@@ -1,0 +1,91 @@
+.site-chips { white-space: nowrap; padding: 20rpx 24rpx 0; }
+.package-switch { display: flex; gap: 12rpx; overflow-x: auto; white-space: nowrap; padding: 20rpx 24rpx 0; }
+.package-chip { flex: 0 0 auto; padding: 10rpx 18rpx; color: var(--text-2); background: var(--fill-2); border-radius: 10rpx; font-size: 23rpx; }
+.package-chip-on { background: var(--brand); color: #fff; }
+.package-head { display: flex; justify-content: space-between; align-items: center; margin: 18rpx 24rpx 0; padding: 18rpx 20rpx; background: var(--brand-weak); border-left: 6rpx solid var(--brand); }
+.package-title { display: block; color: var(--text); font-size: 28rpx; font-weight: 500; }
+.package-meta { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
+.package-vehicle { color: var(--brand); font-size: 24rpx; font-weight: 500; }
+.chip {
+  display: inline-block; padding: 12rpx 28rpx; margin-right: 16rpx;
+  background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 999rpx;
+  font-size: 26rpx; color: var(--text-2);
+}
+.chip-on { background: var(--brand); color: #FFFFFF; border-color: var(--brand); }
+
+.site-head { display: flex; align-items: center; justify-content: space-between; margin: 20rpx 24rpx 0; }
+.site-head-info { display: flex; flex-direction: column; }
+.site-head-name { font-size: 32rpx; font-weight: 500; color: var(--text); }
+.site-head-type { font-size: 23rpx; color: var(--text-3); margin-top: 6rpx; }
+.site-head-ops { display: flex; }
+.op { font-size: 24rpx; color: var(--brand); margin-left: 16rpx; border: 1rpx solid var(--brand-line); border-radius: 12rpx; padding: 10rpx 22rpx; line-height: 1; }
+
+.station-panel { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 12rpx; }
+.station-panel-main { display: flex; align-items: center; min-width: 0; }
+.station-panel-label { color: var(--text); font-size: 26rpx; font-weight: 500; }
+.station-stage { margin-left: 14rpx; padding: 5rpx 12rpx; font-size: 22rpx; border-radius: 999rpx; }
+.station-stage-wait { color: var(--text-2); background: var(--fill); }
+.station-stage-pending { color: #A15C00; background: #FFF3D9; }
+.station-stage-ok { color: var(--green); background: rgba(34, 197, 94, 0.1); }
+.station-panel-meta { flex-shrink: 0; color: var(--text-3); font-size: 23rpx; }
+
+.progress { margin: 20rpx 24rpx 0; display: flex; align-items: center; }
+.progress-bar { flex: 1; height: 16rpx; background: var(--fill-2); border-radius: 999rpx; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--brand); border-radius: 999rpx; }
+.progress-text { font-size: 23rpx; color: var(--text-3); margin-left: 18rpx; }
+
+.cat { margin: 24rpx 24rpx 0; }
+.cat-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12rpx; }
+.cat-name { font-size: 28rpx; font-weight: 500; color: var(--text); }
+.cat-count { font-size: 23rpx; color: var(--text-3); }
+
+.item { display: flex; align-items: center; justify-content: space-between; padding: 26rpx 28rpx 26rpx 0; margin-bottom: 16rpx; }
+.item-strip { width: 6rpx; height: 44rpx; border-radius: 0 999rpx 999rpx 0; margin-right: 22rpx; flex-shrink: 0; }
+.strip-ok { background: var(--green); }
+.strip-wait { background: var(--text-3); }
+.strip-bad { background: var(--red); }
+.item-left { flex: 1; min-width: 0; }
+.item-name { font-size: 28rpx; color: var(--text); }
+.item-meta { margin-top: 10rpx; display: flex; align-items: center; }
+.item-time { font-size: 22rpx; color: var(--text-3); margin-left: 16rpx; }
+.item-right { flex-shrink: 0; margin-left: 20rpx; }
+.item-status { display: inline-flex; align-items: center; line-height: 1; font-size: 24rpx; font-weight: 500; padding: 8rpx 18rpx; border-radius: 999rpx; }
+.st-wait { color: var(--text-3); background: var(--fill); }
+.st-ok { color: var(--green); background: transparent; padding: 0; }
+.st-bad { color: var(--red); background: rgba(250,81,81,0.08); }
+
+/* 底栏表单 */
+.sheet-freq { font-size: 23rpx; color: var(--text-3); margin-bottom: 16rpx; display: block; }
+.field-label { font-size: 25rpx; color: var(--text-2); margin: 24rpx 0 12rpx; }
+.seg { display: flex; background: var(--fill); border-radius: 16rpx; padding: 6rpx; }
+.seg-item { flex: 1; text-align: center; padding: 16rpx 0; font-size: 28rpx; color: var(--text-2); border-radius: 12rpx; }
+.seg-on-ok { background: #FFFFFF; color: var(--green); font-weight: 500; }
+.seg-on-bad { background: #FFFFFF; color: var(--red); font-weight: 500; }
+.ta { width: 100%; height: 130rpx; background: var(--fill-2); border-radius: 16rpx; padding: 18rpx; font-size: 26rpx; }
+.inline-input { width: 100%; height: 76rpx; background: var(--fill-2); border-radius: 16rpx; padding: 0 18rpx; font-size: 26rpx; margin-bottom: 14rpx; }
+
+.photos { display: flex; flex-wrap: wrap; }
+.photo { width: 150rpx; height: 150rpx; margin: 0 16rpx 16rpx 0; position: relative; border-radius: 12rpx; overflow: hidden; }
+.photo-img { width: 100%; height: 100%; }
+.photo-del { position: absolute; top: 4rpx; right: 4rpx; width: 36rpx; height: 36rpx; line-height: 36rpx; text-align: center; background: rgba(0,0,0,0.5); color: #fff; border-radius: 50%; font-size: 28rpx; }
+.photo-add { width: 150rpx; height: 150rpx; margin-bottom: 16rpx; border: 1rpx dashed var(--line); border-radius: 12rpx; text-align: center; line-height: 150rpx; color: var(--text-3); font-size: 56rpx; }
+
+.submit-btn { margin-top: 28rpx; }
+
+/* 站点级拍照进度 */
+.photo-progress { margin: 12rpx 24rpx 0; padding: 14rpx 20rpx; background: var(--fill-2); border-radius: 12rpx; }
+.photo-progress-text { font-size: 24rpx; color: var(--text-2); }
+.photo-missing { color: var(--red); font-weight: 500; }
+
+/* 检查项级拍照提示 */
+.photo-req-hint { font-size: 22rpx; color: var(--text-3); font-weight: 400; margin-left: 8rpx; }
+.photo-summary { margin: -4rpx 0 12rpx; color: var(--text-3); font-size: 22rpx; }
+
+/* 未拍虚线占位框 */
+.photo-slot {
+  width: 150rpx; height: 150rpx; margin: 0 16rpx 16rpx 0;
+  border: 2rpx dashed var(--brand-line); border-radius: 12rpx;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-weak);
+}
+.photo-slot-text { font-size: 22rpx; color: var(--brand); opacity: 0.7; }

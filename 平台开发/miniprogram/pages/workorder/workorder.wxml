@@ -1,0 +1,124 @@
+<view class="page">
+  <view class="tabs">
+    <view class="tab {{tab === item.key ? 'tab-on' : ''}}" wx:for="{{tabs}}" wx:key="key" bindtap="onTab" data-t="{{item.key}}">{{item.label}}</view>
+  </view>
+
+  <view class="card list-card" wx:if="{{list.length}}">
+    <view class="row" wx:for="{{list}}" wx:key="order_no" bindtap="onOpen" data-no="{{item.order_no}}">
+      <view class="row-main">
+        <view class="row-top">
+          <text class="row-title">{{item.title}}</text>
+          <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
+        </view>
+        <text class="row-sub">{{item.site_name}} · {{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}"> · {{item.level_cn}}</text></text>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">暂无工单</text>
+  </view>
+
+  <!-- 详情 / 操作 -->
+  <view class="sheet-mask" wx:if="{{sheet.open}}" bindtap="onClose"></view>
+  <view class="sheet" wx:if="{{sheet.open}}">
+    <view class="sheet-head">
+      <text class="sheet-title">{{sheet.item.title}}</text>
+      <text class="sheet-close" bindtap="onClose">×</text>
+    </view>
+    <view class="d-tag"><text class="tag tag-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}</text><text class="tag tag-{{sheet.item.status_cls}}">{{sheet.item.status_cn}}</text></view>
+    <view class="flow">
+      <view class="flow-step {{sheet.item.step >= 1 ? 'on' : ''}} {{sheet.item.step >= 2 ? 'done' : ''}}">
+        <view class="flow-dot"></view><text class="flow-tx">接单</text>
+      </view>
+      <view class="flow-line {{sheet.item.step >= 2 ? 'on' : ''}}"></view>
+      <view class="flow-step {{sheet.item.step >= 2 ? 'on' : ''}} {{sheet.item.step >= 3 ? 'done' : ''}}">
+        <view class="flow-dot"></view><text class="flow-tx">签到</text>
+      </view>
+      <view class="flow-line {{sheet.item.step >= 3 ? 'on' : ''}}"></view>
+      <view class="flow-step {{sheet.item.step >= 3 ? 'on' : ''}} {{sheet.item.step >= 4 ? 'done' : ''}}">
+        <view class="flow-dot"></view><text class="flow-tx">处置</text>
+      </view>
+      <view class="flow-line {{sheet.item.step >= 4 ? 'on' : ''}}"></view>
+      <view class="flow-step {{sheet.item.step >= 4 ? 'on' : ''}} {{sheet.item.step >= 5 ? 'done' : ''}}">
+        <view class="flow-dot"></view><text class="flow-tx">核验</text>
+      </view>
+    </view>
+    <view class="d-row"><text class="d-k">站点</text><text class="d-v">{{sheet.item.site_name}}</text></view>
+    <view class="d-row"><text class="d-k">来源</text><text class="d-v">{{sheet.item.source_cn}}</text></view>
+    <view class="d-row" wx:if="{{sheet.item.sla_deadline}}"><text class="d-k">时限</text><text class="d-v">{{sheet.item.sla_deadline}}</text></view>
+    <view class="d-row" wx:if="{{sheet.item.status === 'accepted' || sheet.item.status === 'in_progress' || sheet.item.status === 'reviewing'}}">
+      <text class="d-k">签到</text><text class="d-v">{{sheet.item.checked_in ? '已签到' : '未签到'}}</text>
+    </view>
+    <view class="d-desc" wx:if="{{sheet.item.description}}">{{sheet.item.description}}</view>
+
+    <!-- 处置影像展示 -->
+    <view class="blk">
+      <text class="blk-tx">处置影像（{{sheet.item.images_arr.length}}/6）</text>
+      <view class="img-grid">
+        <image wx:for="{{sheet.item.images_arr}}" wx:key="*this" class="img-cell" src="{{item}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{item}}"></image>
+        <view class="img-add" wx:if="{{canWrite && sheet.item.status === 'in_progress'}}" bindtap="onUploadImage">+</view>
+      </view>
+    </view>
+
+    <view class="sheet-ops">
+      <button wx:if="{{sheet.item.status === 'pending' && canWrite}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doAccept">接 单</button>
+
+      <block wx:elif="{{sheet.item.status === 'accepted' && canWrite}}">
+        <button wx:if="{{!sheet.item.checked_in}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="onCheckIn">到场签到</button>
+        <button wx:else class="btn-primary op-btn" loading="{{acting}}" bindtap="doStart">开始处置</button>
+        <view class="op-sub">
+          <button class="btn-ghost op-btn" bindtap="onApplyVehicle">申请用车</button>
+          <button class="btn-ghost op-btn" bindtap="onApplyParts">申请备件</button>
+        </view>
+      </block>
+
+      <block wx:elif="{{sheet.item.status === 'in_progress' && canWrite}}">
+        <button class="btn-ghost op-btn" bindtap="onUploadImage">上传影像</button>
+        <button class="btn-ghost op-btn" bindtap="onApplyVehicle">申请用车</button>
+        <button class="btn-ghost op-btn" bindtap="onApplyParts">申请备件</button>
+        <button class="btn-primary op-btn" loading="{{acting}}" disabled="{{!sheet.item.has_images}}" bindtap="doReview">提交核验</button>
+      </block>
+
+      <block wx:elif="{{sheet.item.status === 'reviewing'}}">
+        <button wx:if="{{isAdmin}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doApprove">核验通过</button>
+        <button wx:if="{{isAdmin}}" class="btn-ghost op-btn" loading="{{acting}}" bindtap="doReject">退回修改</button>
+        <view wx:if="{{!isAdmin}}" class="op-hint">等待管理员核验</view>
+      </block>
+      <view wx:elif="{{sheet.item.status === 'closed'}}" class="op-hint">工单已闭环</view>
+      <view wx:else class="op-hint">当前账号仅可查看</view>
+    </view>
+  </view>
+
+  <!-- 用车申请（极简：仅填事由，可选关联车辆） -->
+  <view class="sheet-mask" wx:if="{{vehicleApply.open}}" bindtap="onCloseVehicle"></view>
+  <view class="sheet" wx:if="{{vehicleApply.open}}">
+    <view class="sheet-head"><text class="sheet-title">申请用车</text><text class="sheet-close" bindtap="onCloseVehicle">×</text></view>
+    <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
+    <picker mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
+      <view class="d-row"><text class="d-k">选择车辆</text><text class="d-v">{{vehicleOptions[vehicleApply.index].label}}</text></view>
+    </picker>
+    <view class="field"><text class="field-label">用车事由</text><textarea class="field-input" placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea></view>
+    <view class="sheet-ops">
+      <button class="btn-primary op-btn" bindtap="submitVehicle">提交申请</button>
+      <button class="btn-ghost op-btn" bindtap="onCloseVehicle">取 消</button>
+    </view>
+  </view>
+
+  <!-- 备件申请（可选关联库存） -->
+  <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onCloseParts"></view>
+  <view class="sheet" wx:if="{{partsApply.open}}">
+    <view class="sheet-head"><text class="sheet-title">申请备件</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
+    <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
+    <picker mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
+      <view class="d-row"><text class="d-k">库存备件</text><text class="d-v">{{partsOptions[partsApply.index].label}}</text></view>
+    </picker>
+    <view class="field"><text class="field-label">备件名称</text><input class="field-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
+    <view class="field"><text class="field-label">数量</text><input class="field-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
+    <view class="field"><text class="field-label">申请事由</text><textarea class="field-input" placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
+    <view class="sheet-ops">
+      <button class="btn-primary op-btn" bindtap="submitParts">提交申请</button>
+      <button class="btn-ghost op-btn" bindtap="onCloseParts">取 消</button>
+    </view>
+  </view>
+</view>

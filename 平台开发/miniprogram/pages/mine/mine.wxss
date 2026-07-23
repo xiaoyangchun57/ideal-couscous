@@ -1,0 +1,16 @@
+.profile { margin: 24rpx; display: flex; align-items: center; }
+.avatar { width: 96rpx; height: 96rpx; border-radius: 50%; background: var(--brand); color: #FFFFFF; font-size: 40rpx; text-align: center; line-height: 96rpx; }
+.profile-info { margin-left: 24rpx; display: flex; flex-direction: column; }
+.profile-name { font-size: 32rpx; font-weight: 500; color: var(--text); }
+.profile-role { font-size: 24rpx; color: var(--text-3); margin-top: 8rpx; }
+
+.menu { margin: 24rpx; padding: 8rpx 28rpx; }
+.menu-item { display: flex; align-items: center; justify-content: space-between; padding: 28rpx 0; }
+.menu-tx { font-size: 28rpx; color: var(--text); }
+.menu-right { display: flex; align-items: center; }
+.menu-sub { font-size: 26rpx; color: var(--text-3); margin-right: 12rpx; }
+.arrow { font-size: 36rpx; color: var(--text-3); }
+.badge { min-width: 32rpx; height: 32rpx; line-height: 32rpx; padding: 0 8rpx; background: var(--red); color: #FFFFFF; font-size: 22rpx; border-radius: 999rpx; text-align: center; margin-right: 12rpx; }
+
+.logout { margin: 48rpx 24rpx 0; }
+.ver { text-align: center; color: var(--text-3); font-size: 22rpx; margin-top: 60rpx; }

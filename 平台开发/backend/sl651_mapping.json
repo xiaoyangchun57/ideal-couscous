@@ -1,0 +1,33 @@
+{
+  "_comment": "SL651-2014 国家水站协议 — 测点/指标映射配置",
+
+  "debug_mode": true,
+
+  "metric_mapping": {
+    "W":   "water_level",
+    "R":   "rainfall",
+    "Q":   "flow",
+    "T":   "temperature",
+    "H":   "humidity",
+    "V":   "wind_speed",
+    "P":   "pressure",
+    "E":   "evaporation",
+    "X":   "turbidity"
+  },
+
+  "per_station": {
+    "62644100": {
+      "name": "横塘",
+      "override_metrics": {}
+    }
+  },
+
+  "unknown_metric_action": "log_and_store",
+
+  "value_transform": {
+    "temperature": { "unit": "celsius", "factor": 1, "offset": 0 },
+    "water_level": { "unit": "m",       "factor": 1, "offset": 0 },
+    "rainfall":    { "unit": "mm",      "factor": 1, "offset": 0 },
+    "flow":        { "unit": "m3h",     "factor": 1, "offset": 0 }
+  }
+}

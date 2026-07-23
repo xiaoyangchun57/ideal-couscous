@@ -1,0 +1,32 @@
+<view class="page" wx:if="{{site}}">
+  <view class="card site-card">
+    <view class="site-name">{{site.name}}</view>
+    <view class="site-tags">
+      <text class="tag tag-brand">{{site.type_cn}}</text>
+      <text class="tag">编码 {{site.code}}</text>
+    </view>
+  </view>
+
+  <view class="ops">
+    <view class="op-btn" bindtap="onNavigate">
+      <text class="op-tx">导航到站</text>
+    </view>
+    <view class="op-btn" bindtap="onCheckIn">
+      <text class="op-tx">到站打卡</text>
+    </view>
+    <view class="op-btn" bindtap="onCalibrate">
+      <text class="op-tx">位置校准</text>
+    </view>
+  </view>
+
+  <view class="card info-card">
+    <view class="info-row"><text class="info-k">经度</text><text class="info-v">{{site.lng || '—'}}</text></view>
+    <view class="hairline"></view>
+    <view class="info-row"><text class="info-k">纬度</text><text class="info-v">{{site.lat || '—'}}</text></view>
+    <view class="hairline"></view>
+    <view class="info-row"><text class="info-k">类型</text><text class="info-v">{{site.type_cn}}</text></view>
+  </view>
+
+  <view class="tip">实时监测数据请在网页端「驾驶舱」查看；移动端聚焦实地作业（巡检、打卡、校准）。</view>
+</view>
+<view class="empty" wx:else>站点信息加载中…</view>

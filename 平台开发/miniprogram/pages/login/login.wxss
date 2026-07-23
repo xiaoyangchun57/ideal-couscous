@@ -1,0 +1,15 @@
+.login-wrap { padding: 120rpx 56rpx 0; }
+
+.login-brand { text-align: center; margin-bottom: 72rpx; }
+.login-logo { font-size: 46rpx; font-weight: 500; color: var(--text); letter-spacing: 2rpx; }
+.login-sub { font-size: 26rpx; color: var(--text-3); margin-top: 16rpx; }
+
+.login-card { margin-bottom: 48rpx; }
+.field { display: flex; align-items: center; padding: 22rpx 8rpx; }
+.label { width: 96rpx; font-size: 28rpx; color: var(--text-2); }
+.input { flex: 1; font-size: 28rpx; color: var(--text); }
+.ph { color: var(--text-3); }
+.hairline { height: 1rpx; background: var(--line); margin: 0 8rpx; }
+
+.login-btn { margin-top: 8rpx; }
+.login-error { margin-top: 28rpx; text-align: center; color: var(--red); font-size: 26rpx; }

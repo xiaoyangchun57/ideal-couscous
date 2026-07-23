@@ -1,0 +1,24 @@
+<view class="login-wrap">
+  <view class="login-brand">
+    <view class="login-logo">水质智慧运维</view>
+    <view class="login-sub">移动巡检 · 实地作业</view>
+  </view>
+
+  <view class="card login-card">
+    <view class="field">
+      <text class="label">工号</text>
+      <input class="input" placeholder="请输入工号" placeholder-class="ph"
+             value="{{username}}" bindinput="onUser" confirm-type="next" />
+    </view>
+    <view class="hairline"></view>
+    <view class="field">
+      <text class="label">密码</text>
+      <input class="input" placeholder="请输入密码" placeholder-class="ph"
+             password value="{{password}}" bindinput="onPass" confirm-type="done" bindconfirm="onLogin" />
+    </view>
+  </view>
+
+  <button class="btn-primary login-btn" loading="{{loading}}" disabled="{{loading}}" bindtap="onLogin">登 录</button>
+
+  <view class="login-error" wx:if="{{error}}">{{error}}</view>
+</view>

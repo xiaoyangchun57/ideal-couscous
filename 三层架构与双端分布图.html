@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>水质运维系统 · 三层架构与双端分布</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; padding: 32px 20px; color: #1a1a1a; }
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 6px; }
+.subtitle { text-align: center; font-size: 13px; color: #8a8f99; margin-bottom: 32px; }
+
+/* 端标签 */
+.end-legend { display: flex; justify-content: center; gap: 24px; margin-bottom: 28px; font-size: 13px; }
+.end-legend span { display: flex; align-items: center; gap: 6px; }
+.dot { width: 12px; height: 12px; border-radius: 3px; }
+.dot-pc { background: #2b6cff; }
+.dot-mb { background: #1fb673; }
+.dot-both { background: linear-gradient(135deg, #2b6cff 50%, #1fb673 50%); }
+.dot-auto { background: #722ed1; }
+
+/* 三层架构 */
+.layer { border-radius: 14px; padding: 22px 24px; margin-bottom: 18px; position: relative; }
+.layer-passive { background: linear-gradient(135deg, #f3eaff 0%, #faf5ff 100%); border: 1.5px solid #d3b8f5; }
+.layer-bridge { background: linear-gradient(135deg, #fff2e8 0%, #fffaf5 100%); border: 1.5px solid #ffd4b3; }
+.layer-active { background: linear-gradient(135deg, #eaf1ff 0%, #f5f9ff 100%); border: 1.5px solid #bcd1ff; }
+.layer-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.layer-tag { font-size: 11px; padding: 3px 10px; border-radius: 6px; font-weight: 600; color: #fff; }
+.tag-passive { background: #722ed1; }
+.tag-bridge { background: #ff7a28; }
+.tag-active { background: #2b6cff; }
+.layer-title { font-size: 16px; font-weight: 600; }
+.layer-status { font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-left: auto; }
+.status-done { background: #e6f7f0; color: #1fb673; }
+.status-todo { background: #feecec; color: #fa5151; }
+.status-doing { background: #fff2e8; color: #ff7a28; }
+
+.flow-row { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
+.flow-box { flex: 1; min-width: 130px; background: #fff; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.04); }
+.flow-box h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.flow-box p { font-size: 11px; color: #5a5f66; line-height: 1.5; }
+.flow-connector { display: flex; align-items: center; color: #b0b4b9; font-size: 16px; }
+.end-mark { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 500; white-space: nowrap; }
+.em-pc { background: #eaf1ff; color: #2b6cff; }
+.em-mb { background: #e6f7f0; color: #1fb673; }
+.em-both { background: #f0f1f3; color: #5a5f66; }
+.em-auto { background: #f3eaff; color: #722ed1; }
+
+.layer-arrow { text-align: center; color: #b0b4b9; font-size: 20px; margin: -6px 0 12px; }
+.arrow-label { font-size: 11px; color: #8a8f99; }
+
+/* 双端分布表 */
+.section-title { font-size: 17px; font-weight: 600; margin: 36px 0 16px; padding-left: 12px; border-left: 4px solid #2b6cff; }
+.dist-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.05); font-size: 13px; }
+.dist-table th { background: #f5f6f8; padding: 12px 14px; text-align: left; font-weight: 600; color: #5a5f66; font-size: 12px; }
+.dist-table td { padding: 11px 14px; border-top: 1px solid #f0f1f3; vertical-align: top; line-height: 1.6; }
+.dist-table tr:hover td { background: #fafbfc; }
+.col-fn { width: 18%; font-weight: 500; }
+.col-pc { width: 38%; }
+.col-mb { width: 38%; }
+.col-flag { width: 6%; text-align: center; }
+.flag { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 3px; }
+.flag-pc { background: #eaf1ff; color: #2b6cff; }
+.flag-mb { background: #e6f7f0; color: #1fb673; }
+.flag-both { background: #f0f1f3; color: #5a5f66; }
+.muted { color: #b0b4b9; }
+
+/* 流程步骤分布 */
+.flow-detail { background: #fff; border-radius: 12px; padding: 20px 24px; margin-bottom: 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); }
+.flow-detail h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.step { padding: 7px 12px; border-radius: 8px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.step-pc { background: #eaf1ff; color: #1a5ae8; border: 1px solid #bcd1ff; }
+.step-mb { background: #e6f7f0; color: #159960; border: 1px solid #a3e4c9; }
+.step-both { background: #f0f1f3; color: #5a5f66; border: 1px solid #e8e9ec; }
+.step-auto { background: #f3eaff; color: #722ed1; border: 1px solid #d3b8f5; }
+.step-arrow { color: #b0b4b9; font-size: 14px; }
+
+/* 缺口提示 */
+.gap-box { background: #fffbe6; border: 1px solid #ffe58f; border-radius: 10px; padding: 16px 20px; margin-top: 24px; }
+.gap-box h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #ad6800; }
+.gap-box ul { list-style: none; padding: 0; }
+.gap-box li { font-size: 13px; color: #5a5f66; padding: 5px 0 5px 20px; position: relative; line-height: 1.6; }
+.gap-box li::before { content: '⚠'; position: absolute; left: 0; color: #faad14; font-size: 12px; }
+.gap-box li b { color: #1a1a1a; }
+
+.note { background: #fff; border-radius: 10px; padding: 16px 20px; margin-top: 16px; font-size: 13px; color: #5a5f66; line-height: 1.7; box-shadow: 0 2px 12px rgba(0,0,0,0.04); }
+.note b { color: #1a1a1a; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>水质运维系统 · 三层架构与双端功能分布</h1>
+<p class="subtitle">被动智能层（已实现）→ 衔接层（建设中）→ 主动计划层（设计中）｜ PC端 vs 移动端职责划分</p>
+
+<div class="end-legend">
+  <span><span class="dot dot-pc"></span>PC端（管理者：规划/配置/审核/报表）</span>
+  <span><span class="dot dot-mb"></span>移动端（一线：现场执行/拍照/打卡）</span>
+  <span><span class="dot dot-both"></span>双端共有</span>
+  <span><span class="dot dot-auto"></span>系统自动（无需人工）</span>
+</div>
+
+<!-- 三层架构 -->
+<div class="layer layer-passive">
+  <div class="layer-header">
+    <span class="layer-tag tag-passive">被动智能层</span>
+    <span class="layer-title">数据监测 · 异常检测 · 自动派单</span>
+    <span class="layer-status status-done">✓ 已实现</span>
+  </div>
+  <div class="flow-row">
+    <div class="flow-box">
+      <h4>📡 数据接入 <span class="end-mark em-auto">自动</span></h4>
+      <p>传感器实时数据 / 设备状态 / 定时任务（5-10min轮询）</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>🔍 异常检测 <span class="end-mark em-auto">自动</span></h4>
+      <p>5管道：阈值超限 / 数据僵死 / 数据尖峰 / 数据缺报 / 设备离线</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>🚨 告警分级 <span class="end-mark em-auto">自动</span></h4>
+      <p>蓝/黄/橙/红四级，去重合并，3次触发自动升级</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>📋 自动派单 <span class="end-mark em-auto">自动</span></h4>
+      <p>A级自动转工单 / B级人工确认 / SLA超时升级建单<br>按 user_sites 站点归属自动指派责任人</p>
+    </div>
+  </div>
+  <div class="flow-row" style="margin-top: 10px;">
+    <div class="flow-box">
+      <h4>🧪 L1/L2/L3 数据审核 <span class="end-mark em-auto">自动+人工</span></h4>
+      <p>L1四管道自动审（范围/趋势/相关性/僵死）→ L2 SPC Z-score → L3人工复核 <span class="end-mark em-pc">PC审核</span></p>
+    </div>
+    <div class="flow-box">
+      <h4>⏱ SLA升级机制 <span class="end-mark em-auto">自动</span></h4>
+      <p>蓝120min→黄60→橙30→红10，超时自动升级+自动建单+通知</p>
+    </div>
+    <div class="flow-box">
+      <h4>🔗 三方闭环 <span class="end-mark em-auto">自动</span></h4>
+      <p>告警↔数据审核↔工单交叉关联，解决一个自动关闭其他</p>
+    </div>
+  </div>
+</div>
+
+<div class="layer-arrow">↓ <span class="arrow-label">产生工单 / 告警 / 预警</span></div>
+
+<div class="layer layer-bridge">
+  <div class="layer-header">
+    <span class="layer-tag tag-bridge">衔接层</span>
+    <span class="layer-title">智能建议 · 主动推送 · 状态回写</span>
+    <span class="layer-status status-doing">◐ 建设中</span>
+  </div>
+  <div class="flow-row">
+    <div class="flow-box">
+      <h4>⚡ 工单顺路建议 <span class="end-mark em-mb">移动端</span></h4>
+      <p>排计划时提示"该站有未关工单，建议顺路处理"</p>
+    </div>
+    <div class="flow-box">
+      <h4>🔔 告警复核建议 <span class="end-mark em-mb">移动端</span></h4>
+      <p>"该站有黄色告警待现场复核，建议本周前往"</p>
+    </div>
+    <div class="flow-box">
+      <h4>🧪 试剂/设备预警 <span class="end-mark em-mb">移动端</span></h4>
+      <p>"试剂剩余3天，建议本次携带更换"</p>
+    </div>
+    <div class="flow-box">
+      <h4>📨 超期主动推送 <span class="end-mark em-mb">移动端</span></h4>
+      <p>"你有2条工单超SLA未处理"（微信订阅消息）</p>
+    </div>
+    <div class="flow-box">
+      <h4>📊 工单状态回写 <span class="end-mark em-pc">PC端</span></h4>
+      <p>工单被纳入计划→标记"已安排"→管理者可见</p>
+    </div>
+  </div>
+</div>
+
+<div class="layer-arrow">↓ <span class="arrow-label">喂入计划建议</span></div>
+
+<div class="layer layer-active">
+  <div class="layer-header">
+    <span class="layer-tag tag-active">主动计划层</span>
+    <span class="layer-title">周计划排程 · 资源确认 · 审核 · 执行</span>
+    <span class="layer-status status-doing">◐ 设计中</span>
+  </div>
+  <div class="flow-row">
+    <div class="flow-box">
+      <h4>📅 周计划排程 <span class="end-mark em-mb">移动端</span></h4>
+      <p>运维人员选站排程，接收衔接层智能建议</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>🚗🔧 资源确认 <span class="end-mark em-mb">移动端</span></h4>
+      <p>车辆冲突检测 + 备件库存校验</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>✅ 管理员审核 <span class="end-mark em-pc">PC端</span></h4>
+      <p>合理性判断 + 物资调配 + 通过/退回</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>⚙️ 自动流转 <span class="end-mark em-auto">自动</span></h4>
+      <p>生成任务 + 锁车 + 备件出库 + 通知</p>
+    </div>
+    <div class="flow-connector">→</div>
+    <div class="flow-box">
+      <h4>📱 移动端执行 <span class="end-mark em-mb">移动端</span></h4>
+      <p>打卡→巡检→拍照→工单处理→提交</p>
+    </div>
+  </div>
+  <div class="flow-row" style="margin-top: 10px;">
+    <div class="flow-box" style="flex: 2;">
+      <h4>🔄 执行结果回写（闭环回到被动层）</h4>
+      <p>巡检异常→转告警 ｜ 工单关单→告警关闭+审核归档 ｜ 试剂更换→质控验证→数据恢复 <span class="end-mark em-mb">移动端</span> <span class="end-mark em-auto">自动</span></p>
+    </div>
+  </div>
+</div>
+
+<!-- 双端功能分布 -->
+<div class="section-title">双端功能分布总览</div>
+<table class="dist-table">
+  <tr>
+    <th class="col-fn">功能域</th>
+    <th class="col-pc">🖥 PC端（管理者）</th>
+    <th class="col-mb">📱 移动端（一线+移动审批）</th>
+    <th class="col-flag">分布</th>
+  </tr>
+  <tr>
+    <td class="col-fn">数据监测/告警</td>
+    <td class="col-pc">规则引擎、阈值配置、告警模拟、升级配置、催办/处置/转工单/批量、人工异常上报</td>
+    <td class="col-mb">告警列表、查看详情、确认告警</td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">数据审核</td>
+    <td class="col-pc">L3人工复核、处置结论、关联告警办结</td>
+    <td class="col-mb"><span class="muted">—（暂无入口）</span></td>
+    <td class="col-flag"><span class="flag flag-pc">PC独</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">工单</td>
+    <td class="col-pc">创建/编辑/删除/派发、关单结论、Excel导出、备件申请审核</td>
+    <td class="col-mb">接单→到场→处置→上传影像→申请用车/备件→提交核验</td>
+    <td class="col-flag"><span class="flag flag-both">分工</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">巡检</td>
+    <td class="col-pc">模板管理、计划生成/审批、匹配规则、智能预览、看板、跳过审核配置</td>
+    <td class="col-mb">选站→打卡(GPS)→逐项填报→拍照→提交、弱网重传</td>
+    <td class="col-flag"><span class="flag flag-both">分工</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">周计划</td>
+    <td class="col-pc">列表、新建、批准/驳回 <span class="muted">（待升级：审核详情+合理性辅助）</span></td>
+    <td class="col-mb"><span class="muted">—（待新增：排程+资源确认+提交）</span></td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">审核中心</td>
+    <td class="col-pc">6类全量审批：数据/巡检质控/工单/备件/用车/影像</td>
+    <td class="col-mb">移动审批（精简版）：巡检质控/工单/照片/备件/用车</td>
+    <td class="col-flag"><span class="flag flag-both">双端</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">站点档案</td>
+    <td class="col-pc">批量导入、数据源管理、档案导出、试剂库存维护</td>
+    <td class="col-mb">导航、打卡、位置校准、查看任务</td>
+    <td class="col-flag"><span class="flag flag-both">分工</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">设备/备件</td>
+    <td class="col-pc">设备台账CRUD、备件库存CRUD/出入库、设备回收审批、运维看板</td>
+    <td class="col-mb"><span class="muted">—（待新增：工单关单时备件使用确认+回收拍照）</span></td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">试剂</td>
+    <td class="col-pc">主数据目录、站点试剂库存、物资预警、更换记录</td>
+    <td class="col-mb"><span class="muted">—（待新增：现场更换登记+质控验证）</span></td>
+    <td class="col-flag"><span class="flag flag-pc">PC独</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">车辆</td>
+    <td class="col-pc">车辆台账、使用/保养/加油记录、用车审批</td>
+    <td class="col-mb">用车申请提交（工单内）</td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">影像</td>
+    <td class="col-pc">归档库、批量上传/删除、归档管理、审核</td>
+    <td class="col-mb">现场拍照（唯一生产入口）、上传</td>
+    <td class="col-flag"><span class="flag flag-both">分工</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">驾驶舱/分析</td>
+    <td class="col-pc">综合大屏、数据分析、数据健康度、趋势图表</td>
+    <td class="col-mb">首页精简概览（4项统计+待办列表）</td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">报表/评估</td>
+    <td class="col-pc">季度/年度运维报告、人员绩效、Excel导出</td>
+    <td class="col-mb"><span class="muted">—</span></td>
+    <td class="col-flag"><span class="flag flag-pc">PC独</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">消息通知</td>
+    <td class="col-pc"><span class="muted">—（无独立页面）</span></td>
+    <td class="col-mb">通知中心、已读管理、微信订阅消息</td>
+    <td class="col-flag"><span class="flag flag-mb">移动独</span></td>
+  </tr>
+  <tr>
+    <td class="col-fn">用户管理</td>
+    <td class="col-pc">用户CRUD、启停、重置密码</td>
+    <td class="col-mb">个人中心、openid绑定</td>
+    <td class="col-flag"><span class="flag flag-pc">PC主</span></td>
+  </tr>
+</table>
+
+<!-- 核心流程步骤分布 -->
+<div class="section-title">核心流程 · 步骤端分布</div>
+
+<div class="flow-detail">
+  <h3>🔄 被动响应链路（数据异常 → 工单关闭）</h3>
+  <div class="steps">
+    <span class="step step-auto">数据接入·异常检测</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">告警生成·分级</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">自动派单(按站点归属)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">移动端确认/接单</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">现场处置·拍照</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-both">核验(双端)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">告警关闭·审核归档</span>
+  </div>
+</div>
+
+<div class="flow-detail">
+  <h3>📅 主动计划链路（周计划 → 执行）</h3>
+  <div class="steps">
+    <span class="step step-mb">运维排程+智能建议</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">车辆/备件确认</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">提交审核</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-pc">管理员审核(PC)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">自动流转(任务/车/备件)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">移动端执行</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-both">审核(双端)</span>
+  </div>
+</div>
+
+<div class="flow-detail">
+  <h3>🔍 巡检全链路（规划 → 执行 → 质控）</h3>
+  <div class="steps">
+    <span class="step step-pc">模板/计划配置(PC)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-pc">计划审批(PC)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">到站打卡(GPS)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">逐项填报+拍照</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">提交</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-both">质控审核(双端)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">异常自动转告警</span>
+  </div>
+</div>
+
+<div class="flow-detail">
+  <h3>🧪 试剂更换链路（更换 → 质控 → 恢复）</h3>
+  <div class="steps">
+    <span class="step step-pc">试剂主数据/库存(PC)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">现场更换登记(待新增)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">质控验证·跑标样(待新增)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">通过→更新剩余天数</span>
+    <span class="step-arrow">/</span>
+    <span class="step step-pc">不通过→校准/报修(PC)</span>
+  </div>
+</div>
+
+<div class="flow-detail">
+  <h3>🔧 备件链路（出库 → 使用 → 回收）</h3>
+  <div class="steps">
+    <span class="step step-mb">计划确认备件需求</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-auto">审批通过自动出库</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-pc">库存扣减·记录(PC)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">现场使用·关单确认(待新增)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-mb">旧件回收拍照(待新增)</span>
+    <span class="step-arrow">→</span>
+    <span class="step step-pc">维修/报废(PC·P3)</span>
+  </div>
+</div>
+
+<!-- 缺口与建设重点 -->
+<div class="gap-box">
+  <h3>当前缺口与建设重点（按优先级）</h3>
+  <ul>
+    <li><b>衔接层缺失（高）：</b>被动层产生的工单/告警没有自动流入周计划建议，"巡检迎合工单"的智能化价值未释放——这是当前最大断点。</li>
+    <li><b>移动端周计划入口缺失（高）：</b>周计划目前仅PC可新建/审批，运维人员（高频移动端用户）无法在手机上排程、确认资源、提交审核。</li>
+    <li><b>移动端试剂/备件操作缺失（中高）：</b>试剂更换登记、质控验证、备件使用确认、旧件回收都在移动端无入口，现场动作无法闭环。</li>
+    <li><b>SPC动态阈值未落地（中高）：</b>spc_3sigma 仅有骨架，仍依赖固定/手动阈值（"太简单太粗暴"），需真实数据积累后落地。</li>
+    <li><b>数据模拟器关闭（部署项）：</b>当前静态演示模式，真实部署需对接实际数据源，被动层才能运转。</li>
+    <li><b>移动端无数据审核入口（中）：</b>L3人工复核仅PC可做，管理者移动审批时无法处理数据审核类待办。</li>
+  </ul>
+</div>
+
+<div class="note">
+  <b>总体判断：</b>系统的<b>被动智能层是强项</b>（异常检测、自动派单、三级审核、SLA升级、闭环关联都已实现），<b>主动计划层和衔接层是短板</b>。两端职责清晰——<b>PC端=管理/配置/规划/台账/报表中心，移动端=现场执行+移动审批中心</b>，审批是唯一深度重叠域。下一步核心不是重建被动层，而是<b>补齐衔接层</b>（让工单/告警自动喂入计划建议）和<b>移动端计划/物资操作入口</b>，把已有的智能化能力真正串联成闭环。
+</div>
+
+</div>
+</body>
+</html>

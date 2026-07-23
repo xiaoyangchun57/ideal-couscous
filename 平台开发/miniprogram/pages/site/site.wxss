@@ -1,0 +1,16 @@
+.site-card { margin: 24rpx; }
+.site-name { font-size: 32rpx; font-weight: 500; color: var(--text); }
+.site-tags { margin-top: 16rpx; display: flex; }
+.site-tags .tag { margin-right: 14rpx; }
+
+.ops { display: flex; margin: 0 24rpx; }
+.op-btn { flex: 1; background: var(--card); border: 1rpx solid var(--line); border-radius: 20rpx; padding: 34rpx 0; margin: 0 10rpx; text-align: center; position: relative; }
+.op-btn::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 6rpx; border-radius: 20rpx 20rpx 0 0; background: var(--brand); opacity: 0.9; }
+.op-tx { font-size: 27rpx; color: var(--text); font-weight: 500; }
+
+.info-card { margin: 24rpx; padding: 8rpx 28rpx; }
+.info-row { display: flex; align-items: center; justify-content: space-between; padding: 24rpx 0; }
+.info-k { font-size: 27rpx; color: var(--text-2); }
+.info-v { font-size: 27rpx; color: var(--text); }
+
+.tip { margin: 24rpx; font-size: 23rpx; color: var(--text-3); line-height: 1.6; }

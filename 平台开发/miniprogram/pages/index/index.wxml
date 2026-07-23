@@ -1,0 +1,139 @@
+<view class="page">
+  <!-- 问候 -->
+  <view class="greet">
+    <text class="greet-name">{{realName}}，你好</text>
+    <text class="greet-sub">今日实地作业总览</text>
+    <text class="greet-date">{{today}}</text>
+  </view>
+
+  <!-- 汇总：4 项 -->
+  <view class="card stat-grid" wx:if="{{summary4}}">
+    <view class="stat">
+      <text class="stat-num {{summary4.sites ? 'stat-brand' : ''}}">{{summary4.sites}}</text>
+      <text class="stat-label">站点</text>
+    </view>
+    <view class="stat-divider"></view>
+    <view class="stat">
+      <text class="stat-num {{summary4.pending ? 'stat-brand' : ''}}">{{summary4.pending}}</text>
+      <text class="stat-label">待检</text>
+    </view>
+    <view class="stat-divider"></view>
+    <view class="stat">
+      <text class="stat-num {{summary4.workorders ? 'stat-brand' : ''}}">{{summary4.workorders}}</text>
+      <text class="stat-label">工单</text>
+    </view>
+    <view class="stat-divider"></view>
+    <view class="stat">
+      <text class="stat-num {{summary4.alerts ? 'stat-red' : ''}}">{{summary4.alerts}}</text>
+      <text class="stat-label">告警</text>
+    </view>
+  </view>
+
+  <!-- 今日作业包：由已批准计划自动生成 -->
+  <view class="section" wx:if="{{workPackage && workPackage.has_plan}}">
+    <view class="section-title">今日作业包<text class="section-more" bindtap="goPlan">计划详情 ›</text></view>
+  </view>
+  <view class="card work-package" wx:if="{{workPackage && workPackage.has_plan}}">
+    <view class="package-line">
+      <text class="package-label">站点</text>
+      <text class="package-value">{{workPackage.sites.length}} 个</text>
+    </view>
+    <view class="package-line">
+      <text class="package-label">车辆</text>
+      <text class="package-value {{workPackage.readiness.vehicle_confirmed ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_confirmed ? '已确认' : '待确认'}}</text>
+    </view>
+    <view class="package-line">
+      <text class="package-label">备件</text>
+      <text class="package-value">{{workPackage.readiness.parts_count}} 件</text>
+    </view>
+    <view class="package-line">
+      <text class="package-label">顺路工单</text>
+      <text class="package-value">{{workPackage.readiness.linked_workorders}} 张</text>
+    </view>
+  </view>
+
+  <!-- 我的计划（快捷入口） -->
+  <view class="card plan-entry" bindtap="goPlan">
+    <view class="plan-entry-l">
+      <text class="plan-entry-icon">📋</text>
+      <text class="plan-entry-label">我的计划</text>
+    </view>
+    <text class="plan-entry-r">排程 · 审批进度 ›</text>
+  </view>
+
+  <!-- 待我审核（管理者/审批者） -->
+  <view class="section">
+    <view class="section-title">待我审核<text class="section-more" bindtap="goReview">去审核 ›</text></view>
+  </view>
+  <view class="card review-entry" bindtap="goReview">
+    <view class="review-entry-l">
+      <text class="review-entry-num">{{reviewCount}}</text>
+      <text class="review-entry-label">项待审核</text>
+    </view>
+    <view class="review-entry-r">巡检质控 · 工单 · 备件 · 用车 ›</view>
+  </view>
+
+  <!-- 待检站点 -->
+  <view class="section">
+    <view class="section-title">待检站点<text class="section-more" bindtap="goInspection">全部巡检 ›</text></view>
+  </view>
+  <scroll-view wx:if="{{sites.length}}" scroll-x class="site-scroll" enhanced show-scrollbar="{{false}}">
+    <view class="site-card" wx:for="{{sites}}" wx:key="site_id" bindtap="onSiteTap" data-id="{{item.site_id}}">
+      <view class="site-card-strip"></view>
+      <view class="site-card-main">
+        <text class="site-card-name">{{item.site_name}}</text>
+        <text class="site-card-type">{{item.site_type_cn}}</text>
+      </view>
+      <view class="site-card-foot">
+        <text class="site-card-num">{{item.pending_items}}</text>
+        <text class="site-card-unit">项待检</text>
+      </view>
+    </view>
+  </scroll-view>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">今日无待检站点</text>
+  </view>
+
+  <!-- 待办工单 -->
+  <view class="section">
+    <view class="section-title">待办工单<text class="section-more" bindtap="goWorkorder">全部 ›</text></view>
+  </view>
+  <view class="card list-card" wx:if="{{workorders.length}}">
+    <view class="row" wx:for="{{workorders}}" wx:key="order_no" bindtap="goWorkorder">
+      <view class="row-main">
+        <view class="row-top">
+          <text class="row-title">{{item.title}}</text>
+          <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
+        </view>
+        <text class="row-sub">{{item.site_name}} · {{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}"> · {{item.level_cn}}</text></text>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">暂无待办工单</text>
+  </view>
+
+  <!-- 未处理告警 -->
+  <view class="section">
+    <view class="section-title">未处理告警<text class="section-more" bindtap="goAlert">全部 ›</text></view>
+  </view>
+  <view class="card list-card" wx:if="{{alerts.length}}">
+    <view class="row" wx:for="{{alerts}}" wx:key="id" bindtap="goAlert">
+      <view class="row-main">
+        <text class="row-title">{{item.site_name}} · {{item.metric_cn}}</text>
+        <text class="row-sub">{{item.message}}</text>
+      </view>
+      <view class="row-right">
+        <text class="tag tag-{{item.level_cls}}">{{item.level_cn}}</text>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">暂无未处理告警</text>
+  </view>
+
+  <view style="height: 40rpx"></view>
+</view>

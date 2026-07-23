@@ -1,0 +1,29 @@
+<view class="page">
+  <view class="card profile">
+    <view class="avatar">{{realName[0]}}</view>
+    <view class="profile-info">
+      <text class="profile-name">{{realName}}</text>
+      <text class="profile-role">{{roleCn}} · {{phone}}</text>
+    </view>
+  </view>
+
+  <view class="card menu">
+    <view class="menu-item" bindtap="goMessage">
+      <text class="menu-tx">消息通知</text>
+      <view class="menu-right"><text wx:if="{{unread > 0}}" class="badge">{{unread}}</text><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline"></view>
+    <view class="menu-item" bindtap="goReview">
+      <text class="menu-tx">待我审核</text>
+      <view class="menu-right"><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline"></view>
+    <view class="menu-item">
+      <text class="menu-tx">负责站点</text>
+      <text class="menu-right menu-sub">{{sitesCount}} 个</text>
+    </view>
+  </view>
+
+  <button class="btn-ghost logout" bindtap="onLogout">退出登录</button>
+  <view class="ver">水质智慧运维 · 移动端</view>
+</view>

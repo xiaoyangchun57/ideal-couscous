@@ -1,0 +1,52 @@
+/* 顶部筛选标签（6 项需横向滚动，避免小屏换行） */
+.tabs { display: flex; margin: 16rpx 24rpx 0; overflow-x: auto; white-space: nowrap; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex-shrink: 0; font-size: 27rpx; color: var(--text-3); margin-right: 40rpx; padding-bottom: 12rpx; }
+.tab-on { color: var(--text); font-weight: 500; border-bottom: 4rpx solid var(--brand); }
+
+.list-card { margin: 16rpx 24rpx 0; padding: 8rpx 28rpx; }
+.row { padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
+.row:last-child { border-bottom: none; }
+.row-main { min-width: 0; }
+.row-top { display: flex; align-items: center; justify-content: space-between; }
+.row-title { flex: 1; min-width: 0; font-size: 28rpx; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-sub { font-size: 23rpx; color: var(--text-3); margin-top: 10rpx; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.d-tag { margin-bottom: 20rpx; }
+.d-tag .tag { margin-right: 12rpx; }
+.d-row { display: flex; padding: 14rpx 0; }
+.d-k { width: 120rpx; font-size: 26rpx; color: var(--text-3); }
+.d-v { flex: 1; font-size: 26rpx; color: var(--text); }
+.d-desc { font-size: 25rpx; color: var(--text-2); line-height: 1.6; margin: 12rpx 0 8rpx; padding: 18rpx; background: var(--fill-2); border-radius: 14rpx; }
+
+.sheet-ops { margin-top: 28rpx; }
+.op-btn { width: 100%; }
+.op-sub { display: flex; gap: 20rpx; margin-top: 16rpx; }
+.op-sub .op-btn { width: auto; flex: 1; }
+.op-hint { text-align: center; color: var(--text-3); font-size: 26rpx; padding: 24rpx 0; }
+
+/* 处置影像区 */
+.blk { margin: 20rpx 0 4rpx; }
+.blk-tx { font-size: 24rpx; color: var(--text-3); display: block; margin-bottom: 14rpx; }
+.img-grid { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.img-cell { width: 160rpx; height: 160rpx; border-radius: 12rpx; background: var(--fill); }
+
+/* 申请表单 */
+.field { margin: 20rpx 0; }
+.field-label { font-size: 25rpx; color: var(--text-3); display: block; margin-bottom: 12rpx; }
+.field-input { width: 100%; box-sizing: border-box; font-size: 27rpx; color: var(--text); background: var(--fill-2); border: 1rpx solid var(--line); border-radius: 14rpx; padding: 20rpx; min-height: 88rpx; }
+textarea.field-input { height: 180rpx; }
+
+/* 流程进度条 */
+.flow { display: flex; align-items: flex-start; margin: 24rpx 0 8rpx; }
+.flow-step { display: flex; flex-direction: column; align-items: center; width: 88rpx; }
+.flow-dot { width: 28rpx; height: 28rpx; border-radius: 50%; background: var(--fill); border: 2rpx solid var(--line); }
+.flow-step.on .flow-dot { background: var(--brand); border-color: var(--brand); }
+.flow-step.done .flow-dot { background: var(--green); border-color: var(--green); }
+.flow-tx { font-size: 22rpx; color: var(--text-3); margin-top: 10rpx; }
+.flow-step.on .flow-tx, .flow-step.done .flow-tx { color: var(--text); }
+.flow-line { flex: 1; height: 2rpx; background: var(--line); margin: 14rpx 6rpx 0; }
+.flow-line.on { background: var(--brand); }
+
+/* 影像添加框（虚线） */
+.img-add { width: 160rpx; height: 160rpx; border-radius: 12rpx; border: 1rpx dashed var(--line); color: var(--text-3); font-size: 56rpx; text-align: center; line-height: 160rpx; background: var(--fill); }

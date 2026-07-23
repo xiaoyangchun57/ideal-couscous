@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>交互深度审计 · 点击路径总览</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; padding: 32px 20px; color: #1a1a1a; }
+.container { max-width: 1180px; margin: 0 auto; }
+h1 { text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 6px; }
+.subtitle { text-align: center; font-size: 13px; color: #8a8f99; margin-bottom: 24px; }
+
+/* 深度预算 */
+.budget { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 30px; }
+.budget-card { border-radius: 12px; padding: 18px 20px; color: #fff; }
+.budget-card h3 { font-size: 15px; margin-bottom: 4px; }
+.budget-card .depth { font-size: 28px; font-weight: 700; margin: 6px 0; }
+.budget-card p { font-size: 11px; opacity: 0.92; line-height: 1.6; }
+.b1 { background: linear-gradient(135deg, #fa5151, #ff7875); }
+.b2 { background: linear-gradient(135deg, #ff7a28, #ffa940); }
+.b3 { background: linear-gradient(135deg, #1fb673, #52c41a); }
+
+.section-title { font-size: 17px; font-weight: 600; margin: 28px 0 14px; padding-left: 12px; border-left: 4px solid; }
+.t-mb { border-color: #1fb673; } .t-pc { border-color: #2b6cff; } .t-rule { border-color: #722ed1; }
+
+/* 审计表 */
+.audit { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.05); font-size: 12.5px; margin-bottom: 10px; }
+.audit th { background: #f5f6f8; padding: 11px 12px; text-align: left; font-weight: 600; color: #5a5f66; font-size: 12px; }
+.audit td { padding: 10px 12px; border-top: 1px solid #f0f1f3; vertical-align: middle; line-height: 1.5; }
+.audit tr:hover td { background: #fafbfc; }
+.group-row td { background: #fafbfc; font-weight: 600; color: #8a8f99; font-size: 11px; letter-spacing: 1px; }
+
+/* 深度可视化 */
+.depth-dots { display: flex; gap: 4px; align-items: center; }
+.dd { width: 14px; height: 14px; border-radius: 4px; }
+.dd-fill { background: #1fb673; }
+.dd-fill.warn { background: #ff7a28; }
+.dd-empty { background: #e8e9ec; }
+.depth-num { font-size: 11px; color: #8a8f99; margin-left: 6px; }
+
+.badge { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+.badge-ok { background: #e6f7f0; color: #1fb673; }
+.badge-opt { background: #eaf1ff; color: #2b6cff; }
+.path { color: #5a5f66; }
+.path .arr { color: #b0b4b9; margin: 0 3px; }
+.opt { color: #2b6cff; font-size: 11px; }
+
+/* 布局约束 */
+.layout-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
+.layout-card { background: #fff; border-radius: 12px; padding: 18px 20px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); }
+.layout-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.layout-card ul { list-style: none; }
+.layout-card li { font-size: 12px; color: #5a5f66; padding: 5px 0 5px 18px; position: relative; line-height: 1.6; }
+.layout-card li::before { content: '▸'; position: absolute; left: 2px; color: #b0b4b9; }
+.layout-card li b { color: #1a1a1a; }
+
+/* 反模式 */
+.anti-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 14px; }
+.anti-item { background: #fff; border-radius: 10px; padding: 12px 16px; box-shadow: 0 1px 8px rgba(0,0,0,0.04); display: flex; gap: 10px; align-items: flex-start; }
+.anti-item .icon { color: #fa5151; font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.anti-item .txt { font-size: 12px; line-height: 1.5; }
+.anti-item .txt b { color: #1a1a1a; display: block; }
+.anti-item .txt span { color: #8a8f99; }
+
+.note { background: #fff; border-radius: 10px; padding: 16px 20px; margin-top: 24px; font-size: 13px; color: #5a5f66; line-height: 1.7; box-shadow: 0 2px 12px rgba(0,0,0,0.04); }
+.note b { color: #1a1a1a; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>交互深度审计 · 点击路径总览</h1>
+<p class="subtitle">任何按钮 / 关联数据 / 状态，在合理点击次数内可达 ｜ 移动端最严格 · PC端适中</p>
+
+<!-- 深度预算 -->
+<div class="budget">
+  <div class="budget-card b1">
+    <h3>每天多次 · 核心动作</h3>
+    <div class="depth">≤2 次触达</div>
+    <p>看今日任务、打卡、拍照、提交检查项、接单<br>（一线运维高频，必须打开即用）</p>
+  </div>
+  <div class="budget-card b2">
+    <h3>每天/每周 · 常规动作</h3>
+    <div class="depth">≤3 次点击</div>
+    <p>排周计划、确认告警、工单处置、审批待办<br>（双端常规操作）</p>
+  </div>
+  <div class="budget-card b3">
+    <h3>偶尔 · 配置/深度</h3>
+    <div class="depth">≤4 次点击</div>
+    <p>规则配置、报表导出、台账维护、用户管理<br>（管理者低频操作）</p>
+  </div>
+</div>
+
+<!-- 移动端审计 -->
+<div class="section-title t-mb">移动端点击深度审计（一线运维 · 最严格）</div>
+<table class="audit">
+  <tr><th style="width:22%">流程</th><th style="width:34%">点击路径</th><th style="width:14%">深度</th><th style="width:8%">达标</th><th style="width:22%">优化措施</th></tr>
+  <tr class="group-row"><td colspan="5">每日核心（目标 ≤2 次触达）</td></tr>
+  <tr><td>查看今日任务</td><td class="path">打开小程序<span class="arr">→</span>首页任务列表</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">首屏即任务，无需选菜单</td></tr>
+  <tr><td>到站打卡</td><td class="path">首页<span class="arr">→</span>站点卡<span class="arr">→</span>打卡</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">到站GPS自动提示打卡</td></tr>
+  <tr><td>拍检查项照片</td><td class="path">巡检页<span class="arr">→</span>检查项<span class="arr">→</span>拍照</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">异常项自动弹相机→1</td></tr>
+  <tr><td>提交检查项</td><td class="path">巡检页<span class="arr">→</span>检查项<span class="arr">→</span>提交</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">正常项一键"正常"→1</td></tr>
+  <tr><td>查看拍照进度/缺拍</td><td class="path">巡检页顶部进度条（常驻）</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">常驻显示，无需点击</td></tr>
+  <tr><td>接单 / 确认告警</td><td class="path">首页待办<span class="arr">→</span>卡片<span class="arr">→</span>接单/确认</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">行内快捷按钮→1</td></tr>
+  <tr class="group-row"><td colspan="5">每周常规（目标 ≤3 次点击）</td></tr>
+  <tr><td>排周计划-选站</td><td class="path">计划tab<span class="arr">→</span>新建<span class="arr">→</span>逐日选站</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-fill"></span></span><span class="depth-num">3</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">搜索+常用站点置顶</td></tr>
+  <tr><td>确认用车/备件</td><td class="path">计划编辑页<span class="arr">→</span>资源区<span class="arr">→</span>选择</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">智能建议预填+冲突实时提示</td></tr>
+  <tr><td>提交计划审核</td><td class="path">计划编辑页<span class="arr">→</span>提交按钮</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">提交前自动校验</td></tr>
+  <tr><td>发起计划变更</td><td class="path">计划详情<span class="arr">→</span>发起变更<span class="arr">→</span>修改</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-fill"></span></span><span class="depth-num">3</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">—</td></tr>
+  <tr><td>工单处置-上传影像</td><td class="path">工单详情<span class="arr">→</span>拍照上传</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">大按钮88rpx+相机图标</td></tr>
+  <tr class="group-row"><td colspan="5">现场附带（目标 ≤3 次点击）</td></tr>
+  <tr><td>试剂更换+质控</td><td class="path">巡检页<span class="arr">→</span>试剂项<span class="arr">→</span>质控自动弹</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">更换提交后自动触发质控</td></tr>
+  <tr><td>备件使用/旧件回收</td><td class="path">工单关单<span class="arr">→</span>确认<span class="arr">→</span>回收拍照</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">出库单自动关联+完成提示</td></tr>
+  <tr><td>移动审批</td><td class="path">审核入口<span class="arr">→</span>待办<span class="arr">→</span>通过/驳回</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">行内快捷操作</td></tr>
+</table>
+
+<!-- PC端审计 -->
+<div class="section-title t-pc">PC端点击深度审计（管理者 · 适中）</div>
+<table class="audit">
+  <tr><th style="width:22%">流程</th><th style="width:34%">点击路径</th><th style="width:14%">深度</th><th style="width:8%">达标</th><th style="width:22%">优化措施</th></tr>
+  <tr class="group-row"><td colspan="5">每日高频（目标 ≤3 次点击）</td></tr>
+  <tr><td>查看待办概览</td><td class="path">登录<span class="arr">→</span>工作台</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">工作台聚合"待我处理"</td></tr>
+  <tr><td>审批单个计划</td><td class="path">工作台<span class="arr">→</span>待办<span class="arr">→</span>通过</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">行内快捷通过按钮</td></tr>
+  <tr><td>查看风险预警/站点卡/路线</td><td class="path">审批详情内同屏展示</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">决策支撑信息同屏聚合</td></tr>
+  <tr><td>照片审核-标记异常</td><td class="path">审核页<span class="arr">→</span>点异常照片</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">异常驱动，只点问题照片</td></tr>
+  <tr><td>照片审核-批量确认</td><td class="path">审核页<span class="arr">→</span>确认按钮</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-empty"></span><span class="dd dd-empty"></span></span><span class="depth-num">1</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">"通过47张驳回1张"一次完成</td></tr>
+  <tr><td>工单核验/L3数据审核</td><td class="path">审核中心<span class="arr">→</span>待办<span class="arr">→</span>通过/退回</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">侧边抽屉，不跳页</td></tr>
+  <tr><td>处理告警/转工单</td><td class="path">告警中心<span class="arr">→</span>告警<span class="arr">→</span>处置</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">行内操作按钮</td></tr>
+  <tr class="group-row"><td colspan="5">每周常规（目标 ≤3 次点击）</td></tr>
+  <tr><td>审批变更（diff对比）</td><td class="path">工作台<span class="arr">→</span>变更待办<span class="arr">→</span>对比</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">变更前后对比同屏</td></tr>
+  <tr><td>数据健康度drill-down</td><td class="path">健康度<span class="arr">→</span>点人<span class="arr">→</span>点站<span class="arr">→</span>点参数</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-fill warn"></span></span><span class="depth-num">3</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">逐层下钻，每层有反馈</td></tr>
+  <tr><td>查看某站近期故障</td><td class="path">站点管理<span class="arr">→</span>站点<span class="arr">→</span>故障tab</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">站点详情聚合工单/告警</td></tr>
+  <tr><td>备件出库确认/库存预警</td><td class="path">物资管理<span class="arr">→</span>出库单/总览</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-empty"></span></span><span class="depth-num">2</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">行内确认+低量自动标红</td></tr>
+  <tr class="group-row"><td colspan="5">偶尔配置（目标 ≤4 次点击）</td></tr>
+  <tr><td>规则/阈值/模板配置</td><td class="path">对应模块<span class="arr">→</span>配置项<span class="arr">→</span>编辑</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-fill"></span></span><span class="depth-num">3</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">—</td></tr>
+  <tr><td>报表导出/用户管理</td><td class="path">报表/设置<span class="arr">→</span>选择<span class="arr">→</span>操作</td><td><span class="depth-dots"><span class="dd dd-fill"></span><span class="dd dd-fill"></span><span class="dd dd-fill"></span></span><span class="depth-num">3</span></td><td><span class="badge badge-ok">✓</span></td><td class="opt">用户管理仅管理员可见</td></tr>
+</table>
+
+<!-- 布局约束 -->
+<div class="section-title t-rule">双端布局约束（保证深度达标的结构基础）</div>
+<div class="layout-grid">
+  <div class="layout-card">
+    <h4>📱 移动端结构</h4>
+    <ul>
+      <li><b>TabBar≤5个</b>：首页/巡检/工单/告警/我的，一级直达无二级菜单</li>
+      <li><b>主操作固定底部拇指区</b>：88rpx大按钮，打卡/拍照/提交不藏页面中部</li>
+      <li><b>关联数据卡片内展开</b>：手风琴就地展开，不跳新页面</li>
+      <li><b>底部面板替代多层跳转</b>：最多一层蒙层</li>
+      <li><b>状态即入口</b>：首页"待办3"数字可点直达</li>
+      <li><b>异常自动弹相机</b>：减少"找上传按钮"步骤</li>
+    </ul>
+  </div>
+  <div class="layout-card">
+    <h4>🖥 PC端结构</h4>
+    <ul>
+      <li><b>菜单最多两级</b>：任何功能从侧边栏≤2级可达</li>
+      <li><b>列表行内快捷操作</b>：通过/退回/查看不强迫进详情页</li>
+      <li><b>详情用侧边抽屉</b>：不跳新页面，关掉回列表不丢位置</li>
+      <li><b>关联数据同屏聚合</b>：审批时告警/巡检/站点情况分tab展示</li>
+      <li><b>面包屑可跳回</b>：深度页面随时返回任意层级</li>
+      <li><b>三层结构</b>：指标条+工具栏+列表（已有UI规范）</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 反模式 -->
+<div class="section-title t-rule">反模式清单（禁止）</div>
+<div class="anti-grid">
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>高频动作埋进"设置/更多"</b><span>找不到→放弃使用。高频动作放主路径</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>连续弹窗（弹窗套弹窗）</b><span>迷失上下文。最多一层蒙层，用面板/抽屉</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>跳转后丢失上下文</b><span>回来要重新筛选翻页。抽屉/返回保留状态</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>关键状态要点进去才看见</b><span>增加无谓点击。状态在列表/卡片直接露出</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>同一信息散落多个页面</b><span>拼凑信息效率低。关联数据同屏聚合</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>提交时才报错（照片不足）</b><span>挫败感+返工。过程中实时提示缺什么</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>移动端操作按钮在中/顶部</b><span>拇指够不到。主操作固定底部拇指区</span></div></div>
+  <div class="anti-item"><span class="icon">✕</span><div class="txt"><b>审批必须进详情页再返回</b><span>连续审批效率低。行内快捷操作+抽屉</span></div></div>
+</div>
+
+<div class="note">
+  <b>验收标准（每页上线前）：</b>① 实际点击路径不超过审计表标注深度；② 每次点击有明确反馈，无"点了没反应"；③ 任何页面有明确返回/下一步路径；④ 关键状态外露不靠点进去看；⑤ 详情返回列表不丢筛选和滚动位置；⑥ 移动端主操作底部单手可完成。<br><br>
+  <b>与其他规范的关系：</b>《巡检计划体系设计》定流程 → 本规范定每个流程的点击路径 → 《UI样式规范》《移动端UI设计升级方案》定样式。三层配合，先流程、再路径、后样式。
+</div>
+
+</div>
+</body>
+</html>

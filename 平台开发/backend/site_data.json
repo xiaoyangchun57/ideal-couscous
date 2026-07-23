@@ -1,0 +1,2117 @@
+[
+  {
+    "code": "62313350",
+    "name": "邓埠",
+    "type": "hydrology",
+    "lat": 28.7,
+    "lng": 115.666667,
+    "address": "新建区西山镇邓埠村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62610570",
+    "name": "聂城",
+    "type": "hydrology",
+    "lat": 28.683333,
+    "lng": 115.733333,
+    "address": "湾里区招贤镇聂城村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62517550",
+    "name": "新祺周",
+    "type": "hydrology",
+    "lat": 28.966667,
+    "lng": 115.8,
+    "address": "桑海开发区桑海水产养殖场",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62518640",
+    "name": "雷家",
+    "type": "hydrology",
+    "lat": 28.716667,
+    "lng": 115.55,
+    "address": "安义县石鼻镇雷家",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62611600",
+    "name": "江桥",
+    "type": "hydrology",
+    "lat": 28.833333,
+    "lng": 115.866667,
+    "address": "新建区乐化镇江桥村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62402600",
+    "name": "李家渡(柴埠口)",
+    "type": "hydrology",
+    "lat": 28.216667,
+    "lng": 116.166667,
+    "address": "进贤县李渡镇桐车港村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62402800",
+    "name": "李家渡(焦石)",
+    "type": "hydrology",
+    "lat": 28.2,
+    "lng": 116.15,
+    "address": "临川区大岗乡蔡家洲村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62606370",
+    "name": "莲塘",
+    "type": "hydrology",
+    "lat": 28.533333,
+    "lng": 115.933333,
+    "address": "南昌县莲塘镇",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62606700",
+    "name": "茶溪",
+    "type": "hydrology",
+    "lat": 28.35,
+    "lng": 116.316667,
+    "address": "进贤县民和镇院泽村",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62615500",
+    "name": "河东",
+    "type": "hydrology",
+    "lat": 29.45,
+    "lng": 116.0,
+    "address": "庐山市",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62615100",
+    "name": "华林",
+    "type": "hydrology",
+    "lat": 29.366667,
+    "lng": 115.95,
+    "address": "庐山市",
+    "note": "非基本水文站"
+  },
+  {
+    "code": "62312282",
+    "name": "乌井水库",
+    "type": "water_level",
+    "lat": 28.733333,
+    "lng": 115.7,
+    "address": "湾里区招贤镇乌井水库大堤上",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62312320",
+    "name": "谢家垄",
+    "type": "water_level",
+    "lat": 28.516667,
+    "lng": 115.716667,
+    "address": "红谷滩新区生米镇谢家垄村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62517500",
+    "name": "桐溪",
+    "type": "water_level",
+    "lat": 28.95,
+    "lng": 115.816667,
+    "address": "桑海开发区桐溪村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62611610",
+    "name": "裘家(江桥)",
+    "type": "water_level",
+    "lat": 28.833333,
+    "lng": 115.533333,
+    "address": "新建区乐化镇江桥村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62612900",
+    "name": "连前",
+    "type": "water_level",
+    "lat": 28.883333,
+    "lng": 116.05,
+    "address": "新建区联圩镇联圩水闸",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62613352",
+    "name": "新增",
+    "type": "water_level",
+    "lat": 29.016667,
+    "lng": 115.983333,
+    "address": "新建区铁河乡新增闸",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62613362",
+    "name": "上池湖",
+    "type": "water_level",
+    "lat": 28.9,
+    "lng": 115.95,
+    "address": "新建区樵舍镇雪舫地上池湖边闸上",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62518600",
+    "name": "安义",
+    "type": "water_level",
+    "lat": 28.833333,
+    "lng": 115.533333,
+    "address": "安义县龙津镇",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62518650",
+    "name": "石鼻",
+    "type": "water_level",
+    "lat": 28.733333,
+    "lng": 115.55,
+    "address": "安义县石鼻镇",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62558720",
+    "name": "峤岭",
+    "type": "water_level",
+    "lat": 28.966667,
+    "lng": 115.516667,
+    "address": "安义县新民乡几峤岭垦殖场",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62517350",
+    "name": "熊村庄",
+    "type": "water_level",
+    "lat": 28.516667,
+    "lng": 110.716667,
+    "address": "安义县东阳镇云溪村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62517450",
+    "name": "文埠",
+    "type": "water_level",
+    "lat": 28.916667,
+    "lng": 115.666667,
+    "address": "安义县万埠镇文埠村委会",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62610320",
+    "name": "象湖",
+    "type": "water_level",
+    "lat": 28.633333,
+    "lng": 115.883333,
+    "address": "西湖区象湖",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62610360",
+    "name": "明山闸",
+    "type": "water_level",
+    "lat": 28.7,
+    "lng": 115.983333,
+    "address": "青山湖区艾溪湖",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62610380",
+    "name": "瑶湖",
+    "type": "water_level",
+    "lat": 28.666667,
+    "lng": 116.033333,
+    "address": "青山湖区瑶湖大桥旁",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62612800",
+    "name": "樵舍",
+    "type": "water_level",
+    "lat": 28.85,
+    "lng": 115.983333,
+    "address": "新建区樵舍镇",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62613350",
+    "name": "铁河",
+    "type": "water_level",
+    "lat": 29.066667,
+    "lng": 116.0,
+    "address": "新建区铁河乡防汛指挥部旁提上",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62610580",
+    "name": "长堎",
+    "type": "water_level",
+    "lat": 28.666667,
+    "lng": 115.816667,
+    "address": "长堎村迎宾桥",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62605760",
+    "name": "南矶山",
+    "type": "water_level",
+    "lat": 29.633333,
+    "lng": 116.366667,
+    "address": "新建县",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606350",
+    "name": "雄溪",
+    "type": "water_level",
+    "lat": 28.533333,
+    "lng": 115.9,
+    "address": "南昌县小蓝经济开发区雄溪村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606750",
+    "name": "民和",
+    "type": "water_level",
+    "lat": 28.383333,
+    "lng": 116.25,
+    "address": "进贤县民和镇城郊排涝站",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606320",
+    "name": "红旗",
+    "type": "water_level",
+    "lat": 28.7,
+    "lng": 116.183333,
+    "address": "南昌县新联",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606340",
+    "name": "塔城",
+    "type": "water_level",
+    "lat": 28.5,
+    "lng": 116.083333,
+    "address": "南昌县塔城乡郑家村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606360",
+    "name": "黄湖",
+    "type": "water_level",
+    "lat": 28.866667,
+    "lng": 116.216667,
+    "address": "南昌县蒋巷镇",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606380",
+    "name": "五星",
+    "type": "water_level",
+    "lat": 28.75,
+    "lng": 116.316667,
+    "address": "南昌县五星农场",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62606850",
+    "name": "二塘",
+    "type": "water_level",
+    "lat": 28.55,
+    "lng": 116.466667,
+    "address": "进贤县二塘乡潭津村",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62605740",
+    "name": "白沙洲",
+    "type": "water_level",
+    "lat": 29.116667,
+    "lng": 116.55,
+    "address": "鄱阳县",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62602450",
+    "name": "塘美",
+    "type": "water_level",
+    "lat": 29.2,
+    "lng": 116.516667,
+    "address": "都昌县",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62615700",
+    "name": "钱湖",
+    "type": "water_level",
+    "lat": 29.4,
+    "lng": 115.966667,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62615300",
+    "name": "长西岭",
+    "type": "water_level",
+    "lat": 29.316667,
+    "lng": 115.983333,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62614500",
+    "name": "观音塘",
+    "type": "water_level",
+    "lat": 29.416667,
+    "lng": 115.866667,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62635810",
+    "name": "跃进水库",
+    "type": "water_level",
+    "lat": 29.566667,
+    "lng": 116.05,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62639390",
+    "name": "文敬垅水库",
+    "type": "water_level",
+    "lat": 29.533333,
+    "lng": 116.066667,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62639400",
+    "name": "正垅水库",
+    "type": "water_level",
+    "lat": 29.566667,
+    "lng": 116.066667,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62641100",
+    "name": "白鹿",
+    "type": "water_level",
+    "lat": 29.466667,
+    "lng": 116.0,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62644100",
+    "name": "横塘",
+    "type": "water_level",
+    "lat": 29.333333,
+    "lng": 115.883333,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62644550",
+    "name": "西牛塘水库",
+    "type": "water_level",
+    "lat": 29.516667,
+    "lng": 116.016667,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "626R5740",
+    "name": "石牛山",
+    "type": "water_level",
+    "lat": 29.533333,
+    "lng": 116.05,
+    "address": "庐山市",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62621990",
+    "name": "军山湖",
+    "type": "water_level",
+    "lat": 29.366667,
+    "lng": 117.25,
+    "address": "进贤县",
+    "note": "非基本水位站"
+  },
+  {
+    "code": "62340675",
+    "name": "牛岭谌家",
+    "type": "rainfall",
+    "lat": 28.683333,
+    "lng": 115.633333,
+    "address": "湾里区招贤镇牛岭村村委会前",
+    "note": ""
+  },
+  {
+    "code": "62340680",
+    "name": "霞源",
+    "type": "rainfall",
+    "lat": 28.583333,
+    "lng": 115.666667,
+    "address": "新建区石埠乡",
+    "note": ""
+  },
+  {
+    "code": "62340700",
+    "name": "红桥",
+    "type": "rainfall",
+    "lat": 28.566667,
+    "lng": 115.616667,
+    "address": "新建区西山镇水管站外大堤上",
+    "note": ""
+  },
+  {
+    "code": "62340730",
+    "name": "九龙湖",
+    "type": "rainfall",
+    "lat": 28.583333,
+    "lng": 115.783333,
+    "address": "红谷滩区九龙湖管理处九龙湖公园内",
+    "note": ""
+  },
+  {
+    "code": "62340750",
+    "name": "葛家山",
+    "type": "rainfall",
+    "lat": 28.433333,
+    "lng": 115.633333,
+    "address": "新建区石岗镇水务站内",
+    "note": ""
+  },
+  {
+    "code": "62340810",
+    "name": "红谷",
+    "type": "rainfall",
+    "lat": 28.7,
+    "lng": 115.833333,
+    "address": "红谷滩区碟子湖大道1446号,昌北防洪排涝工程管理处院内",
+    "note": ""
+  },
+  {
+    "code": "62340840",
+    "name": "斗门",
+    "type": "rainfall",
+    "lat": 28.566667,
+    "lng": 115.783333,
+    "address": "新建区生米镇同乐路水管站院内",
+    "note": ""
+  },
+  {
+    "code": "62340860",
+    "name": "流湖",
+    "type": "rainfall",
+    "lat": 28.45,
+    "lng": 115.716667,
+    "address": "新建区流湖镇流湖水管站院内",
+    "note": ""
+  },
+  {
+    "code": "62340880",
+    "name": "梅花",
+    "type": "rainfall",
+    "lat": 28.466667,
+    "lng": 115.783333,
+    "address": "新建区厚田乡水管站院内",
+    "note": ""
+  },
+  {
+    "code": "62340900",
+    "name": "璜溪",
+    "type": "rainfall",
+    "lat": 28.666667,
+    "lng": 115.766667,
+    "address": "新建区望城镇46号",
+    "note": ""
+  },
+  {
+    "code": "62340920",
+    "name": "乐化",
+    "type": "rainfall",
+    "lat": 28.816667,
+    "lng": 115.85,
+    "address": "新建区乐化镇乐化水库",
+    "note": ""
+  },
+  {
+    "code": "62340940",
+    "name": "溪霞",
+    "type": "rainfall",
+    "lat": 28.85,
+    "lng": 115.833333,
+    "address": "新建区溪霞镇镇政府内",
+    "note": ""
+  },
+  {
+    "code": "62621350",
+    "name": "太平",
+    "type": "rainfall",
+    "lat": 28.783333,
+    "lng": 115.683333,
+    "address": "湾里区太平镇客运站旁",
+    "note": ""
+  },
+  {
+    "code": "62621850",
+    "name": "前湖",
+    "type": "rainfall",
+    "lat": 28.65,
+    "lng": 115.8,
+    "address": "新建区红角洲前湖迎宾馆门口",
+    "note": ""
+  },
+  {
+    "code": "62621920",
+    "name": "金盘",
+    "type": "rainfall",
+    "lat": 28.966667,
+    "lng": 115.9,
+    "address": "新建区金桥乡",
+    "note": ""
+  },
+  {
+    "code": "62555700",
+    "name": "社坑",
+    "type": "rainfall",
+    "lat": 28.616667,
+    "lng": 115.55,
+    "address": "安义县乔乐乡社坑村",
+    "note": ""
+  },
+  {
+    "code": "62555720",
+    "name": "潘家",
+    "type": "rainfall",
+    "lat": 28.666667,
+    "lng": 115.583333,
+    "address": "安义县石鼻镇潘家村",
+    "note": ""
+  },
+  {
+    "code": "62557915",
+    "name": "鼎湖",
+    "type": "rainfall",
+    "lat": 28.816667,
+    "lng": 115.483333,
+    "address": "安义县鼎湖镇小学围墙外",
+    "note": ""
+  },
+  {
+    "code": "62557930",
+    "name": "长埠",
+    "type": "rainfall",
+    "lat": 28.783333,
+    "lng": 115.6,
+    "address": "安义县长埠镇长垅水库",
+    "note": ""
+  },
+  {
+    "code": "62558030",
+    "name": "献忠",
+    "type": "rainfall",
+    "lat": 28.783333,
+    "lng": 115.65,
+    "address": "湾里区太平乡献忠水库",
+    "note": ""
+  },
+  {
+    "code": "62558400",
+    "name": "新民",
+    "type": "rainfall",
+    "lat": 28.916667,
+    "lng": 115.55,
+    "address": "安义县新民乡新民中学",
+    "note": ""
+  },
+  {
+    "code": "62558410",
+    "name": "桑海",
+    "type": "rainfall",
+    "lat": 28.933333,
+    "lng": 115.833333,
+    "address": "新建区桑海开发区",
+    "note": ""
+  },
+  {
+    "code": "62558680",
+    "name": "罗亭",
+    "type": "rainfall",
+    "lat": 28.883333,
+    "lng": 115.783333,
+    "address": "湾里区罗亭镇罗亭大道",
+    "note": ""
+  },
+  {
+    "code": "62558740",
+    "name": "徐家",
+    "type": "rainfall",
+    "lat": 28.933333,
+    "lng": 115.616667,
+    "address": "安义县东阳镇新华村",
+    "note": ""
+  },
+  {
+    "code": "62621600",
+    "name": "店前街",
+    "type": "rainfall",
+    "lat": 28.8,
+    "lng": 115.75,
+    "address": "湾里区梅岭镇店前街",
+    "note": ""
+  },
+  {
+    "code": "62621700",
+    "name": "新建(三联)",
+    "type": "rainfall",
+    "lat": 28.683333,
+    "lng": 115.816667,
+    "address": "新建区长堎镇龙珠社区(礼步湖大道区气象局院内)",
+    "note": ""
+  },
+  {
+    "code": "62621750",
+    "name": "湾里(红源)",
+    "type": "rainfall",
+    "lat": 28.716667,
+    "lng": 115.716667,
+    "address": "湾里区政府",
+    "note": ""
+  },
+  {
+    "code": "62621900",
+    "name": "大塘",
+    "type": "rainfall",
+    "lat": 29.016667,
+    "lng": 115.916667,
+    "address": "新建区大塘乡三岔口电",
+    "note": ""
+  },
+  {
+    "code": "62621940",
+    "name": "三尖(联圩)",
+    "type": "rainfall",
+    "lat": 28.916667,
+    "lng": 116.083333,
+    "address": "新建区联圩乡湾上村站后院内",
+    "note": ""
+  },
+  {
+    "code": "62621960",
+    "name": "象山",
+    "type": "rainfall",
+    "lat": 28.966667,
+    "lng": 116.033333,
+    "address": "新建区象山镇水管站内",
+    "note": ""
+  },
+  {
+    "code": "62622500",
+    "name": "梅湖",
+    "type": "rainfall",
+    "lat": 28.6,
+    "lng": 115.916667,
+    "address": "青云谱区梅湖风景区湖边",
+    "note": ""
+  },
+  {
+    "code": "62622505",
+    "name": "下罗",
+    "type": "rainfall",
+    "lat": 28.75,
+    "lng": 115.833333,
+    "address": "新建区蛟桥镇下罗村",
+    "note": ""
+  },
+  {
+    "code": "62622510",
+    "name": "白水湖",
+    "type": "rainfall",
+    "lat": 28.75,
+    "lng": 115.866667,
+    "address": "青山湖区经济技术开发区工业园保税物流院内",
+    "note": ""
+  },
+  {
+    "code": "62622520",
+    "name": "洪都",
+    "type": "rainfall",
+    "lat": 28.65,
+    "lng": 115.95,
+    "address": "青山湖区湖坊镇洪都村",
+    "note": ""
+  },
+  {
+    "code": "62622790",
+    "name": "罗家",
+    "type": "rainfall",
+    "lat": 28.583333,
+    "lng": 116.0,
+    "address": "青山湖区罗家镇谢埠电排站",
+    "note": ""
+  },
+  {
+    "code": "62622800",
+    "name": "青云谱",
+    "type": "rainfall",
+    "lat": 28.616667,
+    "lng": 115.933333,
+    "address": "青云谱区镇政府院内",
+    "note": ""
+  },
+  {
+    "code": "62622815",
+    "name": "湖坊",
+    "type": "rainfall",
+    "lat": 28.65,
+    "lng": 115.916667,
+    "address": "青山湖区湖坊镇政府内",
+    "note": ""
+  },
+  {
+    "code": "62622830",
+    "name": "塘山",
+    "type": "rainfall",
+    "lat": 28.7,
+    "lng": 115.95,
+    "address": "青山湖区塘山镇满庭春小区院内",
+    "note": ""
+  },
+  {
+    "code": "62622850",
+    "name": "扬子洲",
+    "type": "rainfall",
+    "lat": 28.75,
+    "lng": 115.933333,
+    "address": "青山湖区扬子洲乡水务站",
+    "note": ""
+  },
+  {
+    "code": "62555725",
+    "name": "柏树",
+    "type": "rainfall",
+    "lat": 28.816667,
+    "lng": 115.566667,
+    "address": "安义县鼎湖镇柏树村",
+    "note": ""
+  },
+  {
+    "code": "62555740",
+    "name": "向坊",
+    "type": "rainfall",
+    "lat": 28.716667,
+    "lng": 115.6,
+    "address": "安义县石鼻镇向坊村",
+    "note": ""
+  },
+  {
+    "code": "62557910",
+    "name": "江西社",
+    "type": "rainfall",
+    "lat": 28.95,
+    "lng": 115.483333,
+    "address": "安义县新民乡珠珞村",
+    "note": ""
+  },
+  {
+    "code": "62557920",
+    "name": "珠珞",
+    "type": "rainfall",
+    "lat": 28.933333,
+    "lng": 115.5,
+    "address": "安义县新民乡珠珞村",
+    "note": ""
+  },
+  {
+    "code": "62557950",
+    "name": "丰收",
+    "type": "rainfall",
+    "lat": 28.783333,
+    "lng": 115.466667,
+    "address": "安义县黄洲镇新福村",
+    "note": ""
+  },
+  {
+    "code": "62558050",
+    "name": "观察",
+    "type": "rainfall",
+    "lat": 28.833333,
+    "lng": 115.716667,
+    "address": "安义县长均乡",
+    "note": ""
+  },
+  {
+    "code": "62558200",
+    "name": "名山",
+    "type": "rainfall",
+    "lat": 28.85,
+    "lng": 115.733333,
+    "address": "湾里区罗亭镇名山村",
+    "note": ""
+  },
+  {
+    "code": "62558710",
+    "name": "合水",
+    "type": "rainfall",
+    "lat": 28.983333,
+    "lng": 115.483333,
+    "address": "安义县新民乡合水村",
+    "note": ""
+  },
+  {
+    "code": "62558730",
+    "name": "芦家",
+    "type": "rainfall",
+    "lat": 28.9,
+    "lng": 115.583333,
+    "address": "安义县东阳镇黄城村",
+    "note": ""
+  },
+  {
+    "code": "62621300",
+    "name": "洗药坞",
+    "type": "rainfall",
+    "lat": 28.766667,
+    "lng": 115.683333,
+    "address": "湾里区太平镇",
+    "note": ""
+  },
+  {
+    "code": "62621400",
+    "name": "况家",
+    "type": "rainfall",
+    "lat": 28.716667,
+    "lng": 115.65,
+    "address": "湾里区招贤镇红星乡",
+    "note": ""
+  },
+  {
+    "code": "62621480",
+    "name": "梅岭头",
+    "type": "rainfall",
+    "lat": 28.766667,
+    "lng": 115.766667,
+    "address": "湾里区梅岭镇梅岭村",
+    "note": ""
+  },
+  {
+    "code": "62621500",
+    "name": "袁家村",
+    "type": "rainfall",
+    "lat": 28.8,
+    "lng": 115.783333,
+    "address": "湾里区梅岭镇袁家村",
+    "note": ""
+  },
+  {
+    "code": "62438250",
+    "name": "长山晏",
+    "type": "rainfall",
+    "lat": 28.25,
+    "lng": 116.25,
+    "address": "进贤县长山晏乡",
+    "note": ""
+  },
+  {
+    "code": "62438330",
+    "name": "白圩",
+    "type": "rainfall",
+    "lat": 28.233333,
+    "lng": 116.216667,
+    "address": "进贤县白圩乡汽车站院内",
+    "note": ""
+  },
+  {
+    "code": "62438350",
+    "name": "文港",
+    "type": "rainfall",
+    "lat": 28.283333,
+    "lng": 116.116667,
+    "address": "进贤县文港镇政府内",
+    "note": ""
+  },
+  {
+    "code": "62438380",
+    "name": "官田",
+    "type": "rainfall",
+    "lat": 28.3,
+    "lng": 116.05,
+    "address": "南昌县黄马乡官田村",
+    "note": ""
+  },
+  {
+    "code": "62438420",
+    "name": "蚕桑场",
+    "type": "rainfall",
+    "lat": 28.366667,
+    "lng": 116.016667,
+    "address": "南昌县黄马乡蚕桑场内",
+    "note": ""
+  },
+  {
+    "code": "62438450",
+    "name": "泉岭",
+    "type": "rainfall",
+    "lat": 28.366667,
+    "lng": 116.066667,
+    "address": "进贤县泉岭乡水管站",
+    "note": ""
+  },
+  {
+    "code": "62438500",
+    "name": "三江",
+    "type": "rainfall",
+    "lat": 28.3,
+    "lng": 116.0,
+    "address": "南昌县三江镇新大桥旁",
+    "note": ""
+  },
+  {
+    "code": "62621132",
+    "name": "东新",
+    "type": "rainfall",
+    "lat": 28.6,
+    "lng": 115.833333,
+    "address": "南昌县东新乡便民服务中心院内",
+    "note": ""
+  },
+  {
+    "code": "62621134",
+    "name": "八一",
+    "type": "rainfall",
+    "lat": 28.55,
+    "lng": 115.983333,
+    "address": "南昌县八一乡五星村北罗自然村",
+    "note": ""
+  },
+  {
+    "code": "62622870",
+    "name": "禾洲",
+    "type": "rainfall",
+    "lat": 28.866667,
+    "lng": 116.083333,
+    "address": "南昌县南新乡禾洲村",
+    "note": ""
+  },
+  {
+    "code": "62623350",
+    "name": "塘南",
+    "type": "rainfall",
+    "lat": 28.683333,
+    "lng": 116.116667,
+    "address": "南昌县塘南镇篁山村",
+    "note": ""
+  },
+  {
+    "code": "62623360",
+    "name": "康庄",
+    "type": "rainfall",
+    "lat": 28.683333,
+    "lng": 116.25,
+    "address": "南昌县泾口乡康庄村",
+    "note": ""
+  },
+  {
+    "code": "62623420",
+    "name": "北联",
+    "type": "rainfall",
+    "lat": 28.783333,
+    "lng": 116.183333,
+    "address": "南昌县塘南镇北联村鲤鱼洲",
+    "note": ""
+  },
+  {
+    "code": "62623600",
+    "name": "架桥",
+    "type": "rainfall",
+    "lat": 28.433333,
+    "lng": 116.066667,
+    "address": "进贤县架桥镇政府院内",
+    "note": ""
+  },
+  {
+    "code": "62623700",
+    "name": "前坊",
+    "type": "rainfall",
+    "lat": 28.516667,
+    "lng": 116.216667,
+    "address": "进贤县前坊镇政府院内",
+    "note": ""
+  },
+  {
+    "code": "62623720",
+    "name": "南洲",
+    "type": "rainfall",
+    "lat": 28.466667,
+    "lng": 116.116667,
+    "address": "南昌县塔城乡南洲村",
+    "note": ""
+  },
+  {
+    "code": "62623750",
+    "name": "邓芳",
+    "type": "rainfall",
+    "lat": 28.583333,
+    "lng": 116.05,
+    "address": "南昌县幽兰镇邓芳村",
+    "note": ""
+  },
+  {
+    "code": "62623785",
+    "name": "七里",
+    "type": "rainfall",
+    "lat": 28.433333,
+    "lng": 116.266667,
+    "address": "进贤县七里乡政府院内",
+    "note": ""
+  },
+  {
+    "code": "62623800",
+    "name": "进贤",
+    "type": "rainfall",
+    "lat": 28.366667,
+    "lng": 116.233333,
+    "address": "进贤县民和镇",
+    "note": ""
+  },
+  {
+    "code": "62623810",
+    "name": "罗溪",
+    "type": "rainfall",
+    "lat": 28.4,
+    "lng": 116.15,
+    "address": "进贤县罗溪镇计生办后院外",
+    "note": ""
+  },
+  {
+    "code": "62623825",
+    "name": "张公",
+    "type": "rainfall",
+    "lat": 28.35,
+    "lng": 116.166667,
+    "address": "进贤县张公镇政府院内",
+    "note": ""
+  },
+  {
+    "code": "62623870",
+    "name": "幽兰",
+    "type": "rainfall",
+    "lat": 28.566667,
+    "lng": 116.133333,
+    "address": "南昌县幽兰镇派出所后渠旁",
+    "note": ""
+  },
+  {
+    "code": "62624110",
+    "name": "武阳",
+    "type": "rainfall",
+    "lat": 28.516667,
+    "lng": 116.0,
+    "address": "南昌县武阳镇自来水厂院内",
+    "note": ""
+  },
+  {
+    "code": "62624120",
+    "name": "冈上",
+    "type": "rainfall",
+    "lat": 28.4,
+    "lng": 115.833333,
+    "address": "南昌县冈上镇",
+    "note": ""
+  },
+  {
+    "code": "62624122",
+    "name": "昌东",
+    "type": "rainfall",
+    "lat": 28.716667,
+    "lng": 116.016667,
+    "address": "南昌县昌东镇富大有路南塘湖电排站内",
+    "note": ""
+  },
+  {
+    "code": "62624124",
+    "name": "麻丘",
+    "type": "rainfall",
+    "lat": 28.616667,
+    "lng": 116.05,
+    "address": "高新区麻丘镇杨桥村",
+    "note": ""
+  },
+  {
+    "code": "62624126",
+    "name": "泾口",
+    "type": "rainfall",
+    "lat": 28.633333,
+    "lng": 116.15,
+    "address": "南昌县泾口乡新大桥旁",
+    "note": ""
+  },
+  {
+    "code": "62624128",
+    "name": "黄马",
+    "type": "rainfall",
+    "lat": 28.333333,
+    "lng": 116.0,
+    "address": "南昌县黄马乡冯家村",
+    "note": ""
+  },
+  {
+    "code": "62624130",
+    "name": "衙前",
+    "type": "rainfall",
+    "lat": 28.283333,
+    "lng": 116.45,
+    "address": "进贤县衙前乡",
+    "note": ""
+  },
+  {
+    "code": "62624160",
+    "name": "下埠集",
+    "type": "rainfall",
+    "lat": 28.3,
+    "lng": 116.383333,
+    "address": "进贤县下埠集乡政府",
+    "note": ""
+  },
+  {
+    "code": "62624180",
+    "name": "大昌",
+    "type": "rainfall",
+    "lat": 28.516667,
+    "lng": 115.85,
+    "address": "南昌县八一乡大昌村",
+    "note": ""
+  },
+  {
+    "code": "62624210",
+    "name": "池溪",
+    "type": "rainfall",
+    "lat": 28.383333,
+    "lng": 116.416667,
+    "address": "进贤县池溪乡政府院内",
+    "note": ""
+  },
+  {
+    "code": "62624600",
+    "name": "梅庄",
+    "type": "rainfall",
+    "lat": 28.583333,
+    "lng": 116.4,
+    "address": "进贤县梅庄乡",
+    "note": ""
+  },
+  {
+    "code": "62624610",
+    "name": "南台",
+    "type": "rainfall",
+    "lat": 28.483333,
+    "lng": 116.4,
+    "address": "进贤县南台乡",
+    "note": ""
+  },
+  {
+    "code": "62624615",
+    "name": "钟陵",
+    "type": "rainfall",
+    "lat": 28.433333,
+    "lng": 116.483333,
+    "address": "进贤县钟陵乡",
+    "note": ""
+  },
+  {
+    "code": "62624625",
+    "name": "三里",
+    "type": "rainfall",
+    "lat": 28.666667,
+    "lng": 116.366667,
+    "address": "进贤县三里乡财政所院内",
+    "note": ""
+  },
+  {
+    "code": "62640744",
+    "name": "向塘",
+    "type": "rainfall",
+    "lat": 28.433333,
+    "lng": 115.966667,
+    "address": "南昌县向塘镇地质大队抚河堤上",
+    "note": ""
+  },
+  {
+    "code": "62621000",
+    "name": "沙湖山",
+    "type": "rainfall",
+    "lat": 29.183333,
+    "lng": 116.016667,
+    "address": "庐山市沙湖山自然保护区",
+    "note": ""
+  },
+  {
+    "code": "62634700",
+    "name": "朱袍山",
+    "type": "rainfall",
+    "lat": 29.15,
+    "lng": 116.3,
+    "address": "都昌县和合乡",
+    "note": ""
+  },
+  {
+    "code": "62634900",
+    "name": "松门山",
+    "type": "rainfall",
+    "lat": 29.2,
+    "lng": 116.183333,
+    "address": "永修县吴城镇",
+    "note": ""
+  },
+  {
+    "code": "62638800",
+    "name": "金凤岭",
+    "type": "rainfall",
+    "lat": 29.466667,
+    "lng": 115.9,
+    "address": "庐山市温泉镇金凤岭村",
+    "note": ""
+  },
+  {
+    "code": "62639500",
+    "name": "太乙",
+    "type": "rainfall",
+    "lat": 29.516667,
+    "lng": 115.983333,
+    "address": "庐山市白鹿镇太乙村",
+    "note": ""
+  },
+  {
+    "code": "62641200",
+    "name": "余家咀",
+    "type": "rainfall",
+    "lat": 29.45,
+    "lng": 115.983333,
+    "address": "庐山市白鹿镇余家咀村",
+    "note": ""
+  },
+  {
+    "code": "62641300",
+    "name": "白鹿洞",
+    "type": "rainfall",
+    "lat": 29.5,
+    "lng": 116.033333,
+    "address": "庐山市白鹿镇畈李村",
+    "note": ""
+  },
+  {
+    "code": "62641400",
+    "name": "卧龙岗",
+    "type": "rainfall",
+    "lat": 29.5,
+    "lng": 116.0,
+    "address": "庐山市白鹿镇水库管理处",
+    "note": ""
+  },
+  {
+    "code": "62641500",
+    "name": "南康",
+    "type": "rainfall",
+    "lat": 29.466667,
+    "lng": 116.033333,
+    "address": "庐山市南康镇沿山新区第三栋",
+    "note": ""
+  },
+  {
+    "code": "62642100",
+    "name": "蓼花",
+    "type": "rainfall",
+    "lat": 29.383333,
+    "lng": 115.983333,
+    "address": "庐山市蓼花镇敬老院",
+    "note": ""
+  },
+  {
+    "code": "62642200",
+    "name": "蓼南",
+    "type": "rainfall",
+    "lat": 29.3,
+    "lng": 115.966667,
+    "address": "庐山市蓼南乡政府",
+    "note": ""
+  },
+  {
+    "code": "62642250",
+    "name": "渚溪",
+    "type": "rainfall",
+    "lat": 29.316667,
+    "lng": 116.016667,
+    "address": "庐山市蓼南乡渚溪村",
+    "note": ""
+  },
+  {
+    "code": "62642300",
+    "name": "蛟塘",
+    "type": "rainfall",
+    "lat": 29.3,
+    "lng": 115.916667,
+    "address": "庐山市蛟塘镇镇政府",
+    "note": ""
+  },
+  {
+    "code": "62644250",
+    "name": "鸦吉山",
+    "type": "rainfall",
+    "lat": 29.333333,
+    "lng": 115.916667,
+    "address": "庐山市华林镇鸦吉山村",
+    "note": ""
+  },
+  {
+    "code": "62644300",
+    "name": "东牯山",
+    "type": "rainfall",
+    "lat": 29.433333,
+    "lng": 115.933333,
+    "address": "庐山市东牯山林场",
+    "note": ""
+  },
+  {
+    "code": "62644400",
+    "name": "栖贤",
+    "type": "rainfall",
+    "lat": 29.516667,
+    "lng": 116.0,
+    "address": "庐山市东牯山林场栖贤村",
+    "note": ""
+  },
+  {
+    "code": "62645100",
+    "name": "万衫",
+    "type": "rainfall",
+    "lat": 29.466667,
+    "lng": 116.0,
+    "address": "庐山市白鹿镇万衫村",
+    "note": ""
+  },
+  {
+    "code": "62645200",
+    "name": "温泉",
+    "type": "rainfall",
+    "lat": 29.4,
+    "lng": 115.883333,
+    "address": "庐山市温泉镇镇政府",
+    "note": ""
+  },
+  {
+    "code": "62645300",
+    "name": "杜村",
+    "type": "rainfall",
+    "lat": 29.483333,
+    "lng": 115.916667,
+    "address": "庐山市温泉镇杜村",
+    "note": ""
+  },
+  {
+    "code": "62645400",
+    "name": "西洲",
+    "type": "rainfall",
+    "lat": 29.4,
+    "lng": 115.866667,
+    "address": "庐山市温泉镇西洲村",
+    "note": ""
+  },
+  {
+    "code": "62645600",
+    "name": "板桥山",
+    "type": "rainfall",
+    "lat": 29.416667,
+    "lng": 115.933333,
+    "address": "庐山市温泉镇饶家山水库",
+    "note": ""
+  },
+  {
+    "code": "62645700",
+    "name": "郭家",
+    "type": "rainfall",
+    "lat": 29.45,
+    "lng": 115.95,
+    "address": "庐山市温泉镇郭家村",
+    "note": ""
+  },
+  {
+    "code": "62364300",
+    "name": "昌东",
+    "type": "groundwater",
+    "lat": 28.666667,
+    "lng": 116.0,
+    "address": "高新区昌东镇水文嘉苑大门左侧围墙边",
+    "note": ""
+  },
+  {
+    "code": "62364400",
+    "name": "昌邑",
+    "type": "groundwater",
+    "lat": 29.016667,
+    "lng": 116.05,
+    "address": "新建区昌邑乡水管站内",
+    "note": ""
+  },
+  {
+    "code": "62364450",
+    "name": "罗家集(压力式)",
+    "type": "groundwater",
+    "lat": 28.6,
+    "lng": 115.983333,
+    "address": "南昌县八一乡淡溪电排站",
+    "note": ""
+  },
+  {
+    "code": "62569000",
+    "name": "民丰",
+    "type": "groundwater",
+    "lat": 28.7,
+    "lng": 115.95,
+    "address": "进贤县李家渡水文站院内",
+    "note": ""
+  },
+  {
+    "code": "62661910",
+    "name": "南钢",
+    "type": "groundwater",
+    "lat": 28.65,
+    "lng": 115.983333,
+    "address": "青山湖区罗家集镇746厂院内",
+    "note": ""
+  },
+  {
+    "code": "62661920",
+    "name": "樵舍",
+    "type": "groundwater",
+    "lat": 28.866667,
+    "lng": 115.983333,
+    "address": "青山湖区民丰路满庭春小区",
+    "note": ""
+  },
+  {
+    "code": "62661930",
+    "name": "省水利设计院(浮子)",
+    "type": "groundwater",
+    "lat": 28.666667,
+    "lng": 115.933333,
+    "address": "进贤县民和镇白果村白果小学",
+    "note": ""
+  },
+  {
+    "code": "62661940",
+    "name": "省水文局",
+    "type": "groundwater",
+    "lat": 28.65,
+    "lng": 115.883333,
+    "address": "青山湖区罗家集镇货场小学",
+    "note": ""
+  },
+  {
+    "code": "62661950",
+    "name": "石桥",
+    "type": "groundwater",
+    "lat": 28.616667,
+    "lng": 115.95,
+    "address": "新建区联圩镇上万坊张家",
+    "note": ""
+  },
+  {
+    "code": "62661960",
+    "name": "桃花园(浮子)",
+    "type": "groundwater",
+    "lat": 28.65,
+    "lng": 115.866667,
+    "address": "西湖区北京东路省水利设计院内",
+    "note": "基本站"
+  },
+  {
+    "code": "62661970",
+    "name": "外洲",
+    "type": "groundwater",
+    "lat": 28.633333,
+    "lng": 115.833333,
+    "address": "西湖区前西路329号水文局",
+    "note": "基本站"
+  },
+  {
+    "code": "62661980",
+    "name": "万家埠",
+    "type": "groundwater",
+    "lat": 28.85,
+    "lng": 115.65,
+    "address": "南昌县昌东镇昌东工业园石桥老年活动广场",
+    "note": "基本站"
+  },
+  {
+    "code": "62668010",
+    "name": "尤口",
+    "type": "groundwater",
+    "lat": 28.716667,
+    "lng": 116.016667,
+    "address": "南昌县塘南镇水管站院内",
+    "note": "基本站"
+  },
+  {
+    "code": "62364100",
+    "name": "星子",
+    "type": "groundwater",
+    "lat": 29.433333,
+    "lng": 116.033333,
+    "address": "西湖区老福山桃花广场",
+    "note": "基本站"
+  },
+  {
+    "code": "62461200",
+    "name": "淡溪",
+    "type": "groundwater",
+    "lat": 28.566667,
+    "lng": 115.95,
+    "address": "西湖区观洲路观水花园围墙外",
+    "note": "基本站"
+  },
+  {
+    "code": "62463300",
+    "name": "李家渡",
+    "type": "groundwater",
+    "lat": 28.216667,
+    "lng": 116.15,
+    "address": "安义县万埠镇镇政府内",
+    "note": "基本站"
+  },
+  {
+    "code": "62463360",
+    "name": "民和",
+    "type": "groundwater",
+    "lat": 28.366667,
+    "lng": 116.283333,
+    "address": "进贤县温圳镇大溪村大溪小学",
+    "note": "基本站"
+  },
+  {
+    "code": "62661100",
+    "name": "塘南",
+    "type": "groundwater",
+    "lat": 28.65,
+    "lng": 116.15,
+    "address": "庐山市南康镇",
+    "note": "基本站"
+  },
+  {
+    "code": "62661300",
+    "name": "温家圳",
+    "type": "groundwater",
+    "lat": 28.35,
+    "lng": 116.116667,
+    "address": "南昌县小蓝经济开发区雄溪村象湖联圩管理站",
+    "note": "基本站"
+  },
+  {
+    "code": "62661400",
+    "name": "雄溪",
+    "type": "groundwater",
+    "lat": 28.533333,
+    "lng": 115.9,
+    "address": "高新区昌东镇创新大道尤口老政府院内",
+    "note": "基本站"
+  },
+  {
+    "code": "62660110",
+    "name": "钟陵",
+    "type": "groundwater",
+    "lat": 28.433333,
+    "lng": 116.466667,
+    "address": "进贤县钟陵乡乡政府院内",
+    "note": "基本站"
+  },
+  {
+    "code": "626A7000",
+    "name": "白鹿",
+    "type": "soil_moisture",
+    "lat": 28.983333,
+    "lng": 115.916667,
+    "address": "庐山市白鹿镇梅溪村",
+    "note": "辅助站"
+  },
+  {
+    "code": "623A8000",
+    "name": "草山",
+    "type": "soil_moisture",
+    "lat": 28.55,
+    "lng": 115.583333,
+    "address": "新建区西山镇草山村",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A3800",
+    "name": "大塘",
+    "type": "soil_moisture",
+    "lat": 28.85,
+    "lng": 115.6,
+    "address": "新建区大塘乡联合村",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A6400",
+    "name": "东阳",
+    "type": "soil_moisture",
+    "lat": 28.35,
+    "lng": 115.983333,
+    "address": "新建区东阳镇战坪村象田小组",
+    "note": "辅助站"
+  },
+  {
+    "code": "624A6000",
+    "name": "黄马",
+    "type": "soil_moisture",
+    "lat": 28.65,
+    "lng": 116.233333,
+    "address": "南昌县黄马乡茶厂",
+    "note": "基本站"
+  },
+  {
+    "code": "626A4200",
+    "name": "架桥",
+    "type": "soil_moisture",
+    "lat": 28.533333,
+    "lng": 115.633333,
+    "address": "进贤县架桥镇罗垅村委会",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A6800",
+    "name": "蛟塘",
+    "type": "soil_moisture",
+    "lat": 28.483333,
+    "lng": 115.733333,
+    "address": "庐山市蛟塘镇芙蓉村",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A3400",
+    "name": "泾口",
+    "type": "soil_moisture",
+    "lat": 28.866667,
+    "lng": 115.766667,
+    "address": "新建区西山乡山头村三组果园",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A3600",
+    "name": "鞠塘",
+    "type": "soil_moisture",
+    "lat": 28.783333,
+    "lng": 115.75,
+    "address": "新建区乐化镇鞠塘村",
+    "note": "辅助站"
+  },
+  {
+    "code": "623A8200",
+    "name": "乐化",
+    "type": "soil_moisture",
+    "lat": 28.8,
+    "lng": 116.066667,
+    "address": "新建区乐化镇徐邓村文盛家庭家场",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A7200",
+    "name": "蓼南",
+    "type": "soil_moisture",
+    "lat": 28.65,
+    "lng": 115.566667,
+    "address": "庐山市蓼南乡新池村",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A7000",
+    "name": "林厂",
+    "type": "soil_moisture",
+    "lat": 28.85,
+    "lng": 115.75,
+    "address": "湾里区罗亭镇林厂",
+    "note": "辅助站"
+  },
+  {
+    "code": "623A1200",
+    "name": "流湖",
+    "type": "soil_moisture",
+    "lat": 28.733333,
+    "lng": 115.566667,
+    "address": "新建区流湖乡(六湖导托管理所)",
+    "note": "基本站"
+  },
+  {
+    "code": "627A5200",
+    "name": "梅岭",
+    "type": "soil_moisture",
+    "lat": 28.55,
+    "lng": 115.75,
+    "address": "湾里区梅岭镇梅岭村",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A4900",
+    "name": "梅庄",
+    "type": "soil_moisture",
+    "lat": 28.483333,
+    "lng": 115.433333,
+    "address": "进贤县梅庄镇",
+    "note": "基本站"
+  },
+  {
+    "code": "626A4400",
+    "name": "民和",
+    "type": "soil_moisture",
+    "lat": 28.883333,
+    "lng": 115.616667,
+    "address": "进贤县民和镇民和茶厂",
+    "note": "基本站"
+  },
+  {
+    "code": "626A4000",
+    "name": "南新",
+    "type": "soil_moisture",
+    "lat": 28.466667,
+    "lng": 115.95,
+    "address": "南昌县南新乡芳洲村",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A4600",
+    "name": "七里",
+    "type": "soil_moisture",
+    "lat": 28.95,
+    "lng": 115.566667,
+    "address": "进贤县七里乡姜家村",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A4800",
+    "name": "前坊",
+    "type": "soil_moisture",
+    "lat": 28.583333,
+    "lng": 116.2,
+    "address": "进贤县前坊镇太平村青岚果园",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A6000",
+    "name": "乔乐",
+    "type": "soil_moisture",
+    "lat": 28.866667,
+    "lng": 115.733333,
+    "address": "新建区乔乐乡乔乐村下村组",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A7200",
+    "name": "上坂",
+    "type": "soil_moisture",
+    "lat": 28.716667,
+    "lng": 115.75,
+    "address": "湾里区罗亭镇上坂村",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A6200",
+    "name": "石鼻",
+    "type": "soil_moisture",
+    "lat": 29.466667,
+    "lng": 116.05,
+    "address": "新建区石鼻镇潘家村老基自然村",
+    "note": "辅助站"
+  },
+  {
+    "code": "623A8400",
+    "name": "石岗",
+    "type": "soil_moisture",
+    "lat": 29.3,
+    "lng": 115.933333,
+    "address": "新建区石岗镇徐塘村",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A5405",
+    "name": "太平",
+    "type": "soil_moisture",
+    "lat": 29.3,
+    "lng": 115.966667,
+    "address": "湾里区太平乡红岭自然村",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A3600",
+    "name": "万家埠试验站",
+    "type": "soil_moisture",
+    "lat": 29.433333,
+    "lng": 115.933333,
+    "address": "新建区东阳镇万家埠垦殖厂",
+    "note": "基本站"
+  },
+  {
+    "code": "626A7400",
+    "name": "温泉",
+    "type": "soil_moisture",
+    "lat": 29.316667,
+    "lng": 115.816667,
+    "address": "庐山市温泉镇新塘村",
+    "note": "辅助站"
+  },
+  {
+    "code": "624A6200",
+    "name": "文港",
+    "type": "soil_moisture",
+    "lat": 28.433333,
+    "lng": 115.933333,
+    "address": "进贤县文港镇晏殊村",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A3200",
+    "name": "向塘",
+    "type": "soil_moisture",
+    "lat": 28.366667,
+    "lng": 116.366667,
+    "address": "南昌县向塘镇剑霞村委会团结村小组",
+    "note": "辅助站"
+  },
+  {
+    "code": "625A6800",
+    "name": "新民",
+    "type": "soil_moisture",
+    "lat": 28.416667,
+    "lng": 116.283333,
+    "address": "新建区新民乡峤岭村",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A3000",
+    "name": "幽兰",
+    "type": "soil_moisture",
+    "lat": 28.516667,
+    "lng": 116.233333,
+    "address": "南昌县幽兰镇新庄村园艺场",
+    "note": "辅助站"
+  },
+  {
+    "code": "626A6600",
+    "name": "泽泉",
+    "type": "soil_moisture",
+    "lat": 28.316667,
+    "lng": 116.15,
+    "address": "共青城市泽泉乡泽泉村斜田李",
+    "note": "基本站"
+  },
+  {
+    "code": "625A6600",
+    "name": "长均",
+    "type": "soil_moisture",
+    "lat": 28.466667,
+    "lng": 115.716667,
+    "address": "新建区长均镇曹村",
+    "note": "辅助站"
+  },
+  {
+    "code": "627A5000",
+    "name": "招贤",
+    "type": "soil_moisture",
+    "lat": 28.583333,
+    "lng": 116.4,
+    "address": "湾里区招贤镇港下村",
+    "note": "辅助站"
+  },
+  {
+    "code": "62302250",
+    "name": "外洲",
+    "type": "evaporation",
+    "lat": 28.638888,
+    "lng": 115.8447,
+    "address": "江西南昌市西湖区桃花镇",
+    "note": ""
+  },
+  {
+    "code": "62402400",
+    "name": "李家渡",
+    "type": "evaporation",
+    "lat": 28.35,
+    "lng": 116.316667,
+    "address": "进贤县李渡镇康洁大道",
+    "note": ""
+  },
+  {
+    "code": "62517400",
+    "name": "万家埠",
+    "type": "evaporation",
+    "lat": 28.859472,
+    "lng": 115.6476,
+    "address": "江西安义县万埠镇",
+    "note": ""
+  },
+  {
+    "code": "62601200",
+    "name": "星子",
+    "type": "evaporation",
+    "lat": 29.4454,
+    "lng": 116.0496,
+    "address": "江西星子县南康镇",
+    "note": ""
+  },
+  {
+    "code": "62602000",
+    "name": "都昌",
+    "type": "evaporation",
+    "lat": 29.2533,
+    "lng": 116.1897,
+    "address": "江西都昌县都昌镇印山村",
+    "note": ""
+  },
+  {
+    "code": "62602600",
+    "name": "棠荫",
+    "type": "evaporation",
+    "lat": 29.0868,
+    "lng": 116.3807,
+    "address": "江西都昌县周溪镇",
+    "note": ""
+  },
+  {
+    "code": "62605800",
+    "name": "康山",
+    "type": "evaporation",
+    "lat": 28.8904,
+    "lng": 116.4172,
+    "address": "江西余干县康山乡",
+    "note": ""
+  },
+  {
+    "code": "62601200-2",
+    "name": "星子",
+    "type": "station_yard",
+    "lat": 29.45,
+    "lng": 116.05,
+    "address": "庐山市",
+    "note": ""
+  },
+  {
+    "code": "62605800-2",
+    "name": "康山",
+    "type": "station_yard",
+    "lat": 28.883333,
+    "lng": 116.4,
+    "address": "余干县",
+    "note": ""
+  },
+  {
+    "code": "62602000-2",
+    "name": "都昌",
+    "type": "station_yard",
+    "lat": 29.25,
+    "lng": 116.183333,
+    "address": "都昌县",
+    "note": ""
+  },
+  {
+    "code": "62610570-2",
+    "name": "聂城",
+    "type": "station_yard",
+    "lat": 28.683333,
+    "lng": 115.733333,
+    "address": "湾里区招贤镇聂城村",
+    "note": ""
+  },
+  {
+    "code": "62517400-2",
+    "name": "万家埠",
+    "type": "station_yard",
+    "lat": 28.85,
+    "lng": 115.633333,
+    "address": "安义县万埠镇桥东街",
+    "note": ""
+  },
+  {
+    "code": "62517550-2",
+    "name": "新祺周",
+    "type": "station_yard",
+    "lat": 28.966667,
+    "lng": 115.8,
+    "address": "桑海开发区桑海水产养殖场",
+    "note": ""
+  },
+  {
+    "code": "62518640-2",
+    "name": "雷家",
+    "type": "station_yard",
+    "lat": 28.716667,
+    "lng": 115.55,
+    "address": "安义县石鼻镇雷家",
+    "note": ""
+  },
+  {
+    "code": "62611600-2",
+    "name": "江桥",
+    "type": "station_yard",
+    "lat": 28.833333,
+    "lng": 115.866667,
+    "address": "新建区乐化镇江桥村",
+    "note": ""
+  },
+  {
+    "code": "62402400-2",
+    "name": "李家渡",
+    "type": "station_yard",
+    "lat": 28.216667,
+    "lng": 116.15,
+    "address": "进贤县李渡镇",
+    "note": ""
+  },
+  {
+    "code": "62606370-2",
+    "name": "莲塘",
+    "type": "station_yard",
+    "lat": 28.533333,
+    "lng": 115.933333,
+    "address": "南昌县莲塘镇",
+    "note": ""
+  },
+  {
+    "code": "62606700-2",
+    "name": "茶溪",
+    "type": "station_yard",
+    "lat": 28.35,
+    "lng": 116.316667,
+    "address": "进贤县民和镇院泽村",
+    "note": ""
+  },
+  {
+    "code": "62608100",
+    "name": "岗前",
+    "type": "station_yard",
+    "lat": 28.333333,
+    "lng": 115.95,
+    "address": "南昌县广福镇吴石村",
+    "note": ""
+  },
+  {
+    "code": "62614600",
+    "name": "观口",
+    "type": "station_yard",
+    "lat": 29.45,
+    "lng": 115.883333,
+    "address": "庐山市",
+    "note": ""
+  }
+]

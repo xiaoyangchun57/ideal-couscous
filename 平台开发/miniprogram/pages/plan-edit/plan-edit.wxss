@@ -1,0 +1,87 @@
+/* 变更提示横幅 */
+.change-banner {
+  margin: 20rpx 24rpx 0; padding: 18rpx 24rpx; border-radius: 16rpx;
+  background: rgba(255,143,31,0.10); border: 1rpx solid rgba(255,143,31,0.4);
+}
+.change-banner-tx { font-size: 25rpx; color: var(--orange); line-height: 1.5; }
+
+.period-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 24rpx 28rpx; margin: 20rpx 24rpx 0;
+  background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line);
+}
+.period-text { font-size: 28rpx; font-weight: 500; color: var(--text); }
+
+/* 频次选择 */
+.type-picker { display: flex; align-items: center; gap: 6rpx; }
+
+/* 添加日期栏（月/季/年检） */
+.add-day-bar { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; }
+.add-day-btn {
+  font-size: 26rpx; color: var(--brand); background: var(--brand-weak);
+  border: 1rpx dashed var(--brand-line); border-radius: 12rpx; padding: 14rpx 28rpx;
+}
+.add-day-hint { font-size: 23rpx; color: var(--text-3); }
+
+/* 每天卡片的"移除" */
+.day-del { font-size: 23rpx; color: var(--text-3); }
+
+/* 智能建议 */
+.suggest-card { margin: 20rpx 24rpx 0; }
+.suggest-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
+.suggest-title { font-size: 28rpx; font-weight: 500; color: var(--text); }
+.suggest-count { font-size: 22rpx; color: var(--text-3); }
+.suggest-item { display: flex; align-items: flex-start; margin-bottom: 14rpx; }
+.suggest-item .dot { margin-top: 10rpx; margin-right: 14rpx; flex-shrink: 0; }
+.suggest-text { font-size: 25rpx; color: var(--text-2); line-height: 1.5; }
+
+/* 日卡片 */
+.day-card { margin: 20rpx 24rpx 0; }
+.day-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
+.day-label { display: flex; align-items: baseline; gap: 12rpx; }
+.day-weekday { font-size: 30rpx; font-weight: 600; color: var(--text); }
+.day-date { font-size: 23rpx; color: var(--text-3); }
+.day-ops { display: flex; align-items: center; gap: 16rpx; }
+.day-count { font-size: 23rpx; color: var(--brand); }
+.day-all { font-size: 23rpx; color: var(--text-3); text-decoration: underline; }
+
+/* 站点 chips */
+.site-chips-wrap { display: flex; flex-wrap: wrap; gap: 14rpx; }
+.chip {
+  display: inline-flex; align-items: center; padding: 12rpx 24rpx;
+  background: var(--fill); border: 1rpx solid var(--line); border-radius: 999rpx;
+  font-size: 25rpx; color: var(--text-2);
+}
+.chip-on { background: var(--brand-weak); border-color: var(--brand-line); color: var(--brand); font-weight: 500; }
+.chip-score { font-size: 20rpx; color: var(--orange); margin-left: 4rpx; }
+
+/* 车辆 */
+.vehicle-row { display: flex; align-items: center; margin-top: 20rpx; padding-top: 20rpx; border-top: 1rpx solid var(--line); }
+.vehicle-label { font-size: 25rpx; color: var(--text-2); margin-right: 20rpx; }
+.vehicle-picker { display: flex; align-items: center; gap: 8rpx; }
+.vehicle-val { font-size: 26rpx; color: var(--text); }
+.vehicle-ph { font-size: 26rpx; color: var(--text-3); }
+.vehicle-arrow { font-size: 22rpx; color: var(--text-3); }
+
+/* 出车资源 */
+.resource-card { margin: 20rpx 24rpx 0; }
+.resource-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
+.resource-title { font-size: 28rpx; font-weight: 500; color: var(--text); }
+.resource-hint { font-size: 22rpx; color: var(--text-3); }
+.resource-empty { display: block; font-size: 24rpx; color: var(--text-3); padding: 12rpx 0; }
+.resource-auto { display: block; margin-top: 16rpx; font-size: 23rpx; line-height: 1.5; color: var(--text-3); }
+
+/* 备注 */
+.remarks-card { margin: 20rpx 24rpx 0; }
+.remarks-label { font-size: 25rpx; color: var(--text-2); display: block; margin-bottom: 12rpx; }
+
+/* 底部操作栏 */
+.bottom-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: flex; gap: 20rpx; padding: 20rpx 28rpx calc(20rpx + env(safe-area-inset-bottom));
+  background: #FFFFFF; border-top: 1rpx solid var(--line);
+}
+.bottom-btn { flex: 1; }
+
+/* 底部留白避免遮挡 */
+.page { padding-bottom: 160rpx; }

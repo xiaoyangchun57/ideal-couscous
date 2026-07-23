@@ -1,0 +1,31 @@
+.filter-bar {
+  display: flex; padding: 20rpx 24rpx 0; gap: 16rpx;
+}
+.filter-item {
+  padding: 12rpx 32rpx; border-radius: 999rpx; font-size: 26rpx;
+  background: #FFFFFF; border: 1rpx solid var(--line); color: var(--text-2);
+}
+.filter-on { background: var(--brand); color: #FFFFFF; border-color: var(--brand); }
+
+.plan-card { margin: 20rpx 24rpx 0; }
+.plan-top { display: flex; align-items: center; justify-content: space-between; }
+.plan-type-row { display: flex; gap: 12rpx; }
+.plan-period { font-size: 24rpx; color: var(--text-3); }
+
+.plan-info { margin-top: 16rpx; display: flex; align-items: center; justify-content: space-between; }
+.plan-stat { font-size: 26rpx; color: var(--text); }
+.plan-time { font-size: 22rpx; color: var(--text-3); }
+
+.plan-reject {
+  margin-top: 16rpx; padding: 16rpx 20rpx; border-radius: 12rpx;
+  background: rgba(250,81,81,0.06); color: var(--red); font-size: 24rpx;
+}
+
+.plan-actions { margin-top: 20rpx; display: flex; justify-content: flex-end; }
+
+.fab {
+  position: fixed; right: 32rpx; bottom: calc(48rpx + env(safe-area-inset-bottom));
+  background: var(--brand); color: #FFFFFF; font-size: 28rpx; font-weight: 500;
+  padding: 24rpx 40rpx; border-radius: 999rpx;
+  box-shadow: 0 8rpx 24rpx var(--brand-line);
+}

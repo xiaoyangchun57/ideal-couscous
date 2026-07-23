@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>巡检计划体系 · 总览图</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; padding: 32px 20px; color: #1a1a1a; }
+.container { max-width: 1180px; margin: 0 auto; }
+h1 { text-align: center; font-size: 24px; font-weight: 600; margin-bottom: 6px; }
+.subtitle { text-align: center; font-size: 13px; color: #8a8f99; margin-bottom: 28px; }
+
+.legend { display: flex; justify-content: center; gap: 22px; margin-bottom: 26px; font-size: 12px; flex-wrap: wrap; }
+.legend span { display: flex; align-items: center; gap: 6px; }
+.dot { width: 12px; height: 12px; border-radius: 3px; }
+.d-pc { background: #2b6cff; } .d-mb { background: #1fb673; } .d-auto { background: #722ed1; } .d-both { background: linear-gradient(135deg,#2b6cff 50%,#1fb673 50%); }
+
+/* 分层模型 */
+.freq-model { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 8px; }
+.freq-card { border-radius: 12px; padding: 16px; text-align: center; color: #fff; position: relative; }
+.freq-card h3 { font-size: 16px; margin-bottom: 6px; }
+.freq-card .fq { font-size: 11px; opacity: 0.9; margin-bottom: 8px; }
+.freq-card p { font-size: 11px; line-height: 1.5; opacity: 0.95; }
+.f-week { background: linear-gradient(135deg, #2b6cff, #4d84ff); }
+.f-month { background: linear-gradient(135deg, #1fb673, #3cc98a); }
+.f-quarter { background: linear-gradient(135deg, #ff7a28, #ff9550); }
+.f-year { background: linear-gradient(135deg, #722ed1, #9254de); }
+.freq-badge { position: absolute; top: 8px; right: 10px; font-size: 10px; background: rgba(255,255,255,0.25); padding: 2px 8px; border-radius: 10px; }
+.model-note { text-align: center; font-size: 12px; color: #8a8f99; margin: 12px 0 28px; }
+.model-note b { color: #2b6cff; }
+
+/* 主流程 */
+.section-title { font-size: 17px; font-weight: 600; margin: 30px 0 16px; padding-left: 12px; border-left: 4px solid #2b6cff; }
+.pipeline { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+.stage { flex: 1; min-width: 150px; background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); position: relative; }
+.stage h4 { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.stage ul { list-style: none; }
+.stage li { font-size: 11px; color: #5a5f66; padding: 3px 0 3px 14px; position: relative; line-height: 1.5; }
+.stage li::before { content: ''; position: absolute; left: 0; top: 9px; width: 5px; height: 5px; border-radius: 50%; background: #d0d3d9; }
+.p-arrow { display: flex; align-items: center; padding: 0 4px; color: #b0b4b9; font-size: 18px; }
+.em { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 500; margin-left: auto; }
+.em-pc { background: #eaf1ff; color: #2b6cff; } .em-mb { background: #e6f7f0; color: #1fb673; }
+.em-auto { background: #f3eaff; color: #722ed1; } .em-both { background: #f0f1f3; color: #5a5f66; }
+
+/* 智能建议 */
+.suggest-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.suggest-card { background: #fff; border-radius: 10px; padding: 14px 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); border-left: 3px solid #ff7a28; }
+.suggest-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.suggest-card p { font-size: 11px; color: #5a5f66; line-height: 1.5; }
+.suggest-card .ex { font-size: 10px; color: #8a8f99; margin-top: 6px; font-style: italic; }
+.dual-use { background: #fffbe6; border: 1px solid #ffe58f; border-radius: 8px; padding: 10px 16px; font-size: 12px; color: #ad6800; margin-top: 14px; }
+
+/* 审批决策支撑 */
+.approval-grid { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px; }
+.approval-card { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.approval-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.station-card { background: #fafbfc; border-radius: 8px; padding: 12px; font-size: 11px; line-height: 1.7; }
+.station-card .name { font-weight: 600; font-size: 13px; color: #1a1a1a; }
+.station-card .health { float: right; color: #ff7a28; font-weight: 600; }
+.warn-item { background: #fff2e8; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #ad4e00; margin-bottom: 8px; line-height: 1.5; }
+.route-box { background: #f5f9ff; border-radius: 8px; padding: 12px; font-size: 11px; color: #5a5f66; line-height: 1.8; }
+.route-box .bad { color: #fa5151; font-weight: 500; }
+
+/* 拍照审核 */
+.photo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.photo-card { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.photo-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.thumb-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.thumb { width: 56px; height: 56px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; }
+.t-ok { background: #1fb673; } .t-bad { background: #fa5151; border: 3px solid #fa5151; box-shadow: 0 0 0 2px #fff inset; }
+.t-empty { background: #fff; border: 2px dashed #d0d3d9; color: #8a8f99; }
+.photo-card .desc { font-size: 11px; color: #5a5f66; line-height: 1.6; }
+.photo-card .desc b { color: #1a1a1a; }
+.key-point { background: #e6f7f0; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #159960; margin-top: 10px; }
+
+/* 实施路线 */
+.roadmap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.phase { background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); border-top: 4px solid; }
+.ph1 { border-color: #fa5151; } .ph2 { border-color: #ff7a28; } .ph3 { border-color: #1fb673; }
+.phase h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.phase .days { font-size: 12px; color: #8a8f99; margin-bottom: 12px; }
+.phase ul { list-style: none; }
+.phase li { font-size: 12px; color: #5a5f66; padding: 5px 0 5px 16px; position: relative; line-height: 1.5; border-bottom: 1px solid #f5f6f8; }
+.phase li::before { content: '→'; position: absolute; left: 0; color: #b0b4b9; }
+
+.note { background: #fff; border-radius: 10px; padding: 16px 20px; margin-top: 24px; font-size: 13px; color: #5a5f66; line-height: 1.7; box-shadow: 0 2px 12px rgba(0,0,0,0.04); }
+.note b { color: #1a1a1a; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>巡检计划体系 · 总览图</h1>
+<p class="subtitle">周/月/季/年统一分层 ｜ 调度层（排程+资源+审核）+ 执行层（检查+拍照）｜ 双端协同</p>
+
+<div class="legend">
+  <span><span class="dot d-pc"></span>PC端（管理者）</span>
+  <span><span class="dot d-mb"></span>移动端（一线）</span>
+  <span><span class="dot d-both"></span>双端</span>
+  <span><span class="dot d-auto"></span>系统自动</span>
+</div>
+
+<!-- 分层模型 -->
+<div class="section-title">一、巡检计划分层模型（周计划=最高频巡检，不再独立）</div>
+<div class="freq-model">
+  <div class="freq-card f-week">
+    <span class="freq-badge">最高频</span>
+    <h3>周巡检</h3>
+    <div class="fq">每周 · 全覆盖</div>
+    <p>常规检查、读数、外观、清洁、基础维护<br>项多但简单，拍照多</p>
+  </div>
+  <div class="freq-card f-month">
+    <h3>月巡检</h3>
+    <div class="fq">每月 · 部分/全部</div>
+    <p>校准、质控、易损件检查<br>含质控验证项</p>
+  </div>
+  <div class="freq-card f-quarter">
+    <h3>季巡检</h3>
+    <div class="fq">每季 · 重点站</div>
+    <p>深度维护、性能验证<br>项少但深入</p>
+  </div>
+  <div class="freq-card f-year">
+    <h3>年巡检</h3>
+    <div class="fq">每年 · 全部站</div>
+    <p>全面检修、设备评估、备件大修<br>备件需求大、耗时长</p>
+  </div>
+</div>
+<p class="model-note">统一数据模型 <b>inspection_schedules</b>（schedule_type 区分频次）+ 现有 <b>insp_plans</b> 执行层 ｜ 检查项模板按频次区分 ｜ 周巡检要求全覆盖校验</p>
+
+<!-- 主流程 -->
+<div class="section-title">二、调度层主流程（排程 → 资源 → 审核 → 执行）</div>
+<div class="pipeline">
+  <div class="stage">
+    <h4>📅 排程 <span class="em em-mb">移动主</span></h4>
+    <ul>
+      <li>选周期类型(周/月/季/年)</li>
+      <li>逐日安排站点</li>
+      <li>实时智能建议</li>
+      <li>全覆盖校验</li>
+    </ul>
+  </div>
+  <div class="p-arrow">→</div>
+  <div class="stage">
+    <h4>🚗🔧 出发前资源 <span class="em em-mb">移动</span></h4>
+    <ul>
+      <li>用车：选车+冲突检测</li>
+      <li>备件：建议+库存校验</li>
+      <li>顺路工单确认</li>
+      <li>（出发前落实，非处置后）</li>
+    </ul>
+  </div>
+  <div class="p-arrow">→</div>
+  <div class="stage">
+    <h4>✅ 审核 <span class="em em-pc">PC主</span></h4>
+    <ul>
+      <li>站点情况卡</li>
+      <li>风险预警(排序/折返)</li>
+      <li>路线地图</li>
+      <li>通过/退回/调整</li>
+    </ul>
+  </div>
+  <div class="p-arrow">→</div>
+  <div class="stage">
+    <h4>⚙️ 自动流转 <span class="em em-auto">自动</span></h4>
+    <ul>
+      <li>生成执行任务</li>
+      <li>锁定车辆</li>
+      <li>备件出库</li>
+      <li>微信通知</li>
+    </ul>
+  </div>
+  <div class="p-arrow">→</div>
+  <div class="stage">
+    <h4>📱 执行 <span class="em em-mb">移动</span></h4>
+    <ul>
+      <li>打卡(GPS)→拍照解锁</li>
+      <li>逐项检查(拍照清单)</li>
+      <li>顺路工单处理</li>
+      <li>试剂更换+质控</li>
+    </ul>
+  </div>
+  <div class="p-arrow">→</div>
+  <div class="stage">
+    <h4>🔍 审核 <span class="em em-both">双端</span></h4>
+    <ul>
+      <li>异常驱动照片审核</li>
+      <li>巡检质控</li>
+      <li>工单核验</li>
+      <li>异常→转告警(闭环)</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 智能建议 -->
+<div class="section-title">三、智能建议（一套数据，排程端+审批端双复用）</div>
+<div class="suggest-grid">
+  <div class="suggest-card">
+    <h4>⚡ 工单顺路 / 告警复核</h4>
+    <p>选站时查该站未关工单、待复核告警</p>
+    <p class="ex">"麻山有紧急工单（已9天），建议顺路并排前面"</p>
+  </div>
+  <div class="suggest-card">
+    <h4>🧪 试剂临期 / 高危优先</h4>
+    <p>试剂余量预警 + 站点优先级评分</p>
+    <p class="ex">"五陂下试剂剩3天，建议携带更换"</p>
+  </div>
+  <div class="suggest-card">
+    <h4>🗺 路线折返 / 覆盖遗漏</h4>
+    <p>检测当天路线折返 + 周巡检漏站</p>
+    <p class="ex">"周三路线折返，调整可省35km"</p>
+  </div>
+</div>
+<div class="dual-use">💡 同一套能力：在<b>排程端</b>辅助运维排得更合理（减少被退回），在<b>审批端</b>辅助管理者判断合理性（不用翻历史记录）。</div>
+
+<!-- 审批决策支撑 -->
+<div class="section-title">四、审批决策支撑（管理者PC端，三大能力）</div>
+<div class="approval-grid">
+  <div class="approval-card">
+    <h4>📋 站点情况卡</h4>
+    <div class="station-card">
+      <span class="name">麻山站</span><span class="health">91.5% ⚠</span><br>
+      📍 距上一站：18km<br>
+      🔴 未关工单：1条（氨氮超标，9天）<br>
+      🟠 近期告警：2条（pH偏低）<br>
+      🔧 上次巡检：7/15 正常<br>
+      🧪 试剂：总磷剩3天 ⚠<br>
+      📉 趋势：96%→93%→91.5% ↓<br>
+      💡 优先级：高（建议排前）
+    </div>
+  </div>
+  <div class="approval-card">
+    <h4>⚠️ 风险预警</h4>
+    <div class="warn-item">🔴 麻山有紧急工单（临近SLA），但排在周五，建议提前到周一/周二</div>
+    <div class="warn-item">🗺 周三路线折返：星子(北)→袁河(南)→山口岩(北)，多跑约35km</div>
+    <div class="warn-item" style="background:#e6f7f0;color:#159960;">✓ 站点覆盖：5/5 全覆盖</div>
+  </div>
+  <div class="approval-card">
+    <h4>🗺 路线可视化</h4>
+    <div class="route-box">
+      [周一][周二][<b>周三</b>][周四][周五]<br><br>
+      星子 ● ─╲<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;╲ 山口岩 ●<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;╱ <span class="bad">←折返</span><br>
+      袁河 ●<br><br>
+      本日：3站/62km<br>
+      <span class="bad">⚠ 可优化至45km</span>
+    </div>
+  </div>
+</div>
+
+<!-- 拍照与审核 -->
+<div class="section-title">五、拍照清单 + 异常驱动审核（双方减负）</div>
+<div class="photo-grid">
+  <div class="photo-card">
+    <h4>📷 拍照端（移动端）— 清楚拍什么/拍多少/缺什么</h4>
+    <div class="thumb-row">
+      <div class="thumb t-ok">✓仪器</div>
+      <div class="thumb t-ok">✓数据</div>
+      <div class="thumb t-empty">+ 试剂</div>
+    </div>
+    <div class="desc">每检查项预定义<b>应拍清单</b>（图标+文字），已拍打勾、未拍虚线框提示"缺：试剂余量"。顶部实时进度<b>"本站需拍24张，已拍18张，缺6张"</b>。</div>
+    <div class="key-point">提交前一目了然缺什么，不靠提交时才报错</div>
+  </div>
+  <div class="photo-card">
+    <h4>🔍 审核端（PC端）— 只标记异常，其余自动通过</h4>
+    <div class="thumb-row">
+      <div class="thumb t-ok">✓</div>
+      <div class="thumb t-bad">⚠</div>
+      <div class="thumb t-ok">✓</div>
+      <div class="thumb t-ok">✓</div>
+    </div>
+    <div class="desc">默认全部通过，<b>点击问题照片标记异常</b>（红框），底部按钮<b>"通过47张，驳回1张"</b>一次确认。驳回需填原因。</div>
+    <div class="key-point">48张仅1张问题时只需点2次，而非48次"通过"</div>
+  </div>
+</div>
+
+<!-- 实施路线 -->
+<div class="section-title">六、实施路线（分三阶段）</div>
+<div class="roadmap">
+  <div class="phase ph1">
+    <h4>P1 核心闭环</h4>
+    <div class="days">约 9.5 天</div>
+    <ul>
+      <li>调度层表+周巡检排程+全覆盖校验</li>
+      <li>用车冲突+备件建议+自动流转</li>
+      <li>移动端排程编辑/查看页</li>
+    </ul>
+  </div>
+  <div class="phase ph2">
+    <h4>P2 体验提升</h4>
+    <div class="days">约 6.5 天</div>
+    <ul>
+      <li>审批决策支撑(站点卡+预警+路线)</li>
+      <li>拍照清单+缺拍可视化</li>
+      <li>异常驱动照片审核</li>
+    </ul>
+  </div>
+  <div class="phase ph3">
+    <h4>P3 完整性</h4>
+    <div class="days">约 8 天</div>
+    <ul>
+      <li>月/季/年多频次扩展</li>
+      <li>变更流程+任务重建同步</li>
+      <li>试剂质控+备件回收</li>
+    </ul>
+  </div>
+</div>
+
+<div class="note">
+  <b>核心设计取舍：</b>① 周计划并入巡检体系（按频次分层，避免运维理解成两个东西）；② 资源协调前置到出发前（驻地统一、站点分散）；③ 智能建议双端复用（排程辅助+审批辅助）；④ 审批做决策支撑而非决策替代（路线只检测折返，不做复杂TSP）；⑤ 异常驱动审核（反转"逐张点通过"）；⑥ 变更用全量重建+保护已完成（当前规模下比增量同步简单稳妥）。
+</div>
+
+</div>
+</body>
+</html>

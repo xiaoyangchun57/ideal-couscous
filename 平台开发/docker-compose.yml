@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  water-monitor:
+    build: .
+    container_name: water-monitor
+    restart: always
+    ports:
+      - "8080:5000"
+    volumes:
+      - ./backend/data:/app/data

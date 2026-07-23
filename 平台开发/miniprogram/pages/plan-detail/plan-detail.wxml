@@ -1,0 +1,111 @@
+<view class="page" wx:if="{{loaded && detail}}">
+  <!-- 状态头 -->
+  <view class="status-header status-{{statusCls}}">
+    <text class="status-main">{{statusCn}}</text>
+    <text class="status-sub">{{typeCn}} · {{detail.period_start}} ~ {{detail.period_end}}</text>
+  </view>
+
+  <!-- 退回原因 -->
+  <view class="card reject-card" wx:if="{{detail.status === 'rejected' && detail.reject_reason}}">
+    <text class="reject-label">退回原因</text>
+    <text class="reject-text">{{detail.reject_reason}}</text>
+  </view>
+
+  <!-- 变更信息 -->
+  <view class="card change-card" wx:if="{{(detail.status === 'modifying' || detail.status === 'change_submitted') && detail.change_reason}}">
+    <view class="change-head">
+      <text class="change-label">变更原因</text>
+      <text class="tag tag-orange">v{{detail.version}}</text>
+    </view>
+    <text class="change-text">{{detail.change_reason}}</text>
+    <text class="change-hint" wx:if="{{detail.status === 'modifying'}}">计划变更中，请修改后重新提交审核</text>
+    <text class="change-hint" wx:if="{{detail.status === 'change_submitted'}}">变更已提交，等待管理员审核</text>
+  </view>
+
+  <!-- 审批信息 -->
+  <view class="card info-card" wx:if="{{detail.approved_at || detail.submitted_at}}">
+    <view class="info-row" wx:if="{{detail.submitted_at}}">
+      <text class="info-label">提交时间</text>
+      <text class="info-val">{{detail.submitted_at}}</text>
+    </view>
+    <view class="info-row" wx:if="{{detail.approved_at}}">
+      <text class="info-label">审批通过</text>
+      <text class="info-val">{{detail.approved_at}}</text>
+    </view>
+    <view class="info-row" wx:if="{{detail.remarks}}">
+      <text class="info-label">备注</text>
+      <text class="info-val">{{detail.remarks}}</text>
+    </view>
+  </view>
+
+  <!-- 出发前准备：车辆、备件、顺路工单集中呈现，避免临出发再切换多个页面核对。 -->
+  <block wx:if="{{resourceDays.length || resourceParts.length || linkedWorkorders.length}}">
+    <view class="section">
+      <view class="section-title">出发前准备</view>
+    </view>
+    <view class="card prep-card">
+      <view class="prep-block" wx:if="{{resourceDays.length}}">
+        <text class="prep-label">用车安排</text>
+        <view class="prep-row" wx:for="{{resourceDays}}" wx:key="date">
+          <text class="prep-main">{{item.date_short}} {{item.weekday_cn}}</text>
+          <text class="prep-value {{item.vehicle_name === '未安排用车' ? 'prep-warn' : ''}}">{{item.vehicle_name}}</text>
+        </view>
+      </view>
+      <view class="prep-block" wx:if="{{resourceParts.length}}">
+        <text class="prep-label">备件</text>
+        <view class="prep-row" wx:for="{{resourceParts}}" wx:key="part_id">
+          <text class="prep-main">{{item.part_name}}</text>
+          <text class="prep-value">{{item.quantity_text}} · {{item.status_cn}}</text>
+        </view>
+      </view>
+      <view class="prep-block" wx:if="{{linkedWorkorders.length}}">
+        <text class="prep-label">顺路工单</text>
+        <view class="prep-row" wx:for="{{linkedWorkorders}}" wx:key="id">
+          <text class="prep-main">{{item.site_name || '关联站点'}} · {{item.title}}</text>
+          <text class="prep-value">{{item.order_no}}</text>
+        </view>
+      </view>
+    </view>
+  </block>
+
+  <!-- 逐日行程 -->
+  <view class="section">
+    <view class="section-title">行程安排</view>
+  </view>
+  <view class="card day-row" wx:for="{{days}}" wx:key="date" wx:if="{{item.sites.length}}">
+    <view class="day-row-head">
+      <text class="day-row-weekday">{{item.weekday_cn}}</text>
+      <text class="day-row-date">{{item.date}}</text>
+      <text class="day-vehicle" wx:if="{{item.vehicle_name}}">{{item.vehicle_name}}</text>
+    </view>
+    <view class="day-sites">
+      <text class="tag tag-brand site-tag" wx:for="{{item.sites}}" wx:key="id" wx:for-item="s">{{s.name}}</text>
+    </view>
+  </view>
+  <view class="empty" wx:if="{{!days.length}}">
+    <view class="empty-circle">空</view>
+    <text class="empty-tx">暂无行程安排</text>
+  </view>
+
+  <!-- 已生成任务 -->
+  <block wx:if="{{generatedPlans.length}}">
+    <view class="section">
+      <view class="section-title">已生成巡检任务</view>
+    </view>
+    <view class="card task-list">
+      <view class="task-item" wx:for="{{generatedPlans}}" wx:key="id">
+        <text class="task-name">{{item.site_name || ('计划#' + item.id)}}</text>
+        <text class="tag tag-green">{{item.status === 'active' ? '执行中' : item.status}}</text>
+      </view>
+    </view>
+  </block>
+
+  <!-- 底部操作 -->
+  <view class="bottom-bar" wx:if="{{canEdit}}">
+    <button class="btn-ghost bottom-btn" bindtap="onEdit">编辑</button>
+    <button class="btn-primary bottom-btn" bindtap="onSubmit" wx:if="{{detail.status === 'draft' || detail.status === 'rejected'}}">提交审批</button>
+  </view>
+  <view class="bottom-bar" wx:if="{{canChange}}">
+    <button class="btn-warn bottom-btn" bindtap="onChangeRequest">发起变更</button>
+  </view>
+</view>

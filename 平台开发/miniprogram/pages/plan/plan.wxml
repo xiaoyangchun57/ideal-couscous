@@ -1,0 +1,58 @@
+<wxs module="ft">
+  var ACTIVE = ['draft','submitted','rejected','modifying','change_submitted'];
+  var DONE = ['approved','archived'];
+  module.exports.filter = function(list, f) {
+    if (f === 'active') {
+      return list.filter(function(i) { return ACTIVE.indexOf(i.status) > -1; });
+    }
+    if (f === 'done') {
+      return list.filter(function(i) { return DONE.indexOf(i.status) > -1; });
+    }
+    return list;
+  };
+  module.exports.canEdit = function(status) {
+    return status === 'draft' || status === 'rejected';
+  };
+</wxs>
+
+<view class="page">
+  <!-- 筛选 -->
+  <view class="filter-bar">
+    <view class="filter-item {{filter === 'all' ? 'filter-on' : ''}}" data-f="all" bindtap="onFilterTap">全部</view>
+    <view class="filter-item {{filter === 'active' ? 'filter-on' : ''}}" data-f="active" bindtap="onFilterTap">进行中</view>
+    <view class="filter-item {{filter === 'done' ? 'filter-on' : ''}}" data-f="done" bindtap="onFilterTap">已完成</view>
+  </view>
+
+  <!-- 列表 -->
+  <block wx:if="{{ft.filter(list, filter).length}}">
+    <view class="card plan-card" wx:for="{{ft.filter(list, filter)}}" wx:key="id" bindtap="onItemTap" data-id="{{item.id}}">
+      <view class="plan-top">
+        <view class="plan-type-row">
+          <text class="tag tag-brand">{{item.type_cn}}</text>
+          <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
+        </view>
+        <text class="plan-period">{{item.period_text}}</text>
+      </view>
+      <view class="plan-info">
+        <text class="plan-stat">覆盖 {{item.site_count || 0}} 站 · {{item.day_count || 0}} 天</text>
+        <text class="plan-time" wx:if="{{item.submitted_at}}">提交于 {{item.submitted_at}}</text>
+      </view>
+      <!-- 退回原因 -->
+      <view class="plan-reject" wx:if="{{item.status === 'rejected' && item.reject_reason}}">
+        退回原因：{{item.reject_reason}}
+      </view>
+      <!-- 操作 -->
+      <view class="plan-actions" wx:if="{{ft.canEdit(item.status)}}">
+        <view class="btn-sm btn-ghost" catchtap="onEdit" data-id="{{item.id}}">编辑</view>
+      </view>
+    </view>
+  </block>
+
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle">计</view>
+    <text class="empty-tx">暂无排程计划</text>
+  </view>
+
+  <!-- 新建按钮 -->
+  <view class="fab" bindtap="onNewPlan">+ 新建排程</view>
+</view>

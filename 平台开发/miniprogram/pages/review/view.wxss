@@ -1,0 +1,26 @@
+.page { padding: 24rpx; background: #F5F6F8; min-height: 100vh; box-sizing: border-box; }
+.hd { margin-bottom: 20rpx; }
+.hd-title { font-size: 36rpx; font-weight: 700; color: #1A2233; }
+.hd-sub { font-size: 24rpx; color: #8A93A3; margin-top: 6rpx; }
+
+.empty { text-align: center; color: #8A93A3; padding: 120rpx 0; font-size: 26rpx; }
+.empty-ico { font-size: 80rpx; margin-bottom: 16rpx; }
+
+.group { margin-bottom: 28rpx; }
+.group-hd { font-size: 26rpx; font-weight: 600; color: var(--brand); margin: 8rpx 4rpx 14rpx; }
+
+.card { background: #FFFFFF; border-radius: 24rpx; padding: 24rpx; margin-bottom: 16rpx; box-shadow: 0 4rpx 16rpx rgba(20,30,60,0.04); }
+.card-title { font-size: 28rpx; font-weight: 600; color: #1A2233; margin-bottom: 12rpx; }
+.card-meta { font-size: 24rpx; color: #6B7385; line-height: 1.6; }
+.card-actions { display: flex; gap: 20rpx; margin-top: 20rpx; }
+
+.btn { flex: 1; border-radius: 16rpx; font-size: 26rpx; margin: 0; line-height: 2.4; }
+.btn-ok { background: var(--brand); color: #FFFFFF; }
+.btn-no { background: #FFF1F0; color: #F5473B; }
+.btn-ghost { background: #F2F4F7; color: #6B7385; }
+
+.mask { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: flex-end; z-index: 50; }
+.sheet { width: 100%; background: #FFFFFF; border-radius: 28rpx 28rpx 0 0; padding: 36rpx 32rpx calc(36rpx + env(safe-area-inset-bottom)); box-sizing: border-box; }
+.sheet-title { font-size: 30rpx; font-weight: 700; color: #1A2233; margin-bottom: 24rpx; }
+.reason { width: 100%; height: 200rpx; background: #F7F8FA; border-radius: 16rpx; padding: 20rpx; font-size: 26rpx; box-sizing: border-box; }
+.sheet-actions { display: flex; gap: 20rpx; margin-top: 28rpx; }

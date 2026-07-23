@@ -1,0 +1,43 @@
+<view class="page">
+  <view class="tabs">
+    <view class="tab {{tab === 'pending' ? 'tab-on' : ''}}" bindtap="onTab" data-t="pending">待处理</view>
+    <view class="tab {{tab === 'all' ? 'tab-on' : ''}}" bindtap="onTab" data-t="all">全部</view>
+  </view>
+
+  <view class="card list-card" wx:if="{{list.length}}">
+    <view class="row" wx:for="{{list}}" wx:key="id" bindtap="onOpen" data-id="{{item.id}}">
+      <view class="row-left">
+        <text class="dot dot-{{item.level_cls}}"></text>
+      </view>
+      <view class="row-main">
+        <text class="row-title">{{item.site_name}} · {{item.metric_cn}}</text>
+        <text class="row-sub">{{item.message}}</text>
+      </view>
+      <view class="row-right">
+        <text class="tag {{item.status === 'pending' ? 'tag-red' : 'tag-green'}}">{{item.status_cn}}</text>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">暂无告警</text>
+  </view>
+
+  <!-- 详情 / 确认 -->
+  <view class="sheet-mask" wx:if="{{sheet.open}}" bindtap="onClose"></view>
+  <view class="sheet" wx:if="{{sheet.open}}">
+    <view class="sheet-head">
+      <text class="sheet-title">{{sheet.item.site_name}}</text>
+      <text class="sheet-close" bindtap="onClose">×</text>
+    </view>
+    <view class="d-tag"><text class="tag tag-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}</text><text class="tag">{{sheet.item.metric_cn}}</text></view>
+    <view class="d-row"><text class="d-k">状态</text><text class="d-v">{{sheet.item.status_cn}}</text></view>
+    <view class="d-row"><text class="d-k">时间</text><text class="d-v">{{sheet.item.created_at}}</text></view>
+    <view class="d-desc">{{sheet.item.message}}</view>
+
+    <view class="sheet-ops">
+      <button wx:if="{{sheet.item.status === 'pending'}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doAck">确认告警</button>
+      <view wx:else class="op-hint">该告警已处理</view>
+    </view>
+  </view>
+</view>

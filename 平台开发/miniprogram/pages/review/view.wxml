@@ -1,0 +1,43 @@
+<view class="page">
+  <view class="hd">
+    <view class="hd-title">待办审核</view>
+    <view class="hd-sub">{{total}} 项待处理 · 管理者/审批者</view>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">加载中…</view>
+
+  <view wx:elif="{{total === 0}}" class="empty">
+    <view class="empty-ico">✓</view>
+    <view>暂无待审核事项</view>
+  </view>
+
+  <block wx:else>
+    <view wx:for="{{groups}}" wx:key="label" class="group">
+      <view class="group-hd">{{item.label}}（{{item.items.length}}）</view>
+      <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="card">
+        <view class="card-title">{{it.title}}</view>
+        <view class="card-meta" wx:if="{{it.site_name}}">站点：{{it.site_name}}</view>
+        <view class="card-meta" wx:if="{{it.source_name}}">单号：{{it.source_name}}</view>
+        <view class="card-meta" wx:if="{{it.requester_name}}">申报人：{{it.requester_name}}</view>
+        <view class="card-meta" wx:if="{{it.submit_time}}">提交：{{it.submit_time}}</view>
+        <view class="card-meta" wx:if="{{it.remark}}">说明：{{it.remark}}</view>
+        <view class="card-actions">
+          <button class="btn btn-ok" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onApprove">通过</button>
+          <button class="btn btn-no" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onReject">驳回</button>
+        </view>
+      </view>
+    </view>
+  </block>
+
+  <!-- 驳回原因弹窗 -->
+  <view wx:if="{{rejectShow}}" class="mask" bindtap="closeReject">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">驳回原因</view>
+      <textarea class="reason" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" />
+      <view class="sheet-actions">
+        <button class="btn btn-ghost" size="mini" bindtap="closeReject">取消</button>
+        <button class="btn btn-no" size="mini" bindtap="rejectConfirm" disabled="{{submitting}}">确认驳回</button>
+      </view>
+    </view>
+  </view>
+</view>

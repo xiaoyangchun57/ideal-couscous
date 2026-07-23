@@ -1,0 +1,130 @@
+<view class="page">
+  <!-- 弱网待同步条 -->
+  <view class="sync-bar" wx:if="{{syncCount > 0}}" bindtap="onSyncNow">
+    有 {{syncCount}} 项待同步（弱网已离线保存）· 点击立即同步
+  </view>
+
+  <!-- 仅展示今日已批准排程生成的执行包，避免从任意站点发起无来源巡检 -->
+  <view class="package-switch" wx:if="{{packages.length}}">
+    <view class="package-chip {{selectedPlanId === item.plan_id ? 'package-chip-on' : ''}}"
+      wx:for="{{packages}}" wx:key="plan_id" bindtap="onSelectPackage" data-id="{{item.plan_id}}">
+      {{item.schedule_type === 'weekly' ? '周检' : (item.schedule_type === 'monthly' ? '月检' : (item.schedule_type === 'quarterly' ? '季检' : '年检'))}} · {{item.sites.length}}站
+    </view>
+  </view>
+
+  <view class="package-head" wx:if="{{currentPackage}}">
+    <view>
+      <text class="package-title">今日执行路线</text>
+      <text class="package-meta">第 {{currentPackage.version}} 版 · {{currentPackage.sites.length}} 个站点</text>
+    </view>
+    <text class="package-vehicle" wx:if="{{currentPackage.vehicle}}">{{currentPackage.vehicle.plate_no}}</text>
+  </view>
+
+  <!-- 站点选择 -->
+  <scroll-view wx:if="{{sites.length}}" scroll-x class="site-chips" enhanced show-scrollbar="{{false}}">
+    <view class="chip {{selSiteId === item.id ? 'chip-on' : ''}}" wx:for="{{sites}}" wx:key="id"
+          bindtap="onSelectSite" data-id="{{item.id}}">{{item.name}}</view>
+  </scroll-view>
+
+  <view wx:if="{{selSite}}" class="site-head">
+    <view class="site-head-info">
+      <text class="site-head-name">{{selSite.name}}</text>
+      <text class="site-head-type">{{selSite.type_cn}}</text>
+    </view>
+    <view class="site-head-ops">
+      <view class="op" bindtap="onCheckIn">到站打卡</view>
+      <view class="op" bindtap="goSite">站点信息</view>
+    </view>
+  </view>
+
+  <view wx:if="{{selSite && stationStage}}" class="station-panel">
+    <view class="station-panel-main">
+      <text class="station-panel-label">现场执行</text>
+      <text class="station-stage {{stationStage.cls}}">{{stationStage.label}}</text>
+    </view>
+    <text class="station-panel-meta">巡检 {{completed}}/{{total}} 项</text>
+  </view>
+
+  <view class="progress" wx:if="{{selSite}}">
+    <view class="progress-bar"><view class="progress-fill" style="width:{{total? completed/total*100 : 0}}%"></view></view>
+    <text class="progress-text">已完成 {{completed}}/{{total}}</text>
+  </view>
+
+  <!-- 拍照进度（站点级） -->
+  <view class="photo-progress" wx:if="{{selSite && photoProgress.req > 0}}">
+    <text class="photo-progress-text">📷 需拍 {{photoProgress.req}} 张 · 已拍 {{photoProgress.taken}} 张<text wx:if="{{photoProgress.missing > 0}}" class="photo-missing"> · 缺 {{photoProgress.missing}} 张</text></text>
+  </view>
+
+  <!-- 分类与检查项 -->
+  <block wx:if="{{categories.length}}">
+    <view class="cat" wx:for="{{categories}}" wx:key="category" wx:for-item="cat">
+      <view class="cat-head">
+        <text class="cat-name">{{cat.category_cn}}</text>
+        <text class="cat-count">{{cat.completed}}/{{cat.total}}</text>
+      </view>
+      <view class="card item" wx:for="{{cat.items}}" wx:key="item_id" wx:for-item="it"
+            bindtap="onOpenItem" data-id="{{it.item_id}}">
+        <view class="item-strip {{it.result === 'normal' ? 'strip-ok' : (it.result === 'abnormal' ? 'strip-bad' : 'strip-wait')}}"></view>
+        <view class="item-left">
+          <view class="item-name">{{it.item_name}}</view>
+          <view class="item-meta">
+            <text class="tag">{{it.frequency_cn || '未设频次'}}</text>
+            <text class="item-time" wx:if="{{it.check_time}}">{{it.check_time}}</text>
+          </view>
+        </view>
+        <view class="item-right">
+          <view class="item-status {{it.result === 'normal' ? 'st-ok' : (it.result === 'abnormal' ? 'st-bad' : 'st-wait')}}">
+            {{it.result_cn}}
+          </view>
+        </view>
+      </view>
+    </view>
+  </block>
+  <view class="empty" wx:elif="{{loaded}}">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">今日暂无已批准的巡检任务</text>
+  </view>
+
+  <!-- 检查项操作底栏 -->
+  <view class="sheet-mask" wx:if="{{sheet.open}}" bindtap="onCloseSheet"></view>
+  <view class="sheet" wx:if="{{sheet.open}}">
+    <view class="sheet-head">
+      <text class="sheet-title">{{sheet.item.item_name}}</text>
+      <text class="sheet-close" bindtap="onCloseSheet">×</text>
+    </view>
+    <text class="sheet-freq" wx:if="{{sheet.item.frequency_cn}}">{{sheet.item.frequency_cn}}</text>
+
+    <view class="field-label">判定结果</view>
+    <view class="seg">
+      <view class="seg-item {{sheet.result === 'normal' ? 'seg-on-ok' : ''}}" bindtap="onSetResult" data-r="normal">正常</view>
+      <view class="seg-item {{sheet.result === 'abnormal' ? 'seg-on-bad' : ''}}" bindtap="onSetResult" data-r="abnormal">异常</view>
+    </view>
+
+    <view class="field-label">备注</view>
+    <textarea class="ta" placeholder="填写说明（异常时必填原因）" value="{{sheet.remark}}" bindinput="onRemark" maxlength="200" />
+
+    <view class="field-label">校准信息（选填）</view>
+    <input class="inline-input" placeholder="校准人" value="{{sheet.calibrator}}" bindinput="onCalibrator" />
+    <input class="inline-input" placeholder="校准值" value="{{sheet.calValues}}" bindinput="onCalValues" />
+
+    <view class="field-label">现场照片<text class="photo-req-hint" wx:if="{{sheet.requiredPhotos > 0}}">（需拍 {{sheet.requiredPhotos}} 张，已拍 {{sheet.photos.length}} 张）</text></view>
+    <view class="photo-summary" wx:if="{{sheet.requiredPhotos > 0}}">已拍 {{sheet.photoInfo.captured}} / 需拍 {{sheet.photoInfo.required}}</view>
+    <view class="photos">
+      <view class="photo" wx:for="{{sheet.photos}}" wx:key="*this" wx:for-item="p">
+        <image class="photo-img" src="{{p}}" mode="aspectFill" bindtap="onPreview" data-src="{{p}}" />
+        <text class="photo-del" catchtap="onDelPhoto" data-idx="{{index}}">×</text>
+      </view>
+      <view class="photo" wx:for="{{sheet.localPhotos}}" wx:key="*this" wx:for-item="p">
+        <image class="photo-img" src="{{p}}" mode="aspectFill" bindtap="onPreview" data-src="{{p}}" />
+        <text class="photo-del" catchtap="onDelLocalPhoto" data-idx="{{index}}">×</text>
+      </view>
+      <!-- 未拍虚线占位（应拍清单可视化） -->
+      <view class="photo-slot" wx:if="{{sheet.photoInfo.missing > 0}}" wx:for="{{sheet.photoInfo.missing}}" wx:key="*this">
+        <text class="photo-slot-text">待拍</text>
+      </view>
+      <view class="photo-add" bindtap="onAddPhoto">＋</view>
+    </view>
+
+    <button class="btn-primary submit-btn" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSubmitItem">提 交</button>
+  </view>
+</view>

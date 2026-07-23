@@ -1,0 +1,27 @@
+# Local tooling and editor state
+.playwright-cli/
+.superpowers/
+.workbuddy/
+
+# Dependencies and generated caches
+**/node_modules/
+**/__pycache__/
+*.py[cod]
+
+# Runtime data and logs
+**/data/*.db*
+平台开发/water.db
+平台开发/water.db.*
+平台开发/backend/data/
+平台开发/backend/uploads/
+*.log
+.env
+.env.*
+!.env.example
+
+# Generated exports and local captures
+*.xlsx
+平台开发/*.png
+平台开发/frontend/uploads/
+平台开发/frontend/v2/
+平台开发/dev_scripts/outputs/

@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "待办审核",
+  "navigationBarBackgroundColor": "#FFFFFF",
+  "navigationBarTextStyle": "black",
+  "backgroundColor": "#F5F6F8",
+  "enablePullDownRefresh": true
+}

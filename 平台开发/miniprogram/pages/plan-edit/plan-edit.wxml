@@ -1,0 +1,142 @@
+<wxs module="ft">
+  module.exports.hasSite = function(sites, id) {
+    return sites && sites.indexOf(id) > -1;
+  };
+  module.exports.vehicleName = function(vehicles, vid) {
+    if (!vid) return '选择车辆';
+    for (var i = 0; i < vehicles.length; i++) {
+      if (vehicles[i].id === vid) return vehicles[i].name;
+    }
+    return '选择车辆';
+  };
+  module.exports.vehicleIdx = function(vehicles, vid) {
+    if (!vid) return -1;
+    for (var i = 0; i < vehicles.length; i++) {
+      if (vehicles[i].id === vid) return i;
+    }
+    return -1;
+  };
+  module.exports.daySiteCount = function(day) {
+    return day.sites ? day.sites.length : 0;
+  };
+  module.exports.partSelected = function(parts, id) {
+    if (!parts) return false;
+    for (var i = 0; i < parts.length; i++) {
+      if (Number(parts[i].part_id) === Number(id)) return true;
+    }
+    return false;
+  };
+</wxs>
+
+<view class="page" wx:if="{{loaded}}">
+  <!-- 变更提示 -->
+  <view class="change-banner" wx:if="{{isChange}}">
+    <text class="change-banner-tx">正在变更已批准计划（原因：{{changeReason || '—'}}），提交后需重新审核</text>
+  </view>
+
+  <!-- 周期信息 + 频次选择 -->
+  <view class="period-bar">
+    <text class="period-text">{{periodStart}} ~ {{periodEnd}}</text>
+    <picker mode="selector" range="{{scheduleTypeOptions}}" value="0" bindchange="onTypeChange" disabled="{{!!editId}}">
+      <view class="type-picker"><text class="tag tag-brand">{{scheduleType === 'weekly' ? '周检' : (scheduleType === 'monthly' ? '月检' : (scheduleType === 'quarterly' ? '季检' : '年检'))}}</text><text class="vehicle-arrow" wx:if="{{!editId}}">▾</text></view>
+    </picker>
+  </view>
+
+  <!-- 添加巡检日期（月/季/年检） -->
+  <view class="add-day-bar" wx:if="{{scheduleType !== 'weekly'}}">
+    <picker mode="date" value="{{periodStart}}" start="{{periodStart}}" end="{{periodEnd}}" bindchange="onAddDay">
+      <view class="add-day-btn">＋ 添加巡检日期</view>
+    </picker>
+    <text class="add-day-hint">已添加 {{days.length}} 天</text>
+  </view>
+
+  <!-- 智能建议 -->
+  <view class="card suggest-card" wx:if="{{suggestions.length}}">
+    <view class="suggest-head">
+      <text class="suggest-title">智能建议</text>
+      <text class="suggest-count">{{suggestions.length}} 条</text>
+    </view>
+    <view class="suggest-item" wx:for="{{suggestions}}" wx:key="index">
+      <view class="dot dot-{{item.level === 'high' ? 'red' : (item.level === 'medium' ? 'orange' : 'blue')}}"></view>
+      <text class="suggest-text">{{item.text}}</text>
+    </view>
+  </view>
+
+  <!-- 逐日排程 -->
+  <view class="day-card card" wx:for="{{days}}" wx:key="date" wx:for-item="day" wx:for-index="di">
+    <view class="day-head">
+      <view class="day-label">
+        <text class="day-weekday">{{day.weekday_cn}}</text>
+        <text class="day-date">{{day.date}}</text>
+      </view>
+      <view class="day-ops">
+        <text class="day-count" wx:if="{{ft.daySiteCount(day)}}">{{ft.daySiteCount(day)}} 站</text>
+        <text class="day-all" data-day-idx="{{di}}" bindtap="onToggleAll">全选</text>
+        <text class="day-del" data-date="{{day.date}}" bindtap="onRemoveDay">移除</text>
+      </view>
+    </view>
+
+    <!-- 站点选择 chips -->
+    <view class="site-chips-wrap">
+      <view class="chip {{ft.hasSite(day.sites, site.id) ? 'chip-on' : ''}}"
+            wx:for="{{mySites}}" wx:key="id" wx:for-item="site"
+            data-day-idx="{{di}}" data-site-id="{{site.id}}" bindtap="onToggleSite">
+        {{site.name}}
+        <text class="chip-score" wx:if="{{siteScores[site.id]}}">·{{siteScores[site.id]}}</text>
+      </view>
+    </view>
+
+    <!-- 车辆选择 -->
+    <view class="vehicle-row" wx:if="{{ft.daySiteCount(day)}}">
+      <text class="vehicle-label">用车</text>
+      <picker mode="selector" range="{{vehicles}}" range-key="name"
+              value="{{ft.vehicleIdx(vehicles, day.vehicle_id)}}"
+              data-day-idx="{{di}}" bindchange="onVehicleChange">
+        <view class="vehicle-picker">
+          <text class="{{day.vehicle_id ? 'vehicle-val' : 'vehicle-ph'}}">{{ft.vehicleName(vehicles, day.vehicle_id)}}</text>
+          <text class="vehicle-arrow">▾</text>
+        </view>
+      </picker>
+    </view>
+  </view>
+
+  <!-- 出车资源：车辆按天选择，备件在计划层统一确认；同站未结工单自动关联 -->
+  <view class="card resource-card">
+    <view class="resource-head">
+      <text class="resource-title">出车备件</text>
+      <text class="resource-hint">按需勾选，审批通过后预留</text>
+    </view>
+    <view class="site-chips-wrap" wx:if="{{partsInventory.length}}">
+      <view class="chip {{ft.partSelected(selectedParts, part.id) ? 'chip-on' : ''}}"
+            wx:for="{{partsInventory}}" wx:key="id" wx:for-item="part"
+            data-part-id="{{part.id}}" bindtap="onTogglePart">
+        {{part.name}} · 库存{{part.quantity}}{{part.unit}}
+      </view>
+    </view>
+    <text class="resource-empty" wx:else>当前无可用备件库存</text>
+    <text class="resource-auto">所选站点的未结工单将在提交时自动关联，无需重复填写</text>
+  </view>
+
+  <!-- 空态：未添加巡检日期（月/季/年检） -->
+  <view class="empty" wx:if="{{!days.length && scheduleType !== 'weekly'}}">
+    <view class="empty-circle">期</view>
+    <text class="empty-tx">点击上方"添加巡检日期"开始排程</text>
+  </view>
+
+  <!-- 备注 -->
+  <view class="card remarks-card">
+    <text class="remarks-label">备注（选填）</text>
+    <textarea class="ta" placeholder="补充说明，如特殊安排、注意事项等" value="{{remarks}}" bindinput="onRemarks" maxlength="200" />
+  </view>
+
+  <view class="card remarks-card" wx:if="{{scheduleType === 'weekly'}}">
+    <text class="remarks-label">漏站例外说明（仅未全覆盖时必填）</text>
+    <textarea class="ta" placeholder="如遇封路、站点停运或应急调度，请说明原因" value="{{coverageExceptionReason}}" bindinput="onCoverageExceptionReason" maxlength="200" />
+  </view>
+
+  <!-- 底部操作 -->
+  <view class="bottom-bar">
+    <button class="btn-ghost bottom-btn" bindtap="onSaveDraft" disabled="{{submitting}}">存草稿</button>
+    <button class="btn-primary bottom-btn" bindtap="onSubmit" loading="{{submitting}}" disabled="{{submitting}}">{{isChange ? '提交变更' : '提交审批'}}</button>
+  </view>
+</view>

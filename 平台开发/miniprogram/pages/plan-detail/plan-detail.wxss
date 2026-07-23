@@ -1,0 +1,64 @@
+/* 状态头 */
+.status-header {
+  margin: 20rpx 24rpx 0; padding: 36rpx 28rpx; border-radius: 24rpx;
+  display: flex; flex-direction: column; gap: 8rpx;
+}
+.status-main { font-size: 36rpx; font-weight: 600; }
+.status-sub { font-size: 24rpx; opacity: 0.8; }
+.status-green { background: rgba(31,182,115,0.10); color: var(--green); }
+.status-blue { background: var(--brand-weak); color: var(--brand); }
+.status-red { background: rgba(250,81,81,0.08); color: var(--red); }
+.status-orange { background: rgba(255,143,31,0.10); color: var(--orange); }
+.status-gray { background: var(--fill); color: var(--text-2); }
+
+/* 退回原因 */
+.reject-card { margin: 20rpx 24rpx 0; }
+.reject-label { font-size: 24rpx; color: var(--red); font-weight: 500; display: block; margin-bottom: 8rpx; }
+.reject-text { font-size: 26rpx; color: var(--text); line-height: 1.6; }
+
+/* 变更信息 */
+.change-card { margin: 20rpx 24rpx 0; border: 1rpx solid rgba(255,143,31,0.35); }
+.change-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8rpx; }
+.change-label { font-size: 24rpx; color: var(--orange); font-weight: 500; }
+.change-text { font-size: 26rpx; color: var(--text); line-height: 1.6; display: block; }
+.change-hint { font-size: 23rpx; color: var(--text-3); display: block; margin-top: 10rpx; }
+
+/* 信息卡 */
+.info-card { margin: 20rpx 24rpx 0; }
+.info-row { display: flex; align-items: center; justify-content: space-between; padding: 12rpx 0; }
+.info-label { font-size: 25rpx; color: var(--text-3); }
+.info-val { font-size: 25rpx; color: var(--text); }
+
+/* 出发前准备 */
+.prep-card { margin: 16rpx 24rpx 0; }
+.prep-block { padding: 8rpx 0 16rpx; border-bottom: 1rpx solid var(--line); }
+.prep-block:last-child { padding-bottom: 0; border-bottom: none; }
+.prep-label { display: block; font-size: 24rpx; font-weight: 600; color: var(--text-2); margin-bottom: 4rpx; }
+.prep-row { display: flex; align-items: center; justify-content: space-between; gap: 16rpx; padding: 10rpx 0; }
+.prep-main { flex: 1; min-width: 0; font-size: 25rpx; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prep-value { flex-shrink: 0; font-size: 23rpx; color: var(--text-2); }
+.prep-warn { color: var(--orange); }
+
+/* 日行程 */
+.day-row { margin: 16rpx 24rpx 0; }
+.day-row-head { display: flex; align-items: baseline; gap: 12rpx; margin-bottom: 14rpx; }
+.day-row-weekday { font-size: 28rpx; font-weight: 600; color: var(--text); }
+.day-row-date { font-size: 23rpx; color: var(--text-3); }
+.day-vehicle { margin-left: auto; max-width: 220rpx; font-size: 23rpx; color: var(--brand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-sites { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.site-tag { margin: 0; }
+
+/* 任务列表 */
+.task-list { margin: 16rpx 24rpx 0; }
+.task-item { display: flex; align-items: center; justify-content: space-between; padding: 16rpx 0; border-bottom: 1rpx solid var(--line); }
+.task-item:last-child { border-bottom: none; }
+.task-name { font-size: 26rpx; color: var(--text); }
+
+/* 底部操作栏 */
+.bottom-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: flex; gap: 20rpx; padding: 20rpx 28rpx calc(20rpx + env(safe-area-inset-bottom));
+  background: #FFFFFF; border-top: 1rpx solid var(--line);
+}
+.bottom-btn { flex: 1; }
+.page { padding-bottom: 160rpx; }

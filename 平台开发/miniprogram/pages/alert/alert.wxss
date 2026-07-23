@@ -1,0 +1,23 @@
+.tabs { display: flex; margin: 20rpx 24rpx 0; }
+.tab { font-size: 27rpx; color: var(--text-3); margin-right: 40rpx; padding-bottom: 12rpx; }
+.tab-on { color: var(--text); font-weight: 500; border-bottom: 4rpx solid var(--brand); }
+
+.list-card { margin: 16rpx 24rpx 0; padding: 8rpx 28rpx; }
+.row { display: flex; align-items: center; padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
+.row:last-child { border-bottom: none; }
+.row-left { width: 28rpx; display: flex; align-items: center; }
+.row-main { flex: 1; min-width: 0; margin-left: 16rpx; }
+.row-title { font-size: 28rpx; color: var(--text); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-sub { font-size: 23rpx; color: var(--text-3); margin-top: 6rpx; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-right { margin-left: 16rpx; }
+
+.d-tag { margin-bottom: 20rpx; }
+.d-tag .tag { margin-right: 12rpx; }
+.d-row { display: flex; padding: 14rpx 0; }
+.d-k { width: 120rpx; font-size: 26rpx; color: var(--text-3); }
+.d-v { flex: 1; font-size: 26rpx; color: var(--text); }
+.d-desc { font-size: 25rpx; color: var(--text-2); line-height: 1.6; margin: 12rpx 0 8rpx; padding: 18rpx; background: #F7F8FA; border-radius: 14rpx; }
+
+.sheet-ops { margin-top: 28rpx; }
+.op-btn { width: 100%; }
+.op-hint { text-align: center; color: var(--text-3); font-size: 26rpx; padding: 24rpx 0; }
