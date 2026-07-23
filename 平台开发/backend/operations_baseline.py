@@ -19,10 +19,18 @@ def _scalar(db, sql, params=()):
     return int(row[0] or 0) if row else 0
 
 
-def _event_counts(db):
+def _event_counts(db, start, end):
     if not _has_table(db, 'analytics_events'):
         return {}
-    rows = db.execute('SELECT event_name, COUNT(*) FROM analytics_events GROUP BY event_name').fetchall()
+    rows = db.execute(
+        '''
+        SELECT event_name, COUNT(*)
+        FROM analytics_events
+        WHERE occurred_at >= ? AND occurred_at < ?
+        GROUP BY event_name
+        ''',
+        (start, end),
+    ).fetchall()
     return {row[0]: int(row[1]) for row in rows}
 
 
@@ -48,7 +56,7 @@ def build_baseline(db, start, end):
         done = _scalar(db, f"SELECT COUNT(*) FROM {table} WHERE {time_column}>=? AND {time_column}<? AND status IN ({placeholders})", (start, end, *closed_states))
         north_star[key] = _metric(done, total, table)
 
-    events = _event_counts(db)
+    events = _event_counts(db, start, end)
     offline_total = events.get('inspection.item.queued', 0)
     offline_synced = events.get('inspection.item.synced', 0)
     frontline = {
