@@ -24,16 +24,19 @@ export default function EvaluationPage() {
   const [period, setPeriod] = useState('month');
   const [health, setHealth] = useState(null);
   const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '' });
+  const [baseline, setBaseline] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [h, p] = await Promise.all([
+      const [h, p, b] = await Promise.all([
         api.get('/data/health?period=' + period),
         api.get('/evaluation/personnel?period=' + period),
+        api.get('/operations/baseline?period=' + period),
       ]);
       setHealth(h || null);
+      setBaseline(b && !b.error ? b : null);
       // 兼容旧数组格式与新对象格式
       if (Array.isArray(p)) setPersonnel({ overview: null, list: p, period_label: '' });
       else setPersonnel({ overview: p?.overview || null, list: p?.list || [], period_label: p?.period_label || '' });
@@ -151,6 +154,24 @@ export default function EvaluationPage() {
     ];
   }, [health]);
 
+  const baselineItems = useMemo(() => {
+    if (!baseline) return [];
+    const metrics = baseline.north_star || {};
+    const labelMap = {
+      inspection_coverage: '巡检覆盖率',
+      work_order_online_closure_rate: '工单线上闭环率',
+      alert_online_handling_rate: '告警处置线上率',
+      review_online_completion_rate: '审核线上完成率',
+    };
+    return Object.entries(metrics).map(([key, metric]) => ({
+      key,
+      label: labelMap[key] || key,
+      value: metric.value == null ? '待采集' : `${metric.value}%`,
+      detail: metric.value == null ? '当前周期无有效样本' : `${metric.numerator}/${metric.denominator} 个样本`,
+      color: metric.value == null ? 'default' : 'blue',
+    }));
+  }, [baseline]);
+
   return (
     <div className="evaluation-page">
       <div className="evaluation-header">
@@ -174,6 +195,25 @@ export default function EvaluationPage() {
           <Select value={period} onChange={setPeriod} options={PERIOD_OPTS} style={{ width: 120 }} />
         </Space>
       </div>
+
+      {baselineItems.length > 0 && (
+        <Card title="运营基线（仅记录当前值，不设目标）" style={{ marginBottom: 16 }}>
+          <Row gutter={[12, 12]}>
+            {baselineItems.map((item) => (
+              <Col key={item.key} xs={12} sm={12} lg={6}>
+                <div className="baseline-metric">
+                  <Text type="secondary">{item.label}</Text>
+                  <div><Text strong className="baseline-value">{item.value}</Text></div>
+                  <Tag color={item.color}>{item.detail}</Tag>
+                </div>
+              </Col>
+            ))}
+          </Row>
+          <Text type="secondary" style={{ display: 'block', marginTop: 12 }}>
+            离线闭环、审核耗时、报表自助和行动队列指标仍在采集，基线形成后再纳入月度复盘。
+          </Text>
+        </Card>
+      )}
 
       {/* 人员运维绩效人均概览 */}
       {personOverview && (
@@ -244,6 +284,8 @@ export default function EvaluationPage() {
         .evaluation-page { padding: 24px; }
         .evaluation-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
         .evaluation-actions { justify-content: flex-end; }
+        .baseline-metric { min-height: 94px; padding: 12px; border: 1px solid ${tokens.colorBorder}; border-radius: 6px; }
+        .baseline-value { font-size: 24px; line-height: 1.5; }
         @media (max-width: 639px) {
           .evaluation-page { padding: 16px 12px; }
           .evaluation-header { align-items: flex-start; }

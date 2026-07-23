@@ -3395,6 +3395,8 @@ def login_required(f):
 
 from telemetry import create_telemetry_blueprint
 app.register_blueprint(create_telemetry_blueprint(get_db, login_required))
+from operations_baseline import create_operations_baseline_blueprint
+app.register_blueprint(create_operations_baseline_blueprint(get_db, login_required))
 
 def _filter_site_ids():
     """返回当前用户可见的site_id列表（管理员或无站点绑定返回None=全部）"""
