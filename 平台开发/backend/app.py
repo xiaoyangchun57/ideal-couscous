@@ -517,6 +517,56 @@ def migrate_reagent_qc():
                 pass
         db.commit()
 
+
+def migrate_parts_requests_v2():
+    """将 parts_requests 扩展为统一备件单据模型。
+    历史 spare_part_requests 保持只读；本迁移不搬迁、不扣库。
+    plan_id=0 表示工单/现场临时申请，正数仍表示巡检执行包申请。"""
+    with get_db() as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS parts_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL DEFAULT 0,
+            requester_id INTEGER NOT NULL DEFAULT 0,
+            site_id INTEGER,
+            work_order_no TEXT DEFAULT '',
+            request_no TEXT DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'inspection',
+            reason TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            approver_id INTEGER,
+            approve_comment TEXT DEFAULT '',
+            approved_at TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )""")
+        for column_sql in [
+            "ALTER TABLE parts_requests ADD COLUMN site_id INTEGER",
+            "ALTER TABLE parts_requests ADD COLUMN work_order_no TEXT DEFAULT ''",
+            "ALTER TABLE parts_requests ADD COLUMN request_no TEXT DEFAULT ''",
+            "ALTER TABLE parts_requests ADD COLUMN source TEXT DEFAULT 'inspection'",
+            "ALTER TABLE parts_requests ADD COLUMN reason TEXT DEFAULT ''",
+            "ALTER TABLE parts_requests ADD COLUMN approver_id INTEGER",
+            "ALTER TABLE parts_requests ADD COLUMN approve_comment TEXT DEFAULT ''",
+            "ALTER TABLE parts_requests ADD COLUMN approved_at TEXT",
+            "ALTER TABLE parts_request_items ADD COLUMN part_id INTEGER",
+        ]:
+            try:
+                db.execute(column_sql)
+            except Exception:
+                pass
+        db.execute("""CREATE TABLE IF NOT EXISTS parts_request_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id INTEGER NOT NULL,
+            part_id INTEGER NOT NULL,
+            requested_quantity INTEGER NOT NULL DEFAULT 0,
+            reserved_quantity INTEGER NOT NULL DEFAULT 0,
+            issued_quantity INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'reserved',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(request_id, part_id)
+        )""")
+        db.commit()
+
 def init_db():
     with get_db() as db:
         db.executescript('''
@@ -16103,6 +16153,7 @@ if __name__ == '__main__':
     migrate_vehicle_applications_nullable()
     migrate_plan_schedules()
     migrate_reagent_qc()
+    migrate_parts_requests_v2()
     seed_data()
     seed_inspections()
     seed_alerts()
