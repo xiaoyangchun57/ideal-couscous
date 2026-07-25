@@ -11532,7 +11532,16 @@ def api_parts_requests_mine():
         rows = db.execute("""SELECT r.*, s.name as site_name FROM parts_requests r
             LEFT JOIN sites s ON r.site_id=s.id WHERE r.requester_id=? ORDER BY r.created_at DESC""",
             (g.current_user['id'],)).fetchall()
-    return jsonify([dict(r) for r in rows])
+        result = []
+        for row in rows:
+            item = dict(row)
+            item['items'] = [dict(x) for x in db.execute("""SELECT pri.part_id, pri.part_sku, pri.quantity,
+                spi.part_name, spi.unit, COALESCE(prr.reserved_quantity-prr.issued_quantity,0) AS remaining_quantity
+                FROM parts_request_items pri LEFT JOIN spare_parts_inventory spi ON spi.id=pri.part_id
+                LEFT JOIN parts_request_reservations prr ON prr.request_id=pri.request_id AND prr.part_id=pri.part_id
+                WHERE pri.request_id=?""", (row['id'],)).fetchall()]
+            result.append(item)
+    return jsonify(result)
 
 
 @app.route('/api/parts/requests/<int:rid>/approve', methods=['PUT'])

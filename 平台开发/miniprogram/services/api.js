@@ -67,6 +67,8 @@ const api = {
 
   // 备件申请（关联工单/站点）
   applyParts: (payload) => request('/api/parts/requests', 'POST', payload),
+  myPartsRequests: () => request('/api/parts/requests/mine', 'GET'),
+  issuePartsRequest: (id, items) => request('/api/parts/requests/' + id + '/issue', 'POST', { items }),
 
   // 车辆列表（用车申请关联下拉，可选）
   vehicles: () => request('/api/vehicles', 'GET'),
