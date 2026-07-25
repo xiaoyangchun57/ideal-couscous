@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import {
   Table, Input, Button, Space, Tag, Typography, message,
@@ -435,6 +435,7 @@ export default function AuditPage() {
   // ---- 审核弹窗 ----
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
   const [reviewingItem, setReviewingItem] = useState(null);
+  const reviewSessionRef = useRef(null);
   const [reviewComment, setReviewComment] = useState('');
   const [processing, setProcessing] = useState(false);
 
@@ -572,6 +573,15 @@ export default function AuditPage() {
         setProcessing(false);
         return;
       }
+      if (reviewSessionRef.current) {
+        api.track('review.submitted', {
+          review_id: reviewSessionRef.current,
+          source_type: item.source_type,
+          site_id: item.site_id,
+          decision: action,
+        });
+        reviewSessionRef.current = null;
+      }
       message.success(action === 'approve' ? '审核通过' : '已驳回');
       setReviewModalOpen(false);
       setReviewingItem(null);
@@ -585,6 +595,12 @@ export default function AuditPage() {
   };
 
   const openReview = (item) => {
+    reviewSessionRef.current = 'rev_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+    api.track('review.opened', {
+      review_id: reviewSessionRef.current,
+      source_type: item.source_type,
+      site_id: item.site_id,
+    });
     setReviewingItem(item);
     setReviewComment('');
     setReviewModalOpen(true);

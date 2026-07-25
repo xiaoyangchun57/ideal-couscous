@@ -52,9 +52,26 @@ async function request(url, options = {}) {
   }
 }
 
+// 埋点：对齐小程序 api.trackEvent 契约（/api/telemetry/events）。
+// 本地时间格式 YYYY-MM-DD HH:MM:SS，与 baseline 查询窗口一致。
+function _localStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 export const api = {
   get: (url, timeout) => request(url, { timeout }),
   post: (url, data, timeout) => request(url, { method: 'POST', body: data, timeout }),
   put: (url, data, timeout) => request(url, { method: 'PUT', body: data, timeout }),
   delete: (url, timeout) => request(url, { method: 'DELETE', timeout }),
+  track: (eventName, context = {}, eventId = null) => request('/telemetry/events', {
+    method: 'POST',
+    body: {
+      event_id: eventId || ('evt_' + Date.now() + '_' + Math.floor(Math.random() * 1e6)),
+      event_name: eventName,
+      occurred_at: _localStamp(),
+      context: context || {},
+    },
+  }),
+  trackEvent: (eventName, context) => api.track(eventName, context),
 };

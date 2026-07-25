@@ -1,9 +1,11 @@
 import json
+import re
+from datetime import datetime
 
 from flask import Blueprint, g, jsonify, request
 
-
 FIELD_EVENT_NAMES = {
+    # 移动端巡检执行链路
     'inspection.station_opened',
     'inspection.checkin.queued',
     'inspection.checkin.synced',
@@ -11,9 +13,32 @@ FIELD_EVENT_NAMES = {
     'inspection.item.queued',
     'inspection.item.synced',
     'inspection.sync.failed',
+    # PC 端管理者动作（审核耗时 / 报表自助 / 行动队列）
+    'review.opened',
+    'review.submitted',
+    'report.opened',
+    'report.exported',
+    'action_queue.entered',
 }
 
-CONTEXT_KEYS = {'site_id', 'item_id', 'plan_id', 'entry', 'offline', 'operation_id', 'sync_reason', 'error_code'}
+CONTEXT_KEYS = {
+    'site_id', 'item_id', 'plan_id', 'entry', 'offline', 'operation_id',
+    'sync_reason', 'error_code',
+    # PC 端新增：审核配对 / 报表类型 / 队列来源
+    'review_id', 'source_type', 'decision', 'report_type', 'queue_key',
+}
+
+# 把任意客户端时间（ISO 带 T/Z 或本地空格格式）归一化为 YYYY-MM-DD HH:MM:SS，
+# 与 baseline 查询窗口格式一致，避免字符串比较错位。
+_TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})')
+
+
+def _normalize_occurred_at(value):
+    value = (value or '').strip()
+    m = _TS_RE.match(value)
+    if not m:
+        return None
+    return f'{m.group(1)} {m.group(2)}'
 
 
 def create_telemetry_blueprint(get_db, login_required):
@@ -25,7 +50,7 @@ def create_telemetry_blueprint(get_db, login_required):
         data = request.get_json(silent=True) or {}
         event_id = str(data.get('event_id') or '').strip()
         event_name = str(data.get('event_name') or '').strip()
-        occurred_at = str(data.get('occurred_at') or '').strip()
+        occurred_at = _normalize_occurred_at(data.get('occurred_at'))
         context = data.get('context') or {}
         app_version = str(data.get('app_version') or '').strip()[:64]
 

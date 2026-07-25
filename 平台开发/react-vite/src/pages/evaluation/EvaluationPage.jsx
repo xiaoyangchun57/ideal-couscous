@@ -49,8 +49,12 @@ export default function EvaluationPage() {
 
   useEffect(() => { load(); }, [period]);
 
+  // 报表自助埋点：进入评估/报表页记一次"打开"，导出时记"导出"
+  useEffect(() => { api.track('report.opened', {}); }, []);
+
   // xlsx 下载辅助：api 默认走 JSON，导出接口返回二进制，需单独 fetch
-  const downloadExport = async (url, filename) => {
+  const downloadExport = async (url, filename, reportType) => {
+    if (reportType) api.track('report.exported', { report_type: reportType });
     try {
       const token = (() => { try { return localStorage.getItem('water_ops_token') || ''; } catch { return ''; } })();
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -180,13 +184,13 @@ export default function EvaluationPage() {
           {personnel.period_label && <Text type="secondary">考核期：{personnel.period_label}</Text>}
         </Space>
         <Space className="evaluation-actions" wrap>
-          <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/evaluation?period=' + period, `人员评估_${personnel.period_label || period}.xlsx`)}>
+          <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/evaluation?period=' + period, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>
             导出评估表
           </Button>
           <Dropdown
             menu={{
               items: reportItems,
-              onClick: ({ key }) => downloadExport('/api/export/ops-report?period=' + key, `运维报告_${key === 'quarter' ? '本季度' : '本年度'}.xlsx`),
+              onClick: ({ key }) => downloadExport('/api/export/ops-report?period=' + key, `运维报告_${key === 'quarter' ? '本季度' : '本年度'}.xlsx`, key),
             }}
           >
             <Button icon={<FileExcelOutlined />} type="primary">导出运维报告</Button>

@@ -4,6 +4,45 @@ from datetime import datetime, timedelta
 from flask import Blueprint, g, jsonify, request
 
 
+def _review_durations(db, start, end):
+    """按 review_id 配对 opened/submitted，返回 (中位耗时秒, 样本数) 或无样本 (None, 0)。"""
+    rows = db.execute(
+        "SELECT event_name, occurred_at, context_json FROM analytics_events "
+        "WHERE event_name IN ('review.opened','review.submitted') AND occurred_at>=? AND occurred_at<?",
+        (start, end),
+    ).fetchall()
+    opened, submitted = {}, {}
+    for r in rows:
+        try:
+            ctx = json.loads(r['context_json'] or '{}')
+        except Exception:
+            ctx = {}
+        rid = ctx.get('review_id')
+        if not rid:
+            continue
+        bucket = opened if r['event_name'] == 'review.opened' else submitted
+        bucket[rid] = r['occurred_at']
+    durations = []
+    for rid, opened_at in opened.items():
+        sub = submitted.get(rid)
+        if not sub:
+            continue
+        try:
+            d0 = datetime.strptime(opened_at, '%Y-%m-%d %H:%M:%S')
+            d1 = datetime.strptime(sub, '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            continue
+        secs = (d1 - d0).total_seconds()
+        if secs >= 0:
+            durations.append(secs)
+    if not durations:
+        return None, 0
+    durations.sort()
+    n = len(durations)
+    mid = durations[n // 2] if n % 2 else (durations[n // 2 - 1] + durations[n // 2]) / 2
+    return mid, n
+
+
 def _has_table(db, table):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
 
@@ -64,13 +103,37 @@ def build_baseline(db, start, end):
         'station_open_samples': {'value': events.get('inspection.station_opened', 0), 'state': 'ready' if events else 'collecting', 'source': 'analytics_events'},
         'checkin_samples': {'value': events.get('inspection.checkin.queued', 0), 'state': 'ready' if events else 'collecting', 'source': 'analytics_events'},
     }
+
+    # ---- 采集段：事件齐了才出值，否则继续采集 ----
+    dur, dur_n = _review_durations(db, start, end)
+    if dur is None:
+        review_duration = {'state': 'collecting', 'reason': '审核打开/提交事件样本不足'}
+    else:
+        review_duration = {'value': round(dur, 1), 'unit': 's', 'samples': dur_n, 'state': 'ready', 'source': 'analytics_events'}
+
+    rep_opened = events.get('report.opened', 0)
+    rep_exported = events.get('report.exported', 0)
+    if rep_opened == 0:
+        report_self_service_rate = {'state': 'collecting', 'reason': '报表打开/导出事件样本不足'}
+    else:
+        report_self_service_rate = {
+            'value': round(rep_exported / rep_opened * 100, 1),
+            'numerator': rep_exported, 'denominator': rep_opened, 'state': 'ready', 'source': 'analytics_events',
+        }
+
+    aq = events.get('action_queue.entered', 0)
+    action_queue_decision_rate = {
+        'value': aq, 'state': 'ready' if aq > 0 else 'collecting', 'source': 'analytics_events',
+        'note': '行动队列驱动决策次数（样本）',
+    }
+
     return {
         'north_star': north_star,
         'frontline': frontline,
         'collection': {
-            'review_duration': {'state': 'collecting', 'reason': '缺少审核打开事件'},
-            'report_self_service_rate': {'state': 'collecting', 'reason': '缺少报表需求事件'},
-            'action_queue_decision_rate': {'state': 'collecting', 'reason': '缺少行动来源事件'},
+            'review_duration': review_duration,
+            'report_self_service_rate': report_self_service_rate,
+            'action_queue_decision_rate': action_queue_decision_rate,
         },
     }
 

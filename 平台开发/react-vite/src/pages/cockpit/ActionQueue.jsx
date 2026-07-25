@@ -146,7 +146,10 @@ export default function ActionQueue() {
           rows.map((r) => (
             <div
               key={r.key}
-              onClick={() => navigate(r.to)}
+              onClick={() => {
+                api.track('action_queue.entered', { queue_key: r.key, site_id: undefined });
+                navigate(r.to);
+              }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 10px', borderRadius: 6, cursor: 'pointer',
