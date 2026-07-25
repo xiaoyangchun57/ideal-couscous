@@ -13904,7 +13904,7 @@ def _ps_reserve_parts(db, schedule):
 
 
 def _ps_site_scores(db, site_ids):
-    """站点优先级评分：未关工单（等级+滞留天数）+ 待处理告警 + 试剂临期。
+    """站点优先级评分：未关工单、待处理告警、人工上报和试剂临期。
     评分逻辑透明可解释，供排程建议与审批风险预警共用。"""
     scores = {}
     details = {}
@@ -13930,6 +13930,23 @@ def _ps_site_scores(db, site_ids):
         for a in alerts:
             score += {'red': 20, 'orange': 12, 'yellow': 6}.get(a['level'], 5)
             reasons.append(f'{ALERT_LEVEL_LABEL.get(a["level"], a["level"])}告警（{a["metric"] or "指标异常"}）待处理')
+        # 人工上报是现场已经观察到的异常，必须作为排程优先级的独立证据。
+        # 它可能已经派生工单，但保留单独原因，避免在排程端被“工单”概念淹没。
+        try:
+            reports = db.execute("""
+                SELECT id, report_type, description, reported_at
+                FROM manual_reports
+                WHERE site_id=? AND status NOT IN ('archived', 'closed')
+                  AND reported_at >= datetime('now', '-30 days')
+                ORDER BY reported_at DESC
+            """, (sid,)).fetchall()
+            for report in reports:
+                report_type = report['report_type'] or 'other'
+                score += {'pollution': 30, 'violation': 25, 'equipment': 18,
+                          'environment': 16, 'sensory': 10}.get(report_type, 10)
+                reasons.append(f'人工上报{report_type}异常待跟进')
+        except Exception:
+            pass
         # 试剂临期
         try:
             invs = db.execute("""
@@ -14617,14 +14634,20 @@ def api_plan_schedules_suggestions():
     u = g.current_user
     site_ids_arg = request.args.get('site_ids')
     user_id = request.args.get('user_id')
+    is_manager = u['role'] in ('admin', 'manager')
+    allowed = _filter_site_ids()
     with get_db() as db:
         if site_ids_arg:
             try:
                 site_ids = [int(x) for x in site_ids_arg.split(',') if x.strip()]
             except ValueError:
                 return jsonify({'error': 'site_ids 格式错误'}), 400
+            if not is_manager and allowed is not None and not set(site_ids).issubset(set(allowed)):
+                return jsonify({'error': '无权查看非本人负责站点的排程建议'}), 403
         else:
             uid = user_id or u['id']
+            if not is_manager and int(uid) != int(u['id']):
+                return jsonify({'error': '只能查看自己的排程建议'}), 403
             site_ids = [r['site_id'] for r in
                         db.execute("SELECT site_id FROM user_sites WHERE user_id=?", (uid,)).fetchall()]
         if not site_ids:
@@ -14657,6 +14680,27 @@ def api_plan_schedules_suggestions():
                     'type': 'alert', 'site_id': sid, 'site_name': sname, 'ref_id': a['id'],
                     'level': a['level'],
                     'text': f'{sname}有{ALERT_LEVEL_LABEL.get(a["level"], "")}告警（{a["metric"] or "指标异常"}）待现场复核'})
+            # 人工异常上报：即使已自动派生工单，也单列给排程人，确保“上报→复查”可见。
+            try:
+                reports = db.execute("""
+                    SELECT id, report_type, description, reported_at FROM manual_reports
+                    WHERE site_id=? AND status NOT IN ('archived', 'closed')
+                      AND reported_at >= datetime('now', '-30 days')
+                    ORDER BY reported_at DESC
+                """, (sid,)).fetchall()
+                report_type_cn = {'sensory': '感官', 'equipment': '设备', 'environment': '环境',
+                                  'violation': '违规', 'pollution': '污染'}
+                report_level = {'pollution': 'high', 'violation': 'high', 'equipment': 'orange',
+                                'environment': 'orange', 'sensory': 'warning'}
+                for report in reports:
+                    rtype = report['report_type'] or 'other'
+                    suggestions.append({
+                        'type': 'manual_report', 'site_id': sid, 'site_name': sname,
+                        'ref_id': report['id'], 'level': report_level.get(rtype, 'warning'),
+                        'text': f'{sname}有人工上报的{report_type_cn.get(rtype, rtype)}异常待现场复查'
+                    })
+            except Exception:
+                pass
             # 试剂临期
             try:
                 invs = db.execute("""
