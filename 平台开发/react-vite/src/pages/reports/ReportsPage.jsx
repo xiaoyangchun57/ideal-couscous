@@ -16,6 +16,7 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(false);
   const [sites, setSites] = useState([]);
   const [filterStatus, setFilterStatus] = useState('');
+  const [filterType, setFilterType] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [form] = Form.useForm();
   const canCreate = ['admin', 'manager', 'operator'].includes(user?.role);
@@ -26,12 +27,13 @@ export default function ReportsPage() {
     try {
       const params = new URLSearchParams();
       if (filterStatus) params.set('status', filterStatus);
+      if (filterType) params.set('report_type', filterType);
       const data = await api.get('/manual-reports?' + params.toString()) || [];
       setList(data);
     } catch (e) { message.error('加载失败：' + e.message); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); api.get('/sites').then(s => setSites(Array.isArray(s) ? s : [])); }, [filterStatus]);
+  useEffect(() => { load(); api.get('/sites').then(s => setSites(Array.isArray(s) ? s : [])); }, [filterStatus, filterType]);
 
   const onCreate = async () => {
     try {
@@ -71,6 +73,12 @@ export default function ReportsPage() {
     { title: '上报人', dataIndex: 'reporter_name', width: 100 },
     { title: '时间', dataIndex: 'reported_at', width: 160, render: v => <Text style={{fontSize:11}}>{v}</Text> },
     { title: '状态', dataIndex: 'status', width: 90, render: v => { const s = STATUS_MAP[v] || {label:v,color:'default'}; return <Tag color={s.color}>{s.label}</Tag>; } },
+    { title: '闭环', width: 150, render: (_, r) => <Space direction="vertical" size={0} style={{ fontSize: 11 }}>
+      <Text type="secondary">上报 {r.reported_at || '—'}</Text>
+      {r.verified_at && <Text type="secondary">核实 {r.verified_at}</Text>}
+      {r.resolved_at && <Text type="secondary">解决 {r.resolved_at}</Text>}
+      {r.archived_at && <Text type="secondary">归档 {r.archived_at}</Text>}
+    </Space> },
     ...(canManage ? [{
       title: '操作', width: 170, fixed: 'right',
       render: (_, r) => <Space size={4}>
@@ -94,6 +102,8 @@ export default function ReportsPage() {
         <Space className="reports-actions" wrap>
           <Select value={filterStatus || undefined} onChange={v => setFilterStatus(v || '')} placeholder="全部状态" allowClear style={{ width: 130 }}
             options={Object.entries(STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label }))} />
+          <Select value={filterType || undefined} onChange={v => setFilterType(v || '')} placeholder="全部类型" allowClear style={{ width: 130 }}
+            options={Object.entries(REPORT_TYPE).map(([k, v]) => ({ value: k, label: v }))} />
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
           {canCreate && <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建上报</Button>}
         </Space>
@@ -104,7 +114,7 @@ export default function ReportsPage() {
         )) : <Text type="secondary">暂无异常上报记录</Text>}
       </div>
       <Card bodyStyle={{ padding: 0 }}>
-        <Table rowKey="id" columns={columns} dataSource={list} loading={loading} size="small" scroll={{ x: 930 }} className="review-scroll-table"
+        <Table rowKey="id" columns={columns} dataSource={list} loading={loading} size="small" scroll={{ x: 1080 }} className="review-scroll-table"
           pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
           locale={{ emptyText: <Empty description="暂无上报记录" /> }} />
       </Card>

@@ -15249,6 +15249,7 @@ def api_alert_rules_update(rule_id):
 def api_manual_reports():
     """人工上报列表（按站点范围隔离）"""
     status = request.args.get('status')
+    report_type = request.args.get('report_type')
     site_id = request.args.get('site_id')
     allowed = _filter_site_ids()
     site_id_int = int(site_id) if site_id and site_id.isdigit() else None
@@ -15260,6 +15261,8 @@ def api_manual_reports():
         params = []
         if status:
             q += ' AND mr.status=?'; params.append(status)
+        if report_type:
+            q += ' AND mr.report_type=?'; params.append(report_type)
         if site_id_int is not None:
             if allowed is not None and site_id_int not in allowed:
                 return jsonify([])
