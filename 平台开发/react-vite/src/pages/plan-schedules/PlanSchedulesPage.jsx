@@ -72,6 +72,8 @@ export default function PlanSchedulesPage() {
   const [acting, setActing] = useState(false);
   const [draftRecommendations, setDraftRecommendations] = useState([]);
   const [recommendationLoading, setRecommendationLoading] = useState(false);
+  const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
+  const [followUpLoading, setFollowUpLoading] = useState(false);
 
   const [tableWrapRef, tableBodyHeight] = useTableAutoHeight({ headerOffset: 40, deps: [list.length] });
 
@@ -82,14 +84,16 @@ export default function PlanSchedulesPage() {
       if (statusFilter) params.push(`status=${statusFilter}`);
       if (typeFilter) params.push(`schedule_type=${typeFilter}`);
       if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const [rows, overview, recommendationData] = await Promise.all([
+      const [rows, overview, recommendationData, followUpData] = await Promise.all([
         api.get('/plan-schedules' + (params.length ? '?' + params.join('&') : '')),
         canApprove ? api.get('/plan-schedules/overview').catch(() => null) : Promise.resolve(null),
         api.get('/plan-schedules/draft-recommendations').catch(() => ({ recommendations: [] })),
+        api.get('/plan-schedules/follow-up-recommendations').catch(() => ({ recommendations: [] })),
       ]);
       setList(Array.isArray(rows) ? rows : []);
       setTeamOverview(overview);
       setDraftRecommendations(recommendationData?.recommendations || []);
+      setFollowUpRecommendations(followUpData?.recommendations || []);
     } catch {
       message.error('计划列表加载失败');
     } finally {
@@ -112,6 +116,24 @@ export default function PlanSchedulesPage() {
       message.error(error?.error || '生成草稿失败，请刷新后重试');
     } finally {
       setRecommendationLoading(false);
+    }
+  };
+
+  const createFollowUpDraft = async (item) => {
+    setFollowUpLoading(true);
+    try {
+      const result = await api.post('/plan-schedules/follow-up-recommendations', {
+        user_id: item.user_id,
+        site_id: item.site_id,
+        anomaly_type: item.anomaly_type,
+      });
+      if (result?.error) { message.error(result.error); return; }
+      message.success('已生成复查草稿；仍需确认资源并提交审批');
+      load();
+    } catch (error) {
+      message.error(error?.error || '生成复查草稿失败，请刷新后重试');
+    } finally {
+      setFollowUpLoading(false);
     }
   };
 
@@ -336,12 +358,12 @@ export default function PlanSchedulesPage() {
         ))}
       </Row>
 
-      {draftRecommendations.length > 0 && (
+      {(draftRecommendations.length > 0 || followUpRecommendations.length > 0) && (
         <Alert
-          type="info"
+          type={followUpRecommendations.length > 0 ? "warning" : "info"}
           showIcon
           icon={<BulbOutlined />}
-          message="到期巡检排程建议"
+          message="待确认排程建议"
           description={
             <Space wrap size={[8, 6]}>
               {draftRecommendations.slice(0, 3).map(item => (
@@ -357,6 +379,17 @@ export default function PlanSchedulesPage() {
                 </Space>
               ))}
               {draftRecommendations.length > 3 && <Text type="secondary">另有 {draftRecommendations.length - 3} 条建议</Text>}
+              {followUpRecommendations.map(item => (
+                <Space key={`follow-up-${item.user_id}-${item.site_id}-${item.anomaly_type}`} size={4}>
+                  <Text style={{ fontSize: 12 }}>
+                    系统性异常复查：{item.user_name} · {item.site_name} · {item.anomaly_type}（{item.window_days}天{item.occurrence_count}次）
+                  </Text>
+                  <Button size="small" type="link" danger loading={followUpLoading}
+                    onClick={() => createFollowUpDraft(item)}>
+                    生成复查草稿
+                  </Button>
+                </Space>
+              ))}
             </Space>
           }
         />

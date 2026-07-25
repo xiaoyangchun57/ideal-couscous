@@ -116,7 +116,10 @@ from flask import Flask, jsonify, request, g, send_from_directory, send_file
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos
-from schedule_draft_recommendations import build_draft_recommendations, create_recommended_drafts
+from schedule_draft_recommendations import (
+    build_draft_recommendations, create_recommended_drafts,
+    build_systemic_follow_up_recommendations, create_systemic_follow_up_draft,
+)
 import os, uuid, urllib.request, urllib.error, json as _json
 try:
     from openpyxl import Workbook
@@ -13739,6 +13742,70 @@ def api_create_plan_schedule_from_draft_recommendation():
         'success': True,
         'schedule': _ps_parse_row(row),
         'message': '已生成待确认的排程草稿；尚未创建执行任务、锁定车辆或预留备件。',
+    }), 201
+
+
+@app.route('/api/plan-schedules/follow-up-recommendations', methods=['GET'])
+@login_required
+def api_plan_schedule_follow_up_recommendations():
+    """列出满足“30天内同类巡检异常≥2次”的系统性问题复查建议。"""
+    u = g.current_user
+    requested_user_id = request.args.get('user_id')
+    is_manager = u['role'] in ('admin', 'manager')
+    if requested_user_id and not is_manager and int(requested_user_id) != int(u['id']):
+        return jsonify({'error': '只能查看自己的复查建议'}), 403
+    target_user_id = int(requested_user_id) if requested_user_id and is_manager else (None if is_manager else u['id'])
+    with get_db() as db:
+        result = build_systemic_follow_up_recommendations(db)
+        recommendations = [item for item in result['recommendations']
+                           if target_user_id is None or int(item['user_id']) == int(target_user_id)]
+        user_ids = {item['user_id'] for item in recommendations}
+        names = {}
+        if user_ids:
+            placeholders = ','.join('?' * len(user_ids))
+            names = {row['id']: row['real_name'] for row in db.execute(
+                f'SELECT id, real_name FROM users WHERE id IN ({placeholders})', list(user_ids)).fetchall()}
+    for item in recommendations:
+        item['user_name'] = names.get(item['user_id'], f'用户{item["user_id"]}')
+    return jsonify({'success': True, 'as_of': result['as_of'], 'recommendations': recommendations})
+
+
+@app.route('/api/plan-schedules/follow-up-recommendations', methods=['POST'])
+@login_required
+def api_create_systemic_follow_up_draft():
+    """由运维/管理者确认后创建系统性异常复查草稿，绝不自动派发。"""
+    u = g.current_user
+    data = request.get_json(silent=True) or {}
+    try:
+        target_user_id = int(data.get('user_id'))
+        site_id = int(data.get('site_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': '缺少有效的 user_id 或 site_id'}), 400
+    anomaly_type = (data.get('anomaly_type') or '').strip()
+    if not anomaly_type:
+        return jsonify({'error': '缺少异常类型'}), 400
+    if u['role'] not in ('admin', 'manager') and target_user_id != int(u['id']):
+        return jsonify({'error': '只能为自己创建复查草稿'}), 403
+    with get_db() as db:
+        candidates = build_systemic_follow_up_recommendations(db)['recommendations']
+        candidate = next((item for item in candidates
+                          if item['user_id'] == target_user_id and item['site_id'] == site_id
+                          and item['anomaly_type'] == anomaly_type), None)
+        if not candidate:
+            return jsonify({'error': '该复查建议已失效或已有未完成复查计划，请刷新后重试'}), 409
+        schedule_id = create_systemic_follow_up_draft(db, candidate)
+        if not schedule_id:
+            return jsonify({'error': '该复查计划已存在，请刷新后重试'}), 409
+        _ps_record_event(db, schedule_id, 1, 'systemic_follow_up_draft', u['id'], {
+            'site_id': site_id, 'anomaly_type': anomaly_type,
+            'occurrence_count': candidate['occurrence_count'], 'window_days': candidate['window_days'],
+        })
+        db.commit()
+        row = db.execute('SELECT * FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()
+    return jsonify({
+        'success': True,
+        'schedule': _ps_parse_row(row),
+        'message': '已生成系统性异常复查草稿；请确认日期、车辆和备件后提交审批。',
     }), 201
 
 

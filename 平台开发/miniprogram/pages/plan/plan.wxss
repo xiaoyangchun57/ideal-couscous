@@ -18,6 +18,9 @@
 .recommendation-text { color: var(--text); font-size: 26rpx; }
 .recommendation-period { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
 .recommendation-btn { flex: none; margin: 0; border-radius: 999rpx; background: var(--brand); color: #FFFFFF; font-size: 22rpx; line-height: 1.9; }
+.follow-up-card { border: 1rpx solid rgba(245, 166, 35, 0.28); }
+.follow-up-count, .follow-up-type { color: #C77D00; }
+.follow-up-btn { background: #D48806; }
 
 .plan-card { margin: 20rpx 24rpx 0; }
 .plan-top { display: flex; align-items: center; justify-content: space-between; }

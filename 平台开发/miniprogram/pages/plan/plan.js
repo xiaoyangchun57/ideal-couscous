@@ -10,7 +10,9 @@ Page({
     list: [],       // 排程列表（含中文映射）
     filter: 'all',  // all | active（进行中=草稿/待审/变更中）| done（已通过/已归档）
     recommendations: [],
-    creatingRecommendationKey: ''
+    creatingRecommendationKey: '',
+    followUpRecommendations: [],
+    creatingFollowUpKey: ''
   },
 
   onShow() {
@@ -28,9 +30,10 @@ Page({
   load(done) {
     Promise.all([
       api.planSchedules(),
-      api.planScheduleDraftRecommendations().catch(() => ({ recommendations: [] }))
+      api.planScheduleDraftRecommendations().catch(() => ({ recommendations: [] })),
+      api.planScheduleFollowUpRecommendations().catch(() => ({ recommendations: [] }))
     ])
-      .then(([res, recommendationResult]) => {
+      .then(([res, recommendationResult, followUpResult]) => {
         const list = (Array.isArray(res) ? res : []).map(item => {
           return Object.assign({}, item, {
             status_cn: maps.map(maps.PLAN_SCHEDULE_STATUS, item.status, item.status),
@@ -44,6 +47,9 @@ Page({
           list,
           recommendations: (recommendationResult.recommendations || []).map(item => Object.assign({}, item, {
             recommendation_key: item.user_id + '-' + item.schedule_type + '-' + item.period_start
+          })),
+          followUpRecommendations: (followUpResult.recommendations || []).map(item => Object.assign({}, item, {
+            follow_up_key: item.user_id + '-' + item.site_id + '-' + item.anomaly_type
           }))
         });
         if (done) done();
@@ -100,6 +106,27 @@ Page({
         wx.showToast({ title: err && err.error ? err.error : '创建草稿失败，请刷新后重试', icon: 'none' });
       })
       .finally(() => this.setData({ creatingRecommendationKey: '' }));
+  },
+
+  onCreateFollowUpDraft(e) {
+    const { userId, siteId, anomalyType } = e.currentTarget.dataset;
+    const key = userId + '-' + siteId + '-' + anomalyType;
+    if (this.data.creatingFollowUpKey) return;
+    this.setData({ creatingFollowUpKey: key });
+    api.createPlanScheduleFollowUpDraft({
+      user_id: userId,
+      site_id: siteId,
+      anomaly_type: anomalyType
+    })
+      .then(res => {
+        const scheduleId = res && res.schedule && res.schedule.id;
+        if (!scheduleId) throw new Error('复查草稿创建结果无效');
+        wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + scheduleId });
+      })
+      .catch(err => {
+        wx.showToast({ title: err && err.error ? err.error : '创建复查草稿失败，请刷新后重试', icon: 'none' });
+      })
+      .finally(() => this.setData({ creatingFollowUpKey: '' }));
   },
 
   // 编辑（仅 draft/rejected 可进入编辑）

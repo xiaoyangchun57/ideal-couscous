@@ -134,6 +134,13 @@ const api = {
   createPlanScheduleFromRecommendation: (payload) =>
     request('/api/plan-schedules/draft-recommendations', 'POST', payload),
 
+  // 系统性巡检异常复查建议（30 天内同类异常达到阈值）
+  planScheduleFollowUpRecommendations: () =>
+    request('/api/plan-schedules/follow-up-recommendations', 'GET'),
+
+  createPlanScheduleFollowUpDraft: (payload) =>
+    request('/api/plan-schedules/follow-up-recommendations', 'POST', payload),
+
   // 排程详情（含 site_map、generated_plans）
   planScheduleDetail: (id) => request('/api/plan-schedules/' + id, 'GET'),
 

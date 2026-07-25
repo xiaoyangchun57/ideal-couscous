@@ -44,6 +44,27 @@
     </view>
   </view>
 
+  <!-- 系统性异常只给出复查草稿建议，由人确认后进入同一排程审批链 -->
+  <view class="card recommendation-card follow-up-card" wx:if="{{followUpRecommendations.length}}">
+    <view class="recommendation-head">
+      <view>
+        <text class="recommendation-title">系统性异常复查</text>
+        <text class="recommendation-hint">同站同类异常 30 天内出现 2 次，建议安排复查</text>
+      </view>
+      <text class="recommendation-count follow-up-count">{{followUpRecommendations.length}} 条</text>
+    </view>
+    <view class="recommendation-item" wx:for="{{followUpRecommendations}}" wx:key="follow_up_key">
+      <view class="recommendation-main">
+        <text class="recommendation-type follow-up-type">{{item.site_name}}</text>
+        <text class="recommendation-text">{{item.anomaly_type}} · {{item.window_days}}天{{item.occurrence_count}}次</text>
+        <text class="recommendation-period">最近一次：{{item.latest_at}}</text>
+      </view>
+      <button class="recommendation-btn follow-up-btn" size="mini" loading="{{creatingFollowUpKey === item.follow_up_key}}"
+        data-user-id="{{item.user_id}}" data-site-id="{{item.site_id}}" data-anomaly-type="{{item.anomaly_type}}"
+        bindtap="onCreateFollowUpDraft">建复查草稿</button>
+    </view>
+  </view>
+
   <!-- 列表 -->
   <block wx:if="{{ft.filter(list, filter).length}}">
     <view class="card plan-card" wx:for="{{ft.filter(list, filter)}}" wx:key="id" bindtap="onItemTap" data-id="{{item.id}}">
