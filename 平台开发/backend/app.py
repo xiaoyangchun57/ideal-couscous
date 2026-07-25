@@ -12268,6 +12268,87 @@ def mobile_execution_site_reagents(plan_id, site_id):
     return jsonify({'items': [dict(row) for row in rows]})
 
 
+@app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-replacements', methods=['POST'])
+@login_required
+def mobile_execution_reagent_replacement(plan_id, site_id):
+    """现场试剂更换：只允许写入当前执行包站点，并留下执行包关联。"""
+    data = request.get_json(silent=True) or {}
+    reagent_id = data.get('reagent_id')
+    try:
+        new_qty = float(data.get('new_qty'))
+    except (TypeError, ValueError):
+        return jsonify({'error': '请填写有效的更换后余量'}), 400
+    if not reagent_id or new_qty < 0:
+        return jsonify({'error': '试剂和更换后余量不能为空'}), 400
+    with get_db() as db:
+        if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+            return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        inv = db.execute("SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
+                         (site_id, reagent_id)).fetchone()
+        reagent = db.execute("SELECT name FROM reagents WHERE id=?", (reagent_id,)).fetchone()
+        if not inv or not reagent:
+            return jsonify({'error': '该站点无此试剂库存记录'}), 404
+        duration = data.get('expected_duration_days')
+        try:
+            duration = int(duration) if duration not in (None, '') else inv['expected_duration_days']
+        except (TypeError, ValueError):
+            return jsonify({'error': '预计使用天数必须是整数'}), 400
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        db.execute("""INSERT INTO reagent_records
+            (site_id, reagent_name, usage_date, replacement_date, operator, notes,
+             old_qty, new_qty, plan_id)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (site_id, reagent['name'], now, now, g.current_user.get('real_name', ''),
+             (data.get('remark') or '').strip()[:200] or '移动端现场更换',
+             inv['current_qty'], new_qty, plan_id))
+        db.execute("""UPDATE reagent_inventory SET current_qty=?, last_replaced_at=?,
+            expected_duration_days=?, qc_status='pending', updated_at=?
+            WHERE site_id=? AND reagent_id=?""",
+            (new_qty, now, duration, now, site_id, reagent_id))
+        db.commit()
+    return jsonify({'ok': True, 'qc_status': 'pending'})
+
+
+@app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-qc', methods=['POST'])
+@login_required
+def mobile_execution_reagent_qc(plan_id, site_id):
+    """现场标样质控：结果归属执行包；不通过仅改变质控状态并通知跟进。"""
+    data = request.get_json(silent=True) or {}
+    reagent_id = data.get('reagent_id')
+    if not reagent_id:
+        return jsonify({'error': '请选择试剂'}), 400
+    try:
+        standard_value = float(data.get('standard_value'))
+        measured_value = float(data.get('measured_value'))
+    except (TypeError, ValueError):
+        return jsonify({'error': '请填写标样值和实测值'}), 400
+    passed = 1 if data.get('passed') in (1, True, '1', 'true') else 0
+    fail_action = (data.get('fail_action') or '').strip()
+    if not passed and fail_action not in ('calibrate', 'repair'):
+        return jsonify({'error': '质控不通过时请选择校准或报修'}), 400
+    with get_db() as db:
+        if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+            return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        inv = db.execute("SELECT 1 FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
+                         (site_id, reagent_id)).fetchone()
+        if not inv:
+            return jsonify({'error': '该站点无此试剂库存记录'}), 404
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        deviation = round(measured_value - standard_value, 4)
+        db.execute("""INSERT INTO reagent_qc_records
+            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
+             fail_action, operator, operator_id, qc_time, remark, plan_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
+             fail_action if not passed else '', g.current_user.get('real_name', ''),
+             g.current_user['id'], now, (data.get('remark') or '').strip()[:200], plan_id))
+        status = 'passed' if passed else 'failed'
+        db.execute("UPDATE reagent_inventory SET qc_status=?, updated_at=? WHERE site_id=? AND reagent_id=?",
+                   (status, now, site_id, reagent_id))
+        db.commit()
+    return jsonify({'ok': True, 'qc_status': status, 'deviation': deviation})
+
+
 @app.route('/api/sites/<int:site_id>/calibrate', methods=['PUT'])
 @login_required
 def calibrate_site_location(site_id):

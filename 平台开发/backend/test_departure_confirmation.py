@@ -55,7 +55,18 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
                 CREATE TABLE reagents (id INTEGER PRIMARY KEY, name TEXT, unit TEXT);
                 CREATE TABLE reagent_inventory (
                     id INTEGER PRIMARY KEY, site_id INTEGER, reagent_id INTEGER,
-                    current_qty REAL, qc_status TEXT
+                    current_qty REAL, qc_status TEXT, expected_duration_days INTEGER,
+                    last_replaced_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE reagent_records (
+                    id INTEGER PRIMARY KEY, site_id INTEGER, reagent_name TEXT, usage_date TEXT,
+                    replacement_date TEXT, operator TEXT, notes TEXT, old_qty REAL, new_qty REAL,
+                    plan_id INTEGER
+                );
+                CREATE TABLE reagent_qc_records (
+                    id INTEGER PRIMARY KEY, site_id INTEGER, reagent_id INTEGER, standard_value REAL,
+                    measured_value REAL, deviation REAL, passed INTEGER, fail_action TEXT,
+                    operator TEXT, operator_id INTEGER, qc_time TEXT, remark TEXT, plan_id INTEGER
                 );
                 CREATE TABLE plan_departure_confirmations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_id INTEGER NOT NULL,
@@ -80,7 +91,7 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
             db.execute('INSERT INTO insp_plans VALUES (42, 5, 9, ?, \'active\', 0)', (today,))
             db.execute("INSERT INTO insp_plan_items VALUES (1, 42, 1, 'active')")
             db.execute("INSERT INTO reagents VALUES (3, '氨氮试剂A', '瓶')")
-            db.execute("INSERT INTO reagent_inventory VALUES (1, 1, 3, 2, 'pending')")
+            db.execute("INSERT INTO reagent_inventory VALUES (1, 1, 3, 2, 'pending', 30, '', '')")
             db.execute("INSERT INTO vehicles VALUES (1, 'available')")
             db.execute('INSERT INTO spare_parts_inventory VALUES (1, 12)')
         self.client = app_module.app.test_client()
@@ -142,6 +153,28 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
         self.assertEqual(response.json['items'][0]['reagent_name'], '氨氮试剂A')
         self.assertEqual(response.json['items'][0]['qc_status'], 'pending')
         self.assertEqual(outside.status_code, 404)
+
+    def test_reagent_replacement_then_qc_are_linked_to_execution_plan(self):
+        base = '/api/mobile/execution-plans/42/sites/1'
+        replacement = self.client.post(base + '/reagent-replacements', headers=self.owner_headers, json={
+            'reagent_id': 3, 'new_qty': 5, 'expected_duration_days': 40
+        })
+        qc = self.client.post(base + '/reagent-qc', headers=self.owner_headers, json={
+            'reagent_id': 3, 'standard_value': 10, 'measured_value': 10.2, 'passed': True
+        })
+
+        self.assertEqual(replacement.status_code, 200)
+        self.assertEqual(replacement.json['qc_status'], 'pending')
+        self.assertEqual(qc.status_code, 200)
+        self.assertEqual(qc.json['qc_status'], 'passed')
+        db = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT plan_id FROM reagent_records').fetchone()[0], 42)
+            self.assertEqual(db.execute('SELECT plan_id FROM reagent_qc_records').fetchone()[0], 42)
+            self.assertEqual(db.execute('SELECT current_qty FROM reagent_inventory').fetchone()[0], 5)
+            self.assertEqual(db.execute('SELECT qc_status FROM reagent_inventory').fetchone()[0], 'passed')
+        finally:
+            db.close()
 
 
 if __name__ == '__main__':
