@@ -102,6 +102,7 @@ Flask RESTful API + SQLite + APScheduler
 import os
 import json
 import sqlite3
+import math
 import random
 import time
 import threading
@@ -1194,6 +1195,11 @@ def init_db():
             "ALTER TABLE operation_attachments ADD COLUMN match_confidence REAL DEFAULT NULL",
             "ALTER TABLE operation_attachments ADD COLUMN review_required INTEGER DEFAULT 0",
             "ALTER TABLE operation_attachments ADD COLUMN extra_json TEXT DEFAULT ''",
+            "ALTER TABLE operation_attachments ADD COLUMN review_action TEXT DEFAULT ''",
+            # === 影像抽样审核：标红字段（v1，系统自动判定需人工复核的照片）===
+            "ALTER TABLE operation_attachments ADD COLUMN is_flagged INTEGER DEFAULT 0",
+            "ALTER TABLE operation_attachments ADD COLUMN flag_reason TEXT DEFAULT ''",
+            "ALTER TABLE operation_attachments ADD COLUMN flag_rule TEXT DEFAULT ''",
             # === 照片类型配置扩展 ===
             "ALTER TABLE photo_requirements ADD COLUMN category TEXT DEFAULT ''",
             "ALTER TABLE photo_requirements ADD COLUMN watermark_keyword TEXT DEFAULT ''",
@@ -5240,6 +5246,9 @@ def _batch_link_wo_photos(order_no, urls, file_size=0):
                      f'工单[{order_no}]处置照片',
                      'workorder', wo_id,
                      0, None, '', None, None, now_str, default_category, '', _b_rec_cat, _b_match_status, _b_match_conf, _b_review_required, _b_req_id))
+                new_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                # 影像抽样审核：上传即时标红判定（工单照片 GPS/ref 多为空，通常不计标红）
+                _flag_attachment(db, new_id, 0, 'workorder', wo_id, None, None, now_str)
                 db.commit()
                 inserted += 1
         except Exception as e:
@@ -9184,12 +9193,13 @@ def audit_pending():
         photo_reviews = db.execute("""
             SELECT a.id as aid, a.description, a.watermark_text, a.recognized_category,
                    a.site_id, s.name as site_name, a.source_type, a.source_id,
-                   a.created_at as submit_time, a.stored_path, a.filename, a.taken_at
+                   a.created_at as submit_time, a.stored_path, a.filename, a.taken_at,
+                   a.is_flagged, a.flag_reason, a.flag_rule
             FROM operation_attachments a
             LEFT JOIN sites s ON a.site_id = s.id
             WHERE a.is_deleted=0 AND a.review_required=1 AND a.review_status='pending'
               AND a.source_type != 'workorder'
-            ORDER BY a.created_at DESC
+            ORDER BY a.is_flagged DESC, a.created_at DESC
         """).fetchall()
         for pr in photo_reviews:
             if allowed is not None and pr['site_id'] not in allowed:
@@ -9212,6 +9222,10 @@ def audit_pending():
                 'stored_path': pd.get('stored_path'),
                 'description': pd.get('description'),
             }]
+            # 影像抽样审核：透传标红字段供前端置顶+红徽标
+            pd['is_flagged'] = pr['is_flagged'] or 0
+            pd['flag_reason'] = pr['flag_reason'] or ''
+            pd['flag_rule'] = pr['flag_rule'] or ''
             result.append(pd)
 
         # 补充工单的站点名称（历史兼容分支）
@@ -9267,6 +9281,207 @@ def api_operation_attachments_review():
     return jsonify({'ok': True, 'count': len(attachment_ids), 'status': new_status})
 
 
+@app.route('/api/operation-attachments/reevaluate', methods=['POST'])
+def api_attachments_reevaluate():
+    """回填历史照片的标红字段（迁移/规则变更后一次性执行）"""
+    g_ = require_admin()
+    if g_:
+        return g_
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, site_id, source_type, source_id, gps_lat, gps_lng, taken_at "
+            "FROM operation_attachments WHERE is_deleted=0").fetchall()
+        updated = 0
+        flagged = 0
+        for r in rows:
+            fl = _evaluate_attachment_flag(db, dict(r))
+            db.execute(
+                "UPDATE operation_attachments SET is_flagged=?, flag_reason=?, flag_rule=? WHERE id=?",
+                (fl['is_flagged'], fl['flag_reason'], fl['flag_rule'], r['id']))
+            updated += 1
+            flagged += fl['is_flagged']
+        db.commit()
+    return jsonify({'ok': True, 'updated': updated, 'flagged': flagged})
+
+
+@app.route('/api/operation-attachments/auto-review', methods=['POST'])
+def api_attachments_auto_review():
+    """一键通过正常照片：将未标红的待审照片批量置为通过（工单照片除外）。"""
+    g_ = require_reviewer()
+    if g_:
+        return g_
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get('dry_run') is True
+    requested_site_id = data.get('site_id')
+    allowed_site_ids = _filter_site_ids()
+    if requested_site_id not in (None, ''):
+        try:
+            requested_site_id = int(requested_site_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid site id'}), 400
+        if allowed_site_ids is not None and requested_site_id not in allowed_site_ids:
+            return jsonify({'error': 'No permission for this site'}), 403
+        scope_site_ids = [requested_site_id]
+    else:
+        scope_site_ids = allowed_site_ids
+    reviewer_id = g.current_user.get('id') or 1
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cnt_sql = ("SELECT COUNT(*) c FROM operation_attachments "
+               "WHERE is_deleted=0 AND is_flagged=0 AND (review_status='pending' OR review_status IS NULL) "
+               "AND source_type!='workorder'")
+    cparams = []
+    upd_sql = ("UPDATE operation_attachments SET review_status='approved', reviewer_id=?, reviewed_at=?, review_action='auto_pass_normal', reject_reason=NULL "
+               "WHERE is_deleted=0 AND is_flagged=0 AND (review_status='pending' OR review_status IS NULL) "
+               "AND source_type!='workorder'")
+    uparams = [reviewer_id, now]
+    flagged_sql = ("SELECT COUNT(*) c FROM operation_attachments "
+                   "WHERE is_deleted=0 AND is_flagged=1 AND (review_status='pending' OR review_status IS NULL) "
+                   "AND source_type!='workorder'")
+    flagged_params = []
+    if scope_site_ids is not None:
+        placeholders = ','.join('?' for _ in scope_site_ids)
+        if not placeholders:
+            return jsonify({'ok': True, 'approved': 0, 'remaining_flagged': 0, 'site_ids': []})
+        site_clause = f' AND site_id IN ({placeholders})'
+        cnt_sql += site_clause
+        cparams.extend(scope_site_ids)
+        upd_sql += site_clause
+        uparams.extend(scope_site_ids)
+        flagged_sql += site_clause
+        flagged_params.extend(scope_site_ids)
+    with get_db() as db:
+        approved = db.execute(cnt_sql, cparams).fetchone()['c']
+        if not dry_run:
+            db.execute(upd_sql, uparams)
+        remaining = db.execute(flagged_sql, flagged_params).fetchone()['c']
+        if not dry_run:
+            db.commit()
+    return jsonify({
+        'ok': True,
+        'approved': approved,
+        'remaining_flagged': remaining,
+        'site_ids': scope_site_ids,
+        'preview': dry_run,
+    })
+
+
+# ===================== 影像抽样审核：标红规则引擎 =====================
+GPS_DEVIATION_M = 200          # GPS 偏离站点阈值（米），超此值视为"非本站拍摄"
+FUTURE_SKEW_S = 300           # 拍摄时间"未来"容差（秒），防时钟抖动误判
+STALE_REF_DAYS = 3            # 拍摄时间与关联任务日期的偏差阈值（天）
+
+def _haversine(lat1, lng1, lat2, lng2):
+    """两点球面距离（米）"""
+    try:
+        lat1, lng1, lat2, lng2 = float(lat1), float(lng1), float(lat2), float(lng2)
+    except (TypeError, ValueError):
+        return 0.0
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    return 6371000 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _parse_dt(value):
+    """宽松解析日期时间字符串为 datetime；失败返回 None"""
+    if not value:
+        return None
+    s = str(value).strip().replace('T', ' ').replace('Z', '')
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(s[:19] if (':' in s) else s[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _attachment_ref_date(db, att):
+    """返回照片关联任务的参考日期（用于"早于任务N天"判定）；无关联返回 None。
+    注意：工单照片的拍摄时间本就晚于工单创建，不以工单日期为参考，避免误标红。"""
+    st = att.get('source_type')
+    sid = att.get('source_id')
+    if not sid:
+        return None
+    if st in ('inspection', 'insp', 'insp_item', 'insp_plan_item') and sid:
+        r = db.execute('SELECT plan_id FROM insp_plan_items WHERE id=?', (sid,)).fetchone()
+        if r and r['plan_id']:
+            p = db.execute('SELECT start_date, plan_date FROM insp_plans WHERE id=?', (r['plan_id'],)).fetchone()
+            if p:
+                for k in ('start_date', 'plan_date'):
+                    d = _parse_dt(p[k])
+                    if d:
+                        return d
+    return None
+
+
+def _evaluate_attachment_flag(db, att):
+    """纯函数：根据 GPS 偏离 / 时间异常 / 关联异常项 判定照片是否需人工标红。
+    返回 {'is_flagged':0/1, 'flag_reason':str, 'flag_rule':str}。
+    设计目标：正常照片不标红→可一键通过；仅系统判定可疑的照片进入人工复核。"""
+    reasons = []
+    rule = ''
+    # 1) GPS 偏离站点
+    try:
+        alat = float(att['gps_lat']) if att.get('gps_lat') is not None else None
+        alng = float(att['gps_lng']) if att.get('gps_lng') is not None else None
+    except (TypeError, ValueError):
+        alat = alng = None
+    site = None
+    if att.get('site_id'):
+        site = db.execute('SELECT gps_lat, gps_lng FROM sites WHERE id=?', (att['site_id'],)).fetchone()
+    if alat is not None and alng is not None and site and site['gps_lat'] is not None:
+        d = _haversine(alat, alng, float(site['gps_lat']), float(site['gps_lng']))
+        if d > GPS_DEVIATION_M:
+            reasons.append(f'GPS偏离站点{d:.0f}米')
+            rule = 'gps'
+    # 2) 时间异常：未来 或 与任务参考日期偏差超阈值
+    ta = att.get('taken_at')
+    t = _parse_dt(ta)
+    if ta:
+        t = _parse_dt(ta)
+        if t:
+            now = datetime.now()
+            if t > now + timedelta(seconds=FUTURE_SKEW_S):
+                reasons.append('拍摄时间在未来')
+                rule = rule or 'time'
+            else:
+                ref = _attachment_ref_date(db, att)
+                if ref:
+                    if t < ref - timedelta(days=STALE_REF_DAYS) or t > ref + timedelta(days=STALE_REF_DAYS):
+                        reasons.append('拍摄时间与任务日期偏差超3天')
+                        rule = rule or 'time'
+    if att.get('source_type') != 'workorder' and (alat is None or alng is None or t is None):
+        reasons.append('\u7f3a\u5c11\u73b0\u573a\u62cd\u6444GPS\u6216\u65f6\u95f4\u4fe1\u606f')
+        rule = rule or 'metadata_missing'
+    # 3) 关联巡检项标记为异常
+    if att.get('source_type') in ('inspection', 'insp', 'insp_item', 'insp_plan_item') and att.get('source_id'):
+        it = db.execute('SELECT result FROM insp_plan_items WHERE id=?', (att['source_id'],)).fetchone()
+        if it and (it['result'] or '').lower() == 'abnormal':
+            reasons.append('关联巡检项标记为异常')
+            rule = rule or 'abnormal'
+    if reasons:
+        return {'is_flagged': 1, 'flag_reason': '；'.join(reasons), 'flag_rule': rule}
+    return {'is_flagged': 0, 'flag_reason': '', 'flag_rule': ''}
+
+
+def _flag_attachment(db, att_id, site_id, source_type, source_id, gps_lat, gps_lng, taken_at):
+    """上传后即时计算并落库标红字段（自带提交兜底）"""
+    try:
+        fl = _evaluate_attachment_flag(db, {
+            'site_id': site_id, 'source_type': source_type, 'source_id': source_id,
+            'gps_lat': gps_lat, 'gps_lng': gps_lng, 'taken_at': taken_at,
+        })
+        db.execute(
+            'UPDATE operation_attachments SET is_flagged=?, flag_reason=?, flag_rule=? WHERE id=?',
+            (fl['is_flagged'], fl['flag_reason'], fl['flag_rule'], att_id))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 @app.route('/api/audit/stats')
 def audit_stats():
     """待审核统计：返回巡检+工单+备件预申报+用车申请的待审总数"""
@@ -9301,6 +9516,11 @@ def audit_stats():
             "SELECT COUNT(*) as c FROM operation_attachments "
             "WHERE is_deleted=0 AND review_required=1 AND review_status='pending' AND source_type!='workorder'"
         ).fetchone()['c']
+        photo_flagged = db.execute(
+            "SELECT COUNT(*) as c FROM operation_attachments "
+            "WHERE is_deleted=0 AND is_flagged=1 AND (review_status='pending' OR review_status IS NULL) "
+            "AND source_type!='workorder'"
+        ).fetchone()['c']
         total = insp_pending + wo_pending + parts_pending + vehicle_pending + photo_pending
     return jsonify({
         'total': total,
@@ -9309,6 +9529,7 @@ def audit_stats():
         'parts_pending': parts_pending,
         'vehicle_pending': vehicle_pending,
         'photo_pending': photo_pending,
+        'photo_flagged': photo_flagged,
     })
 
 # --- 提醒配置 ---
@@ -12184,6 +12405,9 @@ def mobile_upload_site_photo():
     site_id = data.get('site_id')
     image = data.get('image', '')
     idempotency_key = data.get('_idempotency_key')
+    gps_lat = data.get('gps_lat')
+    gps_lng = data.get('gps_lng')
+    taken_at = data.get('taken_at')
     if not site_id or not image:
         return jsonify({'error': '缺少站点ID或图片数据'}), 400
     try:
@@ -12205,17 +12429,21 @@ def mobile_upload_site_photo():
         # 统一归口：写入 operation_attachments，网页端影像档案可见
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         uploader = g.current_user
+        if not taken_at:
+            taken_at = now_str
         with get_db() as db:
             db.execute("""INSERT INTO operation_attachments
                 (filename, stored_path, file_type, mime_type, file_size, description,
                  source_type, source_id, site_id, uploader_id, uploader_name,
-                 taken_at, created_at, category)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 gps_lat, gps_lng, taken_at, created_at, category)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (filename, url, 'image', '.jpg', len(img_data),
                  f'站点[{site_id}]现场照片', 'site_photo', 0, site_id,
                  uploader['id'], uploader.get('real_name', ''),
-                 now_str, now_str, '现场照片'))
+                 gps_lat, gps_lng, taken_at, now_str, '现场照片'))
             new_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            # 影像抽样审核：上传即时标红判定
+            _flag_attachment(db, new_id, site_id, 'site_photo', 0, gps_lat, gps_lng, taken_at)
             response = {'success': True, 'url': url, 'size': len(img_data), 'id': new_id}
             _mobile_idempotency_store(db, idempotency_key, 'upload-site-photo', response)
             db.commit()
@@ -12552,6 +12780,7 @@ def api_inspection_photo_upload():
     uploader_name = data.get('uploader_name', '')
     gps_lat = data.get('gps_lat')
     gps_lng = data.get('gps_lng')
+    taken_at = data.get('taken_at') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     category = data.get('category', '巡检照片')
     description = data.get('description', '')
 
@@ -12567,14 +12796,16 @@ def api_inspection_photo_upload():
         cur = db.execute(
             '''INSERT INTO operation_attachments
                (filename, stored_path, file_type, source_type, source_id, site_id,
-                uploader_id, uploader_name, gps_lat, gps_lng, category, description,
+                uploader_id, uploader_name, gps_lat, gps_lng, taken_at, category, description,
                 requirement_id, review_status)
-               VALUES (?,?,'image','inspection',0,?,?,?,?,?,?,?,?,?)''',
+               VALUES (?,?,'image','inspection',0,?,?,?,?,?,?,?,?,?,?)''',
             (filename, stored_path, site_id, uploader_id, uploader_name,
-             gps_lat, gps_lng, category, description, requirement_id,
+             gps_lat, gps_lng, taken_at, category, description, requirement_id,
              'pending' if review_required else 'approved'))
         db.commit()
         new_id = cur.lastrowid
+        # 影像抽样审核：上传即时标红判定
+        _flag_attachment(db, new_id, site_id, 'inspection', 0, gps_lat, gps_lng, taken_at)
         row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (new_id,)).fetchone()
         return jsonify(dict(row)), 201
 

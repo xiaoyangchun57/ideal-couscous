@@ -45,7 +45,7 @@ function MetricCard({ title, value, color }) {
 }
 
 // 通用工具栏：搜索 + 筛选 + 刷新 + 计数
-function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, total, filteredCount, refresh, helpText }) {
+function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, extraAction, total, filteredCount, refresh, helpText }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
       <Input.Search
@@ -57,6 +57,7 @@ function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, tot
         style={{ width: 280 }}
       />
       {filterSlot}
+      {extraAction}
       <div style={{ flex: 1, minWidth: 8 }} />
       {helpText && (
         <Tooltip title={helpText}>
@@ -74,7 +75,7 @@ function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, tot
 // ---------------------------------------------------------------------------
 // 业务审核通用 Tab：按 sourceTypes 分组展示一类待办，含指标/筛选/列表
 // ---------------------------------------------------------------------------
-function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, onOpenReview, onRefresh }) {
+function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, onOpenReview, onRefresh, extraAction }) {
   const { tokens } = useTheme();
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState(undefined);
@@ -140,12 +141,14 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
     ];
     helpText = '工单审核包含两类：处置照片审核和工单状态流转（受理/办结）；点击「审核」后状态自动推进。';
   } else if (sourceTypes.includes('photo_review')) {
+    const flaggedCount = filtered.filter(i => i.is_flagged).length;
     metrics = [
       { title: '影像待审', value: statValue || 0, color: (statValue || 0) > 0 ? '#fa8c16' : '#52c41a' },
+      { title: '标红待查', value: flaggedCount, color: flaggedCount > 0 ? '#ff4d4f' : '#52c41a' },
       { title: '涉及站点', value: siteCount, color: '#1677ff' },
       { title: '等待最久', value: oldestDays !== null ? `${oldestDays}天` : '-', color: '#888' },
     ];
-    helpText = '影像审核用于确认巡检/校准等场景上传的照片是否符合规范；驳回后需重新拍摄。';
+    helpText = '正常照片可一键通过，仅系统标红（GPS偏离/时间异常/关联异常项）需人工确认；展开全部照片→只点异常→其余自动通过。';
   }
 
   const columns = [
@@ -175,6 +178,13 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
           {r.source_type === 'photo_review' && r.remark && (
             <div><Text type="secondary" style={{ fontSize: 11 }}>{r.remark}</Text></div>
           )}
+          {r.source_type === 'photo_review' && r.is_flagged ? (
+            <div style={{ marginTop: 4 }}>
+              <Tag color="red" style={{ borderRadius: 4, fontSize: 11 }}>
+                标红：{r.flag_reason || '触发标红规则'}
+              </Tag>
+            </div>
+          ) : null}
         </div>
       ),
     },
@@ -240,6 +250,7 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
             options={typeOptions}
           />
         ) : null}
+        extraAction={extraAction}
         total={filtered.length}
         filteredCount={searched.length}
         refresh={onRefresh}
@@ -438,6 +449,7 @@ export default function AuditPage() {
   const reviewSessionRef = useRef(null);
   const [reviewComment, setReviewComment] = useState('');
   const [processing, setProcessing] = useState(false);
+  const [autoPassing, setAutoPassing] = useState(false);
 
   const loadPending = useCallback(async () => {
     setLoading(true);
@@ -606,6 +618,46 @@ export default function AuditPage() {
     setReviewModalOpen(true);
   };
 
+  // 一键通过正常照片（影像抽样审核核心减负动作）
+  const handleAutoPassNormal = async () => {
+    try {
+      const preview = await api.post('/operation-attachments/auto-review', { dry_run: true });
+      if (!preview || preview.error) {
+        message.error(preview?.error || '无法获取批量审核范围');
+        return;
+      }
+      if (!preview.approved) {
+        message.info('当前权限范围内没有可自动通过的正常照片');
+        return;
+      }
+      Modal.confirm({
+        title: '确认一键通过正常照片',
+        content: `将在当前权限范围内通过 ${preview.approved} 张正常照片，保留 ${preview.remaining_flagged || 0} 张标红照片供人工审核。`,
+        okText: '确认通过',
+        cancelText: '取消',
+        onOk: async () => {
+          setAutoPassing(true);
+          try {
+            const result = await api.post('/operation-attachments/auto-review', {});
+            if (result && !result.error) {
+              message.success(
+                `已自动通过 ${result.approved || 0} 张正常照片，剩余 ${result.remaining_flagged || 0} 张标红待查`
+              );
+              loadPending();
+            } else {
+              message.error(result?.error || '操作失败');
+            }
+          } finally {
+            setAutoPassing(false);
+          }
+        },
+      });
+    } catch (e) {
+      console.error('auto-pass error:', e);
+      message.error('自动通过失败');
+    }
+  };
+
   // ===== 审核弹窗 =====
   function ReviewModal() {
     if (!reviewModalOpen) return null;
@@ -658,6 +710,13 @@ export default function AuditPage() {
             <>
               <Descriptions.Item label="自动归类">{item.recognized_category || '-'}</Descriptions.Item>
               <Descriptions.Item label="水印说明">{item.remark || '-'}</Descriptions.Item>
+              {item.is_flagged ? (
+                <Descriptions.Item label="系统标红">
+                  <Tag color="red" style={{ borderRadius: 4 }}>{item.flag_reason || '触发标红规则'}</Tag>
+                </Descriptions.Item>
+              ) : (
+                <Descriptions.Item label="系统标红"><Tag color="green" style={{ borderRadius: 4 }}>正常照片</Tag></Descriptions.Item>
+              )}
             </>
           )}
           <Descriptions.Item label="照片进度">
@@ -805,6 +864,16 @@ export default function AuditPage() {
           loading={loading}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          extraAction={
+            <Button
+              icon={<CheckOutlined />}
+              loading={autoPassing}
+              onClick={handleAutoPassNormal}
+              style={{ background: '#52c41a', borderColor: '#52c41a', color: '#fff' }}
+            >
+              一键通过正常照片
+            </Button>
+          }
         />
       ),
     },
