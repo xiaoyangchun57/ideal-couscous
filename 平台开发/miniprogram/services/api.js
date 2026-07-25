@@ -126,6 +126,14 @@ const api = {
   // 我的排程列表（运维只看自己的）
   planSchedules: () => request('/api/plan-schedules', 'GET'),
 
+  // 到期检查项形成的排程草稿建议；只读，不会自动派发任务
+  planScheduleDraftRecommendations: () =>
+    request('/api/plan-schedules/draft-recommendations', 'GET'),
+
+  // 将一条服务端建议落为可编辑草稿；不创建执行任务、不锁车、不预留备件
+  createPlanScheduleFromRecommendation: (payload) =>
+    request('/api/plan-schedules/draft-recommendations', 'POST', payload),
+
   // 排程详情（含 site_map、generated_plans）
   planScheduleDetail: (id) => request('/api/plan-schedules/' + id, 'GET'),
 

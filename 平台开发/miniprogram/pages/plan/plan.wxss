@@ -7,6 +7,18 @@
 }
 .filter-on { background: var(--brand); color: #FFFFFF; border-color: var(--brand); }
 
+.recommendation-card { margin: 20rpx 24rpx 0; padding: 24rpx; }
+.recommendation-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16rpx; }
+.recommendation-title { display: block; color: var(--text); font-size: 30rpx; font-weight: 600; }
+.recommendation-hint { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.5; }
+.recommendation-count { flex: none; color: var(--brand); font-size: 24rpx; }
+.recommendation-item { display: flex; align-items: center; justify-content: space-between; gap: 16rpx; margin-top: 20rpx; padding-top: 20rpx; border-top: 1rpx solid var(--line); }
+.recommendation-main { min-width: 0; flex: 1; }
+.recommendation-type { display: inline-block; margin-right: 12rpx; color: var(--brand); font-size: 24rpx; font-weight: 600; }
+.recommendation-text { color: var(--text); font-size: 26rpx; }
+.recommendation-period { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
+.recommendation-btn { flex: none; margin: 0; border-radius: 999rpx; background: var(--brand); color: #FFFFFF; font-size: 22rpx; line-height: 1.9; }
+
 .plan-card { margin: 20rpx 24rpx 0; }
 .plan-top { display: flex; align-items: center; justify-content: space-between; }
 .plan-type-row { display: flex; gap: 12rpx; }

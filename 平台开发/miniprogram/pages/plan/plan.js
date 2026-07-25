@@ -8,7 +8,9 @@ Page({
   data: {
     loaded: false,
     list: [],       // 排程列表（含中文映射）
-    filter: 'all'   // all | active（进行中=草稿/待审/变更中）| done（已通过/已归档）
+    filter: 'all',  // all | active（进行中=草稿/待审/变更中）| done（已通过/已归档）
+    recommendations: [],
+    creatingRecommendationKey: ''
   },
 
   onShow() {
@@ -24,8 +26,11 @@ Page({
   },
 
   load(done) {
-    api.planSchedules()
-      .then(res => {
+    Promise.all([
+      api.planSchedules(),
+      api.planScheduleDraftRecommendations().catch(() => ({ recommendations: [] }))
+    ])
+      .then(([res, recommendationResult]) => {
         const list = (Array.isArray(res) ? res : []).map(item => {
           return Object.assign({}, item, {
             status_cn: maps.map(maps.PLAN_SCHEDULE_STATUS, item.status, item.status),
@@ -34,7 +39,13 @@ Page({
             period_text: (item.period_start || '').slice(5) + ' ~ ' + (item.period_end || '').slice(5)
           });
         });
-        this.setData({ loaded: true, list });
+        this.setData({
+          loaded: true,
+          list,
+          recommendations: (recommendationResult.recommendations || []).map(item => Object.assign({}, item, {
+            recommendation_key: item.user_id + '-' + item.schedule_type + '-' + item.period_start
+          }))
+        });
         if (done) done();
       })
       .catch(() => {
@@ -67,6 +78,28 @@ Page({
 
   onNewPlan() {
     wx.navigateTo({ url: '/pages/plan-edit/plan-edit' });
+  },
+
+  // 建议必须由人显式确认后才落为草稿；创建后直接进入现有排程编辑页。
+  onCreateRecommendedDraft(e) {
+    const { userId, scheduleType, periodStart } = e.currentTarget.dataset;
+    const key = userId + '-' + scheduleType + '-' + periodStart;
+    if (this.data.creatingRecommendationKey) return;
+    this.setData({ creatingRecommendationKey: key });
+    api.createPlanScheduleFromRecommendation({
+      user_id: userId,
+      schedule_type: scheduleType,
+      period_start: periodStart
+    })
+      .then(res => {
+        const scheduleId = res && res.schedule && res.schedule.id;
+        if (!scheduleId) throw new Error('草稿创建结果无效');
+        wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + scheduleId });
+      })
+      .catch(err => {
+        wx.showToast({ title: err && err.error ? err.error : '创建草稿失败，请刷新后重试', icon: 'none' });
+      })
+      .finally(() => this.setData({ creatingRecommendationKey: '' }));
   },
 
   // 编辑（仅 draft/rejected 可进入编辑）

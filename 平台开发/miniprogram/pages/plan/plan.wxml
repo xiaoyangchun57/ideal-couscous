@@ -23,6 +23,27 @@
     <view class="filter-item {{filter === 'done' ? 'filter-on' : ''}}" data-f="done" bindtap="onFilterTap">已完成</view>
   </view>
 
+  <!-- 到期检查项建议：由人确认后才创建可编辑草稿，不自动派单 -->
+  <view class="card recommendation-card" wx:if="{{recommendations.length}}">
+    <view class="recommendation-head">
+      <view>
+        <text class="recommendation-title">到期巡检建议</text>
+        <text class="recommendation-hint">确认后生成草稿，仍需完善排程并提交审批</text>
+      </view>
+      <text class="recommendation-count">{{recommendations.length}} 条</text>
+    </view>
+    <view class="recommendation-item" wx:for="{{recommendations}}" wx:key="recommendation_key">
+      <view class="recommendation-main">
+        <text class="recommendation-type">{{item.schedule_type_cn}}</text>
+        <text class="recommendation-text">{{item.site_count}}站 · {{item.due_item_count}}项到期</text>
+        <text class="recommendation-period">{{item.period_start}} ~ {{item.period_end}}</text>
+      </view>
+      <button class="recommendation-btn" size="mini" loading="{{creatingRecommendationKey === item.recommendation_key}}"
+        data-user-id="{{item.user_id}}" data-schedule-type="{{item.schedule_type}}" data-period-start="{{item.period_start}}"
+        bindtap="onCreateRecommendedDraft">生成草稿</button>
+    </view>
+  </view>
+
   <!-- 列表 -->
   <block wx:if="{{ft.filter(list, filter).length}}">
     <view class="card plan-card" wx:for="{{ft.filter(list, filter)}}" wx:key="id" bindtap="onItemTap" data-id="{{item.id}}">
