@@ -48,6 +48,15 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, plan_schedule_id INTEGER, assignee_id INTEGER,
                     generate_date TEXT, status TEXT, completion_rate REAL DEFAULT 0
                 );
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    execution_status TEXT DEFAULT 'active'
+                );
+                CREATE TABLE reagents (id INTEGER PRIMARY KEY, name TEXT, unit TEXT);
+                CREATE TABLE reagent_inventory (
+                    id INTEGER PRIMARY KEY, site_id INTEGER, reagent_id INTEGER,
+                    current_qty REAL, qc_status TEXT
+                );
                 CREATE TABLE plan_departure_confirmations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL, work_date TEXT NOT NULL,
@@ -69,6 +78,9 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
             db.executemany('INSERT INTO user_sites VALUES (?,?)', [(9, 1), (10, 2)])
             db.execute("INSERT INTO plan_schedules VALUES (5, 'approved', 3)")
             db.execute('INSERT INTO insp_plans VALUES (42, 5, 9, ?, \'active\', 0)', (today,))
+            db.execute("INSERT INTO insp_plan_items VALUES (1, 42, 1, 'active')")
+            db.execute("INSERT INTO reagents VALUES (3, '氨氮试剂A', '瓶')")
+            db.execute("INSERT INTO reagent_inventory VALUES (1, 1, 3, 2, 'pending')")
             db.execute("INSERT INTO vehicles VALUES (1, 'available')")
             db.execute('INSERT INTO spare_parts_inventory VALUES (1, 12)')
         self.client = app_module.app.test_client()
@@ -119,6 +131,17 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_departure_confirmations').fetchone()[0], 0)
         finally:
             db.close()
+
+    def test_reagent_inventory_is_only_visible_inside_own_execution_site(self):
+        response = self.client.get(
+            '/api/mobile/execution-plans/42/sites/1/reagents', headers=self.owner_headers)
+        outside = self.client.get(
+            '/api/mobile/execution-plans/42/sites/2/reagents', headers=self.owner_headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['items'][0]['reagent_name'], '氨氮试剂A')
+        self.assertEqual(response.json['items'][0]['qc_status'], 'pending')
+        self.assertEqual(outside.status_code, 404)
 
 
 if __name__ == '__main__':

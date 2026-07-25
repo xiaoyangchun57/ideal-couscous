@@ -505,6 +505,8 @@ def migrate_reagent_qc():
             )""")
         for col_sql in [
             "ALTER TABLE reagent_inventory ADD COLUMN qc_status TEXT DEFAULT 'passed'",
+            "ALTER TABLE reagent_records ADD COLUMN plan_id INTEGER",
+            "ALTER TABLE reagent_qc_records ADD COLUMN plan_id INTEGER",
         ]:
             try:
                 db.execute(col_sql)
@@ -12236,6 +12238,34 @@ def mobile_execution_site_tasks(plan_id, site_id):
                          'lat': site['gps_lat'], 'lng': site['gps_lng'], 'type': site['type'],
                          'type_cn': {'water_quality':'水质自动站','manual_station':'水质手动站','drinking_source':'饮用水源站','cross_boundary':'跨界断面站','groundwater':'地下水站'}.get(site['type'], site['type'])},
                         'plan_id': plan_id, 'categories': categories, 'total': total, 'completed': completed})
+
+
+def _mobile_execution_site_access(db, plan_id, site_id, user):
+    """验证移动端现场操作只来自本人当天、已批准的执行包。"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    plan = db.execute("""SELECT ip.id FROM insp_plans ip
+        JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+        WHERE ip.id=? AND ip.assignee_id=? AND ip.generate_date=?
+          AND ip.status IN ('active','completed') AND ps.status='approved'""",
+        (plan_id, user['id'], today)).fetchone()
+    if not plan:
+        return False
+    return bool(db.execute("""SELECT 1 FROM insp_plan_items
+        WHERE plan_id=? AND site_id=? AND COALESCE(execution_status,'active')='active' LIMIT 1""",
+        (plan_id, site_id)).fetchone())
+
+
+@app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagents')
+@login_required
+def mobile_execution_site_reagents(plan_id, site_id):
+    """现场试剂清单：只从本人当天已批准执行包中的站点读取。"""
+    with get_db() as db:
+        if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+            return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        rows = db.execute("""SELECT ri.*, r.name AS reagent_name, r.unit
+            FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+            WHERE ri.site_id=? ORDER BY r.name""", (site_id,)).fetchall()
+    return jsonify({'items': [dict(row) for row in rows]})
 
 
 @app.route('/api/sites/<int:site_id>/calibrate', methods=['PUT'])
