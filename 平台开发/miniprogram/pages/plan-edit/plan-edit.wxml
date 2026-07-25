@@ -22,7 +22,8 @@
   module.exports.partSelected = function(parts, id) {
     if (!parts) return false;
     for (var i = 0; i < parts.length; i++) {
-      if (Number(parts[i].part_id) === Number(id)) return true;
+      // WXS 不提供 Number() 全局构造器；此处用宽松比较兼容 dataset 的字符串 id。
+      if (parts[i].part_id == id) return true;
     }
     return false;
   };
