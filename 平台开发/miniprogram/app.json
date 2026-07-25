@@ -8,6 +8,7 @@
     "pages/alert/alert",
     "pages/mine/mine",
     "pages/message/message",
+    "pages/reports/reports",
     "pages/review/view",
     "pages/plan/plan",
     "pages/plan-edit/plan-edit",

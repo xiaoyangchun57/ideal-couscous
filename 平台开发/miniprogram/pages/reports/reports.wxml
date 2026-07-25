@@ -1,0 +1,20 @@
+<view class="page">
+  <view class="head">
+    <view><text class="title">我的异常上报</text><text class="sub">上报后由管理端核实并跟随工单闭环</text></view>
+    <button class="report-btn" size="mini" bindtap="onGoReport">现场上报</button>
+  </view>
+  <scroll-view class="filters" scroll-x="true" enhanced show-scrollbar="false">
+    <view wx:for="{{filters}}" wx:key="*this" data-index="{{index}}" bindtap="onFilter" class="filter {{(index === 0 && !filter) || (index === 1 && filter === 'dispatched') || (index === 2 && filter === 'verified') || (index === 3 && filter === 'resolved') || (index === 4 && filter === 'archived') ? 'filter-on' : ''}}">{{item}}</view>
+  </scroll-view>
+  <view wx:if="{{loading}}" class="empty">加载中…</view>
+  <block wx:else>
+    <view wx:for="{{reports}}" wx:key="id" wx:if="{{!filter || item.status === filter}}" class="card report">
+      <view class="line"><text class="type">{{item.type_cn}}</text><text class="status status-{{item.status}}">{{item.status_cn}}</text></view>
+      <text class="site">{{item.site_name || '未关联站点'}}</text>
+      <text class="description">{{item.description}}</text>
+      <view class="meta"><text>{{item.reported_at}}</text><text wx:if="{{item.photo_count}}">现场照片 {{item.photo_count}} 张</text></view>
+      <view wx:if="{{item.order_no}}" class="order" bindtap="goOrder" data-order="{{item.order_no}}">关联工单：{{item.order_no}} ›</view>
+    </view>
+    <view wx:if="{{!reports.length}}" class="empty">暂无异常上报记录</view>
+  </block>
+</view>

@@ -14,6 +14,7 @@ const api = {
   myToday: () => request('/api/mobile/my-today', 'GET'),
   anomalyCodes: () => request('/api/anomaly-codes', 'GET'),
   submitManualReport: (payload) => request('/api/manual-reports', 'POST', payload),
+  manualReports: (status) => request('/api/manual-reports' + (status ? '?status=' + status : ''), 'GET'),
 
   // 今日已批准巡检执行包（巡检 Tab 的唯一入口）
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),

@@ -18,6 +18,11 @@
       <view class="menu-right"><text class="menu-sub">{{partsRequests.length}} 条</text><text class="arrow">›</text></view>
     </view>
     <view class="hairline"></view>
+    <view class="menu-item" bindtap="goReports">
+      <text class="menu-tx">我的异常上报</text>
+      <view class="menu-right"><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline"></view>
     <view class="menu-item" bindtap="goReview">
       <text class="menu-tx">待我审核</text>
       <view class="menu-right"><text class="arrow">›</text></view>

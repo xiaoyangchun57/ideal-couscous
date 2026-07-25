@@ -26,6 +26,7 @@ Page({
   },
 
   goMessage() { wx.navigateTo({ url: '/pages/message/message' }); },
+  goReports() { wx.navigateTo({ url: '/pages/reports/reports' }); },
   goReview() { wx.navigateTo({ url: '/pages/review/view' }); },
   onOpenParts() { this.setData({ 'partsSheet.open': true, 'partsSheet.index': 0, 'partsSheet.quantity': 1 }); },
   onCloseParts() { this.setData({ 'partsSheet.open': false }); },
