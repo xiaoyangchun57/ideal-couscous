@@ -407,6 +407,20 @@ def migrate_plan_schedules():
             payload TEXT DEFAULT '{}',
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )""")
+        # 出发前资源确认只做现场留痕：不锁车、不出库、不改变审批结果。
+        db.execute("""CREATE TABLE IF NOT EXISTS plan_departure_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schedule_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            work_date TEXT NOT NULL,
+            vehicle_confirmed INTEGER NOT NULL DEFAULT 0,
+            parts_confirmed INTEGER NOT NULL DEFAULT 0,
+            note TEXT DEFAULT '',
+            confirmed_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(schedule_id, user_id, work_date),
+            FOREIGN KEY (schedule_id) REFERENCES plan_schedules(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )""")
         db.commit()
         # ---- 旧周计划数据迁移（幂等：同用户同周期已存在则跳过）----
         try:
@@ -11966,6 +11980,14 @@ def mobile_my_today():
             package_site_rows = [dict(r) for r in db.execute(
                 f"SELECT id, name, code FROM sites WHERE id IN ({ph}) ORDER BY name",
                 list(package_sites)).fetchall()]
+        confirmed_schedule_ids = set()
+        if package_schedule_ids:
+            ph = ','.join('?' * len(package_schedule_ids))
+            rows = db.execute(f"""SELECT schedule_id FROM plan_departure_confirmations
+                WHERE user_id=? AND work_date=? AND schedule_id IN ({ph})
+                  AND vehicle_confirmed=1 AND parts_confirmed=1""",
+                [user['id'], today] + package_schedule_ids).fetchall()
+            confirmed_schedule_ids = {row['schedule_id'] for row in rows}
 
         work_package = {
             'has_plan': bool(package_schedule_ids),
@@ -11975,7 +11997,9 @@ def mobile_my_today():
             'spare_parts': package_parts,
             'workorders': package_orders,
             'readiness': {
-                'vehicle_confirmed': bool(package_vehicles),
+                'vehicle_assigned': bool(package_vehicles),
+                'departure_confirmed': bool(package_schedule_ids) and len(confirmed_schedule_ids) == len(set(package_schedule_ids)),
+                'departure_pending_count': len(set(package_schedule_ids) - confirmed_schedule_ids),
                 'parts_count': sum(int(p.get('quantity') or 1) for p in package_parts),
                 'linked_workorders': len(package_orders),
             },
@@ -12125,6 +12149,9 @@ def mobile_today_execution():
             except Exception: order_ids = []
             vehicle_id = vehicle_days.get(today)
             vehicle = db.execute("SELECT id, plate_no FROM vehicles WHERE id=?", (vehicle_id,)).fetchone() if vehicle_id else None
+            confirmation = db.execute("""SELECT vehicle_confirmed, parts_confirmed, note, confirmed_at
+                FROM plan_departure_confirmations WHERE schedule_id=? AND user_id=? AND work_date=?""",
+                (p['plan_schedule_id'], user['id'], today)).fetchone()
             sites = db.execute("""SELECT pi.site_id, s.name, s.type, s.code,
                     COUNT(*) AS total, SUM(CASE WHEN pi.result IS NOT NULL THEN 1 ELSE 0 END) AS completed,
                     SUM(CASE WHEN pi.result='abnormal' THEN 1 ELSE 0 END) AS abnormal
@@ -12135,9 +12162,56 @@ def mobile_today_execution():
                 'plan_id': p['id'], 'schedule_id': p['plan_schedule_id'], 'schedule_type': p['schedule_type'],
                 'version': p['version'], 'status': p['status'], 'progress': p['completion_rate'],
                 'vehicle': dict(vehicle) if vehicle else None, 'spare_parts': parts, 'work_order_ids': order_ids,
+                'departure_confirmation': dict(confirmation) if confirmation else None,
                 'remarks': p['remarks'], 'sites': [dict(s) for s in sites],
             })
         return jsonify({'date': today, 'packages': packages})
+
+
+@app.route('/api/mobile/execution-plans/<int:plan_id>/departure-confirmation', methods=['POST'])
+@login_required
+def mobile_confirm_departure_resources(plan_id):
+    """记录出发前资源确认；这是软确认，不会阻断执行或触发车辆/库存变更。"""
+    user = g.current_user
+    data = request.get_json(silent=True) or {}
+    # 确认只属于当前出发日，客户端不能把今天的执行包写成其他日期的记录。
+    today = datetime.now().strftime('%Y-%m-%d')
+    note = (data.get('note') or '').strip()[:200]
+    vehicle_confirmed = 1 if data.get('vehicle_confirmed', True) else 0
+    parts_confirmed = 1 if data.get('parts_confirmed', True) else 0
+    with get_db() as db:
+        execution = db.execute("""SELECT ip.plan_schedule_id, ps.version FROM insp_plans ip
+            JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+            WHERE ip.id=? AND ip.assignee_id=? AND ip.generate_date=?
+              AND ip.status IN ('active','completed') AND ps.status='approved'""",
+            (plan_id, user['id'], today)).fetchone()
+        if not execution:
+            return jsonify({'error': '该执行包不存在、未批准或不属于当前用户'}), 404
+        schedule_id = execution['plan_schedule_id']
+        previous = db.execute("""SELECT vehicle_confirmed, parts_confirmed, note, confirmed_at
+            FROM plan_departure_confirmations WHERE schedule_id=? AND user_id=? AND work_date=?""",
+            (schedule_id, user['id'], today)).fetchone()
+        changed = (not previous or previous['vehicle_confirmed'] != vehicle_confirmed
+                   or previous['parts_confirmed'] != parts_confirmed or previous['note'] != note)
+        if changed:
+            db.execute("""INSERT INTO plan_departure_confirmations
+                (schedule_id, user_id, work_date, vehicle_confirmed, parts_confirmed, note, confirmed_at)
+                VALUES (?,?,?,?,?,?,datetime('now','localtime'))
+                ON CONFLICT(schedule_id, user_id, work_date) DO UPDATE SET
+                  vehicle_confirmed=excluded.vehicle_confirmed,
+                  parts_confirmed=excluded.parts_confirmed,
+                  note=excluded.note,
+                  confirmed_at=datetime('now','localtime')""",
+                (schedule_id, user['id'], today, vehicle_confirmed, parts_confirmed, note))
+            _ps_record_event(db, schedule_id, execution['version'], 'departure_resources_confirmed', user['id'], {
+                'work_date': today, 'vehicle_confirmed': bool(vehicle_confirmed),
+                'parts_confirmed': bool(parts_confirmed),
+            })
+        row = db.execute("""SELECT vehicle_confirmed, parts_confirmed, note, confirmed_at
+            FROM plan_departure_confirmations WHERE schedule_id=? AND user_id=? AND work_date=?""",
+            (schedule_id, user['id'], today)).fetchone()
+        db.commit()
+    return jsonify({'success': True, 'schedule_id': schedule_id, 'confirmation': dict(row)})
 
 
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>')

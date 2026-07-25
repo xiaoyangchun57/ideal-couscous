@@ -40,7 +40,11 @@
     </view>
     <view class="package-line">
       <text class="package-label">车辆</text>
-      <text class="package-value {{workPackage.readiness.vehicle_confirmed ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_confirmed ? '已确认' : '待确认'}}</text>
+      <text class="package-value {{workPackage.readiness.vehicle_assigned ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_assigned ? '已安排' : '未安排'}}</text>
+    </view>
+    <view class="package-line">
+      <text class="package-label">出发资源</text>
+      <text class="package-value {{workPackage.readiness.departure_confirmed ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.departure_confirmed ? '已确认' : ('待确认 ' + workPackage.readiness.departure_pending_count + ' 个执行包')}}</text>
     </view>
     <view class="package-line">
       <text class="package-label">备件</text>

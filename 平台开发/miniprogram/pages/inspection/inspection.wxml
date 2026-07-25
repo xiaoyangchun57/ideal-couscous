@@ -19,6 +19,20 @@
     </view>
     <text class="package-vehicle" wx:if="{{currentPackage.vehicle}}">{{currentPackage.vehicle.plate_no}}</text>
   </view>
+  <view class="departure-confirmation" wx:if="{{currentPackage}}">
+    <view class="departure-copy">
+      <text class="departure-label">出发资源</text>
+      <text class="departure-hint">仅留痕，不锁车、不扣库</text>
+    </view>
+    <view class="departure-action">
+      <text class="departure-status {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? 'departure-confirmed' : 'departure-pending'}}">
+        {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? '已确认' : '待确认'}}
+      </text>
+      <view class="departure-button" wx:if="{{!(currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed)}}" bindtap="onConfirmDeparture">
+        {{confirmingDeparture ? '提交中…' : '一键确认'}}
+      </view>
+    </view>
+  </view>
 
   <!-- 站点选择 -->
   <scroll-view wx:if="{{sites.length}}" scroll-x class="site-chips" enhanced show-scrollbar="{{false}}">

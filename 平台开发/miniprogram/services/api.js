@@ -17,6 +17,9 @@ const api = {
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
   executionSiteTasks: (planId, siteId) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId, 'GET'),
+  // 出发前资源软确认：仅留痕，不锁车、不扣库，也不阻断现场巡检。
+  confirmDepartureResources: (planId, payload) =>
+    request('/api/mobile/execution-plans/' + planId + '/departure-confirmation', 'POST', payload || {}),
 
   // 站点任务（含已完成）
   siteTasks: (siteId) => request('/api/mobile/site-tasks/' + siteId, 'GET'),

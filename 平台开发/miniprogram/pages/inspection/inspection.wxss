@@ -6,6 +6,15 @@
 .package-title { display: block; color: var(--text); font-size: 28rpx; font-weight: 500; }
 .package-meta { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
 .package-vehicle { color: var(--brand); font-size: 24rpx; font-weight: 500; }
+.departure-confirmation { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 12rpx; }
+.departure-copy { min-width: 0; display: flex; flex-direction: column; }
+.departure-label { color: var(--text); font-size: 25rpx; font-weight: 500; }
+.departure-hint { margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
+.departure-action { display: flex; align-items: center; flex-shrink: 0; }
+.departure-status { font-size: 23rpx; }
+.departure-confirmed { color: var(--green); }
+.departure-pending { color: #A15C00; }
+.departure-button { margin-left: 14rpx; padding: 10rpx 16rpx; color: #FFFFFF; background: var(--brand); border-radius: 10rpx; font-size: 23rpx; line-height: 1; }
 .chip {
   display: inline-block; padding: 12rpx 28rpx; margin-right: 16rpx;
   background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 999rpx;

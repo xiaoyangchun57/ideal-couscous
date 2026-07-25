@@ -35,7 +35,8 @@ Page({
     syncCount: 0,
     stationStage: null,
     sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [] },
-    submitting: false
+    submitting: false,
+    confirmingDeparture: false
   },
 
   onShow() {
@@ -75,6 +76,40 @@ Page({
     const selSiteId = sites[0] && sites[0].id;
     this.setData({ currentPackage, selectedPlanId: planId, sites, selSiteId, categories: [], total: 0, completed: 0 });
     if (selSiteId) this.loadTasks(selSiteId);
+  },
+
+  onConfirmDeparture() {
+    const currentPackage = this.data.currentPackage;
+    if (!currentPackage || this.data.confirmingDeparture) return;
+    wx.showModal({
+      title: '确认出发资源',
+      content: '确认已核验本次车辆和备件准备情况？此操作仅留痕，不锁车、不扣库，也不阻断巡检。',
+      confirmText: '确认留痕',
+      success: (result) => {
+        if (!result.confirm) return;
+        this.setData({ confirmingDeparture: true });
+        api.confirmDepartureResources(currentPackage.plan_id, {
+          vehicle_confirmed: true,
+          parts_confirmed: true
+        }).then(res => {
+          const confirmation = res.confirmation || {
+            vehicle_confirmed: 1,
+            parts_confirmed: 1
+          };
+          const packages = (this.data.packages || []).map(item =>
+            item.plan_id === currentPackage.plan_id
+              ? Object.assign({}, item, { departure_confirmation: confirmation })
+              : item
+          );
+          const updatedPackage = packages.find(item => item.plan_id === currentPackage.plan_id);
+          this.setData({ packages, currentPackage: updatedPackage, confirmingDeparture: false });
+          wx.showToast({ title: '已记录资源确认', icon: 'success' });
+        }).catch(() => {
+          this.setData({ confirmingDeparture: false });
+          wx.showToast({ title: '确认记录失败，请重试', icon: 'none' });
+        });
+      }
+    });
   },
 
   loadTasks(siteId, done) {
