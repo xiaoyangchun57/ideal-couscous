@@ -519,9 +519,7 @@ export default function AuditPage() {
           message.error('驳回需填写原因'); setProcessing(false); return;
         }
         const realId = item.id.replace('pr_', '');
-        const endpoint = action === 'approve'
-          ? `/inspection-v2/parts-request/${realId}/approve`
-          : `/inspection-v2/parts-request/${realId}/reject`;
+        const endpoint = `/parts/requests/${realId}/${action === 'approve' ? 'approve' : 'reject'}`;
         const result = await api.put(endpoint, { comment: reviewComment, approver_id: reviewerId });
         if (result && !result.error) {
           message.success(action === 'approve' ? '备件预申报已批准' : '已驳回');

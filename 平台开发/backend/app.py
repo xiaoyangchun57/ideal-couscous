@@ -9167,10 +9167,12 @@ def audit_pending():
         
         # 3. 巡检备件预申报待审项（parts_requests, status='pending'）
         prs = db.execute("""
-            SELECT pr.id, pr.plan_id, pr.requester_id, pr.created_at as submit_time,
-                   p.plan_name, u.real_name as requester_name
+            SELECT pr.id, pr.plan_id, pr.site_id, pr.work_order_no, pr.request_no, pr.reason,
+                   pr.requester_id, pr.created_at as submit_time, p.plan_name, s.name AS site_name,
+                   u.real_name as requester_name
             FROM parts_requests pr
             LEFT JOIN insp_plans p ON pr.plan_id = p.id
+            LEFT JOIN sites s ON s.id=pr.site_id
             LEFT JOIN users u ON pr.requester_id = u.id
             WHERE pr.status = 'pending'
             ORDER BY pr.created_at DESC
@@ -9181,8 +9183,10 @@ def audit_pending():
                 SELECT s.id as site_id, s.name FROM insp_plan_items i JOIN sites s ON i.site_id = s.id
                 WHERE i.plan_id = ? LIMIT 1
             """, (pd['plan_id'],)).fetchone()
-            pd['site_name'] = site_row['name'] if site_row else ''
-            if allowed is not None and (site_row['site_id'] if site_row else None) not in allowed:
+            effective_site_id = pd.get('site_id') or (site_row['site_id'] if site_row else None)
+            pd['site_id'] = effective_site_id
+            pd['site_name'] = pd.get('site_name') or (site_row['name'] if site_row else '')
+            if allowed is not None and effective_site_id not in allowed:
                 continue
             items = db.execute("""
                 SELECT pri.part_sku, pri.quantity,
@@ -9193,10 +9197,10 @@ def audit_pending():
             """, (pd['id'],)).fetchall()
             pd['parts_detail'] = [dict(x) for x in items]
             pd['source_type'] = 'parts_request'
-            pd['source_label'] = '备件预申报'
+            pd['source_label'] = '备件申请'
             pd['id'] = f'pr_{pd["id"]}'
-            pd['title'] = f'巡检备件预申报（{len(items)}项）'
-            pd['source_name'] = pd['plan_name'] or f'计划#{pd["plan_id"]}'
+            pd['title'] = f'备件申请（{len(items)}项）'
+            pd['source_name'] = pd['work_order_no'] or pd['plan_name'] or pd['request_no'] or f'计划#{pd["plan_id"]}'
             pd['requester_name'] = pd.get('requester_name') or ''
             pd['actual_photos'] = 0
             pd['required_photos'] = 0
