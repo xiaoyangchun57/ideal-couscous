@@ -11468,8 +11468,9 @@ def api_parts_requests_list():
     status_f = request.args.get('status', '').strip()
     applicant = request.args.get('applicant', '').strip()
     with get_db() as db:
-        sql = """SELECT r.*, s.name as site_name
-                 FROM spare_part_requests r LEFT JOIN sites s ON r.site_id=s.id WHERE 1=1"""
+        sql = """SELECT r.*, s.name as site_name, u.real_name as requester_name
+                 FROM parts_requests r LEFT JOIN sites s ON r.site_id=s.id
+                 LEFT JOIN users u ON r.requester_id=u.id WHERE 1=1"""
         params = []
         if status_f:
             sql += " AND r.status=?"
@@ -11485,7 +11486,7 @@ def api_parts_requests_list():
 @app.route('/api/parts/requests', methods=['POST'])
 @login_required
 def api_parts_requests_create():
-    """创建备件申请（移动端调用）"""
+    """创建统一 v2 备件申请；历史 spare_part_requests 不再写入。"""
     data = request.get_json(silent=True) or {}
     site_id = data.get('site_id')
     raw_part_name = (data.get('part_name') or '').strip()
@@ -11493,26 +11494,29 @@ def api_parts_requests_create():
     reason = (data.get('reason') or '').strip()
     work_order_no = (data.get('work_order_no') or '').strip()
     spare_part_id = data.get('spare_part_id') or None
-    applicant = g.current_user['username'] or 'unknown'
+    requester_id = g.current_user['id']
     from datetime import datetime
     today = datetime.now().strftime('%Y%m%d')
     with get_db() as db:
-        part_name = raw_part_name
-        # 关联库存时若未手填名称，自动带出库存名称
-        if spare_part_id and not part_name:
-            inv = db.execute("SELECT part_name FROM spare_parts_inventory WHERE id=?", (spare_part_id,)).fetchone()
-            if inv:
-                part_name = inv['part_name']
-        if not site_id or not part_name:
-            return jsonify({'error': '站点和备件名称不能为空'}), 400
-        count = db.execute("SELECT COUNT(*) as c FROM spare_part_requests WHERE request_no LIKE ?", (f"BJ-{today}%",)).fetchone()['c']
+        allowed = _filter_site_ids()
+        if allowed is not None and site_id not in allowed:
+            return jsonify({'error': '无权为非本人站点申请备件'}), 403
+        inv = db.execute("SELECT * FROM spare_parts_inventory WHERE id=?", (spare_part_id,)).fetchone() if spare_part_id else None
+        if not inv and raw_part_name:
+            inv = db.execute("SELECT * FROM spare_parts_inventory WHERE part_name=? ORDER BY id LIMIT 1", (raw_part_name,)).fetchone()
+        if not site_id or not inv or quantity <= 0:
+            return jsonify({'error': '请选择库存中的备件，并填写有效站点和数量'}), 400
+        count = db.execute("SELECT COUNT(*) as c FROM parts_requests WHERE request_no LIKE ?", (f"BJ-{today}%",)).fetchone()['c']
         request_no = f"BJ-{today}-{count+1:03d}"
-        db.execute("""INSERT INTO spare_part_requests
-            (request_no,site_id,applicant,part_name,quantity,reason,work_order_no,spare_part_id)
-            VALUES (?,?,?,?,?,?,?,?)""",
-            (request_no, site_id, applicant, part_name, quantity, reason, work_order_no, spare_part_id))
+        cur = db.execute("""INSERT INTO parts_requests
+            (plan_id,requester_id,site_id,work_order_no,request_no,source,reason,status)
+            VALUES (0,?,?,?,?,?,?, 'pending')""",
+            (requester_id, site_id, work_order_no, request_no,
+             'workorder' if work_order_no else 'field', reason))
+        db.execute("INSERT INTO parts_request_items (request_id,part_sku,quantity,part_id) VALUES (?,?,?,?)",
+                   (cur.lastrowid, inv['part_code'], quantity, inv['id']))
         db.commit()
-    return jsonify({'success': True, 'request_no': request_no})
+    return jsonify({'success': True, 'id': cur.lastrowid, 'request_no': request_no, 'status': 'pending'})
 
 
 @app.route('/api/parts/requests/mine')
@@ -11521,66 +11525,91 @@ def api_parts_requests_mine():
     """我的备件申请记录（移动端）"""
     applicant = g.current_user['username'] or 'unknown'
     with get_db() as db:
-        rows = db.execute("""SELECT r.*, s.name as site_name
-            FROM spare_part_requests r LEFT JOIN sites s ON r.site_id=s.id
-            WHERE r.applicant=? ORDER BY r.created_at DESC""", (applicant,)).fetchall()
+        rows = db.execute("""SELECT r.*, s.name as site_name FROM parts_requests r
+            LEFT JOIN sites s ON r.site_id=s.id WHERE r.requester_id=? ORDER BY r.created_at DESC""",
+            (g.current_user['id'],)).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route('/api/parts/requests/<int:rid>/approve', methods=['PUT'])
 @login_required
 def api_parts_request_approve(rid):
-    """审批通过：更新状态 + 扣减库存"""
-    if g.current_user['role'] != 'admin':
-        return jsonify({'error': '仅管理员可审批'}), 403
+    """审批 v2 申请：仅预留库存，现场领用时才实际扣减。"""
+    denied = require_approver()
+    if denied: return denied
     data = request.get_json(silent=True) or {}
     comment = data.get('comment', '审批通过')
     with get_db() as db:
-        req = db.execute("SELECT * FROM spare_part_requests WHERE id=?", (rid,)).fetchone()
+        req = db.execute("SELECT * FROM parts_requests WHERE id=?", (rid,)).fetchone()
         if not req:
             return jsonify({'error': '申请不存在'}), 404
         if req['status'] != 'pending':
             return jsonify({'error': '该申请已处理'}), 400
-        # 更新申请状态
-        db.execute("""UPDATE spare_part_requests SET status='approved', approver=?,
-            approval_comment=?, updated_at=datetime('now','localtime') WHERE id=?""",
-            (g.current_user['username'] or 'admin', comment, rid))
-        # 尝试扣减库存：查找匹配的备件（按名称模糊匹配）
-        inv = db.execute("""SELECT * FROM spare_parts_inventory
-            WHERE part_name LIKE ? ORDER BY quantity DESC LIMIT 1""",
-            (f"%{req['part_name']}%",)).fetchone()
-        if inv:
-            new_qty = max(0, inv['quantity'] - req['quantity'])
-            db.execute("UPDATE spare_parts_inventory SET quantity=?, updated_at=datetime('now','localtime') WHERE id=?", (new_qty, inv['id']))
-            db.execute("""INSERT INTO inventory_logs (part_id,type,quantity,ref_type,ref_id,operator,remark,work_order_no)
-                VALUES (?,?,?,'request',?,?,?,?)""",
-                (inv['id'], 'out', req['quantity'], rid,
-                 g.current_user['username'] or 'admin',
-                 f"备件申请 #{req['request_no']}",
-                 req['work_order_no'] if req['work_order_no'] else ''))
+        items = db.execute("SELECT * FROM parts_request_items WHERE request_id=?", (rid,)).fetchall()
+        for item in items:
+            inv = db.execute("SELECT * FROM spare_parts_inventory WHERE id=?", (item['part_id'],)).fetchone()
+            occupied = db.execute("SELECT COALESCE(SUM(reserved_quantity-issued_quantity),0) AS n FROM parts_request_reservations WHERE part_id=? AND status IN ('reserved','issued')", (item['part_id'],)).fetchone()['n']
+            if not inv or inv['quantity'] - occupied < item['quantity']:
+                return jsonify({'error': f'备件库存不足：{item["part_sku"]}'}), 400
+        db.execute("UPDATE parts_requests SET status='approved', approver_id=?, approve_comment=?, approved_at=datetime('now','localtime') WHERE id=?",
+                   (g.current_user['id'], comment, rid))
+        for item in items:
+            db.execute("INSERT INTO parts_request_reservations (request_id,part_id,requested_quantity,reserved_quantity,status) VALUES (?,?,?,?, 'reserved')",
+                       (rid, item['part_id'], item['quantity'], item['quantity']))
         db.commit()
-    return jsonify({'success': True, 'message': '已批准，库存已扣减'})
+    return jsonify({'success': True, 'message': '已批准，库存已预留'})
 
 
 @app.route('/api/parts/requests/<int:rid>/reject', methods=['PUT'])
 @login_required
 def api_parts_request_reject(rid):
-    """驳回申请"""
-    if g.current_user['role'] != 'admin':
-        return jsonify({'error': '仅管理员可审批'}), 403
+    """驳回 v2 申请；未审批申请没有库存变动。"""
+    denied = require_approver()
+    if denied: return denied
     data = request.get_json(silent=True) or {}
     comment = data.get('comment', '驳回')
     with get_db() as db:
-        req = db.execute("SELECT * FROM spare_part_requests WHERE id=?", (rid,)).fetchone()
+        req = db.execute("SELECT * FROM parts_requests WHERE id=?", (rid,)).fetchone()
         if not req:
             return jsonify({'error': '申请不存在'}), 404
         if req['status'] != 'pending':
             return jsonify({'error': '该申请已处理'}), 400
-        db.execute("""UPDATE spare_part_requests SET status='rejected', approver=?,
-            approval_comment=?, updated_at=datetime('now','localtime') WHERE id=?""",
-            (g.current_user['username'] or 'admin', comment, rid))
+        db.execute("UPDATE parts_requests SET status='rejected', approver_id=?, approve_comment=? WHERE id=?",
+                   (g.current_user['id'], comment, rid))
         db.commit()
     return jsonify({'success': True, 'message': '已驳回'})
+
+
+@app.route('/api/parts/requests/<int:rid>/issue', methods=['POST'])
+@login_required
+def api_parts_request_issue(rid):
+    """现场确认领用：仅此处实际扣减库存。"""
+    data = request.get_json(silent=True) or {}
+    requested = data.get('items') or []
+    with get_db() as db:
+        req = db.execute("SELECT * FROM parts_requests WHERE id=?", (rid,)).fetchone()
+        if not req:
+            return jsonify({'error': '申请不存在'}), 404
+        if req['requester_id'] != g.current_user['id'] and g.current_user['role'] not in ('admin', 'manager'):
+            return jsonify({'error': '只能领用自己的申请'}), 403
+        if req['status'] not in ('approved', 'issued'):
+            return jsonify({'error': '仅已批准申请可现场领用'}), 400
+        issued = 0
+        for item in requested:
+            part_id, qty = int(item.get('part_id') or 0), int(item.get('quantity') or 0)
+            reservation = db.execute("SELECT * FROM parts_request_reservations WHERE request_id=? AND part_id=? AND status IN ('reserved','issued')", (rid, part_id)).fetchone()
+            inv = db.execute("SELECT quantity FROM spare_parts_inventory WHERE id=?", (part_id,)).fetchone()
+            if not reservation or qty <= 0 or qty > reservation['reserved_quantity'] - reservation['issued_quantity'] or not inv or inv['quantity'] < qty:
+                return jsonify({'error': f'备件#{part_id}无足够已预留数量'}), 400
+            db.execute("UPDATE spare_parts_inventory SET quantity=quantity-?, updated_at=datetime('now','localtime') WHERE id=?", (qty, part_id))
+            db.execute("UPDATE parts_request_reservations SET issued_quantity=issued_quantity+?, status='issued', updated_at=datetime('now','localtime') WHERE id=?", (qty, reservation['id']))
+            db.execute("INSERT INTO inventory_logs (part_id,type,quantity,ref_type,ref_id,operator,remark) VALUES (?, 'out', ?, 'parts_request', ?, ?, ?)",
+                       (part_id, qty, rid, g.current_user.get('real_name') or g.current_user.get('username'), f'备件申请#{req["request_no"]}现场领用'))
+            issued += qty
+        remaining = db.execute("SELECT COALESCE(SUM(reserved_quantity-issued_quantity),0) AS n FROM parts_request_reservations WHERE request_id=?", (rid,)).fetchone()['n']
+        db.execute("UPDATE parts_requests SET status=? WHERE id=?", ('issued' if remaining == 0 else 'approved', rid))
+        db.commit()
+    return jsonify({'success': True, 'issued_quantity': issued, 'remaining_reserved_quantity': remaining})
 
 
 # ===================== 站点过滤辅助函数 =====================
