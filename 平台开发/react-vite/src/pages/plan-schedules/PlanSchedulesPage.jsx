@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
-  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined,
+  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
@@ -70,6 +70,8 @@ export default function PlanSchedulesPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [routeDay, setRouteDay] = useState(null);
   const [acting, setActing] = useState(false);
+  const [draftRecommendations, setDraftRecommendations] = useState([]);
+  const [recommendationLoading, setRecommendationLoading] = useState(false);
 
   const [tableWrapRef, tableBodyHeight] = useTableAutoHeight({ headerOffset: 40, deps: [list.length] });
 
@@ -80,18 +82,38 @@ export default function PlanSchedulesPage() {
       if (statusFilter) params.push(`status=${statusFilter}`);
       if (typeFilter) params.push(`schedule_type=${typeFilter}`);
       if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const [rows, overview] = await Promise.all([
+      const [rows, overview, recommendationData] = await Promise.all([
         api.get('/plan-schedules' + (params.length ? '?' + params.join('&') : '')),
         canApprove ? api.get('/plan-schedules/overview').catch(() => null) : Promise.resolve(null),
+        api.get('/plan-schedules/draft-recommendations').catch(() => ({ recommendations: [] })),
       ]);
       setList(Array.isArray(rows) ? rows : []);
       setTeamOverview(overview);
+      setDraftRecommendations(recommendationData?.recommendations || []);
     } catch {
       message.error('计划列表加载失败');
     } finally {
       setLoading(false);
     }
   }, [statusFilter, typeFilter, attentionFilter, canApprove]);
+
+  const createRecommendedDraft = async (item) => {
+    setRecommendationLoading(true);
+    try {
+      const result = await api.post('/plan-schedules/draft-recommendations', {
+        user_id: item.user_id,
+        schedule_type: item.schedule_type,
+        period_start: item.period_start,
+      });
+      if (result?.error) { message.error(result.error); return; }
+      message.success('已生成待确认草稿；尚未派发执行任务或占用资源');
+      load();
+    } catch (error) {
+      message.error(error?.error || '生成草稿失败，请刷新后重试');
+    } finally {
+      setRecommendationLoading(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -313,6 +335,32 @@ export default function PlanSchedulesPage() {
           </Col>
         ))}
       </Row>
+
+      {draftRecommendations.length > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          icon={<BulbOutlined />}
+          message="到期巡检排程建议"
+          description={
+            <Space wrap size={[8, 6]}>
+              {draftRecommendations.slice(0, 3).map(item => (
+                <Space key={`${item.user_id}-${item.schedule_type}-${item.period_start}`} size={4}>
+                  <Text style={{ fontSize: 12 }}>
+                    {item.user_name} · {TYPE_MAP[item.schedule_type] || item.schedule_type}：
+                    {item.site_count}站 / {item.due_item_count}项到期
+                  </Text>
+                  <Button size="small" type="link" loading={recommendationLoading}
+                    onClick={() => createRecommendedDraft(item)}>
+                    生成待确认草稿
+                  </Button>
+                </Space>
+              ))}
+              {draftRecommendations.length > 3 && <Text type="secondary">另有 {draftRecommendations.length - 3} 条建议</Text>}
+            </Space>
+          }
+        />
+      )}
 
       {canApprove && teamOverview && (
         <>

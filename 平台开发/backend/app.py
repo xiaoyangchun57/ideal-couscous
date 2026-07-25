@@ -116,6 +116,7 @@ from flask import Flask, jsonify, request, g, send_from_directory, send_file
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos
+from schedule_draft_recommendations import build_draft_recommendations
 import os, uuid, urllib.request, urllib.error, json as _json
 try:
     from openpyxl import Workbook
@@ -13647,6 +13648,98 @@ def _ps_parse_row(row):
         else:
             r[f] = empty if empty is not None else None
     return r
+
+
+@app.route('/api/plan-schedules/draft-recommendations', methods=['GET'])
+@login_required
+def api_plan_schedule_draft_recommendations():
+    """展示由到期检查项形成的排程草稿候选，不创建执行任务。"""
+    u = g.current_user
+    try:
+        remind_days = max(0, int(request.args.get('remind_days', 1)))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'remind_days 必须是非负整数'}), 400
+    requested_user_id = request.args.get('user_id')
+    if requested_user_id and u['role'] in ('admin', 'manager'):
+        target_user_id = int(requested_user_id)
+    elif requested_user_id and int(requested_user_id) != int(u['id']):
+        return jsonify({'error': '只能查看自己的排程草稿建议'}), 403
+    elif u['role'] in ('admin', 'manager') and not requested_user_id:
+        target_user_id = None
+    else:
+        target_user_id = u['id']
+
+    with get_db() as db:
+        result = build_draft_recommendations(db, remind_days=remind_days, user_id=target_user_id)
+        user_ids = {item['user_id'] for item in result['recommendations']}
+        names = {}
+        if user_ids:
+            placeholders = ','.join('?' * len(user_ids))
+            names = {r['id']: r['real_name'] for r in db.execute(
+                f'SELECT id, real_name FROM users WHERE id IN ({placeholders})', list(user_ids)).fetchall()}
+    for item in result['recommendations']:
+        item['user_name'] = names.get(item['user_id'], f'用户{item["user_id"]}')
+        item['schedule_type_cn'] = _PS_FREQ_CN.get(item['schedule_type'], item['schedule_type'])
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/plan-schedules/draft-recommendations', methods=['POST'])
+@login_required
+def api_create_plan_schedule_from_draft_recommendation():
+    """将一个候选落为 ``plan_schedules.draft``。
+
+    候选始终由服务端重新计算，客户端不能自带站点、车辆或备件数据；因此这个操作
+    只生成待编辑草稿，绝不生成 ``insp_plans`` 或占用任何资源。
+    """
+    u = g.current_user
+    data = request.get_json(silent=True) or {}
+    try:
+        target_user_id = int(data.get('user_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': '缺少有效的 user_id'}), 400
+    schedule_type = data.get('schedule_type')
+    period_start = data.get('period_start')
+    if schedule_type not in _PS_FREQ_CN or not period_start:
+        return jsonify({'error': '缺少有效的计划类型或周期开始日期'}), 400
+    if u['role'] not in ('admin', 'manager') and target_user_id != int(u['id']):
+        return jsonify({'error': '只能为自己创建排程草稿'}), 403
+
+    with get_db() as db:
+        candidates = build_draft_recommendations(db, user_id=target_user_id)['recommendations']
+        candidate = next((item for item in candidates
+                          if item['schedule_type'] == schedule_type
+                          and item['period_start'] == period_start), None)
+        if not candidate:
+            existing = db.execute("""
+                SELECT id FROM plan_schedules
+                 WHERE user_id=? AND schedule_type=? AND period_start=?
+                   AND status NOT IN ('rejected', 'archived') LIMIT 1
+            """, (target_user_id, schedule_type, period_start)).fetchone()
+            if existing:
+                return jsonify({'error': '该周期已有排程草稿或已提交计划', 'schedule_id': existing['id']}), 409
+            return jsonify({'error': '该到期建议已失效，请刷新后重试'}), 404
+
+        cur = db.execute("""
+            INSERT INTO plan_schedules
+                (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days,
+                 spare_parts, work_order_ids, status, remarks, tasks_generated)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0)
+        """, (target_user_id, schedule_type, candidate['period_start'], candidate['period_end'],
+              json.dumps(candidate['plan_data'], ensure_ascii=False), '{}', '[]', '[]', 'draft',
+              '系统根据到期检查项生成的草稿，请排程人确认日期、车辆和备件后再提交'))
+        schedule_id = cur.lastrowid
+        _ps_record_event(db, schedule_id, 1, 'draft_recommended', u['id'], {
+            'source': 'due_inspection_schedules',
+            'schedule_ids': candidate['schedule_ids'],
+            'due_item_count': candidate['due_item_count'],
+        })
+        db.commit()
+        row = db.execute('SELECT * FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()
+    return jsonify({
+        'success': True,
+        'schedule': _ps_parse_row(row),
+        'message': '已生成待确认的排程草稿；尚未创建执行任务、锁定车辆或预留备件。',
+    }), 201
 
 
 def _ps_check_vehicle_conflicts(db, user_id, vehicle_days, exclude_schedule_id=None):
