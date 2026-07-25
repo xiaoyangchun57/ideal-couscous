@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { Table, Card, Button, Space, Tag, Typography, message, Modal, Form, Select, Input, Empty } from 'antd';
-import { PlusOutlined, ReloadOutlined, EnvironmentOutlined, FileTextOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined, EnvironmentOutlined, FileTextOutlined, CheckOutlined, InboxOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 
 const { Text, Title } = Typography;
 
 const REPORT_TYPE = { sensory: '感官异常', equipment: '设备异常', environment: '环境异常', violation: '违规操作', pollution: '污染事件' };
-const STATUS_MAP = { open: { label: '待处置', color: 'orange' }, dispatched: { label: '已派单', color: 'blue' }, resolved: { label: '已解决', color: 'green' }, archived: { label: '已归档', color: 'default' } };
+const STATUS_MAP = { open: { label: '待处置', color: 'orange' }, dispatched: { label: '已派单', color: 'blue' }, verified: { label: '已核实', color: 'cyan' }, resolved: { label: '已解决', color: 'green' }, archived: { label: '已归档', color: 'default' } };
 
 export default function ReportsPage() {
   const { user } = useAuth();
@@ -18,6 +19,7 @@ export default function ReportsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [form] = Form.useForm();
   const canCreate = ['admin', 'manager', 'operator'].includes(user?.role);
+  const canManage = ['admin', 'manager'].includes(user?.role);
 
   const load = async () => {
     setLoading(true);
@@ -43,16 +45,40 @@ export default function ReportsPage() {
     } catch (e) { message.error('提交失败：' + e.message); }
   };
 
+  const onVerify = async (record) => {
+    try {
+      await api.post(`/manual-reports/${record.id}/verify`, {});
+      message.success('上报已核实，关联工单继续处置');
+      load();
+    } catch (e) { message.error(`核实失败：${e.message}`); }
+  };
+
+  const onArchive = async (record) => {
+    try {
+      await api.post(`/manual-reports/${record.id}/archive`, {});
+      message.success('上报已归档');
+      load();
+    } catch (e) { message.error(`归档失败：${e.message}`); }
+  };
+
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     { title: '类型', dataIndex: 'report_type', width: 90, render: v => <Tag color="orange">{REPORT_TYPE[v] || v}</Tag> },
     { title: '站点', dataIndex: 'site_name', width: 120 },
     { title: '描述', dataIndex: 'description', ellipsis: true },
     { title: '位置', width: 110, render: (_, r) => r.gps_lat ? <Text code style={{fontSize:11}}>{Number(r.gps_lat).toFixed(3)},{Number(r.gps_lng).toFixed(3)}</Text> : '-' },
-    { title: '工单', dataIndex: 'order_no', width: 150, render: v => v ? <Tag color="blue">{v}</Tag> : '-' },
+    { title: '工单', dataIndex: 'order_no', width: 150, render: v => v ? <Link to={`/workorders?search=${encodeURIComponent(v)}`}><Tag color="blue">{v}</Tag></Link> : '-' },
     { title: '上报人', dataIndex: 'reporter_name', width: 100 },
     { title: '时间', dataIndex: 'reported_at', width: 160, render: v => <Text style={{fontSize:11}}>{v}</Text> },
     { title: '状态', dataIndex: 'status', width: 90, render: v => { const s = STATUS_MAP[v] || {label:v,color:'default'}; return <Tag color={s.color}>{s.label}</Tag>; } },
+    ...(canManage ? [{
+      title: '操作', width: 170, fixed: 'right',
+      render: (_, r) => <Space size={4}>
+        {r.status === 'dispatched' && <Button size="small" icon={<CheckOutlined />} onClick={() => onVerify(r)}>核实</Button>}
+        {r.status === 'resolved' && <Button size="small" icon={<InboxOutlined />} onClick={() => onArchive(r)}>归档</Button>}
+        {!['dispatched', 'resolved'].includes(r.status) && <Text type="secondary">—</Text>}
+      </Space>,
+    }] : []),
   ];
 
   const statusSummary = useMemo(() => Object.keys(STATUS_MAP).map((status) => ({

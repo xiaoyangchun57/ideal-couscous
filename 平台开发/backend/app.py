@@ -518,6 +518,25 @@ def migrate_reagent_qc():
         db.commit()
 
 
+def migrate_manual_report_closure():
+    """为人工异常上报补齐核实、解决和归档的审计字段。"""
+    with get_db() as db:
+        try:
+            cols = {r['name'] for r in db.execute("PRAGMA table_info(manual_reports)").fetchall()}
+            for col, ctype in (
+                ('verification_note', "TEXT DEFAULT ''"),
+                ('verified_by', 'INTEGER'),
+                ('verified_at', 'TEXT'),
+                ('archived_by', 'INTEGER'),
+                ('archived_at', 'TEXT'),
+                ('resolved_at', 'TEXT'),
+            ):
+                if col not in cols:
+                    db.execute(f"ALTER TABLE manual_reports ADD COLUMN {col} {ctype}")
+            db.commit()
+        except Exception as e:
+            print(f'[Migrate] 人工上报闭环字段迁移跳过: {e}')
+
 def migrate_parts_requests_v2():
     """将 parts_requests 扩展为统一备件单据模型。
     历史 spare_part_requests 保持只读；本迁移不搬迁、不扣库。
@@ -5017,6 +5036,7 @@ def update_workorder_status(order_no):
                 "UPDATE hotline_events SET status='closed' WHERE related_order_no=? AND status != 'closed'",
                 (order_no,)
             )
+            _mark_manual_reports_resolved(db, order_no)
             # 3. 备件库存扣减（used_parts为JSON格式: [{part_id, quantity}]）
             if cur['used_parts']:
                 try:
@@ -5099,6 +5119,7 @@ def approve_workorder(order_no):
             "UPDATE hotline_events SET status='closed' WHERE related_order_no=? AND status != 'closed'",
             (order_no,)
         )
+        _mark_manual_reports_resolved(db, order_no)
         if cur['used_parts']:
             try:
                 import json as _json
@@ -14285,7 +14306,7 @@ def _ps_site_scores(db, site_ids):
             reports = db.execute("""
                 SELECT id, report_type, description, reported_at
                 FROM manual_reports
-                WHERE site_id=? AND status NOT IN ('archived', 'closed')
+                WHERE site_id=? AND status NOT IN ('resolved', 'archived', 'closed')
                   AND reported_at >= datetime('now', '-30 days')
                 ORDER BY reported_at DESC
             """, (sid,)).fetchall()
@@ -15047,7 +15068,7 @@ def api_plan_schedules_suggestions():
             try:
                 reports = db.execute("""
                     SELECT id, report_type, description, reported_at FROM manual_reports
-                    WHERE site_id=? AND status NOT IN ('archived', 'closed')
+                    WHERE site_id=? AND status NOT IN ('resolved', 'archived', 'closed')
                       AND reported_at >= datetime('now', '-30 days')
                     ORDER BY reported_at DESC
                 """, (sid,)).fetchall()
@@ -15296,6 +15317,85 @@ def api_manual_reports_create():
 
         row = db.execute('SELECT * FROM manual_reports WHERE id=?', (report_id,)).fetchone()
         return jsonify(dict(row)), 201
+
+
+def _mark_manual_reports_resolved(db, order_no):
+    """工单关单时回写其派生的人工异常上报；不自动归档，保留管理者复盘入口。"""
+    rows = db.execute(
+        "SELECT id FROM manual_reports WHERE order_no=? AND status NOT IN ('resolved', 'archived')",
+        (order_no,),
+    ).fetchall()
+    if not rows:
+        return 0
+    db.execute(
+        """UPDATE manual_reports SET status='resolved', resolved_at=datetime('now','localtime')
+           WHERE order_no=? AND status NOT IN ('resolved', 'archived')""",
+        (order_no,),
+    )
+    for row in rows:
+        db.execute(
+            """INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark)
+               VALUES (?,?,?,?,?)""",
+            ('manual_report', row['id'], 'resolved', 'system', f'派生工单 {order_no} 已完成，上报已解决'),
+        )
+    return len(rows)
+
+
+@app.route('/api/manual-reports/<int:report_id>/verify', methods=['POST'])
+def api_manual_report_verify(report_id):
+    """管理者核实现场上报真实性；核实不替代工单处置，也不自动关单。"""
+    denied = require_approver()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    note = (data.get('note') or '').strip()
+    with get_db() as db:
+        report = db.execute('SELECT id, status, order_no FROM manual_reports WHERE id=?', (report_id,)).fetchone()
+        if not report:
+            return jsonify({'error': '异常上报不存在'}), 404
+        if report['status'] != 'dispatched':
+            return jsonify({'error': '仅已派单的异常上报可核实'}), 400
+        order = db.execute('SELECT status FROM work_orders WHERE order_no=?', (report['order_no'],)).fetchone()
+        if not order or order['status'] == 'closed':
+            return jsonify({'error': '关联工单不存在或已完成，请刷新后查看处理结果'}), 400
+        db.execute(
+            """UPDATE manual_reports SET status='verified', verification_note=?, verified_by=?,
+               verified_at=datetime('now','localtime') WHERE id=?""",
+            (note, g.current_user['id'], report_id),
+        )
+        db.execute(
+            """INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark)
+               VALUES (?,?,?,?,?)""",
+            ('manual_report', report_id, 'verified', g.current_user.get('real_name') or g.current_user.get('username') or 'manager', note or '管理核实通过'),
+        )
+        db.commit()
+        return jsonify({'success': True, 'status': 'verified'})
+
+
+@app.route('/api/manual-reports/<int:report_id>/archive', methods=['POST'])
+def api_manual_report_archive(report_id):
+    """仅已解决上报允许归档，避免把尚未完成的现场问题从待办中隐藏。"""
+    denied = require_approver()
+    if denied:
+        return denied
+    with get_db() as db:
+        report = db.execute('SELECT id, status FROM manual_reports WHERE id=?', (report_id,)).fetchone()
+        if not report:
+            return jsonify({'error': '异常上报不存在'}), 404
+        if report['status'] != 'resolved':
+            return jsonify({'error': '仅已解决的异常上报可归档'}), 400
+        db.execute(
+            """UPDATE manual_reports SET status='archived', archived_by=?,
+               archived_at=datetime('now','localtime') WHERE id=?""",
+            (g.current_user['id'], report_id),
+        )
+        db.execute(
+            """INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark)
+               VALUES (?,?,?,?,?)""",
+            ('manual_report', report_id, 'archived', g.current_user.get('real_name') or g.current_user.get('username') or 'manager', '异常上报已归档'),
+        )
+        db.commit()
+        return jsonify({'success': True, 'status': 'archived'})
 
 
 # ============================================================
@@ -16195,6 +16295,7 @@ if __name__ == '__main__':
     migrate_vehicle_applications_nullable()
     migrate_plan_schedules()
     migrate_reagent_qc()
+    migrate_manual_report_closure()
     migrate_parts_requests_v2()
     seed_data()
     seed_inspections()

@@ -284,6 +284,12 @@ CREATE TABLE IF NOT EXISTS manual_reports (
     reported_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     order_no TEXT DEFAULT NULL,                 -- 关联工单号
     status TEXT DEFAULT 'open',                 -- 'open'/'dispatched'/'resolved'/'archived'
+    verification_note TEXT DEFAULT '',
+    verified_by INTEGER DEFAULT NULL,
+    verified_at TEXT DEFAULT NULL,
+    resolved_at TEXT DEFAULT NULL,
+    archived_by INTEGER DEFAULT NULL,
+    archived_at TEXT DEFAULT NULL,
     FOREIGN KEY (site_id) REFERENCES sites(id),
     FOREIGN KEY (reporter_id) REFERENCES users(id)
 );
