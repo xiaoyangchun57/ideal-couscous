@@ -374,6 +374,9 @@ def migrate_plan_schedules():
         for col_sql in [
             "ALTER TABLE insp_plans ADD COLUMN plan_schedule_id INTEGER",
             "ALTER TABLE plan_schedules ADD COLUMN previous_vehicle_days TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_spare_parts TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_work_order_ids TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_remarks TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN coverage_exception_reason TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN validation_snapshot TEXT",
             "ALTER TABLE insp_plans ADD COLUMN schedule_version INTEGER DEFAULT 1",
@@ -13826,7 +13829,9 @@ def _ps_parse_row(row):
     """plan_schedules 行 → dict，解析 JSON 字段"""
     r = dict(row)
     for f, empty in (('plan_data', {}), ('vehicle_days', {}), ('spare_parts', []),
-                     ('work_order_ids', []), ('previous_plan_data', None)):
+                     ('work_order_ids', []), ('previous_plan_data', None),
+                     ('previous_vehicle_days', None), ('previous_spare_parts', None),
+                     ('previous_work_order_ids', None)):
         v = r.get(f)
         if v:
             try:
@@ -14750,6 +14755,10 @@ def api_plan_schedules_approve(sid):
             _create_notification(fresh['user_id'], 'plan_schedule', sid, '计划变更已通过',
                                  f'变更原因：{fresh["change_reason"] or "—"}。任务已按新计划同步'
                                  f'（保留{flow["kept"]}个、重建{flow["plans_created"]}个）。', db=db)
+            # 二次审批完成后清理临时回滚快照；完整变更事实已写入审计事件。
+            db.execute("""UPDATE plan_schedules SET previous_plan_data=NULL, previous_vehicle_days=NULL,
+                previous_spare_parts=NULL, previous_work_order_ids=NULL, previous_remarks=NULL,
+                change_reason=NULL WHERE id=?""", (sid,))
         else:
             flow = _ps_auto_flow(db, fresh)
         _ps_record_event(db, sid, fresh['version'], 'approved', u['id'],
@@ -14778,10 +14787,14 @@ def api_plan_schedules_reject(sid):
         if row['status'] == 'change_submitted':
             # 驳回变更：回滚到变更前的已批准版本，计划整体仍保持 approved
             db.execute("""
-                UPDATE plan_schedules SET status='approved', approver_id=?, reject_reason=?,
+            UPDATE plan_schedules SET status='approved', approver_id=?, reject_reason=?,
                        plan_data=COALESCE(previous_plan_data, plan_data),
                        vehicle_days=COALESCE(previous_vehicle_days, vehicle_days),
-                       previous_plan_data=NULL, previous_vehicle_days=NULL, change_reason=NULL
+                       spare_parts=COALESCE(previous_spare_parts, spare_parts),
+                       work_order_ids=COALESCE(previous_work_order_ids, work_order_ids),
+                       remarks=COALESCE(previous_remarks, remarks),
+                       previous_plan_data=NULL, previous_vehicle_days=NULL, previous_spare_parts=NULL,
+                       previous_work_order_ids=NULL, previous_remarks=NULL, change_reason=NULL
                 WHERE id=?
             """, (u['id'], reason, sid))
             _create_notification(row['user_id'], 'plan_schedule', sid, '计划变更被驳回',
@@ -14851,14 +14864,20 @@ def api_plan_schedules_request_change(sid):
             return jsonify({'error': f'当前状态（{row["status"]}）不可发起变更，仅已通过的计划可变更'}), 400
         db.execute("""
             UPDATE plan_schedules SET status='modifying', change_reason=?,
-                   previous_plan_data=?, previous_vehicle_days=?
+                   previous_plan_data=?, previous_vehicle_days=?, previous_spare_parts=?,
+                   previous_work_order_ids=?, previous_remarks=?
             WHERE id=?
-        """, (reason, row['plan_data'], row['vehicle_days'], sid))
+        """, (reason, row['plan_data'], row['vehicle_days'], row['spare_parts'],
+              row['work_order_ids'], row['remarks'], sid))
         # 通知审批人有变更待处理
         approvers = db.execute("SELECT id FROM users WHERE role IN ('admin','manager')").fetchall()
         for ap in approvers:
             _create_notification(ap['id'], 'plan_schedule', sid, '巡检计划发起变更',
                                  f'原因：{reason}。修改后将重新提交审核。', db=db)
+        _ps_record_event(db, sid, row['version'], 'change_requested', u['id'], {
+            'reason': reason,
+            'snapshot_fields': ['plan_data', 'vehicle_days', 'spare_parts', 'work_order_ids', 'remarks'],
+        })
         db.commit()
         return jsonify({'success': True, 'id': sid, 'status': 'modifying'})
 
