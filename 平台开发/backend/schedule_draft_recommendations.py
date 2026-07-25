@@ -6,6 +6,7 @@
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+import json
 
 
 SUPPORTED_SCHEDULE_TYPES = ("weekly", "monthly", "quarterly", "yearly")
@@ -114,4 +115,47 @@ def build_draft_recommendations(db, as_of=None, remind_days=1, user_id=None):
         "cutoff": cutoff.isoformat(),
         "recommendations": recommendations,
         "unsupported_due_items": unsupported,
+    }
+
+
+def create_recommended_drafts(db, as_of=None, remind_days=1):
+    """将当前候选写为调度层草稿。
+
+    这是给定时任务使用的唯一写入函数。只插入 ``plan_schedules.status='draft'``；
+    不触发执行任务、审批、车辆锁定或物资预留。每次写入前再次检查同一责任人、
+    类型和周期是否已有有效排程，确保任务重复运行时保持幂等。
+    """
+    result = build_draft_recommendations(db, as_of=as_of, remind_days=remind_days)
+    created = []
+    for candidate in result["recommendations"]:
+        exists = db.execute(
+            """
+            SELECT id FROM plan_schedules
+             WHERE user_id=? AND schedule_type=? AND period_start=? AND period_end=?
+               AND status NOT IN ('rejected', 'archived')
+             LIMIT 1
+            """,
+            (candidate["user_id"], candidate["schedule_type"],
+             candidate["period_start"], candidate["period_end"]),
+        ).fetchone()
+        if exists:
+            continue
+        cur = db.execute(
+            """
+            INSERT INTO plan_schedules
+                (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days,
+                 spare_parts, work_order_ids, status, remarks, tasks_generated)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0)
+            """,
+            (candidate["user_id"], candidate["schedule_type"], candidate["period_start"],
+             candidate["period_end"], json.dumps(candidate["plan_data"], ensure_ascii=False),
+             "{}", "[]", "[]", "draft",
+             "系统根据到期检查项生成的草稿，请排程人确认日期、车辆和备件后再提交"),
+        )
+        created.append({"schedule_id": cur.lastrowid, **candidate})
+    return {
+        "created": created,
+        "created_count": len(created),
+        "unsupported_due_items": result["unsupported_due_items"],
+        "as_of": result["as_of"],
     }

@@ -116,7 +116,7 @@ from flask import Flask, jsonify, request, g, send_from_directory, send_file
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos
-from schedule_draft_recommendations import build_draft_recommendations
+from schedule_draft_recommendations import build_draft_recommendations, create_recommended_drafts
 import os, uuid, urllib.request, urllib.error, json as _json
 try:
     from openpyxl import Workbook
@@ -15761,6 +15761,24 @@ def alert_escalation_check():
         traceback.print_exc()
 
 
+def create_due_schedule_drafts_job():
+    """每日将到期检查项生成待确认的调度草稿。
+
+    此任务是排程辅助，不是自动派单：只调用 ``create_recommended_drafts``，不会创建
+    ``insp_plans``、审批计划、锁定车辆或预留/扣减备件。
+    """
+    try:
+        with get_db() as db:
+            result = create_recommended_drafts(db, remind_days=1)
+            db.commit()
+        if result['created_count']:
+            print(f"[ScheduleDraft] 已生成 {result['created_count']} 条待确认排程草稿")
+        elif result['unsupported_due_items']:
+            print(f"[ScheduleDraft] 无新草稿；{result['unsupported_due_items']} 项到期频次尚未纳入调度层")
+    except Exception as e:
+        print(f'[ScheduleDraft] 生成草稿失败（非致命）: {e}')
+
+
 if __name__ == '__main__':
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     init_db()
@@ -15833,6 +15851,9 @@ if __name__ == '__main__':
     check_device_offline()
     # 每5分钟告警升级检查
     scheduler.add_job(alert_escalation_check, 'interval', minutes=5, id='alert_escalation')
+    # 每天 06:05 预生成到期巡检的待确认草稿。草稿仍必须由运维确认并提交审批。
+    scheduler.add_job(create_due_schedule_drafts_job, 'cron', hour=6, minute=5,
+                      id='due_schedule_draft_creator', replace_existing=True)
 
     # ===== 可选: SL651 国家水站协议接收器 =====
     # 环境变量 ENABLE_SL651=1 时启动
