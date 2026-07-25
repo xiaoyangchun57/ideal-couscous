@@ -34,6 +34,8 @@ Page({
     total: 0, completed: 0, loaded: false,
     syncCount: 0,
     stationStage: null,
+    reagents: [],
+    reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
     sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [] },
     submitting: false,
     confirmingDeparture: false
@@ -150,9 +152,74 @@ Page({
           })()
         });
         this.refreshStationStage(siteId);
+        this.loadReagents(siteId);
         if (done) done();
       })
       .catch(() => { this.setData({ loaded: true }); if (done) done(); wx.showToast({ title: '加载失败', icon: 'none' }); });
+  },
+
+  loadReagents(siteId) {
+    const planId = this.data.selectedPlanId;
+    if (!planId || !siteId) return;
+    api.executionSiteReagents(planId, siteId)
+      .then(res => this.setData({ reagents: res.items || [] }))
+      .catch(() => this.setData({ reagents: [] }));
+  },
+
+  onOpenReagentSheet() {
+    if (!(this.data.reagents || []).length) {
+      wx.showToast({ title: '本站暂无试剂库存记录', icon: 'none' });
+      return;
+    }
+    const first = this.data.reagents[0];
+    this.setData({ reagentSheet: {
+      open: true, mode: first.qc_status === 'pending' ? 'qc' : 'replacement', index: 0,
+      newQty: '', duration: first.expected_duration_days || '', standardValue: '', measuredValue: '',
+      passed: true, failAction: 'calibrate', submitting: false
+    } });
+  },
+
+  onCloseReagentSheet() { this.setData({ 'reagentSheet.open': false }); },
+  onReagentPick(e) {
+    const index = Number(e.detail.value) || 0;
+    const item = this.data.reagents[index] || {};
+    this.setData({ 'reagentSheet.index': index, 'reagentSheet.duration': item.expected_duration_days || '' });
+  },
+  onReagentMode(e) { this.setData({ 'reagentSheet.mode': e.currentTarget.dataset.mode }); },
+  onReagentField(e) { this.setData({ ['reagentSheet.' + e.currentTarget.dataset.field]: e.detail.value }); },
+  onReagentPass(e) { this.setData({ 'reagentSheet.passed': e.currentTarget.dataset.passed === 'true' }); },
+  onReagentFailAction(e) { this.setData({ 'reagentSheet.failAction': e.currentTarget.dataset.action }); },
+
+  onSubmitReagent() {
+    const sheet = this.data.reagentSheet;
+    const reagent = (this.data.reagents || [])[sheet.index];
+    if (!reagent || sheet.submitting) return;
+    const planId = this.data.selectedPlanId;
+    const siteId = this.data.selSiteId;
+    let request;
+    if (sheet.mode === 'replacement') {
+      if (sheet.newQty === '') { wx.showToast({ title: '请填写更换后余量', icon: 'none' }); return; }
+      request = api.replaceExecutionReagent(planId, siteId, {
+        reagent_id: reagent.reagent_id, new_qty: Number(sheet.newQty),
+        expected_duration_days: sheet.duration
+      });
+    } else {
+      if (sheet.standardValue === '' || sheet.measuredValue === '') { wx.showToast({ title: '请填写标样值和实测值', icon: 'none' }); return; }
+      request = api.submitExecutionReagentQc(planId, siteId, {
+        reagent_id: reagent.reagent_id, standard_value: Number(sheet.standardValue),
+        measured_value: Number(sheet.measuredValue), passed: sheet.passed,
+        fail_action: sheet.passed ? '' : sheet.failAction
+      });
+    }
+    this.setData({ 'reagentSheet.submitting': true });
+    request.then(res => {
+      this.setData({ 'reagentSheet.open': false, 'reagentSheet.submitting': false });
+      this.loadReagents(siteId);
+      wx.showToast({ title: sheet.mode === 'replacement' ? '已记录，待质控' : (res.qc_status === 'passed' ? '质控通过' : '已记录不通过'), icon: 'success' });
+    }).catch(() => {
+      this.setData({ 'reagentSheet.submitting': false });
+      wx.showToast({ title: '提交失败，请重试', icon: 'none' });
+    });
   },
 
   onSelectSite(e) {

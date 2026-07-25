@@ -37,6 +37,12 @@
 .station-stage-pending { color: #A15C00; background: #FFF3D9; }
 .station-stage-ok { color: var(--green); background: rgba(34, 197, 94, 0.1); }
 .station-panel-meta { flex-shrink: 0; color: var(--text-3); font-size: 23rpx; }
+.reagent-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; border: 1rpx solid var(--line); border-radius: 12rpx; background: #fff; }
+.reagent-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 500; }
+.reagent-meta { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
+.reagent-action { color: var(--brand); font-size: 24rpx; }
+.reagent-picker { margin: 18rpx 0; padding: 18rpx; border-radius: 12rpx; color: var(--text); background: var(--fill-2); font-size: 26rpx; }
+.fail-action { margin-top: 16rpx; }
 
 .progress { margin: 20rpx 24rpx 0; display: flex; align-items: center; }
 .progress-bar { flex: 1; height: 16rpx; background: var(--fill-2); border-radius: 999rpx; overflow: hidden; }

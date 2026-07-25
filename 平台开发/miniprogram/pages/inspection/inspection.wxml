@@ -58,6 +58,10 @@
     </view>
     <text class="station-panel-meta">巡检 {{completed}}/{{total}} 项</text>
   </view>
+  <view wx:if="{{selSite}}" class="reagent-entry" bindtap="onOpenReagentSheet">
+    <view><text class="reagent-title">现场试剂</text><text class="reagent-meta">更换后需完成标样质控</text></view>
+    <text class="reagent-action">{{reagents.length ? '处理 ›' : '暂无记录'}}</text>
+  </view>
 
   <view class="progress" wx:if="{{selSite}}">
     <view class="progress-bar"><view class="progress-fill" style="width:{{total? completed/total*100 : 0}}%"></view></view>
@@ -97,6 +101,16 @@
   <view class="empty" wx:elif="{{loaded}}">
     <view class="empty-circle"></view>
     <text class="empty-tx">今日暂无已批准的巡检任务</text>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{reagentSheet.open}}" bindtap="onCloseReagentSheet"></view>
+  <view class="sheet" wx:if="{{reagentSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">现场试剂</text><text class="sheet-close" bindtap="onCloseReagentSheet">×</text></view>
+    <picker mode="selector" range="{{reagents}}" range-key="reagent_name" value="{{reagentSheet.index}}" bindchange="onReagentPick"><view class="reagent-picker">{{reagents[reagentSheet.index].reagent_name}} · {{reagents[reagentSheet.index].qc_status === 'pending' ? '待质控' : '已质控'}} ›</view></picker>
+    <view class="seg"><view class="seg-item {{reagentSheet.mode === 'replacement' ? 'seg-on-ok' : ''}}" data-mode="replacement" bindtap="onReagentMode">更换</view><view class="seg-item {{reagentSheet.mode === 'qc' ? 'seg-on-ok' : ''}}" data-mode="qc" bindtap="onReagentMode">标样质控</view></view>
+    <block wx:if="{{reagentSheet.mode === 'replacement'}}"><view class="field-label">更换后余量</view><input class="inline-input" type="digit" value="{{reagentSheet.newQty}}" data-field="newQty" bindinput="onReagentField" placeholder="填写当前余量" /><view class="field-label">预计使用天数</view><input class="inline-input" type="number" value="{{reagentSheet.duration}}" data-field="duration" bindinput="onReagentField" placeholder="按现场经验填写" /></block>
+    <block wx:else><view class="field-label">标样值 / 实测值</view><input class="inline-input" type="digit" value="{{reagentSheet.standardValue}}" data-field="standardValue" bindinput="onReagentField" placeholder="标样值" /><input class="inline-input" type="digit" value="{{reagentSheet.measuredValue}}" data-field="measuredValue" bindinput="onReagentField" placeholder="实测值" /><view class="seg"><view class="seg-item {{reagentSheet.passed ? 'seg-on-ok' : ''}}" data-passed="true" bindtap="onReagentPass">通过</view><view class="seg-item {{!reagentSheet.passed ? 'seg-on-bad' : ''}}" data-passed="false" bindtap="onReagentPass">不通过</view></view><view wx:if="{{!reagentSheet.passed}}" class="seg fail-action"><view class="seg-item {{reagentSheet.failAction === 'calibrate' ? 'seg-on-bad' : ''}}" data-action="calibrate" bindtap="onReagentFailAction">校准</view><view class="seg-item {{reagentSheet.failAction === 'repair' ? 'seg-on-bad' : ''}}" data-action="repair" bindtap="onReagentFailAction">报修</view></view></block>
+    <button class="btn-primary submit-btn" loading="{{reagentSheet.submitting}}" disabled="{{reagentSheet.submitting}}" bindtap="onSubmitReagent">提交现场记录</button>
   </view>
 
   <!-- 检查项操作底栏 -->

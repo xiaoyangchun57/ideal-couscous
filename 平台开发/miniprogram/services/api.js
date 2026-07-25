@@ -17,6 +17,12 @@ const api = {
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
   executionSiteTasks: (planId, siteId) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId, 'GET'),
+  executionSiteReagents: (planId, siteId) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagents', 'GET'),
+  replaceExecutionReagent: (planId, siteId, payload) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagent-replacements', 'POST', payload),
+  submitExecutionReagentQc: (planId, siteId, payload) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagent-qc', 'POST', payload),
   // 出发前资源软确认：仅留痕，不锁车、不扣库，也不阻断现场巡检。
   confirmDepartureResources: (planId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/departure-confirmation', 'POST', payload || {}),
