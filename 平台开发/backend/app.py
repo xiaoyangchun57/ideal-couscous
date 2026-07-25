@@ -586,6 +586,52 @@ def migrate_parts_requests_v2():
         )""")
         db.commit()
 
+
+def retire_legacy_spare_part_requests():
+    """将可识别的旧备件待审申请一次性纳入 v2；无法识别的记录保留为只读历史。
+
+    旧表不再承担新增或审批职责，避免同一申请在两条链路中被重复处理。
+    """
+    with get_db() as db:
+        try:
+            legacy_rows = db.execute("""SELECT * FROM spare_part_requests
+                WHERE status='pending' ORDER BY id""").fetchall()
+            migrated = readonly = 0
+            for legacy in legacy_rows:
+                item = dict(legacy)
+                inventory = db.execute(
+                    "SELECT id, part_code FROM spare_parts_inventory WHERE part_name=? ORDER BY id LIMIT 1",
+                    (item.get('part_name') or '',),
+                ).fetchone()
+                if not inventory or not item.get('site_id'):
+                    db.execute("UPDATE spare_part_requests SET status='legacy_readonly' WHERE id=?", (item['id'],))
+                    readonly += 1
+                    continue
+                requester = db.execute(
+                    "SELECT id FROM users WHERE real_name=? OR username=? ORDER BY id LIMIT 1",
+                    (item.get('applicant') or '', item.get('applicant') or ''),
+                ).fetchone()
+                request_no = f"LEGACY-{item['id']}"
+                existing = db.execute("SELECT id FROM parts_requests WHERE request_no=?", (request_no,)).fetchone()
+                if not existing:
+                    cur = db.execute("""INSERT INTO parts_requests
+                        (plan_id,requester_id,site_id,work_order_no,request_no,source,reason,status,created_at)
+                        VALUES (0,?,?,?,?,?,?,'pending',COALESCE(?,datetime('now','localtime')))""", (
+                            requester['id'] if requester else 0, item['site_id'], item.get('work_order_no') or '',
+                            request_no, 'legacy_migration',
+                            f"[历史申请 {item.get('request_no') or item['id']}] {item.get('reason') or ''}",
+                            item.get('created_at'),
+                        ))
+                    db.execute("""INSERT INTO parts_request_items (request_id,part_sku,quantity,part_id)
+                        VALUES (?,?,?,?)""", (cur.lastrowid, inventory['part_code'], item.get('quantity') or 1, inventory['id']))
+                db.execute("UPDATE spare_part_requests SET status='migrated' WHERE id=?", (item['id'],))
+                migrated += 1
+            db.commit()
+            if migrated or readonly:
+                print(f'[Migrate] 旧备件待审收口：迁入v2 {migrated} 条，只读保留 {readonly} 条')
+        except Exception as e:
+            print(f'[Migrate] 旧备件待审收口跳过: {e}')
+
 def init_db():
     with get_db() as db:
         db.executescript('''
@@ -1639,33 +1685,6 @@ def seed_data():
                     (pc, pn, mfr, model, cat, unit, qty, minq)
                 )
 
-        # 备件申请种子数据（演示用）
-        req_cnt = db.execute("SELECT COUNT(*) FROM spare_part_requests").fetchone()[0]
-        if req_cnt == 0:
-            from datetime import datetime, timedelta
-            now = datetime.now()
-            sample_reqs = [
-                (1, '系统管理员', '水位计传感器', 2, '水位计数据异常，需更换', 'approved', '系统管理员', '同意更换', (now - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')),
-                (2, '系统管理员', '太阳能板(20W)', 1, '太阳能板破损', 'approved', '系统管理员', '已核实，批准', (now - timedelta(hours=5)).strftime('%Y-%m-%d %H:%M:%S')),
-                (3, '运维人员', 'GPRS通信模块', 2, '通信模块频繁断连', 'pending', '', '', (now - timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')),
-                (4, '运维人员', '防雷模块', 3, '汛期前补充', 'pending', '', '', (now - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')),
-                (5, '系统管理员', '数据采集终端RTU', 1, 'RTU老化需更换', 'rejected', '系统管理员', '库存不足，暂缓采购', (now - timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')),
-            ]
-            for idx, (sid, applicant, pname, qty, reason, status, approver, comment, ctime) in enumerate(sample_reqs):
-                rno = f"BJ-{now.strftime('%Y%m%d')}-{idx+1:03d}"
-                db.execute(
-                    "INSERT INTO spare_part_requests (request_no,site_id,applicant,part_name,quantity,reason,status,approver,approval_comment,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (rno, sid, applicant, pname, qty, reason, status, approver, comment, ctime)
-                )
-                # 已批准的申请记录扣减库存流水
-                if status == 'approved':
-                    inv = db.execute("SELECT id, quantity FROM spare_parts_inventory WHERE part_name LIKE ? LIMIT 1", (f"%{pname}%",)).fetchone()
-                    if inv:
-                        new_qty = max(0, inv['quantity'] - qty)
-                        db.execute("UPDATE spare_parts_inventory SET quantity=? WHERE id=?", (new_qty, inv['id']))
-                        db.execute("INSERT INTO inventory_logs (part_id,type,quantity,ref_type,ref_id,operator,remark) VALUES (?,'out',?,'request',?,?,?)",
-                            (inv['id'], qty, 0, '系统管理员', f"种子数据：{rno}"))
-
         db.commit()
         print("[Seed] Database seeded with initial data.")
 
@@ -2059,17 +2078,6 @@ def seed_abnormal_scenarios():
         if low_part:
             db.execute("UPDATE spare_parts_inventory SET quantity=0, min_quantity=2 WHERE id=?", (low_part['id'],))
         print("  [场景12] 备件库存不足已设置")
-
-        # === 场景13：备件申请待审批 ===
-        # 已在seed_data中创建，这里确保有pending状态的申请
-        pending_req = db.execute("SELECT COUNT(*) FROM spare_part_requests WHERE status='pending'").fetchone()[0]
-        if pending_req == 0:
-            rno = f"BJ-{now.strftime('%Y%m%d')}-999"
-            db.execute("""
-                INSERT INTO spare_part_requests (request_no,site_id,applicant,part_name,quantity,reason,status)
-                VALUES (?,?,?,?,?,?,?)
-            """, (rno, all_sites[0]['id'], '运维人员', '雷达水位计', 1, '设备故障需更换', 'pending'))
-        print("  [场景13] 备件申请待审批已确认")
 
         # === 场景14：热线事件未处理 ===
         # 创建一个新的未处理热线事件
@@ -11582,7 +11590,7 @@ def api_parts_request_approve(rid):
         items = db.execute("SELECT * FROM parts_request_items WHERE request_id=?", (rid,)).fetchall()
         for item in items:
             inv = db.execute("SELECT * FROM spare_parts_inventory WHERE id=?", (item['part_id'],)).fetchone()
-            occupied = db.execute("SELECT COALESCE(SUM(reserved_quantity-issued_quantity),0) AS n FROM parts_request_reservations WHERE part_id=? AND status IN ('reserved','issued')", (item['part_id'],)).fetchone()['n']
+            occupied = db.execute("SELECT COALESCE(SUM(reserved_quantity-COALESCE(issued_quantity,0)),0) AS n FROM parts_request_reservations WHERE part_id=? AND status IN ('reserved','issued')", (item['part_id'],)).fetchone()['n']
             if not inv or inv['quantity'] - occupied < item['quantity']:
                 return jsonify({'error': f'备件库存不足：{item["part_sku"]}'}), 400
         db.execute("UPDATE parts_requests SET status='approved', approver_id=?, approve_comment=?, approved_at=datetime('now','localtime') WHERE id=?",
@@ -11633,14 +11641,16 @@ def api_parts_request_issue(rid):
             part_id, qty = int(item.get('part_id') or 0), int(item.get('quantity') or 0)
             reservation = db.execute("SELECT * FROM parts_request_reservations WHERE request_id=? AND part_id=? AND status IN ('reserved','issued')", (rid, part_id)).fetchone()
             inv = db.execute("SELECT quantity FROM spare_parts_inventory WHERE id=?", (part_id,)).fetchone()
-            if not reservation or qty <= 0 or qty > reservation['reserved_quantity'] - reservation['issued_quantity'] or not inv or inv['quantity'] < qty:
+            reserved = reservation['reserved_quantity'] if reservation else 0
+            already_issued = (reservation['issued_quantity'] or 0) if reservation else 0
+            if not reservation or qty <= 0 or qty > reserved - already_issued or not inv or inv['quantity'] < qty:
                 return jsonify({'error': f'备件#{part_id}无足够已预留数量'}), 400
             db.execute("UPDATE spare_parts_inventory SET quantity=quantity-?, updated_at=datetime('now','localtime') WHERE id=?", (qty, part_id))
-            db.execute("UPDATE parts_request_reservations SET issued_quantity=issued_quantity+?, status='issued', updated_at=datetime('now','localtime') WHERE id=?", (qty, reservation['id']))
+            db.execute("UPDATE parts_request_reservations SET issued_quantity=COALESCE(issued_quantity,0)+?, status='issued', updated_at=datetime('now','localtime') WHERE id=?", (qty, reservation['id']))
             db.execute("INSERT INTO inventory_logs (part_id,type,quantity,ref_type,ref_id,operator,remark) VALUES (?, 'out', ?, 'parts_request', ?, ?, ?)",
                        (part_id, qty, rid, g.current_user.get('real_name') or g.current_user.get('username'), f'备件申请#{req["request_no"]}现场领用'))
             issued += qty
-        remaining = db.execute("SELECT COALESCE(SUM(reserved_quantity-issued_quantity),0) AS n FROM parts_request_reservations WHERE request_id=?", (rid,)).fetchone()['n']
+        remaining = db.execute("SELECT COALESCE(SUM(reserved_quantity-COALESCE(issued_quantity,0)),0) AS n FROM parts_request_reservations WHERE request_id=?", (rid,)).fetchone()['n']
         db.execute("UPDATE parts_requests SET status=? WHERE id=?", ('issued' if remaining == 0 else 'approved', rid))
         db.commit()
     return jsonify({'success': True, 'issued_quantity': issued, 'remaining_reserved_quantity': remaining})
@@ -16297,6 +16307,7 @@ if __name__ == '__main__':
     migrate_reagent_qc()
     migrate_manual_report_closure()
     migrate_parts_requests_v2()
+    retire_legacy_spare_part_requests()
     seed_data()
     seed_inspections()
     seed_alerts()
