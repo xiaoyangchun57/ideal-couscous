@@ -35,6 +35,8 @@ Page({
     syncCount: 0,
     stationStage: null,
     reagents: [],
+    anomalyCodes: [],
+    reportSheet: { open: false, typeIndex: 0, codeIndex: 0, description: '', photos: [], submitting: false },
     reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
     sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [] },
     submitting: false,
@@ -226,6 +228,26 @@ Page({
     const id = e.currentTarget.dataset.id;
     this.setData({ selSiteId: id });
     this.loadTasks(id);
+  },
+
+  onOpenReport() {
+    if (!this.data.selSiteId) return;
+    api.anomalyCodes().then(codes => this.setData({ anomalyCodes: codes || [] })).catch(() => {});
+    this.setData({ reportSheet: { open: true, typeIndex: 0, codeIndex: 0, description: '', photos: [], submitting: false } });
+  },
+  onCloseReport() { this.setData({ 'reportSheet.open': false }); },
+  onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
+  onReportCode(e) { this.setData({ 'reportSheet.codeIndex': Number(e.detail.value) || 0 }); },
+  onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value }); },
+  onAddReportPhoto() {
+    chooseAndCompress(1).then(paths => paths && paths[0] && fileToBase64(paths[0]).then(image => api.uploadSitePhoto(this.data.selSiteId, image)))
+      .then(res => { if (res && res.url) this.setData({ 'reportSheet.photos': [resolveUploadUrl(res.url)] }); }).catch(() => wx.showToast({ title: '照片上传失败', icon: 'none' }));
+  },
+  onSubmitReport() {
+    const rs = this.data.reportSheet; const types = ['sensory', 'equipment', 'environment', 'violation', 'pollution']; const code = (this.data.anomalyCodes || [])[rs.codeIndex];
+    if (!rs.description.trim() || !rs.photos.length) { wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' }); return; }
+    this.setData({ 'reportSheet.submitting': true });
+    getGps().then(gps => api.submitManualReport({ site_id: this.data.selSiteId, report_type: types[rs.typeIndex], description: (code ? '[' + code.code + '] ' : '') + rs.description.trim(), photo_urls: rs.photos, gps_lat: gps && gps.lat, gps_lng: gps && gps.lng })).then(res => { this.setData({ 'reportSheet.open': false, 'reportSheet.submitting': false }); wx.showModal({ title: '异常已上报', content: '已生成工单：' + (res.order_no || '待分派'), showCancel: false }); }).catch(() => this.setData({ 'reportSheet.submitting': false }));
   },
 
   refreshStationStage(siteId) {

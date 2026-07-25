@@ -28,6 +28,8 @@
 .site-head-type { font-size: 23rpx; color: var(--text-3); margin-top: 6rpx; }
 .site-head-ops { display: flex; }
 .op { font-size: 24rpx; color: var(--brand); margin-left: 16rpx; border: 1rpx solid var(--brand-line); border-radius: 12rpx; padding: 10rpx 22rpx; line-height: 1; }
+.op-warn { color: var(--red); border-color: rgba(250,81,81,.35); }
+.report-photo { margin-top: 18rpx; padding: 24rpx; text-align: center; color: var(--brand); background: var(--brand-weak); border-radius: 12rpx; font-size: 25rpx; }
 
 .station-panel { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 12rpx; }
 .station-panel-main { display: flex; align-items: center; min-width: 0; }

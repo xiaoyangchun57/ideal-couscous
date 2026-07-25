@@ -47,9 +47,12 @@
     </view>
     <view class="site-head-ops">
       <view class="op" bindtap="onCheckIn">到站打卡</view>
+      <view class="op op-warn" bindtap="onOpenReport">异常上报</view>
       <view class="op" bindtap="goSite">站点信息</view>
     </view>
   </view>
+
+  <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view><view class="sheet" wx:if="{{reportSheet.open}}"><view class="sheet-head"><text class="sheet-title">现场异常上报</text><text class="sheet-close" bindtap="onCloseReport">×</text></view><picker range="{{['感官异常','设备异常','环境异常','违规操作','污染事件']}}" value="{{reportSheet.typeIndex}}" bindchange="onReportType"><view class="reagent-picker">异常类别 ›</view></picker><picker range="{{anomalyCodes}}" range-key="code" value="{{reportSheet.codeIndex}}" bindchange="onReportCode"><view class="reagent-picker">异常编码（可选） ›</view></picker><textarea class="ta" placeholder="说明现场异常及已采取措施" value="{{reportSheet.description}}" bindinput="onReportDescription"/><view class="report-photo" bindtap="onAddReportPhoto">{{reportSheet.photos.length ? '现场照片已上传，点击重拍' : '拍摄现场照片（必填）'}}</view><button class="btn-primary submit-btn" loading="{{reportSheet.submitting}}" bindtap="onSubmitReport">上报并生成工单</button></view>
 
   <view wx:if="{{selSite && stationStage}}" class="station-panel">
     <view class="station-panel-main">
