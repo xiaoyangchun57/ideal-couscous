@@ -998,16 +998,15 @@ export default function CockpitPage() {
                         onMouseEnter={(e) => { e.currentTarget.style.background = isDark ? 'rgba(239,68,68,0.14)' : 'rgba(239,68,68,0.08)'; }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = isDark ? 'rgba(239,68,68,0.08)' : 'rgba(239,68,68,0.04)'; }}
                       >
-                        <div style={{ fontSize: 12, color: '#ef4444', fontWeight: 500, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <div style={{ fontSize: 12, color: tokens.colorError, fontWeight: 500, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
                           <AlertOutlined style={{ fontSize: 12 }} />
                           活跃告警 ({displayAlerts.length}) — 点击跳转到预警中心
                         </div>
                         {displayAlerts.slice(0, 3).map((alert, idx) => {
-                          const lColor = alert.level === 'red' ? '#ef4444'
-                            : alert.level === 'orange' ? '#fb923c'
-                            : alert.level === 'yellow' ? '#facc15'
-                            : alert.level === 'blue' ? '#38bdf8'
-                            : '#faad14';
+                          const lColor = alert.level === 'red' ? tokens.colorError
+                            : alert.level === 'orange' || alert.level === 'yellow' ? tokens.colorWarning
+                            : alert.level === 'blue' ? tokens.colorInfo
+                            : tokens.colorWarning;
                           return (
                             <div key={idx} style={{ fontSize: 11, color: isDark ? '#d0e8ff' : tokens.colorText, marginBottom: 3, paddingLeft: 8, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
                               <span style={{ width: 5, height: 5, borderRadius: '50%', background: lColor, flexShrink: 0, marginTop: 4, boxShadow: `0 0 3px ${lColor}` }} />
@@ -1032,7 +1031,7 @@ export default function CockpitPage() {
                         navigate(`/sites?archive=${site.id}`);
                       }}
                       style={{
-                        background: 'linear-gradient(135deg, #00c9a7, #00a88a)',
+                        background: tokens.colorPrimary,
                         border: 'none',
                         borderRadius: 6,
                       }}
@@ -1305,7 +1304,7 @@ export default function CockpitPage() {
                                       borderRadius: '50%',
                                       background: markerStatus === 'offline' ? tokens.colorError
                                         : markerStatus === 'anomaly' ? tokens.colorWarning
-                                        : markerStatus === 'pending' ? '#8c8c8c'
+                                        : markerStatus === 'pending' ? tokens.colorTextTertiary
                                         : tokens.colorSuccess,
                                       flexShrink: 0,
                                       boxShadow: markerStatus !== 'normal'
@@ -1338,7 +1337,7 @@ export default function CockpitPage() {
                                   )}
                                   {markerStatus === 'pending' && (
                                     <ClockCircleOutlined
-                                      style={{ color: '#8c8c8c', fontSize: 13 }}
+                                      style={{ color: tokens.colorTextTertiary, fontSize: 13 }}
                                     />
                                   )}
                                   <Tooltip title={pinnedSites.has(site.id) ? '取消关注' : '重点关注'}>
@@ -1616,9 +1615,9 @@ export default function CockpitPage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 2, paddingTop: 4, borderTop: `1px solid ${tokens.colorBorderSecondary}` }}>
                 <div style={{ fontSize: 9, color: tokens.colorTextQuaternary, marginBottom: 1 }}>数据状态</div>
                 {[
-                  { color: '#00c9a7', label: '正常' },
-                  { color: '#facc15', label: '数据异常' },
-                  { color: '#ef4444', label: '长时间无数据' },
+                  { color: tokens.colorSuccess, label: '正常' },
+                  { color: tokens.colorWarning, label: '数据异常' },
+                  { color: tokens.colorError, label: '长时间无数据' },
                 ].map(({ color, label }) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                     <div
@@ -2013,8 +2012,8 @@ export default function CockpitPage() {
                           generated: tokens.colorInfo,
                           dispatched: tokens.colorWarning,
                           in_progress: tokens.colorPrimary,
-                          reviewing: '#a855f7',
-                          acceptance: '#f59e0b',
+                          reviewing: statusColors.purple[isDark ? 'dark' : 'light'],
+                          acceptance: tokens.colorWarning,
                           closed: tokens.colorSuccess,
                         };
                         const barColor = statusBarColors[status] || tokens.colorTextTertiary;

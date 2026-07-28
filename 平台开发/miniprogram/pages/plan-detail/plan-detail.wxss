@@ -28,6 +28,10 @@
 .info-row { display: flex; align-items: center; justify-content: space-between; padding: 12rpx 0; }
 .info-label { font-size: 25rpx; color: var(--text-3); }
 .info-val { font-size: 25rpx; color: var(--text); }
+.reuse-entry { display: flex; align-items: center; justify-content: space-between; gap: 18rpx; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; border: 1rpx solid var(--brand-line); border-radius: 12rpx; background: var(--card); }
+.reuse-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 600; }
+.reuse-hint { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
+.reuse-action { flex: none; color: var(--brand); font-size: 24rpx; }
 
 /* 出发前准备 */
 .prep-card { margin: 16rpx 24rpx 0; }
@@ -58,7 +62,7 @@
 .bottom-bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   display: flex; gap: 20rpx; padding: 20rpx 28rpx calc(20rpx + env(safe-area-inset-bottom));
-  background: #FFFFFF; border-top: 1rpx solid var(--line);
+  background: var(--card); border-top: 1rpx solid var(--line);
 }
 .bottom-btn { flex: 1; }
 .page { padding-bottom: 160rpx; }

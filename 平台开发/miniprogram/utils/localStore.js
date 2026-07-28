@@ -2,6 +2,7 @@
 // 与 utils/request.js 的"请求级失败队列"互补——这里存的是业务实体（带本地照片路径），
 // 确保断网时也能走完「打卡→拍照→提交」闭环，且 App 重启后实体仍在，联网后静默同步。
 const KEY = 'local_insp_ops';
+const { isPendingInspectionSubmit } = require('./inspectionSubmissionState.js');
 
 function read() {
   try { return wx.getStorageSync(KEY) || []; } catch (e) { return []; }
@@ -14,6 +15,13 @@ function write(list) {
 // data: 业务载荷（submit 内置 localPhotos 本地路径数组、siteId）
 function addOp(type, data) {
   const list = read();
+  if (type === 'submit') {
+    const existing = list.find((operation) => isPendingInspectionSubmit([operation], data.item_id, data.plan_id));
+    if (existing) {
+      data._idempotency_key = existing.id;
+      return existing.id;
+    }
+  }
   const op = {
     id: 'op_' + Date.now() + '_' + Math.floor(Math.random() * 1e4),
     type: type,
@@ -58,4 +66,12 @@ function getSiteCheckIn(siteId) {
     .sort((a, b) => b.createdAt - a.createdAt)[0] || null;
 }
 
-module.exports = { addOp, getPending, markSynced, removeOp, queueCount, getLocalCheckIn, getSiteCheckIn, read, write, KEY };
+// 检查项未同步提交是现场端的事实源：同一项同步完成前不可再次提交。
+function getPendingSubmit(itemId, planId) {
+  return getPending().find((op) => isPendingInspectionSubmit([op], itemId, planId)) || null;
+}
+
+module.exports = {
+  addOp, getPending, markSynced, removeOp, queueCount,
+  getLocalCheckIn, getSiteCheckIn, getPendingSubmit, read, write, KEY
+};

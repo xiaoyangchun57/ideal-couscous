@@ -2,20 +2,26 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Card, Input, Select, Button, Space, Tag, Row, Col,
   App, Modal, Typography, Spin, Empty, Image, DatePicker,
-  Badge, Tooltip, Statistic, Table, Checkbox, Radio, Divider,
+  Badge, Tooltip, Statistic, Table, Checkbox, Radio,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, DeleteOutlined,
+  SearchOutlined, ReloadOutlined,
   PictureOutlined, VideoCameraOutlined, FolderOpenOutlined,
   CalendarOutlined, EnvironmentOutlined, UserOutlined,
   FileTextOutlined, DownloadOutlined, InboxOutlined, RollbackOutlined,
-  UploadOutlined, AppstoreOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
+import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import dayjs from 'dayjs';
-import AttachmentUpload from '../../components/AttachmentUpload';
+import FilterBar from '../../components/FilterBar';
+import { statusColors } from '../../theme/tokens';
+import {
+  pageRootStyle, tableCardStyle, tableCardBody,
+  filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
+} from '../../services/pageStyles';
 import {
   attachmentSourceTypeMap, attachmentCategoryColor, attachmentCategoryMap,
   attachmentReviewStatusMap, ATTACHMENT_SOURCE_OPTIONS, ATTACHMENT_CATEGORY_OPTIONS,
@@ -28,7 +34,7 @@ const { RangePicker } = DatePicker;
 // 上传人渲染
 const uploaderOf = (it) => it.uploader_name || '-';
 
-// 审核状态标签
+// 审核状态标签（仅用 antd 预设色名，主题无关，符合规范 §7）
 const ReviewTag = ({ it }) => {
   if (!it.review_required) return <Tag color="default">无需审核</Tag>;
   const map = attachmentReviewStatusMap;
@@ -38,7 +44,7 @@ const ReviewTag = ({ it }) => {
 };
 
 export default function ArchivePage() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const { modal, message } = App.useApp();
   const isAdmin = user?.role === 'admin';
@@ -65,9 +71,10 @@ export default function ArchivePage() {
   const [page, setPage] = useState(1);
   const [view, setView] = useState('grid'); // grid | table
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
-  const [uploadVisible, setUploadVisible] = useState(false);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewItem, setPreviewItem] = useState(null);
+
+  const [tableWrapRef, tableBodyHeight] = useTableAutoHeight({ headerOffset: 40, deps: [list.length] });
 
   // 加载站点列表
   useEffect(() => {
@@ -110,45 +117,6 @@ export default function ArchivePage() {
   useEffect(() => { loadList(1); }, [loadList]);
 
   const refreshStats = () => api.get('/attachments/stats').then(setStats);
-
-  // 删除附件
-  const handleDelete = async (item) => {
-    modal.confirm({
-      title: '确认删除',
-      content: `确定删除 "${item.filename}"？`,
-      okText: '删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        const res = await api.delete(`/attachments/${item.id}`);
-        if (res && res.success) {
-          message.success('已删除');
-          loadList(page);
-          refreshStats();
-        } else {
-          message.error((res && res.error) || '删除失败');
-        }
-      },
-    });
-  };
-
-  // 批量删除
-  const batchDelete = () => {
-    if (!selectedRowKeys.length) return;
-    modal.confirm({
-      title: `批量删除 ${selectedRowKeys.length} 项`,
-      content: '确定删除选中的影像资料？',
-      okText: '批量删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        await Promise.all(selectedRowKeys.map(id => api.delete(`/attachments/${id}`)));
-        message.success('已批量删除');
-        setSelectedRowKeys([]);
-        loadList(page); refreshStats();
-      },
-    });
-  };
 
   // 批量归档
   const batchArchive = async () => {
@@ -244,40 +212,55 @@ export default function ArchivePage() {
     },
     { title: '文件名', dataIndex: 'filename', key: 'filename', ellipsis: true,
       render: (v, it) => <Text ellipsis style={{ fontSize: 13 }}>{it.description || v}</Text> },
-    { title: '分类', dataIndex: 'category', key: 'category', width: 110,
-      render: (c) => c ? <Tag color={catColor(c)} style={{ fontSize: 11 }}>{attachmentCategoryMap[c] || c}</Tag> : '—' },
-    { title: '来源', dataIndex: 'source_type', key: 'source_type', width: 110,
-      render: (t) => <Tag>{sourceLabel(t)}</Tag> },
-    { title: '关联站点', dataIndex: 'site_name', key: 'site_name', width: 130, ellipsis: true,
-      render: (v) => v || '—' },
-    { title: '上传人', dataIndex: 'uploader_name', key: 'uploader_name', width: 100,
-      render: (v) => v || '—' },
-    { title: '拍摄时间', dataIndex: 'taken_at', key: 'taken_at', width: 140,
-      render: (v) => v || '—' },
-    { title: '审核状态', key: 'review', width: 110, render: (_, it) => <ReviewTag it={it} /> },
-    { title: '归档', key: 'archived', width: 90,
-      render: (_, it) => it.archived ? <Tag color="green">已归档</Tag> : <Tag>未归档</Tag> },
     {
-      title: '操作', key: 'op', width: 140, fixed: 'right',
+      title: '属性', key: 'attributes', width: 150,
+      render: (_, it) => (
+        <Space size={[4, 4]} wrap>
+          {it.category && <Tag color={catColor(it.category)} style={{ fontSize: 11 }}>{attachmentCategoryMap[it.category] || it.category}</Tag>}
+          <Tag style={{ fontSize: 11 }}>{sourceLabel(it.source_type)}</Tag>
+        </Space>
+      ),
+    },
+    {
+      title: '关联信息', key: 'association', width: 160, ellipsis: true,
+      render: (_, it) => (
+        <div>
+          <Text ellipsis style={{ display: 'block', fontSize: 12 }}>{it.site_name || '未关联站点'}</Text>
+          <Text type="secondary" ellipsis style={{ display: 'block', fontSize: 11 }}>{uploaderOf(it)}</Text>
+        </div>
+      ),
+    },
+    { title: '拍摄时间', dataIndex: 'taken_at', key: 'taken_at', width: 120,
+      render: (v) => v || '—' },
+    {
+      title: '状态', key: 'status', width: 104,
+      render: (_, it) => (
+        <Space direction="vertical" size={2}>
+          <ReviewTag it={it} />
+          {it.archived ? <Tag color="green">已归档</Tag> : <Tag>未归档</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: '操作', key: 'op', width: isAdmin ? 128 : 64,
       render: (_, it) => (
         <Space size={4}>
           <Button type="link" size="small" onClick={() => handlePreview(it)}>预览</Button>
-          {it.archived
+          {isAdmin && (it.archived
             ? <Button type="link" size="small" onClick={() => handleUnarchive(it)}>取消归档</Button>
-            : <Button type="link" size="small" onClick={() => openArchive(it)}>归档</Button>}
-          <Button type="link" size="small" danger onClick={() => handleDelete(it)}>删除</Button>
+            : <Button type="link" size="small" onClick={() => openArchive(it)}>归档</Button>)}
         </Space>
       ),
     },
   ];
 
-  const rowSelection = {
+  const rowSelection = isAdmin ? {
     selectedRowKeys,
     onChange: (keys) => setSelectedRowKeys(keys),
-  };
+  } : undefined;
 
   return (
-    <div style={{ padding: 24, height: '100%', overflow: 'auto' }}>
+    <div style={pageRootStyle}>
       {/* 统计卡片：响应式，避免小屏挤压 */}
       {stats && (
         <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
@@ -305,99 +288,86 @@ export default function ArchivePage() {
           <Col xs={12} sm={8} md={6} lg={4}>
             <Card size="small">
               <Statistic title="已归档" value={stats.archived || 0} prefix={<InboxOutlined />}
-                valueStyle={{ color: (stats.archived || 0) > 0 ? '#1677ff' : '#52c41a' }} />
+                valueStyle={{ color: (stats.archived || 0) > 0 ? statusColors.info[isDark ? 'dark' : 'light'] : statusColors.success[isDark ? 'dark' : 'light'] }} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
             <Card size="small">
               <Statistic title="待审核" value={stats.review_pending || 0} prefix={<PictureOutlined />}
-                valueStyle={{ color: (stats.review_pending || 0) > 0 ? '#faad14' : '#52c41a' }} />
+                valueStyle={{ color: (stats.review_pending || 0) > 0 ? statusColors.warning[isDark ? 'dark' : 'light'] : statusColors.success[isDark ? 'dark' : 'light'] }} />
             </Card>
           </Col>
         </Row>
       )}
 
-      {/* 筛选栏 + 工具：参考水印相机布局，分两行，避免挤压 */}
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <Row gutter={[12, 12]} align="middle" style={{ marginBottom: 8 }}>
-          <Col>
-            <Select placeholder="选择站点" allowClear showSearch optionFilterProp="label" style={{ minWidth: 150, width: 180 }}
-              value={filters.site_id} onChange={v => setFilters(f => ({ ...f, site_id: v }))}
-              options={sites.map(s => ({ value: s.id, label: s.name }))} />
-          </Col>
-          <Col>
-            <Select placeholder="分类" allowClear style={{ minWidth: 150, width: 180 }}
-              value={filters.category} onChange={v => setFilters(f => ({ ...f, category: v }))}
-              options={ATTACHMENT_CATEGORY_OPTIONS} />
-          </Col>
-          <Col>
-            <Select placeholder="审核状态" allowClear style={{ minWidth: 120, width: 130 }}
-              value={filters.review_status} onChange={v => setFilters(f => ({ ...f, review_status: v }))}
-              options={ATTACHMENT_REVIEW_STATUS_OPTIONS} />
-          </Col>
-          <Col>
-            <Select placeholder="归档状态" style={{ minWidth: 120, width: 130 }}
-              value={filters.archived} onChange={v => setFilters(f => ({ ...f, archived: v }))}
-              options={[{ value: '', label: '全部状态' }, { value: '0', label: '未归档' }, { value: '1', label: '已归档' }]} />
-          </Col>
-          <Col>
-            <RangePicker value={filters.date_range} onChange={v => setFilters(f => ({ ...f, date_range: v }))}
-              placeholder={['开始日期', '结束日期']} />
-          </Col>
-        </Row>
-
-        <Row gutter={[12, 12]} align="middle" justify="space-between">
-          <Col>
-            <Space size={4} wrap>
-              {['今日', '昨日', '近7天', '近30天', '本月'].map(label => (
-                <Button key={label} size="small" type={filters.quickDate === label ? 'primary' : 'default'}
-                  onClick={() => {
-                    let start = null, end = null;
-                    const today = dayjs();
-                    switch (label) {
-                      case '今日': start = today.startOf('day'); end = today.endOf('day'); break;
-                      case '昨日': start = today.subtract(1, 'day').startOf('day'); end = today.subtract(1, 'day').endOf('day'); break;
-                      case '近7天': start = today.subtract(6, 'day').startOf('day'); end = today.endOf('day'); break;
-                      case '近30天': start = today.subtract(29, 'day').startOf('day'); end = today.endOf('day'); break;
-                      case '本月': start = today.startOf('month'); end = today.endOf('month'); break;
-                      default: break;
-                    }
-                    setFilters(f => ({ ...f, quickDate: label, date_range: start && end ? [start, end] : null }));
-                  }}>
-                  {label}
-                </Button>
-              ))}
-              {filters.quickDate && (
-                <Button size="small" type="text" onClick={() => setFilters(f => ({ ...f, quickDate: undefined, date_range: null }))}>清除快捷</Button>
-              )}
-            </Space>
-          </Col>
-          <Col>
-            <Space size={8} wrap>
-              <Input placeholder="搜索文件名或描述..." prefix={<SearchOutlined />}
-                value={filters.keyword} onChange={e => setFilters(f => ({ ...f, keyword: e.target.value }))}
-                onPressEnter={() => loadList(1)} style={{ width: 220 }} allowClear />
-              <Button type="primary" icon={<SearchOutlined />} onClick={() => loadList(1)}>搜索</Button>
-              <Button icon={<ReloadOutlined />} onClick={() => {
-                setFilters({ site_id: undefined, category: undefined, source_type: undefined, review_status: undefined, keyword: '', date_range: null, archived: '', quickDate: undefined });
-              }}>重置</Button>
-              <Radio.Group value={view} onChange={e => setView(e.target.value)} optionType="button" buttonStyle="solid" size="small">
-                <Radio.Button value="grid"><AppstoreOutlined /> 网格</Radio.Button>
-                <Radio.Button value="table"><FileTextOutlined /> 表格</Radio.Button>
-              </Radio.Group>
-              <Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadVisible(true)}>上传资料</Button>
-            </Space>
-          </Col>
-        </Row>
-        {selectedRowKeys.length > 0 && (
-          <div style={{ marginTop: 12, padding: '8px 12px', background: tokens.colorFillSecondary, borderRadius: tokens.borderRadius, display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Text strong>已选 {selectedRowKeys.length} 项</Text>
-            <Button size="small" icon={<InboxOutlined />} onClick={batchArchive} disabled={!isAdmin}>批量归档</Button>
-            <Button size="small" danger icon={<DeleteOutlined />} onClick={batchDelete} disabled={!isAdmin}>批量删除</Button>
-            <Button size="small" type="text" onClick={() => setSelectedRowKeys([])}>取消选择</Button>
-          </div>
+      {/* 筛选栏 + 工具 */}
+      <FilterBar
+        style={{ marginBottom: 12 }}
+        extra={(
+          <Space size={8} wrap>
+            <Button type="primary" icon={<SearchOutlined />} onClick={() => loadList(1)}>搜索</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => {
+              setFilters({ site_id: undefined, category: undefined, source_type: undefined, review_status: undefined, keyword: '', date_range: null, archived: '', quickDate: undefined });
+            }}>重置</Button>
+            <Radio.Group value={view} onChange={e => setView(e.target.value)} optionType="button" buttonStyle="solid" size="small">
+              <Radio.Button value="grid"><AppstoreOutlined /> 网格</Radio.Button>
+              <Radio.Button value="table"><FileTextOutlined /> 表格</Radio.Button>
+            </Radio.Group>
+          </Space>
         )}
-      </Card>
+      >
+        <Input placeholder="搜索文件名或描述..." prefix={<SearchOutlined />}
+          value={filters.keyword} onChange={e => setFilters(f => ({ ...f, keyword: e.target.value }))}
+          onPressEnter={() => loadList(1)} style={{ width: filterInputWidth }} allowClear />
+        <Select placeholder="选择站点" allowClear showSearch optionFilterProp="label" style={{ width: filterSelectWidth }}
+          value={filters.site_id} onChange={v => setFilters(f => ({ ...f, site_id: v }))}
+          options={sites.map(s => ({ value: s.id, label: s.name }))} />
+        <Select placeholder="分类" allowClear style={{ width: filterSelectWidth }}
+          value={filters.category} onChange={v => setFilters(f => ({ ...f, category: v }))}
+          options={ATTACHMENT_CATEGORY_OPTIONS} />
+        <Select placeholder="审核状态" allowClear style={{ width: filterSmallSelectWidth }}
+          value={filters.review_status} onChange={v => setFilters(f => ({ ...f, review_status: v }))}
+          options={ATTACHMENT_REVIEW_STATUS_OPTIONS} />
+        <Select placeholder="归档状态" style={{ width: filterSmallSelectWidth }}
+          value={filters.archived} onChange={v => setFilters(f => ({ ...f, archived: v }))}
+          options={[{ value: '', label: '全部状态' }, { value: '0', label: '未归档' }, { value: '1', label: '已归档' }]} />
+        <RangePicker value={filters.date_range} onChange={v => setFilters(f => ({ ...f, date_range: v }))}
+          placeholder={['开始日期', '结束日期']} />
+      </FilterBar>
+
+      {/* 快捷日期 */}
+      <div style={{ marginBottom: 12, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+        {['今日', '昨日', '近7天', '近30天', '本月'].map(label => (
+          <Button key={label} size="small" type={filters.quickDate === label ? 'primary' : 'default'}
+            onClick={() => {
+              let start = null, end = null;
+              const today = dayjs();
+              switch (label) {
+                case '今日': start = today.startOf('day'); end = today.endOf('day'); break;
+                case '昨日': start = today.subtract(1, 'day').startOf('day'); end = today.subtract(1, 'day').endOf('day'); break;
+                case '近7天': start = today.subtract(6, 'day').startOf('day'); end = today.endOf('day'); break;
+                case '近30天': start = today.subtract(29, 'day').startOf('day'); end = today.endOf('day'); break;
+                case '本月': start = today.startOf('month'); end = today.endOf('month'); break;
+                default: break;
+              }
+              setFilters(f => ({ ...f, quickDate: label, date_range: start && end ? [start, end] : null }));
+            }}>
+            {label}
+          </Button>
+        ))}
+        {filters.quickDate && (
+          <Button size="small" type="text" onClick={() => setFilters(f => ({ ...f, quickDate: undefined, date_range: null }))}>清除快捷</Button>
+        )}
+      </div>
+
+      {/* 批量操作条 */}
+      {selectedRowKeys.length > 0 && (
+        <div style={{ marginBottom: 12, padding: '8px 12px', background: tokens.colorFillSecondary, borderRadius: tokens.borderRadius, display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+          <Text strong>已选 {selectedRowKeys.length} 项</Text>
+          <Button size="small" icon={<InboxOutlined />} onClick={batchArchive} disabled={!isAdmin}>批量归档</Button>
+          <Button size="small" type="text" onClick={() => setSelectedRowKeys([])}>取消选择</Button>
+        </div>
+      )}
 
       {/* 图片网格 / 表格 */}
       <Spin spinning={loading}>
@@ -422,7 +392,7 @@ export default function ArchivePage() {
                         }}
                         onClick={() => handlePreview(item)}
                       >
-                        <Checkbox
+                        {isAdmin && <Checkbox
                           checked={checked}
                           onClick={e => e.stopPropagation()}
                           onChange={e => {
@@ -431,13 +401,22 @@ export default function ArchivePage() {
                               : keys.filter(k => k !== item.id));
                           }}
                           style={{ position: 'absolute', top: 8, left: 8, zIndex: 2 }}
-                        />
+                        />}
                         {img ? (
-                          <img src={item.stored_path} alt={item.filename}
-                            onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.innerHTML = '<span style=\'font-size:48px;color:#ccc\'>📷</span>'; }}
-                            style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <>
+                            <PictureOutlined
+                              aria-hidden
+                              style={{ position: 'absolute', fontSize: 48, color: tokens.colorTextQuaternary }}
+                            />
+                            <img
+                              src={item.stored_path}
+                              alt={item.filename}
+                              onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                              style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative' }}
+                            />
+                          </>
                         ) : (
-                          <span style={{ fontSize: 48, color: '#ccc' }}>{item.file_type === 'video' ? '🎬' : '📄'}</span>
+                          <span style={{ fontSize: 48, color: tokens.colorTextQuaternary }}>{item.file_type === 'video' ? '🎬' : '📄'}</span>
                         )}
                       </div>
                     }
@@ -446,14 +425,12 @@ export default function ArchivePage() {
                         icon={<SearchOutlined />} onClick={() => handlePreview(item)} />,
                       <Button key="download" type="text" size="small" title="下载"
                         icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')} />,
-                      item.archived
+                      isAdmin && (item.archived
                         ? <Button key="unarchive" type="text" size="small" title="取消归档"
                             icon={<RollbackOutlined />} onClick={() => handleUnarchive(item)} />
                         : <Button key="archive" type="text" size="small" title="归档"
-                            icon={<InboxOutlined />} onClick={() => openArchive(item)} />,
-                      <Button key="delete" type="text" size="small" danger title="删除"
-                        icon={<DeleteOutlined />} onClick={() => handleDelete(item)} />,
-                    ]}
+                            icon={<InboxOutlined />} onClick={() => openArchive(item)} />),
+                    ].filter(Boolean)}
                   >
                     <Card.Meta
                       title={
@@ -463,12 +440,12 @@ export default function ArchivePage() {
                       }
                       description={
                         <div>
-                          <div style={{ fontSize: 11, color: '#999', marginBottom: 2 }}>
+                          <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginBottom: 2 }}>
                             <span>{item.taken_at?.slice(0, 10) || '—'}</span>
                             {item.uploader_name && <span> · {item.uploader_name}</span>}
                             {item.site_name && <span> · {item.site_name}</span>}
                           </div>
-                          <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
+                          <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginTop: 2 }}>
                             {item.category && <Tag color={catColor(item.category)} style={{ fontSize: 11 }}>{attachmentCategoryMap[item.category] || item.category}</Tag>}
                             <span>{sourceLabel(item.source_type)} · {fmtSize(item.file_size)}</span>
                           </div>
@@ -481,12 +458,15 @@ export default function ArchivePage() {
             })}
           </Row>
         ) : (
-          <Table
-            rowKey="id" dataSource={list} columns={columns} size="small"
-            rowSelection={rowSelection} pagination={false}
-            scroll={{ x: 1100 }}
-            style={{ background: tokens.colorBgContainer, borderRadius: tokens.borderRadius }}
-          />
+          <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
+            <div ref={tableWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <Table
+                rowKey="id" dataSource={list} columns={columns} size="small"
+                rowSelection={rowSelection} pagination={false}
+                scroll={tableBodyHeight ? { y: tableBodyHeight } : undefined}
+              />
+            </div>
+          </Card>
         )}
 
         {/* 分页 */}
@@ -498,27 +478,6 @@ export default function ArchivePage() {
           </div>
         )}
       </Spin>
-
-      {/* 通用上传弹窗 */}
-      <Modal
-        title={<Space><UploadOutlined />上传影像资料</Space>}
-        open={uploadVisible}
-        onCancel={() => setUploadVisible(false)}
-        footer={null}
-        destroyOnClose
-        width={520}
-      >
-        <div style={{ padding: '8px 0' }}>
-          <AttachmentUpload
-            buttonText="选择文件并上传"
-            onSuccess={() => { setUploadVisible(false); loadList(1); refreshStats(); }}
-          />
-          <Divider style={{ margin: '12px 0' }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            上传后系统按「水印文字 / 文件名 / 描述」自动识别分类；命中审核项则进入「待办审核-影像审核」队列，否则直接归档留存。
-          </Text>
-        </div>
-      </Modal>
 
       {/* 预览弹窗 */}
       <Modal
@@ -581,7 +540,7 @@ export default function ArchivePage() {
         {archiveTarget && (
           <div>
             <p style={{ marginBottom: 8 }}>即将归档：<Text strong>{archiveTarget.filename}</Text></p>
-            <div style={{ marginBottom: 6, color: '#888', fontSize: 13 }}>
+            <div style={{ marginBottom: 6, color: tokens.colorTextSecondary, fontSize: 13 }}>
               归档后可独立检索、长期留存。可填写归档说明（选填）：
             </div>
             <Input.TextArea rows={3} value={archiveReason}

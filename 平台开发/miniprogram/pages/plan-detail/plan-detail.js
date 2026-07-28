@@ -1,5 +1,6 @@
 const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
+const { getUser } = require('../../utils/auth.js');
 
 const app = getApp();
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -15,6 +16,13 @@ function addDays(dateStr, n) {
   const dd = ('0' + d.getDate()).slice(-2);
   return y + '-' + m + '-' + dd;
 }
+function todayString() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = ('0' + (d.getMonth() + 1)).slice(-2);
+  const day = ('0' + d.getDate()).slice(-2);
+  return y + '-' + m + '-' + day;
+}
 
 Page({
   data: {
@@ -28,7 +36,10 @@ Page({
     resourceDays: [],
     resourceParts: [],
     linkedWorkorders: [],
-    canEdit: false
+    canEdit: false,
+    canExecute: false,
+    canFavorite: false,
+    favoriting: false
   },
 
   onLoad(opts) {
@@ -79,10 +90,12 @@ Page({
           weekday_cn: d.weekday_cn,
           vehicle_name: d.vehicle_name || (d.sites.length ? '未安排用车' : '')
         })).filter(d => d.vehicle_name);
-        const reservedParts = Array.isArray(res.resource_parts) && res.resource_parts.length
+        const plannedParts = Array.isArray(res.resource_parts) && res.resource_parts.length
           ? res.resource_parts.map(p => Object.assign({}, p, {
-            status_cn: p.issued_quantity > 0 ? '已领用' : (p.reserved_quantity > 0 ? '已预留' : '待确认'),
-            quantity_text: (p.issued_quantity || p.reserved_quantity || p.planned_quantity || 0) + (p.unit || '个')
+            status_cn: p.issued_quantity > 0
+              ? `已领${p.issued_quantity}${p.unit || '个'}`
+              : '待现场领用',
+            quantity_text: `计划${p.planned_quantity || 0}${p.unit || '个'}`
           }))
           : (Array.isArray(res.spare_parts) ? res.spare_parts.map(p => ({
             part_name: p.part_name || p.name || '备件',
@@ -99,10 +112,12 @@ Page({
           typeCn: maps.map(maps.SCHEDULE_TYPE, res.schedule_type, res.schedule_type),
           generatedPlans: res.generated_plans || [],
           resourceDays,
-          resourceParts: reservedParts,
+          resourceParts: plannedParts,
           linkedWorkorders: res.linked_workorders || [],
           canEdit: res.status === 'draft' || res.status === 'rejected',
-          canChange: res.status === 'approved'
+          canChange: res.status === 'approved',
+          canExecute: res.status === 'approved' && days.some(day => day.date === todayString() && day.sites.length > 0),
+          canFavorite: Number(res.user_id) === Number((getUser() || {}).id) && days.some(day => day.sites.length > 0)
         });
         if (done) done();
       })
@@ -115,6 +130,30 @@ Page({
 
   onEdit() {
     wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
+  },
+
+  onGoExecution() {
+    app.globalData.selPlanId = this.scheduleId;
+    wx.switchTab({ url: '/pages/inspection/inspection' });
+  },
+
+  onFavorite() {
+    if (!this.data.canFavorite || this.data.favoriting) return;
+    wx.showModal({
+      title: '收藏为常用计划',
+      editable: true,
+      placeholderText: '可填写名称，如：周二周四固定路线',
+      content: '',
+      confirmText: '收藏',
+      success: result => {
+        if (!result.confirm) return;
+        this.setData({ favoriting: true });
+        api.addPlanScheduleFavorite(this.scheduleId, (result.content || '').trim())
+          .then(() => wx.showToast({ title: '已加入常用计划', icon: 'success' }))
+          .catch(err => wx.showToast({ title: (err && (err.error || err.message)) || '收藏失败', icon: 'none' }))
+          .finally(() => this.setData({ favoriting: false }));
+      }
+    });
   },
 
   // 发起变更：已通过的计划 → modifying，随后进入编辑页修改

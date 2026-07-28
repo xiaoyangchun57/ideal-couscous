@@ -1,6 +1,9 @@
 <view class="page">
   <!-- 弱网待同步条 -->
-  <view class="sync-bar" wx:if="{{syncCount > 0}}" bindtap="onSyncNow">
+  <view class="sync-bar" wx:if="{{!online}}">
+    当前离线，现场记录会暂存并在联网后自动同步
+  </view>
+  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">
     有 {{syncCount}} 项待同步（弱网已离线保存）· 点击立即同步
   </view>
 
@@ -33,6 +36,23 @@
       </view>
     </view>
   </view>
+  <view class="parts-issue-card" wx:if="{{currentPackage && currentPackage.resource_parts && currentPackage.resource_parts.length}}">
+    <view class="parts-issue-copy">
+      <text class="parts-issue-title">备件现场领用</text>
+      <text class="parts-issue-meta">{{currentPackage.resource_summary.totalKinds}} 种备件 · {{currentPackage.resource_summary.remainingKinds}} 种待领 · 领用后立即扣库</text>
+    </view>
+    <view class="parts-issue-button {{currentPackage.resource_summary.remaining === 0 ? 'parts-issue-done' : ''}}" bindtap="onOpenPartsIssue">
+      {{currentPackage.resource_summary.remaining === 0 ? '已全部领用' : (currentPackage.departure_confirmation && currentPackage.departure_confirmation.parts_confirmed ? '确认领用' : '先确认资源')}}
+    </view>
+  </view>
+  <view class="vehicle-dispatch" wx:if="{{currentPackage.vehicle}}">
+    <view><text class="vehicle-dispatch-title">{{currentPackage.vehicle.plate_no}}</text><text class="vehicle-dispatch-meta {{currentPackage.vehicle.document_warning ? 'vehicle-doc-warning' : ''}}">{{currentPackage.vehicle.document_warning || (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车，行程已归档' : '已出车，待还车验车') : '出发前完成车况检查和里程登记')}}</text></view>
+    <view class="vehicle-dispatch-btn {{currentPackage.vehicle_use && currentPackage.vehicle_use.returned_at ? 'vehicle-dispatch-returned' : (currentPackage.vehicle_use ? 'vehicle-dispatch-done' : '')}}" bindtap="onOpenVehicleCheckout">{{currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车' : '还车登记') : '出车登记'}}</view>
+  </view>
+  <view class="vehicle-live-actions" wx:if="{{currentPackage.vehicle_use && !currentPackage.vehicle_use.returned_at}}">
+    <view class="vehicle-live-action" bindtap="onOpenRefuel">{{currentPackage.vehicle.fuel_type === 'electric' ? '充电记录' : '加油记录'}}</view>
+    <view class="vehicle-live-action vehicle-live-danger" bindtap="onOpenVehicleFault">车辆故障</view>
+  </view>
 
   <!-- 站点选择 -->
   <scroll-view wx:if="{{sites.length}}" scroll-x class="site-chips" enhanced show-scrollbar="{{false}}">
@@ -51,6 +71,10 @@
       <view class="op" bindtap="goSite">站点信息</view>
     </view>
   </view>
+  <view wx:if="{{selSite && selSite.linked_workorders && selSite.linked_workorders.length}}" class="linked-orders">
+    <view class="linked-orders-head"><text>关联工单</text><text>{{selSite.linked_workorders.length}} 条待处理</text></view>
+    <view class="linked-order" wx:for="{{selSite.linked_workorders}}" wx:key="order_no" data-order-no="{{item.order_no}}" bindtap="onLinkedWorkorder"><text class="linked-order-title">{{item.display_title}}</text><text class="linked-order-status">{{item.status_cn}} ›</text></view>
+  </view>
 
   <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view><view class="sheet" wx:if="{{reportSheet.open}}"><view class="sheet-head"><text class="sheet-title">现场异常上报</text><text class="sheet-close" bindtap="onCloseReport">×</text></view><picker range="{{['感官异常','设备异常','环境异常','违规操作','污染事件']}}" value="{{reportSheet.typeIndex}}" bindchange="onReportType"><view class="reagent-picker">异常类别 ›</view></picker><picker range="{{anomalyCodes}}" range-key="code" value="{{reportSheet.codeIndex}}" bindchange="onReportCode"><view class="reagent-picker">异常编码（可选） ›</view></picker><textarea class="ta" placeholder="说明现场异常及已采取措施" value="{{reportSheet.description}}" bindinput="onReportDescription"/><view class="report-photo" bindtap="onAddReportPhoto">{{reportSheet.photos.length ? '现场照片已上传，点击重拍' : '拍摄现场照片（必填）'}}</view><button class="btn-primary submit-btn" loading="{{reportSheet.submitting}}" bindtap="onSubmitReport">上报并生成工单</button></view>
 
@@ -62,7 +86,7 @@
     <text class="station-panel-meta">巡检 {{completed}}/{{total}} 项</text>
   </view>
   <view wx:if="{{selSite}}" class="reagent-entry" bindtap="onOpenReagentSheet">
-    <view><text class="reagent-title">现场试剂</text><text class="reagent-meta">更换后需完成标样质控</text></view>
+    <view><text class="reagent-title">现场试剂</text><text class="reagent-meta">更换后需完成标定</text></view>
     <text class="reagent-action">{{reagents.length ? '处理 ›' : '暂无记录'}}</text>
   </view>
 
@@ -92,10 +116,11 @@
             <text class="tag">{{it.frequency_cn || '未设频次'}}</text>
             <text class="item-time" wx:if="{{it.check_time}}">{{it.check_time}}</text>
           </view>
+          <view class="item-review-reject" wx:if="{{it.review_status === 3 && it.review_comment}}">退回：{{it.review_comment}}</view>
         </view>
         <view class="item-right">
-          <view class="item-status {{it.result === 'normal' ? 'st-ok' : (it.result === 'abnormal' ? 'st-bad' : 'st-wait')}}">
-            {{it.result_cn}}
+          <view class="item-status {{it.review_status === 3 ? 'st-bad' : (it.result === 'normal' ? 'st-ok' : (it.result === 'abnormal' ? 'st-bad' : 'st-wait'))}}">
+            {{it.review_status === 3 ? '待整改' : it.result_cn}}
           </view>
         </view>
       </view>
@@ -106,14 +131,68 @@
     <text class="empty-tx">今日暂无已批准的巡检任务</text>
   </view>
 
+  <view class="sheet-mask" wx:if="{{vehicleSheet.open}}" bindtap="onCloseVehicleCheckout"></view>
+  <view class="sheet" wx:if="{{vehicleSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">{{vehicleSheet.mode === 'return' ? '还车检查' : '出车前检查'}}</text><text class="sheet-close" bindtap="onCloseVehicleCheckout">×</text></view>
+    <text class="vehicle-check-hint">请逐项核对车况。选择“禁用”会将车辆转为受限，无法继续调度。</text>
+    <view class="vehicle-check-row" wx:for="{{vehicleSheet.items}}" wx:key="key" wx:for-item="item">
+      <text class="vehicle-check-label">{{item.label || item.key}}</text>
+      <view class="vehicle-check-options">
+        <text class="vehicle-check-option {{item.status === 'normal' ? 'vehicle-check-ok' : ''}}" data-index="{{index}}" data-status="normal" bindtap="onVehicleItemStatus">正常</text>
+        <text class="vehicle-check-option {{item.status === 'attention' ? 'vehicle-check-attention' : ''}}" data-index="{{index}}" data-status="attention" bindtap="onVehicleItemStatus">关注</text>
+        <text class="vehicle-check-option {{item.status === 'blocked' ? 'vehicle-check-blocked' : ''}}" data-index="{{index}}" data-status="blocked" bindtap="onVehicleItemStatus">禁用</text>
+      </view>
+    </view>
+    <view class="field-label">{{vehicleSheet.mode === 'return' ? '还车时里程' : '出车时里程'}}</view>
+    <input class="inline-input" type="digit" placeholder="填写仪表盘公里数" value="{{vehicleSheet.mileage}}" bindinput="onVehicleMileage"/>
+    <view class="field-label">现场说明{{vehicleSheet.mode === 'return' ? '（异常必填）' : '（异常必填）'}}</view>
+    <textarea class="ta" placeholder="如：左前轮胎压不足、补气后可继续使用" value="{{vehicleSheet.remarks}}" bindinput="onVehicleRemark"/>
+    <button class="btn-primary submit-btn" loading="{{vehicleSheet.submitting}}" disabled="{{vehicleSheet.submitting}}" bindtap="onSubmitVehicleCheckout">{{vehicleSheet.mode === 'return' ? '确认检查并还车' : '确认检查并出车'}}</button>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{partsIssueSheet.open}}" bindtap="onClosePartsIssue"></view>
+  <view class="sheet" wx:if="{{partsIssueSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">备件现场领用</text><text class="sheet-close" bindtap="onClosePartsIssue">×</text></view>
+    <text class="parts-sheet-hint">按实际交付数量确认，可分批领用。提交后立即扣减库存。</text>
+    <view class="parts-sheet-row" wx:for="{{partsIssueSheet.items}}" wx:key="part_id" wx:for-item="part">
+      <view class="parts-sheet-copy">
+        <text class="parts-sheet-name">{{part.part_name || ('备件#' + part.part_id)}}</text>
+        <text class="parts-sheet-meta">剩余可领 {{part.remaining_quantity}}{{part.unit || '件'}} · 已领 {{part.issued_quantity}}{{part.unit || '件'}}</text>
+      </view>
+      <input class="parts-sheet-input" type="number" value="{{part.issue_quantity}}" data-index="{{index}}" bindinput="onPartsIssueQuantity" />
+      <text class="parts-sheet-unit">{{part.unit || '件'}}</text>
+    </view>
+    <button class="btn-primary submit-btn" loading="{{partsIssueSheet.submitting}}" disabled="{{partsIssueSheet.submitting}}" bindtap="onSubmitPartsIssue">确认领用并扣库</button>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{refuelSheet.open}}" bindtap="onCloseRefuel"></view>
+  <view class="sheet" wx:if="{{refuelSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">{{refuelSheet.label}}记录</text><text class="sheet-close" bindtap="onCloseRefuel">×</text></view>
+    <view class="field-label">{{refuelSheet.label}}量（{{refuelSheet.unit}}）</view><input class="inline-input" type="digit" value="{{refuelSheet.quantity}}" data-field="quantity" bindinput="onRefuelField" placeholder="填写补给量"/>
+    <view class="field-label">金额（元，可选）</view><input class="inline-input" type="digit" value="{{refuelSheet.amount}}" data-field="amount" bindinput="onRefuelField" placeholder="填写实付金额"/>
+    <view class="field-label">当前里程</view><input class="inline-input" type="digit" value="{{refuelSheet.mileage}}" data-field="mileage" bindinput="onRefuelField" placeholder="填写仪表盘公里数"/>
+    <view class="field-label">备注（可选）</view><textarea class="ta" value="{{refuelSheet.remark}}" data-field="remark" bindinput="onRefuelField" placeholder="如：92号汽油、加油站名称"/>
+    <button class="btn-primary submit-btn" loading="{{refuelSheet.submitting}}" disabled="{{refuelSheet.submitting}}" bindtap="onSubmitRefuel">保存{{refuelSheet.label}}记录</button>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{vehicleFaultSheet.open}}" bindtap="onCloseVehicleFault"></view>
+  <view class="sheet" wx:if="{{vehicleFaultSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">车辆故障上报</text><text class="sheet-close" bindtap="onCloseVehicleFault">×</text></view>
+    <view class="field-label">故障类型</view><input class="inline-input" value="{{vehicleFaultSheet.faultType}}" data-field="faultType" bindinput="onVehicleFaultField" placeholder="如：轮胎、灯光、制动"/>
+    <view class="field-label">故障时里程（可选）</view><input class="inline-input" type="digit" value="{{vehicleFaultSheet.mileage}}" data-field="mileage" bindinput="onVehicleFaultField" placeholder="填写仪表盘公里数"/>
+    <view class="field-label">故障现象</view><textarea class="ta" value="{{vehicleFaultSheet.description}}" data-field="description" bindinput="onVehicleFaultField" placeholder="说明故障现象及是否影响安全行驶"/>
+    <view class="field-label">补充说明（可选）</view><textarea class="ta" value="{{vehicleFaultSheet.remark}}" data-field="remark" bindinput="onVehicleFaultField" placeholder="已采取的临时措施"/>
+    <button class="btn-danger submit-btn" loading="{{vehicleFaultSheet.submitting}}" disabled="{{vehicleFaultSheet.submitting}}" bindtap="onSubmitVehicleFault">上报并限制使用</button>
+  </view>
+
   <view class="sheet-mask" wx:if="{{reagentSheet.open}}" bindtap="onCloseReagentSheet"></view>
   <view class="sheet" wx:if="{{reagentSheet.open}}">
     <view class="sheet-head"><text class="sheet-title">现场试剂</text><text class="sheet-close" bindtap="onCloseReagentSheet">×</text></view>
-    <picker mode="selector" range="{{reagents}}" range-key="reagent_name" value="{{reagentSheet.index}}" bindchange="onReagentPick"><view class="reagent-picker">{{reagents[reagentSheet.index].reagent_name}} · {{reagents[reagentSheet.index].qc_status === 'pending' ? '待质控' : '已质控'}} ›</view></picker>
-    <view class="seg"><view class="seg-item {{reagentSheet.mode === 'replacement' ? 'seg-on-ok' : ''}}" data-mode="replacement" bindtap="onReagentMode">更换</view><view class="seg-item {{reagentSheet.mode === 'qc' ? 'seg-on-ok' : ''}}" data-mode="qc" bindtap="onReagentMode">标样质控</view></view>
+    <picker mode="selector" range="{{reagents}}" range-key="reagent_name" value="{{reagentSheet.index}}" bindchange="onReagentPick"><view class="reagent-picker">{{reagents[reagentSheet.index].reagent_name}} · {{reagents[reagentSheet.index].qc_status === 'pending' ? '待标定' : '已标定'}} ›</view></picker>
+    <view class="seg"><view class="seg-item {{reagentSheet.mode === 'replacement' ? 'seg-on-ok' : ''}}" data-mode="replacement" bindtap="onReagentMode">更换</view><view class="seg-item {{reagentSheet.mode === 'qc' ? 'seg-on-ok' : ''}}" data-mode="qc" bindtap="onReagentMode">标定</view></view>
     <block wx:if="{{reagentSheet.mode === 'replacement'}}"><view class="field-label">更换后余量</view><input class="inline-input" type="digit" value="{{reagentSheet.newQty}}" data-field="newQty" bindinput="onReagentField" placeholder="填写当前余量" /><view class="field-label">预计使用天数</view><input class="inline-input" type="number" value="{{reagentSheet.duration}}" data-field="duration" bindinput="onReagentField" placeholder="按现场经验填写" /></block>
     <block wx:else><view class="field-label">标样值 / 实测值</view><input class="inline-input" type="digit" value="{{reagentSheet.standardValue}}" data-field="standardValue" bindinput="onReagentField" placeholder="标样值" /><input class="inline-input" type="digit" value="{{reagentSheet.measuredValue}}" data-field="measuredValue" bindinput="onReagentField" placeholder="实测值" /><view class="seg"><view class="seg-item {{reagentSheet.passed ? 'seg-on-ok' : ''}}" data-passed="true" bindtap="onReagentPass">通过</view><view class="seg-item {{!reagentSheet.passed ? 'seg-on-bad' : ''}}" data-passed="false" bindtap="onReagentPass">不通过</view></view><view wx:if="{{!reagentSheet.passed}}" class="seg fail-action"><view class="seg-item {{reagentSheet.failAction === 'calibrate' ? 'seg-on-bad' : ''}}" data-action="calibrate" bindtap="onReagentFailAction">校准</view><view class="seg-item {{reagentSheet.failAction === 'repair' ? 'seg-on-bad' : ''}}" data-action="repair" bindtap="onReagentFailAction">报修</view></view></block>
-    <button class="btn-primary submit-btn" loading="{{reagentSheet.submitting}}" disabled="{{reagentSheet.submitting}}" bindtap="onSubmitReagent">提交现场记录</button>
+    <button class="btn-primary submit-btn" loading="{{reagentSheet.submitting}}" disabled="{{reagentSheet.submitting}}" bindtap="onSubmitReagent">{{reagentSheet.mode === 'replacement' ? '确认更换' : '提交标定结果'}}</button>
   </view>
 
   <!-- 检查项操作底栏 -->

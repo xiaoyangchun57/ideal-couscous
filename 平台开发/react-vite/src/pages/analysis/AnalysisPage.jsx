@@ -3,7 +3,7 @@ import {
   Card, Typography, message, Spin, Empty, Row, Col,
   Tag, Table,
 } from 'antd';
-import EChart, { graphic } from '../../components/EChart';
+import EChart from '../../components/EChart';
 import {
   ArrowUpOutlined, ArrowDownOutlined, DashboardOutlined,
   CheckCircleOutlined, FieldTimeOutlined, WarningOutlined,
@@ -12,6 +12,7 @@ import {
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { stationTypeMap } from '../../services/constants';
+import { pageRootStyle } from '../../services/pageStyles';
 
 const { Title, Text } = Typography;
 
@@ -68,8 +69,8 @@ function ArrivalTrendChart({ tokens, arrival }) {
   const rates = (arrival || []).map((d) => d.rate);
   const option = {
     tooltip: {
-      trigger: 'axis', backgroundColor: 'rgba(0,0,0,0.75)', borderColor: '#333',
-      textStyle: { color: '#fff', fontSize: 12 },
+      trigger: 'axis', backgroundColor: tokens.colorBgElevated, borderColor: tokens.colorBorder,
+      textStyle: { color: tokens.colorText, fontSize: 12 },
       valueFormatter: (v) => (v == null ? '无数据' : `${v}%`),
     },
     grid: { left: 48, right: 16, top: 24, bottom: 24 },
@@ -78,8 +79,8 @@ function ArrivalTrendChart({ tokens, arrival }) {
     series: [{
       name: '到报率', type: 'line', smooth: true, symbol: 'circle', symbolSize: 6,
       connectNulls: false, data: rates,
-      lineStyle: { color: '#00c9a7', width: 2 }, itemStyle: { color: '#00c9a7' },
-      areaStyle: { color: new graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(0,201,167,0.3)' }, { offset: 1, color: 'rgba(0,201,167,0.02)' }]) },
+      lineStyle: { color: tokens.colorPrimary, width: 2 }, itemStyle: { color: tokens.colorPrimary },
+      areaStyle: { color: tokens.colorPrimary, opacity: 0.12 },
     }],
   };
   return (
@@ -93,9 +94,9 @@ function WorkOrderAnalysisChart({ tokens, woStats }) {
   const statuses = ['待受理', '已受理', '处置中', '审核中', '已完成'];
   const keys = ['pending', 'accepted', 'in_progress', 'reviewing', 'closed'];
   const data = keys.map(k => woStats?.by_status?.[k] || 0);
-  const colors = ['#faad14', '#1890ff', '#13c2c2', '#722ed1', '#00c9a7'];
+  const colors = [tokens.colorWarning, tokens.colorInfo, tokens.colorPrimary, tokens.colorInfo, tokens.colorSuccess];
   const option = {
-    tooltip: { trigger: 'axis', backgroundColor: 'rgba(0,0,0,0.75)', borderColor: '#333', textStyle: { color: '#fff', fontSize: 12 } },
+    tooltip: { trigger: 'axis', backgroundColor: tokens.colorBgElevated, borderColor: tokens.colorBorder, textStyle: { color: tokens.colorText, fontSize: 12 } },
     grid: { left: 48, right: 16, top: 24, bottom: 24 },
     xAxis: { type: 'category', data: statuses, axisLine: { lineStyle: { color: tokens.colorBorder } }, axisLabel: { color: tokens.colorTextSecondary, fontSize: 11 } },
     yAxis: { type: 'value', axisLine: { show: false }, splitLine: { lineStyle: { color: tokens.colorBorderSecondary } }, axisLabel: { color: tokens.colorTextSecondary, fontSize: 11 } },
@@ -116,13 +117,13 @@ function DeviceStatusChart({ tokens, devices }) {
   const offline = devices?.offline || 0;
   const fault = devices?.fault || 0;
   const data = [
-    { value: online, name: '在线', itemStyle: { color: '#00c9a7' } },
-    { value: offline, name: '离线', itemStyle: { color: '#ff4d4f' } },
-    { value: fault, name: '告警', itemStyle: { color: '#faad14' } },
-    { value: Math.max(0, total - online - offline - fault), name: '维护中', itemStyle: { color: '#1890ff' } },
+    { value: online, name: '在线', itemStyle: { color: tokens.colorSuccess } },
+    { value: offline, name: '离线', itemStyle: { color: tokens.colorError } },
+    { value: fault, name: '告警', itemStyle: { color: tokens.colorWarning } },
+    { value: Math.max(0, total - online - offline - fault), name: '维护中', itemStyle: { color: tokens.colorInfo } },
   ];
   const option = {
-    tooltip: { trigger: 'item', backgroundColor: 'rgba(0,0,0,0.75)', borderColor: '#333', textStyle: { color: '#fff', fontSize: 12 }, formatter: '{b}: {c} ({d}%)' },
+    tooltip: { trigger: 'item', backgroundColor: tokens.colorBgElevated, borderColor: tokens.colorBorder, textStyle: { color: tokens.colorText, fontSize: 12 }, formatter: '{b}: {c} ({d}%)' },
     legend: { orient: 'vertical', right: 8, top: 'center', textStyle: { color: tokens.colorTextSecondary, fontSize: 12 }, itemWidth: 12, itemHeight: 12 },
     series: [{
       type: 'pie', radius: ['42%', '68%'], center: ['38%', '52%'], avoidLabelOverlap: false,
@@ -142,8 +143,8 @@ function InspectionTrendChart({ tokens, inspection }) {
   const rates = (inspection || []).map((m) => m.rate);
   const option = {
     tooltip: {
-      trigger: 'axis', backgroundColor: 'rgba(0,0,0,0.75)', borderColor: '#333',
-      textStyle: { color: '#fff', fontSize: 12 },
+      trigger: 'axis', backgroundColor: tokens.colorBgElevated, borderColor: tokens.colorBorder,
+      textStyle: { color: tokens.colorText, fontSize: 12 },
       valueFormatter: (v) => (v == null ? '无数据' : `${v}%`),
     },
     grid: { left: 48, right: 16, top: 24, bottom: 24 },
@@ -152,9 +153,9 @@ function InspectionTrendChart({ tokens, inspection }) {
     series: [{
       type: 'line', smooth: true, symbol: 'circle', symbolSize: 6,
       connectNulls: false, data: rates,
-      lineStyle: { color: '#722ed1', width: 2 },
-      itemStyle: { color: '#722ed1' },
-      areaStyle: { color: new graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(114,46,209,0.3)' }, { offset: 1, color: 'rgba(114,46,209,0.02)' }]) },
+      lineStyle: { color: tokens.colorInfo, width: 2 },
+      itemStyle: { color: tokens.colorInfo },
+      areaStyle: { color: tokens.colorInfo, opacity: 0.12 },
     }],
   };
   return (
@@ -388,7 +389,7 @@ export default function AnalysisPage() {
       render: (val, _, idx) => {
         const r = val || idx + 1;
         if (r <= 3) {
-          const colors = ['#f5a623', '#8c8c8c', '#d48806'];
+          const colors = [tokens.colorWarning, tokens.colorTextTertiary, tokens.colorError];
           return <Tag color={colors[r - 1]} style={{ fontWeight: 700, borderRadius: '50%', minWidth: 32, textAlign: 'center' }}>{r}</Tag>;
         }
         return <Text>{r}</Text>;
@@ -399,7 +400,7 @@ export default function AnalysisPage() {
   // ---------- Render ----------
 
   return (
-    <div style={{ padding: 24 }}>
+    <div style={{ ...pageRootStyle, overflowY: 'auto' }}>
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
         <Title level={4} style={{ margin: 0, color: tokens.colorText }}>数据分析</Title>
@@ -425,7 +426,7 @@ export default function AnalysisPage() {
           <Col xs={24} sm={12} lg={8} xl={5} flex="1">
             <KpiCard
               title="巡检完成率" value={inspectionRate} suffix="%"
-              icon={<FieldTimeOutlined />} color="#722ed1"
+              icon={<FieldTimeOutlined />} color={tokens.colorInfo}
               tokens={tokens}
             />
           </Col>
@@ -439,7 +440,7 @@ export default function AnalysisPage() {
           <Col xs={24} sm={12} lg={8} xl={4} flex="1">
             <KpiCard
               title="考核评分" value={assessmentScore} suffix="分"
-              icon={<TrophyOutlined />} color="#fa541c"
+              icon={<TrophyOutlined />} color={tokens.colorWarning}
               tokens={tokens}
             />
           </Col>
@@ -468,9 +469,9 @@ export default function AnalysisPage() {
         style={{ borderRadius: 12, border: `1px solid ${tokens.colorBorderSecondary}` }}
         bodyStyle={{ padding: 0 }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', height: 480 }}>
+        <div style={{ maxHeight: 480, overflow: 'auto' }}>
           <style>{`.hide-scrollbar::-webkit-scrollbar{display:none}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}`}</style>
-          <div className="hide-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+          <div className="hide-scrollbar">
             <Table
               columns={benchmarkColumns}
               dataSource={benchmark}

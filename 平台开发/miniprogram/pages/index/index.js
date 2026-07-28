@@ -8,13 +8,19 @@ const app = getApp();
 Page({
   data: {
     realName: '', today: '', loaded: false,
-    summary: null, sites: [], workorders: [], alerts: [], reviewCount: 0,
+    summary: null, sites: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
     workPackage: null
   },
 
   onLoad() {
     const u = getUser();
-    this.setData({ realName: (u && u.real_name) || '运维人员', today: todayStr() });
+    const reviewRoles = ['admin', 'reviewer'];
+    const roles = (u && u.roles) || [u && u.role];
+    this.setData({
+      realName: (u && u.real_name) || '运维人员',
+      today: todayStr(),
+      canReview: reviewRoles.some(role => roles.includes(role)),
+    });
   },
 
   onShow() {
@@ -46,10 +52,11 @@ Page({
           alerts: (res.alerts || []).map(a => Object.assign({}, a, { level_cls: maps.alertLevelCls(a.level) })),
           workPackage: res.work_package || null
         });
-        // 待我审核计数（管理者/审批者）
-        api.auditPending()
-          .then(r => this.setData({ reviewCount: Array.isArray(r) ? r.length : 0 }))
-          .catch(() => {});
+        if (this.data.canReview) {
+          api.auditPending()
+            .then(r => this.setData({ reviewCount: Array.isArray(r) ? r.length : 0 }))
+            .catch(() => {});
+        }
         if (done) done();
       })
       .catch(() => {
@@ -66,8 +73,10 @@ Page({
     wx.switchTab({ url: '/pages/inspection/inspection' });
   },
   goInspection() { wx.switchTab({ url: '/pages/inspection/inspection' }); },
-  goWorkorder() { wx.switchTab({ url: '/pages/workorder/workorder' }); },
-  goAlert() { wx.switchTab({ url: '/pages/alert/alert' }); },
+  goWorkorder() { wx.navigateTo({ url: '/pages/workorder/workorder' }); },
+  goAlert() { wx.navigateTo({ url: '/pages/alert/alert' }); },
   goReview() { wx.navigateTo({ url: '/pages/review/view' }); },
   goPlan() { wx.navigateTo({ url: '/pages/plan/plan' }); }
+  ,
+  goVehicle() { wx.navigateTo({ url: '/pages/vehicle/vehicle' }); }
 });

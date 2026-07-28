@@ -90,6 +90,9 @@ function request(path, method, data, options) {
                 q.push({ url: path, method: method, data: data, ts: Date.now() });
                 saveQueue(q);
               }
+              // 让调用页区分「业务失败」与「已安全落入离线队列」。
+              // 仍 reject，避免页面将尚未同步的操作误呈现为已完成。
+              err = Object.assign(err || {}, { queued: true });
             }
             reject(err);
           }

@@ -6,8 +6,16 @@
 //   - 开发者工具模拟器 / 真机预览 均可访问
 //   - 需在开发者工具「本地设置」勾选「不校验合法域名、TLS、HTTPS 证书」
 //   - 若接口无响应，请先确认 backend/app.py 已启动
+let isDevtools = false;
+try {
+  isDevtools = typeof wx !== 'undefined' && wx.getSystemInfoSync().platform === 'devtools';
+} catch (_) {
+  // Keep the deployed-device endpoint when runtime information is unavailable.
+}
+
 const CONFIG = {
-  BASE_URL: 'http://192.168.2.103:5000'
+  // The simulator reaches the local Flask service directly; field devices keep the LAN endpoint.
+  BASE_URL: isDevtools ? 'http://127.0.0.1:5000' : 'http://192.168.2.110:5000'
 };
 
 module.exports = CONFIG;

@@ -51,7 +51,7 @@ export default function MainLayout() {
 
   const selectedKey = `/${location.pathname.split('/')[1] || ''}`;
   const currentMeta = routeMeta[selectedKey] || routeMeta['/'];
-  const navItems = useMemo(() => getNavigation(user?.role), [user?.role]);
+  const navItems = useMemo(() => getNavigation(user?.roles || [user?.role]), [user?.role, user?.roles]);
 
   const loadNotifs = useCallback(async () => {
     if (document.hidden) return;
@@ -105,6 +105,48 @@ export default function MainLayout() {
     setUnread((count) => Math.max(0, count - 1));
   };
 
+  const notificationTarget = (item) => {
+    const sourceId = item?.source_id ? encodeURIComponent(item.source_id) : '';
+    switch (item?.source_type) {
+      case 'workorder':
+      case 'workorder_review':
+        return sourceId ? `/workorders?search=${sourceId}` : '/workorders';
+      case 'inspection':
+      case 'inspection_review':
+        return '/audit?tab=inspection';
+      case 'photo_review':
+        return '/audit?tab=photo';
+      case 'data_review':
+        return '/audit?tab=data';
+      case 'parts_request':
+        return '/audit?tab=parts';
+      case 'spare_part_request':
+        return '/audit?tab=spareparts';
+      case 'vehicle_application':
+        return '/audit?tab=vehicle';
+      case 'plan_schedule':
+        return '/plan-schedules';
+      case 'alert':
+      case 'manual_report':
+        return '/alerts';
+      case 'reagent_qc':
+        return '/equipment';
+      default:
+        return null;
+    }
+  };
+
+  const openNotification = async (item) => {
+    if (!item.is_read) {
+      try { await markOneRead(item.id); } catch { /* Navigation remains available if marking read fails. */ }
+    }
+    const target = notificationTarget(item);
+    if (target) {
+      setNotifOpen(false);
+      navigate(target);
+    }
+  };
+
   const notificationContent = (
     <div className="notification-panel">
       <div className="notification-panel__header" style={{ borderColor: tokens.colorBorder }}>
@@ -124,7 +166,7 @@ export default function MainLayout() {
               renderItem={(item) => (
                 <List.Item
                   className="notification-item"
-                  onClick={() => !item.is_read && markOneRead(item.id)}
+                  onClick={() => openNotification(item)}
                   style={{ opacity: item.is_read ? 0.62 : 1 }}
                 >
                   <List.Item.Meta
@@ -237,7 +279,7 @@ export default function MainLayout() {
             <Dropdown menu={{ items: userMenuItems }} placement="bottomRight" trigger={['click']}>
               <button className="user-chip" type="button" style={{ background: tokens.colorPrimaryBg, borderColor: tokens.colorBorder }}>
                 <UserOutlined />
-                <span className="user-chip__name">{user?.name || user?.username || '--'}</span>
+                <span className="user-chip__name">{user?.login_name || user?.real_name || user?.name || user?.username || '--'}</span>
                 <span className="user-chip__role">{roleLabels[user?.role] || '用户'}</span>
               </button>
             </Dropdown>

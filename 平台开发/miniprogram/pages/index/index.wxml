@@ -38,9 +38,9 @@
       <text class="package-label">站点</text>
       <text class="package-value">{{workPackage.sites.length}} 个</text>
     </view>
-    <view class="package-line">
+    <view class="package-line" bindtap="goVehicle">
       <text class="package-label">车辆</text>
-      <text class="package-value {{workPackage.readiness.vehicle_assigned ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_assigned ? '已安排' : '未安排'}}</text>
+      <text class="package-value {{workPackage.readiness.vehicle_assigned ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_assigned ? '已安排 · 查看' : '未安排 · 申请'}}</text>
     </view>
     <view class="package-line">
       <text class="package-label">出发资源</text>
@@ -66,10 +66,10 @@
   </view>
 
   <!-- 待我审核（管理者/审批者） -->
-  <view class="section">
+  <view class="section" wx:if="{{canReview}}">
     <view class="section-title">待我审核<text class="section-more" bindtap="goReview">去审核 ›</text></view>
   </view>
-  <view class="card review-entry" bindtap="goReview">
+  <view class="card review-entry" wx:if="{{canReview}}" bindtap="goReview">
     <view class="review-entry-l">
       <text class="review-entry-num">{{reviewCount}}</text>
       <text class="review-entry-label">项待审核</text>
@@ -103,14 +103,14 @@
   <view class="section">
     <view class="section-title">待办工单<text class="section-more" bindtap="goWorkorder">全部 ›</text></view>
   </view>
-  <view class="card list-card" wx:if="{{workorders.length}}">
+  <view class="list-card" wx:if="{{workorders.length}}">
     <view class="row" wx:for="{{workorders}}" wx:key="order_no" bindtap="goWorkorder">
       <view class="row-main">
-        <view class="row-top">
-          <text class="row-title">{{item.title}}</text>
-          <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
-        </view>
+        <text class="row-title">{{item.title}}</text>
         <text class="row-sub">{{item.site_name}} · {{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}"> · {{item.level_cn}}</text></text>
+      </view>
+      <view class="row-right">
+        <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
       </view>
     </view>
   </view>
@@ -123,7 +123,7 @@
   <view class="section">
     <view class="section-title">未处理告警<text class="section-more" bindtap="goAlert">全部 ›</text></view>
   </view>
-  <view class="card list-card" wx:if="{{alerts.length}}">
+  <view class="list-card" wx:if="{{alerts.length}}">
     <view class="row" wx:for="{{alerts}}" wx:key="id" bindtap="goAlert">
       <view class="row-main">
         <text class="row-title">{{item.site_name}} · {{item.metric_cn}}</text>

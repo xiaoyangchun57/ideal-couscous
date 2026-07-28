@@ -4,13 +4,13 @@
     <view class="tb-btn tb-brand" bindtap="onSubscribe">订阅消息</view>
   </view>
 
-  <view class="card list-card" wx:if="{{list.length}}">
-    <view class="row {{item.is_read ? '' : 'row-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
-      <view class="row-dot" wx:if="{{!item.is_read}}"></view>
-      <view class="row-main">
-        <text class="row-title">{{item.title}}</text>
-        <text class="row-sub">{{item.content}}</text>
-        <text class="row-time">{{item.time}}</text>
+  <view class="list-card" wx:if="{{list.length}}">
+    <view class="msg-row {{item.is_read ? '' : 'msg-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
+      <view class="msg-dot" wx:if="{{!item.is_read}}"></view>
+      <view class="msg-main">
+        <text class="msg-title">{{item.title}}</text>
+        <text class="msg-sub">{{item.content}}</text>
+        <text class="msg-time">{{item.time}}</text>
       </view>
     </view>
   </view>

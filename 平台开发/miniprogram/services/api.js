@@ -24,11 +24,23 @@ const api = {
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagents', 'GET'),
   replaceExecutionReagent: (planId, siteId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagent-replacements', 'POST', payload),
+  // 试剂更换后的标定；保留 reagent-qc 路径以兼容现有后端数据。
   submitExecutionReagentQc: (planId, siteId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagent-qc', 'POST', payload),
   // 出发前资源软确认：仅留痕，不锁车、不扣库，也不阻断现场巡检。
   confirmDepartureResources: (planId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/departure-confirmation', 'POST', payload || {}),
+  // 今日执行包现场领用：提交成功后立即扣减库存，并返回最新计划/领用数量。
+  issueExecutionParts: (planId, items) =>
+    request('/api/mobile/execution-plans/' + planId + '/parts/issue', 'POST', { items: items || [] }),
+  vehicleInspectionTemplate: () => request('/api/vehicle/inspection-template', 'GET'),
+  submitVehicleInspection: (payload) => request('/api/vehicle/inspections', 'POST', payload),
+  checkOutVehicle: (payload) => request('/api/vehicle/use-records', 'POST', payload),
+  returnVehicle: (recordId, payload) => request('/api/vehicle/use-records/' + recordId + '/return', 'POST', payload),
+  refuelVehicleUse: (recordId, payload) => request('/api/mobile/vehicle-use-records/' + recordId + '/refueling', 'POST', payload),
+  reportVehicleFault: (recordId, payload) => request('/api/mobile/vehicle-use-records/' + recordId + '/faults', 'POST', payload),
+  vehicleUseRecords: () => request('/api/vehicle/use-records', 'GET'),
+  vehicleApplications: () => request('/api/vehicle/applications', 'GET'),
 
   // 站点任务（含已完成）
   siteTasks: (siteId) => request('/api/mobile/site-tasks/' + siteId, 'GET'),
@@ -65,6 +77,9 @@ const api = {
   uploadWorkorderImage: (orderNo, image) =>
     request('/api/mobile/workorder/' + orderNo + '/image', 'POST', { image }),
 
+  deleteWorkorderImage: (orderNo, url) =>
+    request('/api/mobile/workorder/' + orderNo + '/image/delete', 'POST', { url }),
+
   // 极简用车申请（仅需事由，可关联工单/站点）
   applyVehicle: (payload) => request('/api/vehicle/applications', 'POST', payload),
 
@@ -72,6 +87,9 @@ const api = {
   applyParts: (payload) => request('/api/parts/requests', 'POST', payload),
   myPartsRequests: () => request('/api/parts/requests/mine', 'GET'),
   issuePartsRequest: (id, items) => request('/api/parts/requests/' + id + '/issue', 'POST', { items }),
+  orderPartsRequest: (id, payload) => request('/api/parts/requests/' + id + '/order', 'POST', payload || {}),
+  fulfillPartsRequest: (id, payload) => request('/api/parts/requests/' + id + '/fulfill', 'POST', payload || {}),
+  uploadPartsEvidence: (image) => request('/api/parts/requests/evidence', 'POST', { image }, { queue: false }),
 
   // 车辆列表（用车申请关联下拉，可选）
   vehicles: () => request('/api/vehicles', 'GET'),
@@ -96,8 +114,8 @@ const api = {
     request('/api/workorders/' + orderNo + '/approve', 'POST', {}),
 
   // 核验退回（reviewing -> in_progress，仅管理员，后端已接审批结果推送）
-  rejectWorkorder: (orderNo) =>
-    request('/api/workorders/' + orderNo + '/reject', 'POST', {}),
+  rejectWorkorder: (orderNo, reason) =>
+    request('/api/workorders/' + orderNo + '/reject', 'POST', { reason: reason || '' }),
 
   // 告警列表（无 _cn，需前端映射）
   alerts: (status) =>
@@ -163,6 +181,15 @@ const api = {
 
   // 编辑排程（仅 draft/rejected 可编辑）
   updatePlanSchedule: (id, payload) => request('/api/plan-schedules/' + id, 'PUT', payload),
+  deletePlanSchedule: (id) => request('/api/plan-schedules/' + id, 'DELETE'),
+
+  // 常用排程：收藏的是相对日期模板，从收藏生成的始终是可编辑草稿。
+  planScheduleFavorites: () => request('/api/plan-schedule-favorites', 'GET'),
+  addPlanScheduleFavorite: (scheduleId, name) =>
+    request('/api/plan-schedule-favorites', 'POST', { schedule_id: scheduleId, name: name || '' }),
+  deletePlanScheduleFavorite: (id) => request('/api/plan-schedule-favorites/' + id, 'DELETE'),
+  createDraftFromPlanScheduleFavorite: (id, periodStart) =>
+    request('/api/plan-schedule-favorites/' + id + '/draft', 'POST', { period_start: periodStart }),
 
   // 提交排程审批
   submitPlanSchedule: (id) => request('/api/plan-schedules/' + id + '/submit', 'POST', {}),
@@ -175,8 +202,8 @@ const api = {
   validatePlanSchedule: (payload) => request('/api/plan-schedules/validate', 'POST', payload),
 
   // 智能建议（站点优先级+工单顺路）
-  planSuggestions: (userId) =>
-    request('/api/plan-schedules/suggestions?user_id=' + userId, 'GET')
+  planSuggestions: (userId, scheduleType) =>
+    request('/api/plan-schedules/suggestions?user_id=' + userId + '&schedule_type=' + (scheduleType || 'weekly'), 'GET')
 };
 
 module.exports = api;

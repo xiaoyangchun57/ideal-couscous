@@ -1,13 +1,15 @@
-.filter-bar {
-  display: flex; padding: 20rpx 24rpx 0; gap: 16rpx;
-}
-.filter-item {
-  padding: 12rpx 32rpx; border-radius: 999rpx; font-size: 26rpx;
-  background: #FFFFFF; border: 1rpx solid var(--line); color: var(--text-2);
-}
-.filter-on { background: var(--brand); color: #FFFFFF; border-color: var(--brand); }
+/* 顶部筛选（原 .filter-bar/.filter-item/.filter-on）已提升为 app.wxss 全局 .seg-strip/.seg-item/.seg-on */
 
 .recommendation-card { margin: 20rpx 24rpx 0; padding: 24rpx; }
+.favorite-entry { display: flex; align-items: center; justify-content: space-between; gap: 18rpx; margin: 20rpx 24rpx 0; padding: 20rpx 24rpx; border: 1rpx solid var(--brand-line); border-radius: 12rpx; background: var(--card); }
+.favorite-entry-title { display: block; color: var(--text); font-size: 27rpx; font-weight: 600; }
+.favorite-entry-hint { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.4; }
+.favorite-entry-action { flex: none; color: var(--brand); font-size: 24rpx; }
+.favorite-field-label { margin: 22rpx 0 10rpx; color: var(--text-2); font-size: 24rpx; }
+.favorite-picker { padding: 18rpx; border-radius: 12rpx; color: var(--text); background: var(--fill-2); font-size: 26rpx; }
+.favorite-summary { margin-top: 10rpx; color: var(--text-3); font-size: 22rpx; }
+.favorite-hint { display: block; margin-top: 22rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.6; }
+.favorite-delete { margin-top: 20rpx; padding: 12rpx; text-align: center; color: var(--red); font-size: 24rpx; }
 .recommendation-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16rpx; }
 .recommendation-title { display: block; color: var(--text); font-size: 30rpx; font-weight: 600; }
 .recommendation-hint { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.5; }
@@ -17,10 +19,10 @@
 .recommendation-type { display: inline-block; margin-right: 12rpx; color: var(--brand); font-size: 24rpx; font-weight: 600; }
 .recommendation-text { color: var(--text); font-size: 26rpx; }
 .recommendation-period { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
-.recommendation-btn { flex: none; margin: 0; border-radius: 999rpx; background: var(--brand); color: #FFFFFF; font-size: 22rpx; line-height: 1.9; }
-.follow-up-card { border: 1rpx solid rgba(245, 166, 35, 0.28); }
-.follow-up-count, .follow-up-type { color: #C77D00; }
-.follow-up-btn { background: #D48806; }
+.recommendation-btn { flex: none; margin: 0; border-radius: 999rpx; background: var(--brand); color: var(--on-brand); font-size: 22rpx; line-height: 1.9; }
+.follow-up-card { border: 1rpx solid rgba(255,143,31,0.28); }
+.follow-up-count, .follow-up-type { color: var(--amber); }
+.follow-up-btn { background: var(--amber); }
 
 .plan-card { margin: 20rpx 24rpx 0; }
 .plan-top { display: flex; align-items: center; justify-content: space-between; }
@@ -37,10 +39,11 @@
 }
 
 .plan-actions { margin-top: 20rpx; display: flex; justify-content: flex-end; }
+.btn-danger { margin-left: 16rpx; color: var(--red); border-color: rgba(239, 68, 68, .35); }
 
 .fab {
   position: fixed; right: 32rpx; bottom: calc(48rpx + env(safe-area-inset-bottom));
-  background: var(--brand); color: #FFFFFF; font-size: 28rpx; font-weight: 500;
+  background: var(--brand); color: var(--on-brand); font-size: 28rpx; font-weight: 500;
   padding: 24rpx 40rpx; border-radius: 999rpx;
   box-shadow: 0 8rpx 24rpx var(--brand-line);
 }

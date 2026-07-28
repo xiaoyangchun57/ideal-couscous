@@ -3,23 +3,141 @@ import { useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
   Table, Card, Input, Select, Button, Space, Tag, Tabs,
-  Typography, message, Spin, Empty, Badge, Modal, Form,
-  Statistic, Row, Col, Descriptions, Drawer, Divider, DatePicker,
+  Typography, message, Spin, Empty, Badge, Modal, Form, Dropdown,
+  Statistic, Row, Col, Descriptions, Drawer, Divider, DatePicker, Upload,
 } from 'antd';
 import {
   SearchOutlined, ReloadOutlined, PlusOutlined, EyeOutlined,
   EditOutlined, DeleteOutlined, ToolOutlined, DatabaseOutlined,
   InboxOutlined, SwapOutlined, ExclamationCircleOutlined,
   CheckCircleOutlined, WarningOutlined, StopOutlined,
-  ArrowUpOutlined, ArrowDownOutlined, HistoryOutlined,
+  ArrowUpOutlined, ArrowDownOutlined, HistoryOutlined, MoreOutlined,
+  DownloadOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import AttachmentUpload from '../../components/AttachmentUpload';
 import { deviceTypeMap } from '../../services/constants';
+import { statusColors } from '../../theme/tokens';
+import FilterBar from '../../components/FilterBar';
+import { pageRootStyle, filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
+import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 
 const { Title, Text } = Typography;
+
+function BulkImportModal({ kind, open, onClose, onImported }) {
+  const isDevice = kind === 'devices';
+  const label = isDevice ? '设备' : '备品备件';
+  const [uploading, setUploading] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [preview, setPreview] = useState(null);
+
+  const downloadTemplate = async () => {
+    try {
+      const token = localStorage.getItem('water_ops_token') || '';
+      const response = await fetch(`/api/import-templates/${kind}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) throw new Error('模板下载失败');
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${label}批量导入模板.xlsx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      message.error(error.message || '模板下载失败');
+    }
+  };
+
+  const validateFile = async (file) => {
+    setUploading(true);
+    setPreview(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const result = await api.postForm(`/imports/${kind}/validate`, formData, 60000);
+      if (result?.error) {
+        message.error(result.error);
+      } else {
+        setPreview(result);
+        message.success(`已完成校验：${result.valid_count}/${result.total} 行可导入`);
+      }
+    } finally {
+      setUploading(false);
+    }
+    return false;
+  };
+
+  const commitImport = async () => {
+    const rows = preview?.rows?.filter(row => row.status === 'valid') || [];
+    if (!rows.length) return;
+    setCommitting(true);
+    try {
+      const result = await api.post(`/imports/${kind}/commit`, { rows }, 60000);
+      if (result?.error) {
+        message.error(result.error);
+        if (result.rows) setPreview(prev => ({ ...prev, rows: result.rows, valid_count: 0, error_count: result.rows.length }));
+        return;
+      }
+      message.success(result.message || '批量导入成功');
+      onImported?.();
+      onClose();
+    } finally {
+      setCommitting(false);
+    }
+  };
+
+  const columns = [
+    { title: '行号', dataIndex: 'row_no', width: 72 },
+    { title: '校验结果', dataIndex: 'status', width: 100, render: status => (
+      <Tag color={status === 'valid' ? 'green' : status === 'warning' ? 'orange' : 'red'}>
+        {status === 'valid' ? '可导入' : status === 'warning' ? '提示' : '需修正'}
+      </Tag>
+    ) },
+    { title: isDevice ? '设备编码' : '备件编码', key: 'code', width: 140,
+      render: (_, row) => row.data?.[isDevice ? 'device_code' : 'part_code'] || '-' },
+    { title: isDevice ? '设备名称' : '备件名称', key: 'name', width: 180,
+      render: (_, row) => row.data?.[isDevice ? 'device_name' : 'part_name'] || '-' },
+    { title: '校验信息', dataIndex: 'messages', render: messages => messages?.join('；') || '字段完整' },
+  ];
+
+  return (
+    <Modal
+      title={`批量导入${label}`}
+      open={open}
+      onCancel={onClose}
+      width={880}
+      destroyOnClose
+      footer={preview ? [
+        <Button key="cancel" onClick={onClose}>关闭</Button>,
+        <Button key="import" type="primary" loading={committing}
+          disabled={!preview.valid_count || preview.error_count > 0} onClick={commitImport}>
+          确认导入 {preview.valid_count || 0} 条
+        </Button>,
+      ] : <Button onClick={onClose}>关闭</Button>}
+    >
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <Text type="secondary">先下载系统模板并填写。上传后会校验编码、站点关联和必填字段；存在错误时不会写入数据。</Text>
+        <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>下载导入模板</Button>
+        <Upload.Dragger accept=".xlsx,.xlsm" maxCount={1} showUploadList={false}
+          beforeUpload={validateFile} disabled={uploading || committing}>
+          <p className="ant-upload-drag-icon"><UploadOutlined /></p>
+          <p className="ant-upload-text">点击或拖拽 Excel 文件到此处校验</p>
+          <p className="ant-upload-hint">仅支持系统模板的 .xlsx 文件，单次最多 1000 行。</p>
+        </Upload.Dragger>
+        {preview && (
+          <>
+            <Text strong>校验结果：{preview.total} 行，{preview.valid_count} 行可导入，{preview.error_count} 行需修正。</Text>
+            <Table columns={columns} dataSource={preview.rows} rowKey="row_no" size="small" pagination={false} scroll={{ y: 280 }} />
+          </>
+        )}
+      </Space>
+    </Modal>
+  );
+}
 
 // ---------- Simulated device model & manufacturer data ----------
 const deviceModelMap = {
@@ -79,25 +197,6 @@ const spareSpecMap = {
   '标准液套装': 'CAL-STD-KIT',
 };
 
-// 实际备件名称→规格型号映射（匹配数据库中的备件名称）
-const partSpecMap = {
-  '数据采集终端RTU': 'RTU-600',
-  'pH复合电极': 'PH-E610',
-  '溶解氧膜头': 'DO-MEMB-K',
-  '高锰酸盐反应管': 'CODMn-FLW',
-  '氨氮试剂泵管': 'NH3-REAG',
-  '总磷消解管': 'TP-DIGEST',
-  '总氮紫外灯管': 'TN-UV-LAMP',
-  '电导率电极': 'EC-CELL4',
-  'GPRS通信模块': '4G-DTU-100',
-  '温湿度传感器': 'TH-100',
-  '蓄电池(12V)': 'BAT-12V38AH',
-  '防雷模块': 'SPD-24V',
-  '信号电缆(10m)': 'CABLE-10M',
-  '蠕动泵管': 'PUMP-TUBE01',
-  '标准校准液': 'CAL-STD-KIT',
-};
-
 // 实际备件名称→适用设备类型映射
 const partDeviceMap = {
   '数据采集终端RTU': ['dtu'],
@@ -153,9 +252,11 @@ const spareMfrMap = {
 
 // ---------- Device Ledger Tab ----------
 function DeviceLedgerTab() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const canWrite = user?.role === 'admin';
+  const infoColor = statusColors.info[isDark ? 'dark' : 'light'];
+  const successColor = statusColors.success[isDark ? 'dark' : 'light'];
   const [searchParams] = useSearchParams();
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -169,8 +270,10 @@ function DeviceLedgerTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingDevice, setEditingDevice] = useState(null);
   const [modalLoading, setModalLoading] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [sites, setSites] = useState([]);
   const [form] = Form.useForm();
+  const [ledgerWrapRef, ledgerBodyH] = useTableAutoHeight({ deps: [devices.length, loading] });
 
   const fetchDevices = useCallback(async () => {
     setLoading(true);
@@ -331,6 +434,14 @@ function DeviceLedgerTab() {
       key: 'device_name',
       width: 160,
       ellipsis: true,
+      render: (text, record) => (
+        <Space size={6}>
+          <span>{text || '-'}</span>
+          {(record.management_scope === 'external_data' || record.manufacturer === '外接设备')
+            ? <Tag color="cyan" style={{ marginInlineEnd: 0 }}>仅接入数据</Tag>
+            : null}
+        </Space>
+      ),
     },
     {
       title: '所属站点',
@@ -338,43 +449,13 @@ function DeviceLedgerTab() {
       key: 'site_name',
       width: 150,
       ellipsis: true,
-      render: (text) => text || '-',
-    },
-    {
-      title: '设备型号',
-      dataIndex: 'device_model',
-      key: 'device_model',
-      width: 120,
-      ellipsis: true,
-      render: (val, record) => {
-        const model = val || deviceModelMap[record.device_type] || '';
-        return <Text style={{ fontSize: 13 }}>{model || '-'}</Text>;
-      },
-    },
-    {
-      title: '生产厂家',
-      dataIndex: 'manufacturer',
-      key: 'manufacturer',
-      width: 150,
-      ellipsis: true,
-      render: (val, record) => {
-        const mfrObj = deviceMfrMap[record.device_type];
-        const mfr = val || (mfrObj ? mfrObj.name : '') || '';
-        return <Text style={{ fontSize: 13 }}>{mfr || '-'}</Text>;
-      },
-    },
-    {
-      title: '安装日期',
-      dataIndex: 'install_date',
-      key: 'install_date',
-      width: 110,
-      render: (val) => <Text style={{ fontSize: 13 }}>{val || '-'}</Text>,
+      render: (text) => <span title={text}>{text || '-'}</span>,
     },
     {
       title: '最后数据',
       dataIndex: 'last_data_time',
       key: 'last_data_time',
-      width: 160,
+      width: 150,
       render: (text) => text ? (
         <Text style={{ color: tokens.colorTextSecondary, fontSize: 13 }}>{text}</Text>
       ) : '-',
@@ -382,95 +463,85 @@ function DeviceLedgerTab() {
     {
       title: '操作',
       key: 'actions',
-      width: 260,
+      width: 130,
       fixed: 'right',
-      render: (_, record) => (
+      render: (_, record) => {
+        const isExternal = record.management_scope === 'external_data' || record.manufacturer === '外接设备';
+        const managementItems = canWrite && !isExternal ? [
+          { key: 'edit', label: '移站/编辑', icon: <EditOutlined />, onClick: () => handleEdit(record) },
+          { key: 'recycle', label: '申请回收', icon: <SwapOutlined />, onClick: () => handleRecycleOpen(record) },
+          { type: 'divider' },
+          {
+            key: 'delete', label: '删除设备', danger: true, icon: <DeleteOutlined />,
+            onClick: () => {
+              Modal.confirm({ title: '确定删除该设备吗？', content: `设备「${record.device_name || record.device_code}」将被永久删除。`, okText: '删除', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => {
+                const result = await api.delete(`/devices/${record.id}`);
+                if (result && !result.error) { message.success('设备已删除'); fetchDevices(); }
+                else message.error(result?.error || '删除失败');
+              } });
+            },
+          },
+        ] : [];
+        return (
         <Space size={2}>
           <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => handleView(record)}>
             详情
           </Button>
-          {canWrite && (
-            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
-              编辑
-            </Button>
-          )}
-          {canWrite && (
-            <Button type="link" size="small" icon={<SwapOutlined />} onClick={() => handleRecycleOpen(record)}>
-              申请回收
-            </Button>
-          )}
-          {canWrite && (
-            <Button type="link" size="small" danger icon={<DeleteOutlined />}
-              onClick={() => {
-                Modal.confirm({
-                  title: '确认删除',
-                  icon: <ExclamationCircleOutlined />,
-                  content: `确认从台账移除设备「${record.device_name || record.device_code}」？该设备记录将被永久删除，不会进入设备回收列表。`,
-                  okText: '删除',
-                  okType: 'danger',
-                  cancelText: '取消',
-                  onOk: async () => {
-                    try {
-                      const result = await api.delete(`/devices/${record.id}`);
-                      if (result && !result.error) {
-                        message.success('设备已删除');
-                        fetchDevices();
-                      } else {
-                        message.error(result?.error || '删除失败');
-                      }
-                    } catch (e) {
-                      message.error(e?.message || '删除失败');
-                    }
-                  },
-                });
-              }}>
-              删除
-            </Button>
-          )}
+          {managementItems.length > 0 && <Dropdown menu={{ items: managementItems }}><Button type="link" size="small" icon={<MoreOutlined />}>管理</Button></Dropdown>}
         </Space>
-      ),
+        );
+      },
     },
   ];
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flexShrink: 0, marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-        <Space wrap size={12}>
-          <Input
-            placeholder="搜索设备编码、名称..."
-            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-            allowClear
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 250, borderRadius: 8 }}
-          />
-          <Select placeholder="设备类型" allowClear value={typeFilter} onChange={setTypeFilter}
-            style={{ width: 160 }} options={typeOptions} showSearch
-            filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
-          <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
-          {(search || typeFilter) && (
-            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-              已筛选 {devices.length} 条结果
-            </Text>
-          )}
-        </Space>
-        {canWrite && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
-            style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
-            注册设备
-          </Button>
+      <FilterBar
+        style={{ marginBottom: 16 }}
+        extra={(
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
+            {canWrite && (
+              <>
+                <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>批量导入</Button>
+                <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
+                  style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
+                  注册设备
+                </Button>
+              </>
+            )}
+          </Space>
         )}
-      </div>
+      >
+        <Input
+          placeholder="搜索设备编码、名称..."
+          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: filterInputWidth, borderRadius: 8 }}
+        />
+        <Select placeholder="设备类型" allowClear value={typeFilter} onChange={setTypeFilter}
+          style={{ width: filterSelectWidth }} options={typeOptions} showSearch
+          filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
+        {(search || typeFilter) && (
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            已筛选 {devices.length} 条结果
+          </Text>
+        )}
+      </FilterBar>
+      <div ref={ledgerWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
       <Table
         columns={columns}
         dataSource={devices}
         rowKey={(r) => r.id || r.code || r.device_code}
         loading={loading}
         pagination={false}
-        scroll={{ x: 1250, y: 'calc(100vh - 380px)' }}
+        scroll={ledgerBodyH ? { y: ledgerBodyH } : undefined}
         locale={{ emptyText: <Empty description="暂无设备数据" /> }}
-        size="middle"
+        size="small"
       />
+      </div>
 
       {/* ===== View Drawer ===== */}
       <Drawer
@@ -490,6 +561,11 @@ function DeviceLedgerTab() {
               <Descriptions.Item label="设备类型">{deviceTypeMap[viewingDevice.device_type] || viewingDevice.device_type || '-'}</Descriptions.Item>
               <Descriptions.Item label="设备型号">{viewingDevice.device_model || deviceModelMap[viewingDevice.device_type] || '-'}</Descriptions.Item>
               <Descriptions.Item label="生产厂家">{viewingDevice.manufacturer || deviceMfrMap[viewingDevice.device_type]?.name || '-'}</Descriptions.Item>
+              <Descriptions.Item label="管理范围">
+                {(viewingDevice.management_scope === 'external_data' || viewingDevice.manufacturer === '外接设备')
+                  ? <Tag color="cyan">仅接入数据，不管辖仪器</Tag>
+                  : <Tag color="green">纳入运维管理</Tag>}
+              </Descriptions.Item>
               <Descriptions.Item label="安装日期">{viewingDevice.install_date || '-'}</Descriptions.Item>
               <Descriptions.Item label="所属站点">{viewingDevice.site_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="最后数据时间">{viewingDevice.last_data_time || '-'}</Descriptions.Item>
@@ -554,6 +630,8 @@ function DeviceLedgerTab() {
         ) : null}
       </Drawer>
 
+      <BulkImportModal kind="devices" open={importOpen} onClose={() => setImportOpen(false)} onImported={fetchDevices} />
+
       {/* ===== Create / Edit Modal ===== */}
       <Modal
         title={editingDevice ? '设备移站' : '注册设备'}
@@ -566,7 +644,7 @@ function DeviceLedgerTab() {
         destroyOnClose
       >
         {editingDevice && (
-          <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: 'rgba(24,144,255,0.06)', border: '1px solid rgba(24,144,255,0.15)' }}>
+          <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: `${infoColor}0F`, border: `1px solid ${infoColor}26` }}>
             <Text style={{ fontSize: 13, color: tokens.colorTextSecondary }}>
               设备基础信息不可直接修改。如需变更设备类型、名称等，请通过设备回收后重新注册。
             </Text>
@@ -610,7 +688,7 @@ function DeviceLedgerTab() {
         destroyOnClose
       >
         {recycleDevice && (
-          <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: 'rgba(82,196,26,0.06)', border: '1px solid rgba(82,196,26,0.15)' }}>
+          <div style={{ marginBottom: 12, padding: '10px 14px', borderRadius: 8, background: `${successColor}0F`, border: `1px solid ${successColor}26` }}>
             <Text style={{ fontSize: 13 }}>
               设备：<Text strong>{recycleDevice.device_name}</Text>（<Text type="secondary">{recycleDevice.device_code}</Text>）
             </Text>
@@ -643,10 +721,15 @@ function DeviceLedgerTab() {
 
 // ---------- Spare Parts Inventory Tab ----------
 function SparePartsTab() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const canWrite = user?.role === 'admin';
+  const successColor = statusColors.success[isDark ? 'dark' : 'light'];
+  const warningColor = statusColors.warning[isDark ? 'dark' : 'light'];
+  const accentColor = statusColors.accent[isDark ? 'dark' : 'light'];
   const [parts, setParts] = useState([]);
+  const [partRequests, setPartRequests] = useState([]);
+  const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -656,6 +739,7 @@ function SparePartsTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingPart, setEditingPart] = useState(null);
   const [modalLoading, setModalLoading] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [sites, setSites] = useState([]);
   const [form] = Form.useForm();
 
@@ -671,6 +755,7 @@ function SparePartsTab() {
   const [recoverPart, setRecoverPart] = useState(null);
   const [recoverLoading, setRecoverLoading] = useState(false);
   const [recoverForm] = Form.useForm();
+  const [partsWrapRef, partsBodyH] = useTableAutoHeight({ deps: [parts.length, loading] });
 
   const fetchParts = useCallback(async () => {
     setLoading(true);
@@ -678,6 +763,8 @@ function SparePartsTab() {
       const params = search ? `?search=${encodeURIComponent(search)}` : '';
       const data = await api.get(`/parts/inventory${params}`);
       setParts(Array.isArray(data) ? data : (data?.parts || []));
+      const requests = await api.get('/parts/requests');
+      setPartRequests(Array.isArray(requests) ? requests : []);
     } catch {
       message.error('加载备件数据失败');
       setParts([]);
@@ -848,15 +935,7 @@ function SparePartsTab() {
   const columns = [
     { title: '备件编号', dataIndex: 'part_code', key: 'part_code', width: 110,
       render: (text, r) => <Text strong style={{ color: tokens.colorPrimary }}>{text || `#${r.id}`}</Text> },
-    { title: '备件名称', dataIndex: 'part_name', key: 'part_name', width: 140, ellipsis: true },
-    { title: '规格型号', dataIndex: 'spec', key: 'spec', width: 130, ellipsis: true,
-      render: (v, r) => v || partSpecMap[r.part_name] || spareSpecMap[r.part_name] || '-' },
-    { title: '生产厂家', dataIndex: 'manufacturer', key: 'manufacturer', width: 100, ellipsis: true,
-      render: (v, r) => {
-        const m = spareMfrMap[r.part_name];
-        const name = v && !/^[A-Za-z]/.test(v) ? v : (m ? m.name : (v || '-'));
-        return <span style={{ fontSize: 12 }}>{name}</span>;
-      }},
+    { title: '备件名称', dataIndex: 'part_name', key: 'part_name', ellipsis: true },
     { title: '库存数量', dataIndex: 'quantity', key: 'quantity', width: 110, align: 'center',
       render: (val, r) => {
         const min = r.min_quantity || 5;
@@ -865,59 +944,86 @@ function SparePartsTab() {
       }},
     { title: '存放位置', dataIndex: 'location', key: 'location', width: 120,
       render: (v, r) => v || partLocationMap[r.part_name] || '-' },
-    { title: '适用设备', dataIndex: 'device_types', key: 'device_types', width: 160,
-      render: (val, r) => {
-        const devices = Array.isArray(val) ? val : (partDeviceMap[r.part_name] || []);
-        return devices.length > 0
-          ? <Space size={4} wrap>{devices.map(t => <Tag key={t} style={{ fontSize: 11 }}>{deviceTypeMap[t] || t}</Tag>)}</Space>
-          : '-';
-      }},
-    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 150, render: (v) => v || '-' },
-    { title: '操作', key: 'actions', width: 270,
+    { title: '操作', key: 'actions', width: 210,
       render: (_, r) => (
-        <Space size={0} wrap>
+        <Space size={0}>
           <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => handleView(r)}>详情</Button>
-          {canWrite && <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(r)}>编辑</Button>}
-          {canWrite && <Button type="link" size="small" style={{ color: '#52c41a' }} icon={<ArrowUpOutlined />} onClick={() => handleStockOpen(r, 'in')}>入库</Button>}
-          {canWrite && <Button type="link" size="small" style={{ color: '#fa8c16' }} icon={<ArrowDownOutlined />} onClick={() => handleStockOpen(r, 'out')}>出库</Button>}
-          {canWrite && <Button type="link" size="small" style={{ color: '#13c2c2' }} icon={<SwapOutlined />} onClick={() => handleRecoverOpen(r)}>回收</Button>}
+          {canWrite && <Button type="link" size="small" style={{ color: successColor }} icon={<ArrowUpOutlined />} onClick={() => handleStockOpen(r, 'in')}>入库</Button>}
+          {canWrite && <Button type="link" size="small" style={{ color: warningColor }} icon={<ArrowDownOutlined />} onClick={() => handleStockOpen(r, 'out')}>出库</Button>}
+          {canWrite && <Dropdown
+            trigger={['click']}
+            menu={{ items: [
+              { key: 'edit', label: '编辑备件', icon: <EditOutlined />, onClick: () => handleEdit(r) },
+              { key: 'recover', label: '旧件回收', icon: <SwapOutlined />, onClick: () => handleRecoverOpen(r) },
+            ] }}
+          >
+            <Button type="text" size="small" icon={<MoreOutlined />} aria-label="更多操作" />
+          </Dropdown>}
         </Space>
       )},
   ];
 
+  const requestColumns = [
+    { title: '需求单', dataIndex: 'request_no', width: 150 },
+    { title: '备件', dataIndex: 'requested_part_name', ellipsis: true,
+      render: (value, row) => value || row.items?.[0]?.part_name || row.items?.[0]?.part_sku || '-' },
+    { title: '方式', dataIndex: 'fulfillment_type', width: 110,
+      render: value => ({ stock: '库存领用', local_purchase: '附近急购', vendor_order: '厂家订购' }[value] || value) },
+    { title: '数量', width: 80, align: 'center', render: (_, row) => row.items?.[0]?.quantity || 0 },
+    { title: '状态', dataIndex: 'status', width: 100,
+      render: value => <Tag color={{ pending: 'orange', approved: 'blue', ordered: 'cyan', issued: 'green', completed: 'green', rejected: 'red' }[value]}>{({ pending: '待审批', approved: '已批准', ordered: '运输中', issued: '已领用', completed: '已完成', rejected: '已驳回' }[value] || value)}</Tag> },
+    { title: '金额', width: 100, align: 'right', render: (_, row) => row.actual_amount != null ? `¥${Number(row.actual_amount).toFixed(2)}` : (row.estimated_amount != null ? `约 ¥${Number(row.estimated_amount).toFixed(2)}` : '-') },
+  ];
+
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flexShrink: 0, marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      <FilterBar
+        style={{ marginBottom: 16 }}
+        extra={canWrite && (
+          <Space>
+            <Button icon={<InboxOutlined />} onClick={() => setRequestDrawerOpen(true)}>备件需求 {partRequests.length}</Button>
+            <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)}>批量导入</Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
+              style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
+              新增备件
+            </Button>
+          </Space>
+        )}
+      >
         <Input
           placeholder="搜索备件名称、编号..."
           prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
           allowClear
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 260, borderRadius: 8 }}
+          style={{ width: filterInputWidth, borderRadius: 8 }}
         />
-        {canWrite && (
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
-            style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
-            新增备件
-          </Button>
-        )}
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 280px)', minHeight: 400 }}>
-        <style>{`.hide-scrollbar::-webkit-scrollbar{display:none}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}`}</style>
-        <div className="hide-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+      </FilterBar>
+      <div ref={partsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           <Table
             columns={columns}
             dataSource={parts}
             rowKey={(r) => r.id || r.part_code}
             loading={loading}
             pagination={false}
-            scroll={{ x: 1250, y: 'calc(100vh - 380px)' }}
+            scroll={partsBodyH ? { y: partsBodyH } : undefined}
             locale={{ emptyText: <Empty description="暂无备件数据" /> }}
-            size="middle"
+            size="small"
           />
-        </div>
       </div>
+
+      <Drawer title="备件需求与履约记录" open={requestDrawerOpen} onClose={() => setRequestDrawerOpen(false)} width={880}>
+        <Text type="secondary">审批只形成授权；库存由现场领用扣减，外购由到货确认自动形成入库或直用流水。</Text>
+        <Table
+          style={{ marginTop: 16 }}
+          size="small"
+          rowKey="id"
+          columns={requestColumns}
+          dataSource={partRequests}
+          pagination={{ pageSize: 12, hideOnSinglePage: true }}
+          locale={{ emptyText: <Empty description="暂无备件需求" /> }}
+        />
+      </Drawer>
 
       {/* ===== View Drawer ===== */}
       <Drawer
@@ -933,6 +1039,14 @@ function SparePartsTab() {
               <Descriptions.Item label="备件编号">{viewingPart.part_code || '-'}</Descriptions.Item>
               <Descriptions.Item label="备件名称">{viewingPart.part_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="规格型号">{viewingPart.spec || spareSpecMap[viewingPart.part_name] || viewingPart.category || '-'}</Descriptions.Item>
+              <Descriptions.Item label="适用设备">
+                {(() => {
+                  const devices = Array.isArray(viewingPart.device_types)
+                    ? viewingPart.device_types
+                    : (partDeviceMap[viewingPart.part_name] || []);
+                  return devices.length ? devices.map(type => deviceTypeMap[type] || type).join('、') : '-';
+                })()}
+              </Descriptions.Item>
               {(() => {
                 const mfr = spareMfrMap[viewingPart.part_name];
                 return mfr ? (
@@ -989,6 +1103,8 @@ function SparePartsTab() {
         )}
       </Drawer>
 
+      <BulkImportModal kind="parts" open={importOpen} onClose={() => setImportOpen(false)} onImported={fetchParts} />
+
       {/* ===== Create / Edit Modal (basic info only) ===== */}
       <Modal
         title={editingPart ? '编辑备件信息' : '新增备件'}
@@ -1001,7 +1117,7 @@ function SparePartsTab() {
         destroyOnClose
       >
         {editingPart && (
-          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(250,140,22,0.06)', border: '1px solid rgba(250,140,22,0.15)' }}>
+          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${warningColor}0F`, border: `1px solid ${warningColor}26` }}>
             <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
               数量和存放位置不可直接修改，请通过入库/出库操作调整库存。
             </Text>
@@ -1056,7 +1172,7 @@ function SparePartsTab() {
         destroyOnClose
       >
         {stockPart && (
-          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: stockType === 'in' ? 'rgba(82,196,26,0.06)' : 'rgba(250,140,22,0.06)', border: `1px solid ${stockType === 'in' ? 'rgba(82,196,26,0.15)' : 'rgba(250,140,22,0.15)'}` }}>
+          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: stockType === 'in' ? `${successColor}0F` : `${warningColor}0F`, border: `1px solid ${stockType === 'in' ? `${successColor}26` : `${warningColor}26`}` }}>
             <Text style={{ fontSize: 13 }}>
               <Text strong>{stockPart.part_name}</Text>
               <Text type="secondary" style={{ marginLeft: 12 }}>当前库存: {stockPart.quantity ?? 0} {stockPart.unit || '个'}</Text>
@@ -1088,7 +1204,7 @@ function SparePartsTab() {
         destroyOnClose
       >
         {recoverPart && (
-          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(19,194,194,0.06)', border: '1px solid rgba(19,194,194,0.15)' }}>
+          <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${accentColor}0F`, border: `1px solid ${accentColor}26` }}>
             <Text style={{ fontSize: 13 }}>
               <Text strong>{recoverPart.part_name}</Text>
               <Text type="secondary" style={{ marginLeft: 12 }}>当前库存: {recoverPart.quantity ?? 0} {recoverPart.unit || '个'}</Text>
@@ -1119,6 +1235,7 @@ function DeviceRecyclingTab() {
   const { tokens } = useTheme();
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [recycleWrapRef, recycleBodyH] = useTableAutoHeight({ deps: [records.length, loading] });
 
   const fetchRecords = useCallback(async () => {
     setLoading(true);
@@ -1155,20 +1272,18 @@ function DeviceRecyclingTab() {
   ];
 
   return (
-    <div>
-      <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 280px)', minHeight: 400 }}>
-        <style>{`.hide-scrollbar::-webkit-scrollbar{display:none}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}`}</style>
-        <div className="hide-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div ref={recycleWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           <Table
             columns={columns}
             dataSource={records}
             rowKey={(r) => r.id || r.device_code}
             loading={loading}
             pagination={false}
+            scroll={recycleBodyH ? { y: recycleBodyH } : undefined}
             locale={{ emptyText: <Empty description="暂无回收记录" /> }}
-            size="middle"
+            size="small"
           />
-        </div>
       </div>
     </div>
   );
@@ -1179,6 +1294,7 @@ function OperationLogsTab() {
   const { tokens } = useTheme();
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [logsWrapRef, logsBodyH] = useTableAutoHeight({ deps: [logs.length, loading] });
 
   useEffect(() => {
     setLoading(true);
@@ -1219,22 +1335,24 @@ function OperationLogsTab() {
   ];
 
   return (
-    <Card bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+    <Card styles={{ body: { padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } }}
       style={{ borderRadius: 12, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
       <div style={{ padding: '12px 16px', flexShrink: 0, borderBottom: `1px solid ${tokens.colorBorderSecondary}` }}>
         <Text type="secondary">设备操作与备件出入库记录（按时间倒序）</Text>
       </div>
-      <Table columns={columns} dataSource={logs} rowKey="id" loading={loading} size="middle"
-        scroll={{ y: 'calc(100vh - 400px)' }}
+      <div ref={logsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      <Table columns={columns} dataSource={logs} rowKey="id" loading={loading} size="small"
+        scroll={logsBodyH ? { y: logsBodyH } : undefined}
         pagination={false}
         locale={{ emptyText: <Empty description="暂无操作记录" /> }} />
+      </div>
     </Card>
   );
 }
 
 // ---------- Main Page ----------
 export default function EquipmentPage() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
   const [dashData, setDashData] = useState(null);
   const [dashLoading, setDashLoading] = useState(false);
 
@@ -1269,29 +1387,29 @@ export default function EquipmentPage() {
   ];
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 24 }}>
+    <div style={pageRootStyle}>
       <Title level={4} style={{ margin: '0 0 16px', color: tokens.colorText }}>设备管理</Title>
       {/* 统计 */}
       <Row gutter={12} style={{ marginBottom: 16 }}>
         <Col xs={12} xs={6} lg={3}>
-          <Card bodyStyle={{ padding: '12px 16px' }} hoverable>
+          <Card styles={{ body: { padding: '12px 16px' } }} hoverable>
             <Statistic title="设备总数" value={dashData?.device_count || 0} valueStyle={{ fontSize: 22, fontWeight: 600 }} prefix={<DatabaseOutlined />} />
           </Card>
         </Col>
         <Col xs={12} xs={6} lg={3}>
-          <Card bodyStyle={{ padding: '12px 16px' }} hoverable>
+          <Card styles={{ body: { padding: '12px 16px' } }} hoverable>
             <Statistic title="备件种类" value={dashData?.total_parts || 0} valueStyle={{ fontSize: 22, fontWeight: 600 }} prefix={<InboxOutlined />} />
           </Card>
         </Col>
         <Col xs={12} xs={6} lg={3}>
-          <Card bodyStyle={{ padding: '12px 16px' }} hoverable>
+          <Card styles={{ body: { padding: '12px 16px' } }} hoverable>
             <Statistic title="低库存预警" value={dashData?.low_stock || 0}
-              valueStyle={{ color: (dashData?.low_stock || 0) > 0 ? '#ff4d4f' : '#52c41a', fontSize: 22, fontWeight: 600 }}
+              valueStyle={{ color: (dashData?.low_stock || 0) > 0 ? statusColors.danger[isDark ? 'dark' : 'light'] : statusColors.success[isDark ? 'dark' : 'light'], fontSize: 22, fontWeight: 600 }}
               prefix={<ExclamationCircleOutlined />} />
           </Card>
         </Col>
       </Row>
-      <Card style={{ borderRadius: 12, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <Card style={{ borderRadius: 12, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} styles={{ body: { padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } }}>
         <Tabs items={tabItems} style={{ flex: 1, display: 'flex', flexDirection: 'column', marginTop: -8 }}
           tabBarStyle={{ flexShrink: 0 }} />
       </Card>

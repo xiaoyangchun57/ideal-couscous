@@ -23,13 +23,13 @@ async function request(url, options = {}) {
 
   try {
     const headers = { ...authHeaders() };
-    if (body && typeof body === 'object') {
+    if (body && typeof body === 'object' && !(body instanceof FormData)) {
       headers['Content-Type'] = 'application/json';
     }
     const res = await fetch(`${API_BASE}${url}`, {
       method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
       signal: controller.signal,
     });
 
@@ -62,6 +62,7 @@ function _localStamp(d = new Date()) {
 export const api = {
   get: (url, timeout) => request(url, { timeout }),
   post: (url, data, timeout) => request(url, { method: 'POST', body: data, timeout }),
+  postForm: (url, data, timeout) => request(url, { method: 'POST', body: data, timeout }),
   put: (url, data, timeout) => request(url, { method: 'PUT', body: data, timeout }),
   delete: (url, timeout) => request(url, { method: 'DELETE', timeout }),
   track: (eventName, context = {}, eventId = null) => request('/telemetry/events', {

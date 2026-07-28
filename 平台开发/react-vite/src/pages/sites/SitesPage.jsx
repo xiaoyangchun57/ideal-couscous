@@ -17,6 +17,8 @@ import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
+import FilterBar from '../../components/FilterBar';
+import { pageRootStyle, filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import { getThresholds, classifyMetric, THRESHOLD_COLORS } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import dayjs from 'dayjs';
@@ -80,7 +82,7 @@ export default function SitesPage() {
   const [reagentModalMode, setReagentModalMode] = useState('edit'); // 'create' | 'edit'
   const [reagentMaster, setReagentMaster] = useState([]); // 试剂主数据目录（用于新增下拉）
   const [reagentSubmitting, setReagentSubmitting] = useState(false);
-  // 试剂质控（更换后跑标样）
+  // 试剂标定（更换后使用标样验证）
   const [qcOpen, setQcOpen] = useState(false);
   const [qcTarget, setQcTarget] = useState(null);
   const [qcForm, setQcForm] = useState({ standard_value: '', measured_value: '', passed: true, fail_action: 'calibrate', remark: '' });
@@ -328,7 +330,7 @@ export default function SitesPage() {
     }
   };
 
-  // 试剂质控：更换后跑标样，通过才算更换完成
+  // 试剂标定：更换后使用标样验证，通过才算更换完成
   const openQc = (row) => {
     setQcTarget(row);
     setQcForm({ standard_value: '', measured_value: '', passed: true, fail_action: 'calibrate', remark: '' });
@@ -351,12 +353,12 @@ export default function SitesPage() {
         remark: qcForm.remark,
       });
       if (res?.error) { message.error(res.error); return; }
-      message.success(qcForm.passed ? '质控通过，更换完成' : '已记录质控不通过，请跟进处理');
+      message.success(qcForm.passed ? '标定通过，更换完成' : '已记录标定不通过，请跟进处理');
       setQcOpen(false);
       const inv = await api.get(`/reagent-inventory/${qcTarget.site_id}`);
       if (Array.isArray(inv)) setReagentInventory(inv);
     } catch (e) {
-      message.error(e?.response?.data?.error || '质控提交失败');
+      message.error(e?.response?.data?.error || '标定提交失败');
     } finally { setQcSubmitting(false); }
   };
 
@@ -403,7 +405,12 @@ export default function SitesPage() {
         width: 180,
         ellipsis: true,
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
-        render: (text) => <Text strong>{text}</Text>,
+        render: (text, record) => (
+          <Space size={6}>
+            <Text strong>{text}</Text>
+            {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}
+          </Space>
+        ),
       },
       {
         title: '区县/地址',
@@ -502,7 +509,7 @@ export default function SitesPage() {
     }
 
     const {
-      name, code, id, type, district, address, manager, status,
+      name, code, id, type, district, address, manager, status, is_pilot, operation_frequency,
       lat, lng, build_date, elevation, equipment, history_records,
       description: siteDesc, contact, area, basin,
       fault_records, replacement_records, inspection_records, calibration_reports,
@@ -532,6 +539,8 @@ export default function SitesPage() {
       },
       { key: 'build_date', label: '建站日期', children: build_date || '-' },
       { key: 'manager', label: '负责人', children: manager || '-' },
+      { key: 'pilot', label: '试点状态', children: is_pilot ? <Tag color="blue">试点站点</Tag> : '非试点' },
+      { key: 'frequency', label: '试点频次', children: operation_frequency || '-', span: 2 },
     ];
 
     const tabItems = [
@@ -744,12 +753,12 @@ export default function SitesPage() {
         title: '剩余可用天数', dataIndex: 'remaining_days', key: 'remaining_days', width: 150,
         render: (v) => v == null
           ? <Text type="secondary">未设置</Text>
-          : <Text strong style={{ color: v <= 0 ? '#ff4d4f' : v <= 7 ? '#faad14' : '#52c41a' }}>{v} 天</Text>,
+          : <Text strong style={{ color: v <= 0 ? tokens.colorError : v <= 7 ? tokens.colorWarning : tokens.colorSuccess }}>{v} 天</Text>,
       },
       {
-        title: '质控状态', dataIndex: 'qc_status', key: 'qc_status', width: 100,
+        title: '标定状态', dataIndex: 'qc_status', key: 'qc_status', width: 100,
         render: (v) => v === 'pending'
-          ? <Tag color="orange">待质控</Tag>
+          ? <Tag color="orange">待标定</Tag>
           : v === 'failed'
             ? <Tag color="red">不通过</Tag>
             : <Tag color="green">已通过</Tag>,
@@ -759,7 +768,7 @@ export default function SitesPage() {
         render: (_, r) => (
           <Space size={0}>
             {(r.qc_status === 'pending' || r.qc_status === 'failed') && (
-              <Button size="small" type="link" onClick={() => openQc(r)}>质控</Button>
+              <Button size="small" type="link" onClick={() => openQc(r)}>标定</Button>
             )}
             <Button size="small" type="link" onClick={() => openReagentUpd(r)}>编辑</Button>
             <Popconfirm
@@ -782,7 +791,7 @@ export default function SitesPage() {
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <Text type="secondary">
-              <ExperimentOutlined style={{ color: '#1890ff', marginRight: 6 }} />
+              <ExperimentOutlined style={{ color: tokens.colorInfo, marginRight: 6 }} />
               可新增 / 编辑 / 删除本站点试剂库存，更换时间与可用天数用于推算剩余可用天数
             </Text>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openReagentCreate}>新增试剂</Button>
@@ -860,17 +869,17 @@ export default function SitesPage() {
             </Form>
           </Modal>
           <Modal
-            title={`试剂质控 · ${qcTarget?.reagent_name || ''}`}
+            title={`试剂标定 · ${qcTarget?.reagent_name || ''}`}
             open={qcOpen}
             onOk={submitQc}
             onCancel={() => setQcOpen(false)}
-            okText="提交质控结果"
+            okText="提交标定结果"
             cancelText="取消"
             confirmLoading={qcSubmitting}
             destroyOnClose
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
-              更换试剂后须跑标样验证，质控通过才算更换完成；不通过需校准或报修。
+              更换试剂后须使用标样完成标定，标定通过才算更换完成；不通过需重新标定或报修。
             </Text>
             <Form layout="vertical" style={{ marginTop: 12 }}>
               <Form.Item label="标样值（标准浓度）" required>
@@ -887,7 +896,7 @@ export default function SitesPage() {
                   style={{ width: '100%' }} placeholder="标样上机实测值"
                 />
               </Form.Item>
-              <Form.Item label="质控结论" required>
+              <Form.Item label="标定结论" required>
                 <Radio.Group
                   value={qcForm.passed}
                   onChange={(e) => setQcForm((f) => ({ ...f, passed: e.target.value }))}
@@ -902,7 +911,7 @@ export default function SitesPage() {
                     value={qcForm.fail_action}
                     onChange={(v) => setQcForm((f) => ({ ...f, fail_action: v }))}
                     options={[
-                      { value: 'calibrate', label: '校准后复测' },
+                      { value: 'calibrate', label: '重新标定' },
                       { value: 'repair', label: '报修' },
                     ]}
                     style={{ width: '100%' }}
@@ -1006,95 +1015,83 @@ export default function SitesPage() {
   // Render
   // ========================================================================
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 24 }}>
+    <div style={pageRootStyle}>
       {/* ---- Page Header ---- */}
       <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, flexShrink: 0 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>站点管理</Title>
+        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>站点全景</Title>
         <Button
+          type="primary"
           icon={<CloudServerOutlined />}
           onClick={() => { setImportModalOpen(true); setImportResult(null); fetchDataSources(); }}
           disabled={!isAdmin}
           title={!isAdmin ? '仅管理员可配置数据接入' : undefined}
-          style={{
-            background: 'linear-gradient(135deg, #1890ff, #00c9a7)',
-            border: 'none', color: '#fff', fontWeight: 500,
-          }}
         >
           数据接入
         </Button>
       </div>
 
       {/* ---- Filter Bar ---- */}
-      <div style={{
-        padding: '8px 0', borderTop: `1px solid ${tokens.colorBorder}`,
-        borderBottom: `1px solid ${tokens.colorBorder}`, flexShrink: 0,
-      }}>
-        <Row gutter={[12, 12]} align="middle">
-          <Col flex="auto">
-            <Space wrap size={12}>
-              <Input
-                placeholder="搜索站点名称 / 编码"
-                prefix={<SearchOutlined style={{ color: tokens.colorTextQuaternary }} />}
-                allowClear
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                style={{ width: 260 }}
-              />
+      <FilterBar
+        extra={(
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={resetFilters}>
+              重置
+            </Button>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={fetchSites}
+              loading={loading}
+            >
+              刷新
+            </Button>
+          </Space>
+        )}
+      >
+        <Input
+          placeholder="搜索站点名称 / 编码"
+          prefix={<SearchOutlined style={{ color: tokens.colorTextQuaternary }} />}
+          allowClear
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          style={{ width: filterInputWidth }}
+        />
 
-              <Select
-                placeholder="站点类型"
-                allowClear
-                value={typeFilter}
-                onChange={setTypeFilter}
-                options={typeOptions}
-                style={{ width: 140 }}
-              />
+        <Select
+          placeholder="站点类型"
+          allowClear
+          value={typeFilter}
+          onChange={setTypeFilter}
+          options={typeOptions}
+          style={{ width: filterSelectWidth }}
+        />
 
-              <Select
-                placeholder="所属区县"
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                value={districtFilter}
-                onChange={setDistrictFilter}
-                options={districtOptions}
-                style={{ width: 150 }}
-              />
+        <Select
+          placeholder="所属区县"
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          value={districtFilter}
+          onChange={setDistrictFilter}
+          options={districtOptions}
+          style={{ width: filterSelectWidth }}
+        />
 
-              <Select
-                placeholder="负责人"
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                value={managerFilter}
-                onChange={setManagerFilter}
-                options={managerOptions}
-                style={{ width: 140 }}
-              />
-              {(searchText || typeFilter || districtFilter || managerFilter) && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  已筛选 {filteredSites.length} 条结果
-                </Text>
-              )}
-            </Space>
-          </Col>
-
-          <Col>
-            <Space>
-              <Button icon={<ReloadOutlined />} onClick={resetFilters}>
-                重置
-              </Button>
-              <Button
-                icon={<ReloadOutlined />}
-                onClick={fetchSites}
-                loading={loading}
-              >
-                刷新
-              </Button>
-            </Space>
-          </Col>
-        </Row>
-      </div>
+        <Select
+          placeholder="负责人"
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          value={managerFilter}
+          onChange={setManagerFilter}
+          options={managerOptions}
+          style={{ width: filterSelectWidth }}
+        />
+        {(searchText || typeFilter || districtFilter || managerFilter) && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            已筛选 {filteredSites.length} 条结果
+          </Text>
+        )}
+      </FilterBar>
 
       {/* ---- Data Table ---- */}
       <Card
@@ -1120,7 +1117,7 @@ export default function SitesPage() {
               size="small"
               loading={loading}
               pagination={false}
-              scroll={{ y: 'calc(100vh - 380px)' }}
+              scroll={listH ? { y: listH } : undefined}
               locale={{
                 emptyText: (
                   <Empty
@@ -1200,7 +1197,7 @@ export default function SitesPage() {
 
       {/* ===== Data Import Modal ===== */}
       <Modal
-        title={<span><CloudServerOutlined style={{ marginRight: 8, color: '#1890ff' }} />数据接入</span>}
+        title={<span><CloudServerOutlined style={{ marginRight: 8, color: tokens.colorInfo }} />数据接入</span>}
         open={importModalOpen}
         onCancel={() => setImportModalOpen(false)}
         footer={[<Button key="close" onClick={() => setImportModalOpen(false)}>关闭</Button>]}
@@ -1235,9 +1232,9 @@ export default function SitesPage() {
                   </Upload.Dragger>
                   {importLoading && <div style={{ textAlign: 'center', padding: 16 }}><Spin /> <Text style={{ marginLeft: 8 }}>正在导入...</Text></div>}
                   {importResult && !importResult.error && (
-                    <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: importResult.imported > 0 ? 'rgba(82,196,26,0.08)' : 'rgba(250,173,20,0.08)', border: `1px solid ${importResult.imported > 0 ? '#b7eb8f' : '#ffe58f'}` }}>
+                    <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: tokens.colorFillSecondary, border: `1px solid ${tokens.colorBorder}` }}>
                       <div style={{ fontWeight: 500, marginBottom: 4 }}>
-                        <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 6 }} />
+                        <CheckCircleOutlined style={{ color: importResult.imported > 0 ? tokens.colorSuccess : tokens.colorWarning, marginRight: 6 }} />
                         导入完成：成功 {importResult.imported} 条，失败 {importResult.failed} 条
                       </div>
                       {importResult.errors?.length > 0 && (
@@ -1248,8 +1245,8 @@ export default function SitesPage() {
                     </div>
                   )}
                   {importResult?.error && (
-                    <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: 'rgba(255,77,79,0.08)', border: '1px solid #ffa39e' }}>
-                      <CloseCircleOutlined style={{ color: '#ff4d4f', marginRight: 6 }} />
+                    <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: tokens.colorFillSecondary, border: `1px solid ${tokens.colorBorder}` }}>
+                      <CloseCircleOutlined style={{ color: tokens.colorError, marginRight: 6 }} />
                       <Text type="danger">{importResult.error}</Text>
                     </div>
                   )}

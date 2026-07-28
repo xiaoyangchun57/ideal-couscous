@@ -18,10 +18,8 @@ const UsersPage = lazy(() => import('./pages/users/UsersPage'));
 const AuditPage = lazy(() => import('./pages/audit/AuditPage'));
 const EvaluationPage = lazy(() => import('./pages/evaluation/EvaluationPage'));
 const VehiclesPage = lazy(() => import('./pages/vehicles/VehiclesPage'));
-const ReportsPage = lazy(() => import('./pages/reports/ReportsPage'));
 const ReagentMasterPage = lazy(() => import('./pages/reagents/ReagentMasterPage'));
 const PlanSchedulesPage = lazy(() => import('./pages/plan-schedules/PlanSchedulesPage'));
-const BatchReviewPage = lazy(() => import('./pages/batch-review/BatchReviewPage'));
 
 function RouteFallback() {
   return (
@@ -39,7 +37,7 @@ function ProtectedRoute({ children, roles }) {
   const { isAuthenticated, user } = useAuth();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   if (!user) return <RouteFallback />;
-  if (roles?.length > 0 && !roles.includes(user.role)) return <Navigate to="/" replace />;
+  if (roles?.length > 0 && !roles.some((role) => (user.roles || [user.role]).includes(role))) return <Navigate to="/" replace />;
   return children;
 }
 
@@ -56,11 +54,9 @@ function AppRoutes() {
         {/* 旧 inspection-v2 计划链路已停用；执行记录统一从计划调度详情查看。 */}
         <Route path="maintenance" element={<Navigate to="/plan-schedules" replace />} />
         <Route path="audit" element={(
-          <ProtectedRoute roles={['admin', 'manager', 'reviewer', 'inspector']}><Deferred><AuditPage /></Deferred></ProtectedRoute>
+          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><AuditPage /></Deferred></ProtectedRoute>
         )} />
-        <Route path="batch-review" element={(
-          <ProtectedRoute roles={['admin', 'manager', 'reviewer', 'inspector']}><Deferred><BatchReviewPage /></Deferred></ProtectedRoute>
-        )} />
+        <Route path="batch-review" element={<Navigate to="/audit?tab=photo" replace />} />
         <Route path="equipment" element={<Deferred><EquipmentPage /></Deferred>} />
         <Route path="analysis" element={<Deferred><AnalysisPage /></Deferred>} />
         <Route path="archive" element={<Deferred><ArchivePage /></Deferred>} />
@@ -70,9 +66,9 @@ function AppRoutes() {
         <Route path="vehicles" element={<Deferred><VehiclesPage /></Deferred>} />
         <Route path="reagents" element={<Deferred><ReagentMasterPage /></Deferred>} />
         <Route path="evaluation" element={(
-          <ProtectedRoute roles={['admin', 'manager', 'reviewer', 'inspector']}><Deferred><EvaluationPage /></Deferred></ProtectedRoute>
+          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><EvaluationPage /></Deferred></ProtectedRoute>
         )} />
-        <Route path="reports" element={<Deferred><ReportsPage /></Deferred>} />
+        <Route path="reports" element={<Navigate to="/alerts?source=manual" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

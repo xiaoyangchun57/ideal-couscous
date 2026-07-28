@@ -38,6 +38,7 @@ Page({
   goOrder(e) {
     const orderNo = e.currentTarget.dataset.order;
     if (!orderNo) return;
-    wx.switchTab({ url: '/pages/workorder/workorder' });
+    getApp().globalData.selWorkorderNo = orderNo;
+    wx.navigateTo({ url: '/pages/workorder/workorder' });
   },
 });

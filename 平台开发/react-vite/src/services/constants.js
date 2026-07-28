@@ -156,6 +156,52 @@ export const alertStatusMap = {
   resolved: '已办结',
 };
 
+// Alert status Tag preset colors (antd 预设色，主题无关)
+export const alertStatusBadge = {
+  pending: 'gold',
+  acknowledged: 'blue',
+  resolved: 'green',
+};
+
+// Work order level Tag preset colors
+export const orderLevelBadge = {
+  normal: 'default',
+  medium: 'default',
+  urgent: 'orange',
+  critical: 'red',
+};
+
+// Plan schedule status (label + Tag preset color)
+export const scheduleStatusMap = {
+  draft: { label: '草稿', color: 'default' },
+  submitted: { label: '待审批', color: 'processing' },
+  approved: { label: '已通过', color: 'success' },
+  rejected: { label: '已退回', color: 'error' },
+  modifying: { label: '变更中', color: 'warning' },
+  change_submitted: { label: '变更待审', color: 'processing' },
+  archived: { label: '已归档', color: 'default' },
+};
+
+// Weekly plan status (label + Tag preset color)
+export const weeklyPlanStatusMap = {
+  draft: { label: '草稿', color: 'default' },
+  submitted: { label: '已提交', color: 'blue' },
+  approved: { label: '已批准', color: 'green' },
+  archived: { label: '已归档', color: 'default' },
+};
+
+// Anomaly report status (label + Tag preset color)
+export const reportStatusMap = {
+  open: { label: '待处置', color: 'orange' },
+  dispatched: { label: '已派单', color: 'blue' },
+  verified: { label: '已核实', color: 'cyan' },
+  resolved: { label: '已解决', color: 'green' },
+  archived: { label: '已归档', color: 'default' },
+};
+
+// Evaluation rate tier color (antd 预设色)
+export const evaluationRateColor = (r) => (r >= 80 ? 'green' : r >= 60 ? 'gold' : 'red');
+
 // Timeline event type mappings
 export const timelineEventMap = {
   alert: '告警',

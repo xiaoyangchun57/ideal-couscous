@@ -8,6 +8,21 @@
   </view>
 
   <view class="card menu">
+    <view class="menu-item" bindtap="goVehicle">
+      <text class="menu-tx">我的车辆</text>
+      <view class="menu-right"><text class="menu-sub">{{activeVehicleUse ? (activeVehicleUse.plate_no + ' · 使用中') : '安排与行程'}}</text><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline"></view>
+    <view class="menu-item" wx:if="{{activeVehicleUse}}" bindtap="goVehicle">
+      <text class="menu-tx">归还车辆</text>
+      <view class="menu-right"><text class="menu-sub">{{activeVehicleUse.plate_no}} · 待验车</text><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline" wx:if="{{activeVehicleUse}}"></view>
+    <view class="menu-item" wx:if="{{vehicleUses.length}}" bindtap="goVehicle">
+      <text class="menu-tx">车辆行程记录</text>
+      <view class="menu-right"><text class="menu-sub">{{vehicleUses.length}} 条</text><text class="arrow">›</text></view>
+    </view>
+    <view class="hairline" wx:if="{{vehicleUses.length}}"></view>
     <view class="menu-item" bindtap="goMessage">
       <text class="menu-tx">消息通知</text>
       <view class="menu-right"><text wx:if="{{unread > 0}}" class="badge">{{unread}}</text><text class="arrow">›</text></view>
@@ -35,7 +50,49 @@
   </view>
 
   <view class="sheet-mask" wx:if="{{partsSheet.open}}" bindtap="onCloseParts"></view>
-  <view class="sheet" wx:if="{{partsSheet.open}}"><view class="sheet-head"><text class="sheet-title">现场领用</text><text class="sheet-close" bindtap="onCloseParts">×</text></view><picker mode="selector" range="{{issuablePartsRequests}}" range-key="request_no" value="{{partsSheet.index}}" bindchange="onPartsPick"><view class="parts-picker">{{issuablePartsRequests[partsSheet.index].request_no}} · {{issuablePartsRequests[partsSheet.index].site_name}} ›</view></picker><input class="parts-input" type="number" value="{{partsSheet.quantity}}" bindinput="onIssueQty" placeholder="填写实际领用数量"/><text class="parts-hint">仅可领用已批准且已预留的备件</text><button class="btn-primary" loading="{{partsSheet.submitting}}" bindtap="onIssueParts">确认领用并扣库</button></view>
+  <view class="sheet" wx:if="{{partsSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">我的备件需求</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
+    <view wx:if="{{!partsRequests.length}}" class="parts-empty">暂无备件需求</view>
+    <view class="parts-request-row" wx:for="{{partsRequests}}" wx:key="id">
+      <view class="parts-request-head"><text class="parts-request-name">{{item.requested_part_name || item.items[0].part_name}}</text><text class="tag">{{item.status_label}}</text></view>
+      <text class="parts-request-sub">{{item.route_label}} · {{item.site_name}} · {{item.request_no}}</text>
+      <text class="parts-request-sub">数量 {{item.items[0].quantity || 1}} · {{item.reason || '无补充说明'}}</text>
+      <view class="parts-request-actions">
+        <button wx:if="{{item.can_issue}}" class="btn-primary parts-action" data-id="{{item.id}}" bindtap="onOpenPartsIssue">确认领用</button>
+        <button wx:if="{{item.can_order}}" class="btn-primary parts-action" data-id="{{item.id}}" bindtap="onOpenPartsOrder">登记厂家下单</button>
+        <button wx:if="{{item.can_fulfill}}" class="btn-primary parts-action" data-id="{{item.id}}" bindtap="onOpenPartsFulfill">{{item.fulfillment_type === 'local_purchase' ? '补票据并确认购买' : '确认到货'}}</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{partsIssueSheet.open}}" bindtap="onClosePartsIssue"></view>
+  <view class="sheet" wx:if="{{partsIssueSheet.open}}"><view class="sheet-head"><text class="sheet-title">确认现场领用</text><text class="sheet-close" bindtap="onClosePartsIssue">×</text></view><text class="parts-hint">批准未锁库，以实际拿到数量为准；提交后立即扣库。</text><input class="parts-input" type="number" value="{{partsIssueSheet.quantity}}" bindinput="onIssueQty" placeholder="填写实际领用数量"/><button class="btn-primary" loading="{{partsIssueSheet.submitting}}" bindtap="onIssueParts">确认领用并扣库</button></view>
+
+  <view class="sheet-mask" wx:if="{{partsOrderSheet.open}}" bindtap="onClosePartsOrder"></view>
+  <view class="sheet" wx:if="{{partsOrderSheet.open}}"><view class="sheet-head"><text class="sheet-title">登记厂家下单</text><text class="sheet-close" bindtap="onClosePartsOrder">×</text></view><text class="return-label">供应商</text><input class="parts-input" value="{{partsOrderSheet.supplier}}" bindinput="onPartsOrderSupplier" placeholder="厂家或供应商名称"/><text class="return-label">订单或快递号（可后补）</text><input class="parts-input" value="{{partsOrderSheet.tracking_no}}" bindinput="onPartsTracking" placeholder="订单号 / 快递单号"/><button class="btn-primary" loading="{{partsOrderSheet.submitting}}" bindtap="onSubmitPartsOrder">确认已下单</button></view>
+
+  <view class="sheet-mask" wx:if="{{partsFulfillSheet.open}}" bindtap="onClosePartsFulfill"></view>
+  <view class="sheet" wx:if="{{partsFulfillSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">确认购买与到货</text><text class="sheet-close" bindtap="onClosePartsFulfill">×</text></view>
+    <text class="return-label">供应商</text><input class="parts-input" value="{{partsFulfillSheet.supplier}}" bindinput="onPartsFulfillSupplier" placeholder="商家或厂家"/>
+    <text class="return-label">实际金额（元）</text><input class="parts-input" type="digit" value="{{partsFulfillSheet.actual_amount}}" bindinput="onPartsActualAmount" placeholder="0.00"/>
+    <text class="return-label">票据编号（无编号时上传照片）</text><input class="parts-input" value="{{partsFulfillSheet.receipt_no}}" bindinput="onPartsReceiptNo" placeholder="发票、收据或支付凭证编号"/>
+    <button class="btn-ghost parts-upload" loading="{{partsFulfillSheet.uploading}}" bindtap="onUploadPartsEvidence">上传票据/到货照片（已上传 {{partsFulfillSheet.evidence_urls.length}} 张）</button>
+    <text class="return-label">到货去向</text><radio-group bindchange="onPartsDestination"><label class="parts-radio"><radio value="direct_use" checked="{{partsFulfillSheet.destination === 'direct_use'}}"/>现场直接使用</label><label class="parts-radio"><radio value="warehouse" checked="{{partsFulfillSheet.destination === 'warehouse'}}"/>带回入库</label></radio-group>
+    <text class="return-label">旧件去向</text><input class="parts-input" value="{{partsFulfillSheet.old_part_disposition}}" bindinput="onOldPartDisposition" placeholder="带回 / 现场报废 / 厂家回收 / 无旧件"/>
+    <text class="parts-hint">现场直用会自动生成等量到货和领用流水，库存净变化为零。</text>
+    <button class="btn-primary" loading="{{partsFulfillSheet.submitting}}" bindtap="onSubmitPartsFulfill">确认并生成台账</button>
+  </view>
+  <view class="sheet-mask" wx:if="{{returnSheet.open}}" bindtap="onCloseReturnVehicle"></view>
+  <view class="sheet" wx:if="{{returnSheet.open}}"><view class="sheet-head"><text class="sheet-title">还车验车</text><text class="sheet-close" bindtap="onCloseReturnVehicle">×</text></view><text class="return-hint">{{activeVehicleUse.plate_no}} · 出车 {{activeVehicleUse.start_mileage}} km</text><text class="return-label">结束里程</text><input class="parts-input" type="digit" value="{{returnSheet.mileage}}" bindinput="onReturnMileage" placeholder="填写仪表盘公里数"/><text class="return-label">异常说明（无异常可不填）</text><textarea class="return-textarea" value="{{returnSheet.remarks}}" bindinput="onReturnRemarks" placeholder="如：右后视镜破损、前轮需补气"/><checkbox-group bindchange="onReturnBlocked"><label class="return-check"><checkbox value="blocked" checked="{{returnSheet.blocked}}"/>存在影响安全的异常，限制使用</label></checkbox-group><button class="btn-primary" loading="{{returnSheet.submitting}}" disabled="{{returnSheet.submitting}}" bindtap="onSubmitReturnVehicle">提交验车并还车</button></view>
+  <view class="sheet-mask" wx:if="{{vehicleHistoryOpen}}" bindtap="onCloseVehicleHistory"></view>
+  <view class="sheet" wx:if="{{vehicleHistoryOpen}}">
+    <view class="sheet-head"><text class="sheet-title">车辆行程记录</text><text class="sheet-close" bindtap="onCloseVehicleHistory">×</text></view>
+    <view class="vehicle-history-row" wx:for="{{vehicleUses}}" wx:key="id">
+      <view class="vehicle-history-main"><text class="vehicle-history-title">{{item.vehicle_label}}</text><text class="vehicle-history-sub">出车 {{item.checked_out_at || '—'}} · {{item.start_mileage || 0}} km</text><text class="vehicle-history-sub" wx:if="{{item.returned_at}}">还车 {{item.returned_at}} · {{item.end_mileage || '—'}} km</text></view>
+      <text class="tag {{item.returned_at ? 'tag-green' : 'tag-orange'}}">{{item.returned_at ? '已归还' : '使用中'}}</text>
+    </view>
+  </view>
 
   <button class="btn-ghost logout" bindtap="onLogout">退出登录</button>
   <view class="ver">水质智慧运维 · 移动端</view>

@@ -73,6 +73,8 @@ Page({
     linkedWorkOrderIds: [],
     suggestions: [],    // [{type, site_id, site_name, text, level}]
     siteScores: {},     // {site_id: score}
+    templateContext: [],
+    coverageWarning: '',
     remarks: '',
     coverageExceptionReason: '',
     submitting: false,
@@ -120,7 +122,9 @@ Page({
   onTypeChange(e) {
     if (this.data.editId) return;
     const idx = parseInt(e.detail.value);
-    this.initPeriod(this.data.typeKeys[idx]);
+    const type = this.data.typeKeys[idx];
+    this.initPeriod(type);
+    this.loadSuggestions(type);
   },
 
   // 添加巡检日期（月/季/年检用，限制在周期范围内）
@@ -137,13 +141,19 @@ Page({
     }
     const days = this.data.days.concat([{ date, weekday_cn: weekdayCn(date), sites: [], vehicle_id: null }]);
     days.sort((a, b) => a.date < b.date ? -1 : 1);
-    this.setData({ days });
+    this.setData({ days }, () => this.refreshValidation());
   },
 
   // 删除某天
   onRemoveDay(e) {
     const date = e.currentTarget.dataset.date;
-    this.setData({ days: this.data.days.filter(d => d.date !== date) });
+    // 周检始终保留完整的七天骨架；“移除”仅清空当天安排，避免误删后无法重新添加。
+    if (this.data.scheduleType === 'weekly') {
+      const days = this.data.days.map(d => d.date === date ? Object.assign({}, d, { sites: [], vehicle_id: null, notes: '' }) : d);
+      this.setData({ days }, () => this.refreshValidation());
+      return;
+    }
+    this.setData({ days: this.data.days.filter(d => d.date !== date) }, () => this.refreshValidation());
   },
 
   // 加载已有排程
@@ -186,6 +196,7 @@ Page({
           days,
           selectedParts: Array.isArray(res.spare_parts) ? res.spare_parts : [],
           linkedWorkOrderIds: Array.isArray(res.work_order_ids) ? res.work_order_ids : [],
+          templateContext: Array.isArray(res.template_context) ? res.template_context : [],
           remarks: res.remarks || '',
           coverageExceptionReason: res.coverage_exception_reason || '',
           isChange: res.status === 'modifying',
@@ -203,8 +214,9 @@ Page({
       .then(res => {
         const vehicles = (Array.isArray(res) ? res : []).map(v => ({
           id: v.id,
-          name: v.plate_number || v.name || ('车辆#' + v.id)
-        }));
+          name: v.plate_no || v.plate_number || v.name || ('车辆#' + v.id),
+          disabled: !v.dispatchable
+        })).filter(v => !v.disabled);
         this.setData({ vehicles });
       })
       .catch(() => {});
@@ -226,14 +238,15 @@ Page({
       .catch(() => {});
   },
 
-  loadSuggestions() {
+  loadSuggestions(scheduleType) {
     const u = getUser();
     if (!u || !u.id) return;
-    api.planSuggestions(u.id)
+    api.planSuggestions(u.id, scheduleType || this.data.scheduleType)
       .then(res => {
         this.setData({
           suggestions: res.suggestions || [],
-          siteScores: res.site_scores || {}
+          siteScores: res.site_scores || {},
+          templateContext: Array.isArray(res.template_context) ? res.template_context : []
         });
       })
       .catch(() => {});
@@ -250,7 +263,7 @@ Page({
     } else {
       sites.push(siteId);
     }
-    this.setData({ [key]: sites });
+    this.setData({ [key]: sites }, () => this.refreshValidation());
   },
 
   // 一键全选/清空当天
@@ -261,7 +274,7 @@ Page({
     const allIds = this.data.mySites.map(s => s.id);
     // 如果已全选则清空，否则全选
     const allSelected = allIds.every(id => cur.indexOf(id) > -1);
-    this.setData({ [key]: allSelected ? [] : allIds.slice() });
+    this.setData({ [key]: allSelected ? [] : allIds.slice() }, () => this.refreshValidation());
   },
 
   // 选择车辆
@@ -269,7 +282,7 @@ Page({
     const dayIdx = e.currentTarget.dataset.dayIdx;
     const idx = parseInt(e.detail.value);
     const vId = idx >= 0 ? this.data.vehicles[idx].id : null;
-    this.setData({ ['days[' + dayIdx + '].vehicle_id']: vId });
+    this.setData({ ['days[' + dayIdx + '].vehicle_id']: vId }, () => this.refreshValidation());
   },
 
   onTogglePart(e) {
@@ -326,6 +339,29 @@ Page({
     };
   },
 
+  // 将后端结构化风险直接挂到对应日期，避免用户只看到文字后再手工查找站点。
+  applyValidation(vr) {
+    const details = vr.warning_details || [];
+    const byDate = {};
+    let coverageWarning = '';
+    details.forEach(w => {
+      if (w.type === 'coverage_missing') coverageWarning = w.text;
+      if (w.date) (byDate[w.date] || (byDate[w.date] = [])).push(w.text);
+    });
+    const days = this.data.days.map(d => Object.assign({}, d, { warning_text: (byDate[d.date] || []).join('\n') }));
+    this.setData({ days, coverageWarning });
+  },
+
+  refreshValidation() {
+    if (this._validationTimer) clearTimeout(this._validationTimer);
+    this._validationTimer = setTimeout(() => {
+      const payload = this.buildPayload(false);
+      api.validatePlanSchedule(Object.assign({ user_id: (getUser() || {}).id }, payload))
+        .then(vr => this.applyValidation(vr || {}))
+        .catch(() => {});
+    }, 250);
+  },
+
   // 提交审批
   onSubmit() {
     if (this.data.submitting) return;
@@ -341,6 +377,7 @@ Page({
     // 先校验
     api.validatePlanSchedule(Object.assign({ user_id: (getUser() || {}).id }, payload))
       .then(vr => {
+        this.applyValidation(vr || {});
         if (vr.errors && vr.errors.length) {
           this.setData({ submitting: false });
           wx.showModal({

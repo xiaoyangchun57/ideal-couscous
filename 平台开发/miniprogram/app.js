@@ -10,6 +10,7 @@ App({
     user: null,
     sites: [],
     selSiteId: null,   // 首页/巡检站间跳转的临时选中站点
+    selPlanId: null,   // 排程详情跳入现场页时的临时预选执行包
     baseUrl: ''         // 运行时可由开发者工具注入，缺省读 config
   },
 

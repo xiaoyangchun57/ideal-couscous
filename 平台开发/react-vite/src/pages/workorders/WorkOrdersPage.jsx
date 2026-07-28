@@ -2,14 +2,14 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams, useLocation } from 'react-router-dom';
 import {
   Table, Card, Input, Select, Button, Space, Tag, Badge, Modal, Upload, Spin,
-  Typography, Form, DatePicker, Divider, Empty, Dropdown, Menu,
+  Typography, Form, DatePicker, Empty, Tooltip,
   Row, Col, Descriptions, Timeline, Drawer, Image, App,
 } from 'antd';
 import {
   PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined,
   EditOutlined, DeleteOutlined, ExclamationCircleOutlined,
   SendOutlined, FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
-  InboxOutlined, SwapOutlined, CheckOutlined, CloseOutlined, MoreOutlined, AuditOutlined,
+  InboxOutlined, SwapOutlined, CheckOutlined, CloseOutlined, AuditOutlined,
   CameraOutlined, UploadOutlined, DownloadOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
@@ -17,25 +17,24 @@ import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import {
-  orderStatusMap, orderLevelMap, orderSourceMap, orderStatusBadge,
+  orderStatusMap, orderLevelMap, orderSourceMap, orderStatusBadge, orderLevelBadge,
   CONCLUSION_OPTIONS,
 } from '../../services/constants';
+import { statusColors } from '../../theme/tokens';
+import FilterBar from '../../components/FilterBar';
+import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
-const levelColorMap = {
-  normal: 'default',
-  medium: 'default',
-  urgent: 'orange',
-  critical: 'red',
-};
-
 export default function WorkOrdersPage() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const { modal, message } = App.useApp();  // 使用实例方法，避免Tracking Prevention阻断
+  // 语义状态色统一走 statusColors（禁硬编码 hex），半透明背景用 alpha 后缀派生
+  const purpleColor = statusColors.purple[isDark ? 'dark' : 'light'];
+  const infoColor = statusColors.info[isDark ? 'dark' : 'light'];
   const [form] = Form.useForm();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
@@ -83,6 +82,8 @@ export default function WorkOrdersPage() {
   const [partReqOpen, setPartReqOpen] = useState(false);
   const [partReqLoading, setPartReqLoading] = useState(false);
   const [partReqForm] = Form.useForm();
+  const [partInventory, setPartInventory] = useState([]);
+  const partFulfillmentType = Form.useWatch('fulfillment_type', partReqForm) || 'stock';
 
   // Device recycle from work order
   const [recycleOpen, setRecycleOpen] = useState(false);
@@ -180,8 +181,11 @@ export default function WorkOrdersPage() {
       partReqForm.setFieldsValue({
         site_id: viewingOrder.site_id,
         work_order_no: viewingOrder.order_no,
+        fulfillment_type: 'stock',
+        quantity: 1,
       });
     }
+    api.get('/parts/inventory').then(rows => setPartInventory(Array.isArray(rows) ? rows : [])).catch(() => setPartInventory([]));
     setPartReqOpen(true);
   }, [partReqForm, viewingOrder]);
 
@@ -398,12 +402,14 @@ export default function WorkOrdersPage() {
         const result = await api.post(`/workorders/${viewingOrder.order_no}/photos`, { delete_url: url });
         if (result && result.success) {
           message.success('照片已删除');
-          // 刷新工单详情
+          const path = (() => { try { return new URL(url, window.location.origin).pathname; } catch { return url; } })();
+          // 同时刷新旧缓存照片区与附件照片区，避免删除后界面残留旧缩略图。
           setViewingOrder(prev => {
             if (!prev) return prev;
             const imgs = typeof prev.images === 'string' ? JSON.parse(prev.images) : (prev.images || []);
-            return { ...prev, images: JSON.stringify(imgs.filter(u => u !== url)) };
+            return { ...prev, images: JSON.stringify(imgs.filter(u => u !== url && u !== path)) };
           });
+          setOperationPhotos(prev => prev.filter(photo => photo.url !== url && photo.url !== path));
           fetchOrders();
         } else {
           message.error(result?.error || '删除失败');
@@ -502,7 +508,6 @@ export default function WorkOrdersPage() {
       dataIndex: 'order_no',
       key: 'order_no',
       width: 120,
-      fixed: 'left',
       render: (text, record) => (
         <Text strong style={{ color: tokens.colorPrimary, fontSize: 13 }}>
           {text || `#${record.id}`}
@@ -515,7 +520,7 @@ export default function WorkOrdersPage() {
       key: 'site_name',
       width: 100,
       ellipsis: true,
-      render: (text) => text || '-',
+      render: (text) => <span title={text}>{text || '-'}</span>,
     },
     {
       title: '来源',
@@ -531,7 +536,7 @@ export default function WorkOrdersPage() {
       width: 70,
       render: (val) => {
         const label = orderLevelMap[val] || val || '-';
-        const color = levelColorMap[val] || 'default';
+        const color = orderLevelBadge[val] || 'default';
         return val ? <Tag color={color} style={{ borderRadius: 4, fontSize: 11 }}>{label}</Tag> : '-';
       },
     },
@@ -541,7 +546,7 @@ export default function WorkOrdersPage() {
       key: 'title',
       width: 160,
       ellipsis: true,
-      render: (text) => text || '-',
+      render: (text) => <span title={text}>{text || '-'}</span>,
     },
     {
       title: '状态',
@@ -560,7 +565,7 @@ export default function WorkOrdersPage() {
       key: 'assignee',
       width: 70,
       ellipsis: true,
-      render: (text) => text || '-',
+      render: (text) => <span title={text}>{text || '-'}</span>,
     },
     {
       title: 'SLA',
@@ -580,90 +585,67 @@ export default function WorkOrdersPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 180,
-      fixed: 'right',
+      width: 220,
       render: (_, record) => {
         const s = record.status;
-        
-        // Build action items for dropdown
-        const actionItems = [];
+        let primaryAction = null;
+        let returnAction = null;
         
         // Status transition actions
         if (s === 'pending') {
-          actionItems.push({
+          primaryAction = {
             key: 'accept',
             label: '受理',
             icon: <CheckOutlined />,
             onClick: () => handleStatusTransition(record, 'accepted', '受理'),
-          });
+          };
         }
         if (s === 'accepted') {
-          actionItems.push({
+          primaryAction = {
             key: 'start',
             label: '开始处置',
             icon: <ToolOutlined />,
             onClick: () => handleStatusTransition(record, 'in_progress', '开始处置'),
-          });
+          };
         }
         if (s === 'dispatched') {
-          actionItems.push({
+          primaryAction = {
             key: 'start',
             label: '开始处置',
             icon: <ToolOutlined />,
             onClick: () => handleStatusTransition(record, 'in_progress', '开始处置'),
-          });
+          };
         }
         if (s === 'in_progress') {
-          actionItems.push({
+          primaryAction = {
             key: 'complete',
             label: '提交审核',
             icon: <CheckOutlined />,
             onClick: () => handleStatusTransition(record, 'reviewing', '提交审核'),
-          });
-          actionItems.push({
+          };
+          returnAction = {
             key: 'return',
             label: '退回受理',
             icon: <SwapOutlined />,
             onClick: () => handleStatusTransition(record, 'accepted', '退回受理'),
-          });
+          };
         }
         if (s === 'reviewing') {
           // 审核中状态：关单/核验通过在「核验通过」按钮进行
         }
         
-        // Common actions (not shown when in reviewing/audit)
-        if (s !== 'closed' && s !== 'reviewing') {
-          actionItems.push({
-            key: 'edit',
-            label: '编辑',
-            icon: <EditOutlined />,
-            onClick: () => handleEdit(record),
-          });
-        }
-        if (s !== 'closed' && s !== 'reviewing') {
-          actionItems.push({
-            key: 'delete',
-            label: '删除',
-            icon: <DeleteOutlined />,
-            danger: true,
-            onClick: () => handleDelete(record),
-          });
-        }
-        
-        const menuItems = actionItems.map(item => ({
-          key: item.key,
-          label: item.label,
-          icon: item.icon,
-          danger: item.danger,
-          onClick: item.onClick,
-        }));
-        
         return (
           <Space size={4}>
-            <Button type="link" size="small" icon={<EyeOutlined />}
-              onClick={() => handleView(record)}>
-              查看
-            </Button>
+            <Tooltip title="查看工单详情">
+              <Button type="text" size="small" icon={<EyeOutlined />} aria-label="查看工单详情"
+                onClick={() => handleView(record)} />
+            </Tooltip>
+            {primaryAction && (
+              <Button size="small" type="primary" icon={primaryAction.icon}
+                onClick={primaryAction.onClick}>
+                {primaryAction.label}
+              </Button>
+            )}
             {s === 'reviewing' && isAdmin && (
               <Button type="link" size="small" icon={<CheckCircleOutlined />}
                 style={{ color: tokens.colorSuccess }}
@@ -671,12 +653,23 @@ export default function WorkOrdersPage() {
                 核验通过
               </Button>
             )}
-            {menuItems.length > 0 && (
-              <Dropdown menu={{ items: menuItems }} trigger={['click']}>
-                <Button type="link" size="small" icon={<MoreOutlined />}>
-                  更多
-                </Button>
-              </Dropdown>
+            {returnAction && (
+              <Tooltip title={returnAction.label}>
+                <Button type="text" size="small" icon={returnAction.icon} aria-label={returnAction.label}
+                  onClick={returnAction.onClick} />
+              </Tooltip>
+            )}
+            {s !== 'closed' && s !== 'reviewing' && (
+              <Tooltip title="编辑工单">
+                <Button type="text" size="small" icon={<EditOutlined />} aria-label="编辑工单"
+                  onClick={() => handleEdit(record)} />
+              </Tooltip>
+            )}
+            {s !== 'closed' && s !== 'reviewing' && (
+              <Tooltip title="删除工单">
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label="删除工单"
+                  onClick={() => handleDelete(record)} />
+              </Tooltip>
             )}
           </Space>
         );
@@ -692,10 +685,10 @@ export default function WorkOrdersPage() {
   ];
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 24 }}>
+    <div style={pageRootStyle}>
       {/* Page Header */}
       <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, flexShrink: 0 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>工单管理</Title>
+        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>工单</Title>
         <Space>
           <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/work-orders?period=month', '工单明细_本月.xlsx')}>
             导出工单
@@ -718,7 +711,7 @@ export default function WorkOrdersPage() {
           { title: '待受理', value: counts.pending, color: tokens.colorWarning, icon: <ClockCircleOutlined /> },
           { title: '已派发', value: counts.dispatched, color: tokens.colorInfo, icon: <SendOutlined /> },
           { title: '处置中', value: counts.in_progress, color: tokens.colorPrimary, icon: <ToolOutlined /> },
-          { title: '待审核', value: counts.reviewing, color: '#722ed1', icon: <AuditOutlined /> },
+          { title: '待审核', value: counts.reviewing, color: purpleColor, icon: <AuditOutlined /> },
           { title: '已完成', value: counts.closed, color: tokens.colorSuccess, icon: <CheckCircleOutlined /> },
         ].map(item => (
           <div key={item.title} style={{ padding: '8px 12px', background: tokens.colorBgContainer, minWidth: 0 }}>
@@ -731,50 +724,52 @@ export default function WorkOrdersPage() {
       </div>
 
       {/* Filters */}
-      <div style={{
-        marginBottom: 12, padding: '8px 0', borderTop: `1px solid ${tokens.colorBorder}`,
-        borderBottom: `1px solid ${tokens.colorBorder}`, flexShrink: 0,
-      }}>
-        <Space wrap size={12} style={{ width: '100%' }}>
-          <Input
-            placeholder="搜索工单号、标题、站点..."
-            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-            allowClear
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onPressEnter={(e) => handleSearch(e.target.value)}
-            style={{ width: 280, borderRadius: 8 }}
-          />
-          <Select
-            placeholder="级别"
-            allowClear
-            value={levelFilter}
-            onChange={handleLevelChange}
-            style={{ width: 120 }}
-            options={levelOptions}
-          />
-          <Select
-            placeholder="状态"
-            allowClear
-            value={statusFilter}
-            onChange={handleStatusChange}
-            style={{ width: 130 }}
-            options={statusOptions}
-          />
-          <Button icon={<SearchOutlined />} onClick={() => handleSearch(search)}>查询</Button>
-          <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
-          {(search || levelFilter || statusFilter) && (
-            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-              已筛选 {filteredOrders.length} 条结果
-            </Text>
-          )}
-        </Space>
-      </div>
+      <FilterBar
+        style={{ marginBottom: 12 }}
+        extra={(
+          <Space>
+            <Button icon={<SearchOutlined />} onClick={() => handleSearch(search)}>查询</Button>
+            <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
+          </Space>
+        )}
+      >
+        <Input
+          placeholder="搜索工单号、标题、站点..."
+          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onPressEnter={(e) => handleSearch(e.target.value)}
+          style={{ width: filterInputWidth, borderRadius: 8 }}
+        />
+        <Select
+          placeholder="级别"
+          allowClear
+          value={levelFilter}
+          onChange={handleLevelChange}
+          style={{ width: filterSmallSelectWidth }}
+          options={levelOptions}
+        />
+        <Select
+          placeholder="状态"
+          allowClear
+          value={statusFilter}
+          onChange={handleStatusChange}
+          style={{ width: filterSelectWidth }}
+          options={statusOptions}
+        />
+        {(search || levelFilter || statusFilter) && (
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            已筛选 {filteredOrders.length} 条结果
+          </Text>
+        )}
+      </FilterBar>
 
       {/* Table */}
-      <Card size="small" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <Card size="small" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} styles={{ body: { padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } }}>
         <div ref={tableWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <Table
+          className="workorders-table"
           columns={columns}
           dataSource={filteredOrders}
           rowKey={(r) => r.order_no || r.id}
@@ -782,7 +777,7 @@ export default function WorkOrdersPage() {
           pagination={false}
           scroll={tableBodyHeight ? { y: tableBodyHeight } : undefined}
           locale={{ emptyText: <Empty description="暂无工单数据" /> }}
-          size="middle"
+          size="small"
         />
         </div>
       </Card>
@@ -842,7 +837,7 @@ export default function WorkOrdersPage() {
           <Space>
             <FileTextOutlined />
             <span>工单详情</span>
-            {viewingOrder && <Tag color={levelColorMap[viewingOrder.level] || 'default'} style={{ borderRadius: 4, fontSize: 11 }}>{orderLevelMap[viewingOrder.level] || viewingOrder.level}</Tag>}
+            {viewingOrder && <Tag color={orderLevelBadge[viewingOrder.level] || 'default'} style={{ borderRadius: 4, fontSize: 11 }}>{orderLevelMap[viewingOrder.level] || viewingOrder.level}</Tag>}
           </Space>
         }
         open={viewOpen}
@@ -859,7 +854,7 @@ export default function WorkOrdersPage() {
               <Descriptions.Item label="站点">{viewingOrder.site_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="来源">{orderSourceMap[viewingOrder.source] || viewingOrder.source || '-'}</Descriptions.Item>
               <Descriptions.Item label="级别">
-                {viewingOrder.level ? <Tag color={levelColorMap[viewingOrder.level] || 'default'} style={{ borderRadius: 4, fontSize: 11 }}>{orderLevelMap[viewingOrder.level] || viewingOrder.level}</Tag> : '-'}
+                {viewingOrder.level ? <Tag color={orderLevelBadge[viewingOrder.level] || 'default'} style={{ borderRadius: 4, fontSize: 11 }}>{orderLevelMap[viewingOrder.level] || viewingOrder.level}</Tag> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="状态">
                 {viewingOrder.status ? <Badge status={orderStatusBadge[viewingOrder.status] || 'default'} text={orderStatusMap[viewingOrder.status] || viewingOrder.status} /> : '-'}
@@ -898,7 +893,7 @@ export default function WorkOrdersPage() {
                                 style={{
                                   position: 'absolute', top: -6, right: -6,
                                   width: 18, height: 18, borderRadius: '50%',
-                                  background: '#ff4d4f', color: '#fff',
+                                  background: tokens.colorError, color: '#fff',
                                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                                   cursor: 'pointer', fontSize: 11, lineHeight: '18px',
                                   boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
@@ -956,13 +951,13 @@ export default function WorkOrdersPage() {
 
             {/* 审核状态提示（只读，审核操作在待办审核页面） */}
             {viewingOrder.status === 'reviewing' && (
-              <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: 'rgba(114, 46, 209, 0.06)', border: '1px solid rgba(114, 46, 209, 0.15)' }}>
+              <div style={{ marginTop: 16, padding: '12px 16px', borderRadius: 8, background: `${purpleColor}0F`, border: `1px solid ${purpleColor}26` }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <AuditOutlined style={{ color: '#722ed1', fontSize: 16 }} />
+                  <AuditOutlined style={{ color: purpleColor, fontSize: 16 }} />
                   <div>
-                    <Text strong style={{ fontSize: 13, color: '#722ed1' }}>待审核</Text>
+                    <Text strong style={{ fontSize: 13, color: purpleColor }}>待审核</Text>
                     <div style={{ fontSize: 12, color: tokens.colorTextSecondary, marginTop: 2 }}>
-                      处置已提交，请在「待办审核」中进行审核操作
+                      处置已提交，请在「统一审核」中进行审核操作
                     </div>
                   </div>
                 </div>
@@ -1075,24 +1070,59 @@ export default function WorkOrdersPage() {
 
       {/* ===== Spare Part Request Modal (from work order) ===== */}
       <Modal
-        title="申请备件"
+        title="备件需求"
         open={partReqOpen}
         onOk={handlePartReqOk}
         onCancel={() => { setPartReqOpen(false); partReqForm.resetFields(); }}
         confirmLoading={partReqLoading}
-        okText="提交申请"
+        okText="提交需求"
         cancelText="取消"
         destroyOnClose
       >
-        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(24,144,255,0.06)', border: '1px solid rgba(24,144,255,0.15)' }}>
+        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${infoColor}0F`, border: `1px solid ${infoColor}26` }}>
           <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
             关联工单：<Text strong style={{ color: tokens.colorPrimary }}>{viewingOrder?.order_no}</Text>
           </Text>
         </div>
         <Form form={partReqForm} layout="vertical" style={{ marginTop: 8 }}>
-          <Form.Item name="part_name" label="备件名称" rules={[{ required: true, message: '请输入备件名称' }]}>
-            <Input placeholder="请输入需要申请的备件名称" />
+          <Form.Item name="fulfillment_type" label="处理方式" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'stock', label: '使用现有库存' },
+              { value: 'local_purchase', label: '附近紧急购买' },
+              { value: 'vendor_order', label: '厂家订购' },
+            ]} />
           </Form.Item>
+          {partFulfillmentType === 'stock' ? (
+            <>
+              <Form.Item name="spare_part_id" label="库存备件" rules={[{ required: true, message: '请选择库存备件' }]}>
+                <Select showSearch optionFilterProp="label" placeholder="选择现有库存" options={partInventory.map(part => ({
+                  value: part.id,
+                  label: `${part.part_name}（${part.part_code}）· 当前 ${part.quantity}${part.unit || '件'}`,
+                }))} onChange={id => {
+                  const part = partInventory.find(row => row.id === id);
+                  if (part) partReqForm.setFieldValue('part_name', part.part_name);
+                }} />
+              </Form.Item>
+              <Form.Item name="part_name" hidden><Input /></Form.Item>
+            </>
+          ) : (
+            <>
+              <Form.Item name="part_name" label="备件名称" rules={[{ required: true, message: '请输入备件名称' }]}>
+                <Input placeholder="如：pH 电极" />
+              </Form.Item>
+              <Form.Item name="specification" label="规格型号">
+                <Input placeholder="厂家、型号或可识别规格" />
+              </Form.Item>
+              <Form.Item name="estimated_amount" label="预计金额（元）">
+                <Input type="number" min={0} placeholder="可暂不填写" />
+              </Form.Item>
+            </>
+          )}
+          <div style={{ marginBottom: 16, color: tokens.colorTextSecondary, fontSize: 12 }}>
+            {partFulfillmentType === 'stock'
+              ? '批准只代表允许使用，不锁库；现场确认领用时才扣库。'
+              : '批准后补充供应商、票据和实际金额，系统自动生成到货及领用台账。'}
+          </div>
           <Form.Item name="quantity" label="数量" rules={[{ required: true, message: '请输入数量' }]}>
             <Input type="number" min={1} placeholder="申请数量" />
           </Form.Item>
@@ -1116,7 +1146,7 @@ export default function WorkOrdersPage() {
         cancelText="取消"
         destroyOnClose
       >
-        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(24,144,255,0.06)', border: '1px solid rgba(24,144,255,0.15)' }}>
+        <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${infoColor}0F`, border: `1px solid ${infoColor}26` }}>
           <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
             关联工单：<Text strong style={{ color: tokens.colorPrimary }}>{viewingOrder?.order_no}</Text>
           </Text>
@@ -1162,7 +1192,7 @@ export default function WorkOrdersPage() {
       >
         {closeTarget && (
           <div style={{ marginTop: 16 }}>
-            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(0,0,0,0.02)', marginBottom: 16 }}>
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: tokens.colorPrimaryBg, marginBottom: 16 }}>
               <Text style={{ fontSize: 13, color: tokens.colorTextSecondary }}>
                 工单号：<Text strong>{closeTarget.order_no}</Text>
               </Text>

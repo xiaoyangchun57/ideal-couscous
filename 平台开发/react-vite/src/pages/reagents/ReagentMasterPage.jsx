@@ -1,12 +1,15 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Card, Table, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, message, Typography } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Card, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, message, Typography } from 'antd';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import AttachmentUpload from '../../components/AttachmentUpload';
+import FilterBar from '../../components/FilterBar';
+import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import { filterInputWidth } from '../../services/pageStyles';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 export default function ReagentMasterPage() {
   const { tokens } = useTheme();
@@ -18,6 +21,17 @@ export default function ReagentMasterPage() {
   const [editing, setEditing] = useState(null); // null=新增，对象=编辑
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
+  const [search, setSearch] = useState('');
+
+  const filteredData = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return data;
+    return data.filter(r =>
+      (r.name && r.name.toLowerCase().includes(q)) ||
+      (r.manufacturer && r.manufacturer.toLowerCase().includes(q)) ||
+      (r.spec && r.spec.toLowerCase().includes(q))
+    );
+  }, [data, search]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -122,30 +136,36 @@ export default function ReagentMasterPage() {
   ];
 
   return (
-    <div style={{ padding: 16, height: '100%', overflow: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-        <div>
-          <Title level={4} style={{ margin: 0 }}>
-            <ExperimentOutlined style={{ marginRight: 8, color: tokens.colorPrimary }} />
-            试剂主数据管理
-          </Title>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            维护试剂目录（名称 / 厂家 / 规格 / 单位 / 保质期）。站点库存中的「新增试剂」从此处选取。
+    <ManagementPage
+      pageTitle="试剂主数据"
+      pageSub="维护试剂目录；站点库存新增试剂时从此处选取。"
+      tableMode="content"
+      filterSlot={<FilterBar
+        extra={canWrite && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增试剂</Button>}
+      >
+        <Input
+          placeholder="搜索试剂名称、厂家、规格..."
+          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: filterInputWidth, borderRadius: 8 }}
+        />
+        {search && (
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            已筛选 {filteredData.length} 条结果
           </Text>
-        </div>
-        {canWrite && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增试剂</Button>}
-      </div>
-
-      <Card bodyStyle={{ padding: 0 }}>
-        <Table
+        )}
+      </FilterBar>}
+      tableSlot={<UnifiedTable
+          mode="content"
           rowKey="id"
           loading={loading}
-          dataSource={data}
+          dataSource={filteredData}
           columns={columns}
-          pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 种试剂` }}
-          size="small"
-        />
-      </Card>
+          pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+        />}
+    >
 
       <Card title="试剂配置照片归档" size="small" style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
@@ -212,6 +232,6 @@ export default function ReagentMasterPage() {
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </ManagementPage>
   );
 }

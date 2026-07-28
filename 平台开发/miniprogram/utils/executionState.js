@@ -4,7 +4,7 @@ function selectExecutionSite(packages, selectedPlanId, preferredSiteId) {
     ? list.find((pkg) => (pkg.sites || []).some((site) => site.site_id === preferredSiteId))
     : null;
   const currentPackage = preferredPackage
-    || list.find((pkg) => pkg.plan_id === selectedPlanId)
+    || list.find((pkg) => selectedPlanId != null && String(pkg.plan_id) === String(selectedPlanId))
     || list[0]
     || null;
   const sites = currentPackage ? currentPackage.sites || [] : [];

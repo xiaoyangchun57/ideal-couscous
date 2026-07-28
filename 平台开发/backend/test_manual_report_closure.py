@@ -42,7 +42,7 @@ class ManualReportClosureTest(unittest.TestCase):
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, status TEXT, related_alert_id INTEGER,
-                    used_parts TEXT, site_id INTEGER, check_in_time TEXT, resolved_at TEXT
+                    used_parts TEXT, site_id INTEGER, check_in_time TEXT, resolved_at TEXT, assignee TEXT
                 );
                 CREATE TABLE manual_reports (
                     id INTEGER PRIMARY KEY, site_id INTEGER, status TEXT, order_no TEXT,
@@ -61,7 +61,7 @@ class ManualReportClosureTest(unittest.TestCase):
                 (1, 'admin', '管理员'), (2, 'manager', '主管'), (9, 'operator', '现场人员'),
             ])
             db.execute('INSERT INTO user_sites VALUES (9, 1)')
-            db.execute("INSERT INTO work_orders VALUES (1, 'MR202607250001', 'reviewing', NULL, '', 1, NULL, NULL)")
+            db.execute("INSERT INTO work_orders VALUES (1, 'MR202607250001', 'reviewing', NULL, '', 1, NULL, NULL, '现场人员')")
             db.execute("INSERT INTO manual_reports (id, site_id, status, order_no) VALUES (7, 1, 'dispatched', 'MR202607250001')")
         self.client = app_module.app.test_client()
 

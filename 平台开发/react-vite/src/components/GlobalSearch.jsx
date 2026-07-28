@@ -67,14 +67,14 @@ export default function GlobalSearch({ open, onClose }) {
   }, [open]);
 
   const results = useMemo(() => {
-    const pages = getSearchablePages(user?.role).map((item) => ({ ...item, icon: <SearchOutlined /> }));
+    const pages = getSearchablePages(user?.roles || [user?.role]).map((item) => ({ ...item, icon: <SearchOutlined /> }));
     const source = [...pages, ...records];
     const keyword = query.trim().toLowerCase();
     if (!keyword) return pages.slice(0, 10);
     return source
       .filter((item) => `${item.title} ${item.subtitle || ''} ${item.type}`.toLowerCase().includes(keyword))
       .slice(0, 20);
-  }, [query, records, user?.role]);
+  }, [query, records, user?.role, user?.roles]);
 
   const openResult = (item) => {
     onClose();

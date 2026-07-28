@@ -1,10 +1,10 @@
 <view class="page">
   <view class="head">
     <view><text class="title">我的异常上报</text><text class="sub">上报后由管理端核实并跟随工单闭环</text></view>
-    <button class="report-btn" size="mini" bindtap="onGoReport">现场上报</button>
+    <button class="btn-primary btn-sm report-btn" size="mini" bindtap="onGoReport">现场上报</button>
   </view>
-  <scroll-view class="filters" scroll-x="true" enhanced show-scrollbar="false">
-    <view wx:for="{{filters}}" wx:key="*this" data-index="{{index}}" bindtap="onFilter" class="filter {{(index === 0 && !filter) || (index === 1 && filter === 'dispatched') || (index === 2 && filter === 'verified') || (index === 3 && filter === 'resolved') || (index === 4 && filter === 'archived') ? 'filter-on' : ''}}">{{item}}</view>
+  <scroll-view class="seg-strip filters" scroll-x="true" enhanced show-scrollbar="false">
+    <view wx:for="{{filters}}" wx:key="*this" data-index="{{index}}" bindtap="onFilter" class="seg-item filter {{(index === 0 && !filter) || (index === 1 && filter === 'dispatched') || (index === 2 && filter === 'verified') || (index === 3 && filter === 'resolved') || (index === 4 && filter === 'archived') ? 'seg-on filter-on' : ''}}">{{item}}</view>
   </scroll-view>
   <view wx:if="{{loading}}" class="empty">加载中…</view>
   <block wx:else>

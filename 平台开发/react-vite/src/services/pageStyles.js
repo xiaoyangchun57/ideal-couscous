@@ -1,19 +1,21 @@
 /**
- * 全系统页面样式统一标准
- * 以告警管理中心（AlertsPage）为基准
+ * 全系统页面样式统一标准（唯一面板规范）
+ * 以告警管理中心（AlertsPage）为基准。
+ *
+ * 约束（结构一致性规范，见 docs/superpowers/ui-specs/web-antd-ui-spec.md §8）：
+ * 1. 基准页本身须先符合本规范——pageStyles 是全部管理页的唯一面板标准，
+ *    任何页不得自建一套 padding / 工具栏 / 状态色；
+ * 2. 新管理页必须套 <ManagementPage> 模板组件（components/ManagementPage.jsx），
+ *    不得新建「裸 Table + 自建工具栏」页；
+ * 3. 状态色一律走 services/constants.js 的 *Map + theme/tokens.js 的 statusColors，
+ *    业务代码禁止硬编码 hex。
  */
-import { theme } from 'antd';
-
 // ---- 卡片样式 ----
-export const cardStyleBase = (tokens, isDark) => ({
+export const cardStyleBase = (tokens) => ({
   borderRadius: 12,
-  background: isDark
-    ? 'linear-gradient(135deg, rgba(12,28,52,0.85), rgba(8,20,42,0.9))'
-    : '#ffffff',
+  background: tokens.colorBgContainer,
   border: `1px solid ${tokens.colorBorder}`,
-  boxShadow: isDark
-    ? '0 2px 12px rgba(0,0,0,0.3)'
-    : '0 2px 8px rgba(0,0,0,0.06)',
+  boxShadow: tokens.shadowCard,
 });
 
 // ---- 页面根容器 ----
@@ -26,8 +28,8 @@ export const pageRootStyle = {
 };
 
 // ---- 统计卡片 ----
-export const statCardStyle = (tokens, isDark) => ({
-  ...cardStyleBase(tokens, isDark),
+export const statCardStyle = (tokens) => ({
+  ...cardStyleBase(tokens),
   transition: 'all 0.2s ease',
 });
 
@@ -51,8 +53,8 @@ export const filterSelectWidth = 140;
 export const filterSmallSelectWidth = 120;
 
 // ---- 表格容器 ----
-export const tableCardStyle = (tokens, isDark) => ({
-  ...cardStyleBase(tokens, isDark),
+export const tableCardStyle = (tokens) => ({
+  ...cardStyleBase(tokens),
   marginTop: 16,
   flex: 1,
   display: 'flex',

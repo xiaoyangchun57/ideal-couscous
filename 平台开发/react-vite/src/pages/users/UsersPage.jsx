@@ -1,24 +1,28 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Table, Card, Input, Select, Button, Space, Tag, Badge, Modal,
-  Typography, message, Spin, Empty, Form, Switch,
+  Input, Select, Button, Space, Tag, Badge, Modal,
+  Typography, message, Empty, Form, Popconfirm,
 } from 'antd';
 import {
   SearchOutlined, ReloadOutlined, PlusOutlined, EditOutlined,
-  DeleteOutlined, LockOutlined, ExclamationCircleOutlined,
+  LockOutlined, StopOutlined, PlayCircleOutlined, DeleteOutlined,
   UserOutlined, SafetyOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
+import FilterBar from '../../components/FilterBar';
+import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import {
+  filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
+} from '../../services/pageStyles';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
+// 角色映射为本页专用小映射（仅 antd Tag 预设色名，符合状态色约定），保留页内定义
 const roleMap = {
   admin: { label: '管理员', color: 'red', icon: <SafetyOutlined /> },
-  manager: { label: '管理者', color: 'orange' },
   operator: { label: '运维人员', color: 'blue' },
-  inspector: { label: '巡检员', color: 'cyan' },
-  viewer: { label: '查看者', color: 'default' },
+  reviewer: { label: '审核员', color: 'cyan' },
 };
 
 export default function UsersPage() {
@@ -27,6 +31,7 @@ export default function UsersPage() {
 
   // Data state
   const [users, setUsers] = useState([]);
+  const [siteOptions, setSiteOptions] = useState([]);
   const [loading, setLoading] = useState(false);
 
   // Filter state
@@ -57,6 +62,7 @@ export default function UsersPage() {
   }, [search, roleFilter, statusFilter]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+  useEffect(() => { api.get('/sites').then(rows => setSiteOptions((rows || []).map(s => ({ value: s.id, label: s.name })))).catch(() => {}); }, []);
 
   const handleReset = () => {
     setSearch('');
@@ -67,17 +73,18 @@ export default function UsersPage() {
   const handleCreate = () => {
     setEditingUser(null);
     form.resetFields();
+    form.setFieldsValue({ roles: ['operator'] });
     setModalOpen(true);
   };
 
   const handleEdit = (record) => {
     setEditingUser(record);
     form.setFieldsValue({
-      username: record.username,
-      name: record.name,
-      role: record.role,
+      login_name: record.login_name || record.real_name,
+      real_name: record.real_name,
+      roles: record.roles || [record.role],
       phone: record.phone,
-      sites: record.sites?.join(', ') || record.assigned_sites?.join(', ') || '',
+      site_ids: record.site_ids || [],
       status: record.status || 'active',
     });
     setModalOpen(true);
@@ -88,18 +95,14 @@ export default function UsersPage() {
       const values = await form.validateFields();
       setModalLoading(true);
 
-      // Process sites field
       const payload = { ...values };
-      if (typeof payload.sites === 'string') {
-        payload.sites = payload.sites.split(',').map(s => s.trim()).filter(Boolean);
-      }
 
       const url = editingUser ? `/users/${editingUser.id}` : '/users';
       const method = editingUser ? 'put' : 'post';
       const result = await api[method](url, payload);
 
       if (result && !result.error) {
-        message.success(editingUser ? '用户信息已更新' : '用户创建成功');
+          message.success(editingUser ? '用户信息已更新' : '用户创建成功');
         setModalOpen(false);
         fetchUsers();
       } else {
@@ -112,29 +115,19 @@ export default function UsersPage() {
     }
   };
 
-  const handleDelete = (record) => {
-    Modal.confirm({
-      title: '确认删除',
-      icon: <ExclamationCircleOutlined />,
-      content: `确认删除用户 ${record.name || record.username}？此操作不可撤销。`,
-      okText: '删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        const result = await api.delete(`/users/${record.id}`);
-        if (result && !result.error) {
-          message.success('用户已删除');
-          fetchUsers();
-        } else {
-          message.error('删除失败');
-        }
-      },
-    });
+  const handleDelete = async (record) => {
+    const result = await api.delete(`/users/${record.id}`);
+    if (result && !result.error) {
+        message.success('账号已注销');
+      fetchUsers();
+    } else {
+      message.error('删除失败');
+    }
   };
 
   const handleToggleStatus = async (record) => {
     const newStatus = record.status === 'active' ? 'inactive' : 'active';
-    const result = await api.put(`/users/${record.id}`, { status: newStatus });
+    const result = await api.put(`/users/${record.id}/status`, { status: newStatus });
     if (result && !result.error) {
       message.success(newStatus === 'active' ? '已启用' : '已停用');
       fetchUsers();
@@ -147,11 +140,11 @@ export default function UsersPage() {
     Modal.confirm({
       title: '重置密码',
       icon: <LockOutlined />,
-      content: `确认重置 ${record.name || record.username} 的密码？`,
+      content: `确认将 ${record.login_name || record.real_name} 的密码重置为 yw123456？`,
       okText: '确认重置',
       cancelText: '取消',
       onOk: async () => {
-        const result = await api.post(`/users/${record.id}/reset-password`, {});
+        const result = await api.put(`/users/${record.id}/reset-password`, { new_password: 'yw123456' });
         if (result && !result.error) {
           message.success('密码已重置');
         } else {
@@ -163,10 +156,10 @@ export default function UsersPage() {
 
   const columns = [
     {
-      title: '用户名',
-      dataIndex: 'username',
-      key: 'username',
-      width: 100,
+      title: '登录名',
+      dataIndex: 'login_name',
+      key: 'login_name',
+      width: 170,
       render: (text, record) => (
         <Space>
           <div style={{
@@ -175,42 +168,44 @@ export default function UsersPage() {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: '#fff', fontSize: 12, fontWeight: 600, flexShrink: 0,
           }}>
-            {(record.name || text || '?')[0].toUpperCase()}
+            {(record.real_name || text || '?')[0]}
           </div>
-          <Text strong>{text}</Text>
+          <Text strong>{text || record.real_name || record.username}</Text>
         </Space>
       ),
     },
     {
       title: '姓名',
-      dataIndex: 'name',
-      key: 'name',
-      width: 70,
+      dataIndex: 'real_name',
+      key: 'real_name',
+      width: 90,
       render: (text) => text || '-',
     },
     {
       title: '角色',
-      dataIndex: 'role',
-      key: 'role',
-      width: 90,
-      render: (val) => {
-        const cfg = roleMap[val] || { label: val || '-', color: 'default' };
-        return <Tag color={cfg.color} icon={cfg.icon}>{cfg.label}</Tag>;
+      dataIndex: 'roles',
+      key: 'roles',
+      width: 180,
+      render: (roles, record) => {
+        const list = roles?.length ? roles : [record.role];
+        return <Space size={4} wrap>{list.map((role) => {
+          const cfg = roleMap[role] || { label: role || '-', color: 'default' };
+          return <Tag key={role} color={cfg.color} icon={cfg.icon}>{cfg.label}</Tag>;
+        })}</Space>;
       },
     },
     {
       title: '手机号',
       dataIndex: 'phone',
       key: 'phone',
-      width: 110,
+      width: 140,
       render: (text) => text || '-',
     },
     {
       title: '负责站点',
       dataIndex: 'sites',
       key: 'sites',
-      width: 180,
-      ellipsis: true,
+      width: 360,
       render: (val, record) => {
         const sites = val || record.assigned_sites || [];
         if (Array.isArray(sites) && sites.length > 0) {
@@ -228,7 +223,7 @@ export default function UsersPage() {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 70,
+      width: 84,
       render: (val) => {
         const isActive = val === 'active';
         return <Badge status={isActive ? 'success' : 'default'} text={isActive ? '启用' : '停用'} />;
@@ -237,25 +232,26 @@ export default function UsersPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 330,
       render: (_, record) => (
-        <Space size={4}>
+        <Space size={0} wrap>
           <Button type="link" size="small" icon={<EditOutlined />}
             onClick={() => handleEdit(record)}>
             编辑
           </Button>
-          <Button type="link" size="small"
-            onClick={() => handleToggleStatus(record)}>
-            {record.status === 'active' ? '停用' : '启用'}
-          </Button>
-          <Button type="link" size="small" icon={<LockOutlined />}
-            onClick={() => handleResetPassword(record)}>
-            重置
-          </Button>
-          <Button type="link" size="small" danger icon={<DeleteOutlined />}
-            onClick={() => handleDelete(record)}>
-            删除
-          </Button>
+          <Button type="link" size="small" icon={<LockOutlined />} onClick={() => handleResetPassword(record)}>重置密码</Button>
+          <Button type="link" size="small" icon={record.status === 'active' ? <StopOutlined /> : <PlayCircleOutlined />}
+            onClick={() => handleToggleStatus(record)}>{record.status === 'active' ? '停用' : '启用'}</Button>
+          <Popconfirm
+            title="确认注销账号？"
+            description="账号将不能登录，历史业务记录会保留。"
+            okText="注销账号"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record)}
+          >
+            <Button type="link" danger size="small" icon={<DeleteOutlined />}>注销</Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -264,70 +260,62 @@ export default function UsersPage() {
   const roleOptions = Object.entries(roleMap).map(([value, cfg]) => ({ value, label: cfg.label }));
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 24 }}>
-      {/* Header */}
-      <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>用户管理</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
-          style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
-          添加用户
-        </Button>
-      </div>
-
-      {/* Filters */}
-      <Card style={{ marginBottom: 16, borderRadius: 12 }} bodyStyle={{ padding: '16px 24px' }}>
-        <Space wrap size={12}>
-          <Input
-            placeholder="搜索用户名、姓名、手机号..."
-            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-            allowClear
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onPressEnter={() => fetchUsers()}
-            style={{ width: 280, borderRadius: 8 }}
-          />
-          <Select
-            placeholder="角色"
-            allowClear
-            value={roleFilter}
-            onChange={(val) => setRoleFilter(val)}
-            style={{ width: 130 }}
-            options={roleOptions}
-          />
-          <Select
-            placeholder="状态"
-            allowClear
-            value={statusFilter}
-            onChange={(val) => setStatusFilter(val)}
-            style={{ width: 120 }}
-            options={[
-              { value: 'active', label: '启用' },
-              { value: 'inactive', label: '停用' },
-            ]}
-          />
-          <Button icon={<SearchOutlined />} onClick={() => fetchUsers()}>查询</Button>
-          <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
-          {(search || roleFilter || statusFilter) && (
-            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-              已筛选 {users.length} 条结果
-            </Text>
-          )}
-        </Space>
-      </Card>
-
-      {/* Table */}
-      <Card style={{ borderRadius: 12, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <Table
+    <ManagementPage
+      pageTitle="用户管理"
+      headerExtra={<Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>添加用户</Button>}
+      tableMode="content"
+      filterSlot={<FilterBar
+        extra={(
+          <Space>
+            <Button icon={<SearchOutlined />} onClick={() => fetchUsers()}>查询</Button>
+            <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
+          </Space>
+        )}
+      >
+        <Input
+          placeholder="搜索登录名、姓名、手机号..."
+          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+          allowClear
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onPressEnter={() => fetchUsers()}
+          style={{ width: filterInputWidth, borderRadius: 8 }}
+        />
+        <Select
+          placeholder="角色"
+          allowClear
+          value={roleFilter}
+          onChange={(val) => setRoleFilter(val)}
+          style={{ width: filterSelectWidth }}
+          options={roleOptions}
+        />
+        <Select
+          placeholder="状态"
+          allowClear
+          value={statusFilter}
+          onChange={(val) => setStatusFilter(val)}
+          style={{ width: filterSmallSelectWidth }}
+          options={[
+            { value: 'active', label: '启用' },
+            { value: 'inactive', label: '停用' },
+          ]}
+        />
+        {(search || roleFilter || statusFilter) && (
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            已筛选 {users.length} 条结果
+          </Text>
+        )}
+      </FilterBar>}
+      tableSlot={<UnifiedTable
+          mode="content"
           columns={columns}
           dataSource={users}
           rowKey={(r) => r.id || r.username}
           loading={loading}
-          pagination={false}
-          scroll={{ x: 760, y: 'calc(100vh - 320px)' }}
+          pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
           locale={{ emptyText: <Empty description="暂无用户数据" /> }}
-          size="middle"
-        />
-      </Card>
+        />}
+    >
 
       {/* Create/Edit Modal */}
       <Modal
@@ -342,9 +330,9 @@ export default function UsersPage() {
         destroyOnClose
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item name="username" label="用户名"
-            rules={[{ required: true, message: '请输入用户名' }, { min: 3, message: '用户名至少3个字符' }]}>
-            <Input prefix={<UserOutlined style={{ color: tokens.colorTextTertiary }} />} placeholder="请输入用户名" disabled={!!editingUser} />
+          <Form.Item name="login_name" label="中文登录名"
+            rules={[{ required: true, message: '请输入中文登录名' }]}>
+            <Input prefix={<UserOutlined style={{ color: tokens.colorTextTertiary }} />} placeholder="例如：李城亮" />
           </Form.Item>
           {!editingUser && (
             <Form.Item name="password" label="密码"
@@ -352,20 +340,20 @@ export default function UsersPage() {
               <Input.Password prefix={<LockOutlined style={{ color: tokens.colorTextTertiary }} />} placeholder="请输入密码" />
             </Form.Item>
           )}
-          <Form.Item name="name" label="姓名" rules={[{ required: true, message: '请输入姓名' }]}>
+          <Form.Item name="real_name" label="姓名" rules={[{ required: true, message: '请输入姓名' }]}>
             <Input placeholder="请输入姓名" />
           </Form.Item>
-          <Form.Item name="role" label="角色" rules={[{ required: true, message: '请选择角色' }]}>
-            <Select placeholder="请选择角色" options={roleOptions} />
+          <Form.Item name="roles" label="角色" rules={[{ required: true, message: '请选择至少一个角色' }]}>
+            <Select mode="multiple" placeholder="可同时选择运维人员和审核员" options={roleOptions} />
           </Form.Item>
           <Form.Item name="phone" label="手机号">
             <Input placeholder="请输入手机号" />
           </Form.Item>
-          <Form.Item name="sites" label="负责站点">
-            <Input placeholder="多个站点用逗号分隔" />
+          <Form.Item name="site_ids" label="负责站点">
+            <Select mode="multiple" allowClear showSearch optionFilterProp="label" options={siteOptions} placeholder="选择该人员可执行和接收通知的站点" />
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </ManagementPage>
   );
 }

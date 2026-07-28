@@ -37,6 +37,14 @@ function workorderCn(w) {
     has_images: imagesArr.length > 0
   });
 }
+
+// 巡检页中的关联工单来自执行包接口，同样必须使用中文状态和统一标题前缀。
+function linkedWorkorderCn(w) {
+  const mapped = workorderCn(w);
+  return Object.assign({}, mapped, {
+    display_title: String(mapped.title || '').replace(/^\[([^\]]+)\]/, '【$1】')
+  });
+}
 // 巡检分类中文映射（严禁 wxml 直接写英文 category）
 const INSPECTION_CATEGORY = {
   equipment_ops: '设备运维', log_books: '登记本', qaqc_calibration: '质控校准',
@@ -52,7 +60,7 @@ const SITE_TYPE = {
   drinking_source: '饮用水源站', cross_boundary: '跨界断面站', groundwater: '地下水站'
 };
 const FREQ = { daily: '每日', weekly: '每周', monthly: '每月', hourly: '每小时' };
-const ROLE = { admin: '管理员', operator: '运维人员', viewer: '查看员' };
+const ROLE = { admin: '管理员', operator: '运维人员', reviewer: '审核员' };
 const RESULT = { normal: '正常', abnormal: '异常', pending: '待检' };
 
 // 监测指标中文（/api/alerts 仅返回原始 metric）
@@ -86,7 +94,7 @@ function map(obj, key, def) {
 
 module.exports = {
   WORKORDER_STATUS, WORKORDER_STATUS_CLS, WORKORDER_LEVEL, WORKORDER_LEVEL_CLS,
-  WORKORDER_SOURCE, workorderCn, INSPECTION_CATEGORY,
+  WORKORDER_SOURCE, workorderCn, linkedWorkorderCn, INSPECTION_CATEGORY,
   ALERT_LEVEL, ALERT_LEVEL_CLS, alertLevelCls, ALERT_STATUS, SITE_TYPE, FREQ, ROLE, RESULT, map,
   METRIC, metricCn,
   PLAN_SCHEDULE_STATUS, PLAN_SCHEDULE_STATUS_CLS, SCHEDULE_TYPE

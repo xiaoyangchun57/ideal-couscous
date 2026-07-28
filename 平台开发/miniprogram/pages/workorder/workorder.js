@@ -2,8 +2,9 @@ const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
-const { chooseAndCompress, fileToBase64 } = require('../../utils/photos.js');
+const { chooseAndCompress, fileToBase64, captureFlushedPhoto } = require('../../utils/photos.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
+const { queueCount, flushQueue } = require('../../utils/request.js');
 
 const app = getApp();
 
@@ -40,27 +41,71 @@ Page({
       { key: 'closed', label: '已完成' }
     ],
     sheet: { open: false, item: null }, isAdmin: false, canWrite: false, acting: false,
+    online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
     vehicleOptions: [{ id: 0, label: '不指定（仅填事由）' }],
     partsOptions: [{ id: 0, label: '手动输入（自定义名称）' }],
     // 极简申请弹层（含关联下标）
     vehicleApply: { open: false, reason: '', index: 0 },
-    partsApply: { open: false, part_name: '', quantity: 1, reason: '', index: 0 }
+    partsFulfillmentOptions: [
+      { key: 'stock', label: '使用现有库存' },
+      { key: 'local_purchase', label: '附近紧急购买' },
+      { key: 'vendor_order', label: '厂家订购' }
+    ],
+    partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 }
   },
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
     const u = getUser() || {};
-    const role = u.role || '';
+    const roles = u.roles || [u.role || ''];
     this.setData({
-      isAdmin: role === 'admin',
-      canWrite: role === 'admin' || role === 'operator'
+      isAdmin: roles.includes('admin'),
+      canWrite: roles.includes('admin') || roles.includes('operator')
     });
+    this.refreshSyncState();
     this.load();
     this.loadLists();
   },
 
   onPullDownRefresh() { this.load(() => wx.stopPullDownRefresh()); },
+
+  refreshSyncState(done) {
+    wx.getNetworkType({
+      success: (res) => {
+        this.setData({ online: res.networkType !== 'none', syncCount: queueCount() });
+        if (done) done();
+      },
+      fail: () => {
+        this.setData({ syncCount: queueCount() });
+        if (done) done();
+      }
+    });
+  },
+
+  onSyncNow() {
+    if (!this.data.syncCount) return;
+    wx.showLoading({ title: '同步中' });
+    flushQueue(captureFlushedPhoto);
+    setTimeout(() => {
+      wx.hideLoading();
+      this.refreshSyncState(() => {
+        if (!this.data.syncCount) this.load();
+        wx.showToast({ title: this.data.syncCount ? '仍有操作待同步' : '同步完成', icon: this.data.syncCount ? 'none' : 'success' });
+      });
+    }, 1000);
+  },
+
+  handleWriteFailure(err, fallback, closePath) {
+    const queued = !!(err && err.queued);
+    const patch = { acting: false, syncCount: queueCount() };
+    if (queued && closePath) patch[closePath] = false;
+    this.setData(patch);
+    wx.showToast({
+      title: queued ? '已离线保存，联网后自动同步' : ((err && err.error) || fallback),
+      icon: 'none'
+    });
+  },
 
   filter(all, tab) {
     const set = TAB_GROUPS[tab];
@@ -73,6 +118,15 @@ Page({
       .then(res => {
         const all = (res || []).map(maps.workorderCn);
         this.setData({ all, list: this.filter(all, this.data.tab), loaded: true });
+        const focusedOrderNo = app.globalData.selWorkorderNo;
+        if (focusedOrderNo) {
+          const item = all.find(workorder => workorder.order_no === focusedOrderNo);
+          app.globalData.selWorkorderNo = null;
+          if (item) {
+            const stepMap = { pending: 1, accepted: 2, dispatched: 2, in_progress: 3, reviewing: 4, closed: 5, resolved: 5 };
+            this.setData({ sheet: { open: true, item: Object.assign({}, item, { step: stepMap[item.status] || 0 }) } });
+          }
+        }
         if (one) one();
       })
       .catch(() => { this.setData({ loaded: true }); if (one) one(); wx.showToast({ title: '加载失败', icon: 'none' }); });
@@ -98,7 +152,7 @@ Page({
   onCloseParts() { this.setData({ 'partsApply.open': false }); },
 
   afterAction(tip) {
-    this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0 }, partsApply: { open: false, part_name: '', quantity: 1, reason: '', index: 0 } });
+    this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0 }, partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } });
     wx.showToast({ title: tip, icon: 'success' });
     this.load();
   },
@@ -108,7 +162,7 @@ Page({
     this.setData({ acting: true });
     api.updateWorkorderStatus(no, 'accepted')
       .then(() => this.afterAction('已接单'))
-      .catch((err) => { this.setData({ acting: false }); wx.showToast({ title: (err && err.error) || '操作失败', icon: 'none' }); });
+      .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
 
   // 到场签到：GPS 围栏由后端校验（距站点 ≤500m）
@@ -125,7 +179,7 @@ Page({
           wx.showToast({ title: '已到场签到', icon: 'success' });
           this.setData({ 'sheet.item.check_in_time': nowStr(), 'sheet.item.checked_in': true });
         })
-        .catch((err) => { wx.showToast({ title: (err && err.error) || '签到失败', icon: 'none' }); });
+        .catch((err) => this.handleWriteFailure(err, '签到失败'));
     });
   },
 
@@ -136,7 +190,7 @@ Page({
     this.setData({ acting: true });
     api.updateWorkorderStatus(no, 'in_progress', { client: 'mobile' })
       .then(() => this.afterAction('处置中'))
-      .catch((err) => { this.setData({ acting: false }); wx.showToast({ title: (err && err.error) || '操作失败', icon: 'none' }); });
+      .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
 
   // 处置影像上传（追加到工单 images）
@@ -157,7 +211,10 @@ Page({
             const arr = (this.data.sheet.item.images_arr || []).concat(urls);
             this.setData({ 'sheet.item.images_arr': arr, 'sheet.item.has_images': arr.length > 0, 'sheet.item.images': JSON.stringify(arr) });
           }
-          if (results.some(r => r.status === 'rejected')) wx.showToast({ title: '部分上传失败', icon: 'none' });
+          if (results.some(r => r.status === 'rejected')) {
+            this.setData({ syncCount: queueCount() });
+            wx.showToast({ title: queueCount() ? '部分影像待同步' : '部分上传失败', icon: 'none' });
+          }
         }).catch(() => wx.hideLoading());
       }).catch(() => {});
   },
@@ -168,6 +225,27 @@ Page({
     wx.previewImage({ urls, current: src });
   },
 
+  onDeleteImage(e) {
+    const item = this.data.sheet.item;
+    const src = e.currentTarget.dataset.src;
+    if (!item || !src) return;
+    wx.showModal({
+      title: '删除影像', content: '确认删除这张处置影像？', confirmColor: '#d14343',
+      success: (res) => {
+        if (!res.confirm) return;
+        wx.showLoading({ title: '删除中' });
+        api.deleteWorkorderImage(item.order_no, src)
+          .then(() => {
+            wx.hideLoading();
+            const arr = (this.data.sheet.item.images_arr || []).filter(url => url !== src);
+            this.setData({ 'sheet.item.images_arr': arr, 'sheet.item.has_images': arr.length > 0, 'sheet.item.images': JSON.stringify(arr) });
+            wx.showToast({ title: '已删除', icon: 'success' });
+          })
+          .catch((err) => { wx.hideLoading(); wx.showToast({ title: (err && err.error) || '删除失败', icon: 'none' }); });
+      }
+    });
+  },
+
   doReview() {
     const item = this.data.sheet.item;
     if (!item.has_images) { wx.showToast({ title: '请先上传处置影像', icon: 'none' }); return; }
@@ -175,7 +253,7 @@ Page({
     this.setData({ acting: true });
     api.submitWorkorderReview(no)
       .then(() => this.afterAction('已提交核验'))
-      .catch((err) => { this.setData({ acting: false }); wx.showToast({ title: (err && err.error) || '操作失败', icon: 'none' }); });
+      .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
 
   doApprove() {
@@ -183,21 +261,23 @@ Page({
     this.setData({ acting: true });
     api.approveWorkorder(no)
       .then(() => this.afterAction('已核验通过'))
-      .catch((err) => { this.setData({ acting: false }); wx.showToast({ title: (err && err.error) || '操作失败', icon: 'none' }); });
+      .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
 
   doReject() {
     const no = this.data.sheet.item.order_no;
     wx.showModal({
       title: '退回修改',
-      content: '确认将工单退回给一线重新处置吗？',
+      editable: true,
+      placeholderText: '请填写需补充或整改的内容',
+      content: '请说明退回原因，现场人员会据此补充整改。',
       confirmText: '退回',
       success: (res) => {
         if (!res.confirm) return;
         this.setData({ acting: true });
-        api.rejectWorkorder(no)
+        api.rejectWorkorder(no, res.content)
           .then(() => this.afterAction('已退回'))
-          .catch((err) => { this.setData({ acting: false }); wx.showToast({ title: (err && err.error) || '操作失败', icon: 'none' }); });
+          .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
       }
     });
   },
@@ -234,11 +314,23 @@ Page({
     wx.showLoading({ title: '提交中' });
     api.applyVehicle({ site_id: item.site_id, work_order_no: item.order_no, reason, vehicle_id })
       .then(() => { wx.hideLoading(); wx.showToast({ title: '用车申请已提交', icon: 'success' }); this.setData({ 'vehicleApply.open': false }); })
-      .catch((err) => { wx.hideLoading(); wx.showToast({ title: (err && err.error) || '提交失败', icon: 'none' }); });
+      .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'vehicleApply.open'); });
   },
 
-  onApplyParts() { this.setData({ 'partsApply.open': true, 'partsApply.part_name': '', 'partsApply.quantity': 1, 'partsApply.reason': '', 'partsApply.index': 0 }); },
+  onApplyParts() { this.setData({ partsApply: { open: true, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } }); },
+  onPartsFulfillmentPick(e) {
+    const idx = parseInt(e.detail.value, 10) || 0;
+    const selected = this.data.partsFulfillmentOptions[idx] || this.data.partsFulfillmentOptions[0];
+    this.setData({
+      'partsApply.fulfillmentIndex': idx,
+      'partsApply.fulfillment_type': selected.key,
+      'partsApply.index': 0,
+      'partsApply.part_name': selected.key === 'stock' ? '' : this.data.partsApply.part_name
+    });
+  },
   onPartsName(e) { this.setData({ 'partsApply.part_name': e.detail.value }); },
+  onPartsSpecification(e) { this.setData({ 'partsApply.specification': e.detail.value }); },
+  onPartsEstimatedAmount(e) { this.setData({ 'partsApply.estimated_amount': e.detail.value }); },
   onPartsQty(e) { this.setData({ 'partsApply.quantity': e.detail.value }); },
   onPartsReason(e) { this.setData({ 'partsApply.reason': e.detail.value }); },
   onPartsPick(e) {
@@ -256,10 +348,16 @@ Page({
     if (!reason) { wx.showToast({ title: '请填写申请事由', icon: 'none' }); return; }
     const item = this.data.sheet.item;
     const opt = this.data.partsOptions[pa.index];
-    const spare_part_id = (opt && opt.id) ? opt.id : null;
+    const spare_part_id = pa.fulfillment_type === 'stock' && opt && opt.id ? opt.id : null;
+    if (pa.fulfillment_type === 'stock' && !spare_part_id) { wx.showToast({ title: '请选择现有库存备件', icon: 'none' }); return; }
     wx.showLoading({ title: '提交中' });
-    api.applyParts({ site_id: item.site_id, work_order_no: item.order_no, part_name, quantity: pa.quantity || 1, reason, spare_part_id })
-      .then(() => { wx.hideLoading(); wx.showToast({ title: '备件申请已提交', icon: 'success' }); this.setData({ 'partsApply.open': false }); })
-      .catch((err) => { wx.hideLoading(); wx.showToast({ title: (err && err.error) || '提交失败', icon: 'none' }); });
+    api.applyParts({
+      site_id: item.site_id, work_order_no: item.order_no, part_name,
+      specification: (pa.specification || '').trim(), quantity: pa.quantity || 1,
+      reason, spare_part_id, fulfillment_type: pa.fulfillment_type,
+      estimated_amount: pa.estimated_amount === '' ? null : Number(pa.estimated_amount)
+    })
+      .then(() => { wx.hideLoading(); wx.showToast({ title: '备件需求已提交', icon: 'success' }); this.setData({ 'partsApply.open': false }); })
+      .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'partsApply.open'); });
   }
 });

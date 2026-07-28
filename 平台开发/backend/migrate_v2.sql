@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS vehicle_refueling_records (
     vehicle_id INTEGER NOT NULL,
     refuel_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     liters REAL NOT NULL,
+    energy_quantity REAL DEFAULT NULL,
+    energy_unit TEXT DEFAULT 'L',
     amount REAL DEFAULT NULL,
     mileage_at REAL DEFAULT NULL,
     remark TEXT DEFAULT NULL,

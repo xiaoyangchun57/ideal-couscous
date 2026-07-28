@@ -1,10 +1,12 @@
 <view class="page">
-  <view class="tabs">
-    <view class="tab {{tab === 'pending' ? 'tab-on' : ''}}" bindtap="onTab" data-t="pending">待处理</view>
-    <view class="tab {{tab === 'all' ? 'tab-on' : ''}}" bindtap="onTab" data-t="all">全部</view>
+  <view class="sync-bar" wx:if="{{!online}}">当前离线，确认操作会暂存并在联网后自动同步</view>
+  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
+  <view class="seg-strip">
+    <view class="seg-item {{tab === 'pending' ? 'seg-on' : ''}}" bindtap="onTab" data-t="pending">待处理</view>
+    <view class="seg-item {{tab === 'all' ? 'seg-on' : ''}}" bindtap="onTab" data-t="all">全部</view>
   </view>
 
-  <view class="card list-card" wx:if="{{list.length}}">
+  <view class="list-card" wx:if="{{list.length}}">
     <view class="row" wx:for="{{list}}" wx:key="id" bindtap="onOpen" data-id="{{item.id}}">
       <view class="row-left">
         <text class="dot dot-{{item.level_cls}}"></text>

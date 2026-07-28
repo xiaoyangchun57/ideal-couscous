@@ -17,10 +17,18 @@
 
 <view class="page">
   <!-- 筛选 -->
-  <view class="filter-bar">
-    <view class="filter-item {{filter === 'all' ? 'filter-on' : ''}}" data-f="all" bindtap="onFilterTap">全部</view>
-    <view class="filter-item {{filter === 'active' ? 'filter-on' : ''}}" data-f="active" bindtap="onFilterTap">进行中</view>
-    <view class="filter-item {{filter === 'done' ? 'filter-on' : ''}}" data-f="done" bindtap="onFilterTap">已完成</view>
+  <view class="seg-strip">
+    <view class="seg-item {{filter === 'all' ? 'seg-on' : ''}}" data-f="all" bindtap="onFilterTap">全部</view>
+    <view class="seg-item {{filter === 'active' ? 'seg-on' : ''}}" data-f="active" bindtap="onFilterTap">进行中</view>
+    <view class="seg-item {{filter === 'done' ? 'seg-on' : ''}}" data-f="done" bindtap="onFilterTap">已完成</view>
+  </view>
+
+  <view class="favorite-entry" bindtap="onOpenFavorites">
+    <view>
+      <text class="favorite-entry-title">常用计划</text>
+      <text class="favorite-entry-hint">复用固定站点、车辆和备件，直接生成草稿</text>
+    </view>
+    <text class="favorite-entry-action">{{favorites.length ? (favorites.length + ' 个 ›') : '暂无 ›'}}</text>
   </view>
 
   <!-- 到期检查项建议：由人确认后才创建可编辑草稿，不自动派单 -->
@@ -86,13 +94,33 @@
       <!-- 操作 -->
       <view class="plan-actions" wx:if="{{ft.canEdit(item.status)}}">
         <view class="btn-sm btn-ghost" catchtap="onEdit" data-id="{{item.id}}">编辑</view>
+        <view class="btn-sm btn-danger" catchtap="onDelete" data-id="{{item.id}}">删除</view>
       </view>
     </view>
   </block>
 
   <view class="empty" wx:elif="{{loaded}}">
-    <view class="empty-circle">计</view>
+    <view class="empty-circle"></view>
     <text class="empty-tx">暂无排程计划</text>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{favoriteSheet.open}}" bindtap="onCloseFavorites"></view>
+  <view class="sheet" wx:if="{{favoriteSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">从常用计划生成草稿</text><text class="sheet-close" bindtap="onCloseFavorites">×</text></view>
+    <view class="favorite-field-label">常用计划</view>
+    <picker mode="selector" range="{{favorites}}" range-key="name" value="{{favoriteSheet.index}}" bindchange="onFavoritePick">
+      <view class="favorite-picker">{{favorites[favoriteSheet.index].name}} ›</view>
+    </picker>
+    <view class="favorite-summary">
+      {{favorites[favoriteSheet.index].type_cn}} · {{favorites[favoriteSheet.index].site_count}}站 · {{favorites[favoriteSheet.index].vehicle_day_count}}天用车
+    </view>
+    <view class="favorite-field-label">新周期开始日期</view>
+    <picker mode="date" value="{{favoriteSheet.periodStart}}" bindchange="onFavoriteDate">
+      <view class="favorite-picker">{{favoriteSheet.periodStart || '请选择日期'}} ›</view>
+    </picker>
+    <text class="favorite-hint">将按原计划的相对日期复用站点、车辆和备件；一次性工单、审批和执行记录不会复制。</text>
+    <button class="btn-primary submit-btn" loading="{{favoriteSheet.submitting}}" disabled="{{favoriteSheet.submitting}}" bindtap="onCreateFavoriteDraft">生成并编辑草稿</button>
+    <view class="favorite-delete" bindtap="onDeleteFavorite">删除此收藏</view>
   </view>
 
   <!-- 新建按钮 -->

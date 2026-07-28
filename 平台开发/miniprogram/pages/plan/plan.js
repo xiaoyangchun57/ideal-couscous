@@ -12,7 +12,9 @@ Page({
     recommendations: [],
     creatingRecommendationKey: '',
     followUpRecommendations: [],
-    creatingFollowUpKey: ''
+    creatingFollowUpKey: '',
+    favorites: [],
+    favoriteSheet: { open: false, index: 0, periodStart: '', submitting: false }
   },
 
   onShow() {
@@ -31,9 +33,10 @@ Page({
     Promise.all([
       api.planSchedules(),
       api.planScheduleDraftRecommendations().catch(() => ({ recommendations: [] })),
-      api.planScheduleFollowUpRecommendations().catch(() => ({ recommendations: [] }))
+      api.planScheduleFollowUpRecommendations().catch(() => ({ recommendations: [] })),
+      api.planScheduleFavorites().catch(() => [])
     ])
-      .then(([res, recommendationResult, followUpResult]) => {
+      .then(([res, recommendationResult, followUpResult, favoriteResult]) => {
         const list = (Array.isArray(res) ? res : []).map(item => {
           return Object.assign({}, item, {
             status_cn: maps.map(maps.PLAN_SCHEDULE_STATUS, item.status, item.status),
@@ -50,6 +53,9 @@ Page({
           })),
           followUpRecommendations: (followUpResult.recommendations || []).map(item => Object.assign({}, item, {
             follow_up_key: item.user_id + '-' + item.site_id + '-' + item.anomaly_type
+          })),
+          favorites: (favoriteResult || []).map(item => Object.assign({}, item, {
+            type_cn: maps.map(maps.SCHEDULE_TYPE, item.schedule_type, item.schedule_type)
           }))
         });
         if (done) done();
@@ -84,6 +90,65 @@ Page({
 
   onNewPlan() {
     wx.navigateTo({ url: '/pages/plan-edit/plan-edit' });
+  },
+
+  onOpenFavorites() {
+    const favorites = this.data.favorites || [];
+    if (!favorites.length) {
+      wx.showToast({ title: '暂无常用计划，可在计划详情中收藏', icon: 'none' });
+      return;
+    }
+    this.setData({ favoriteSheet: {
+      open: true, index: 0, periodStart: favorites[0].suggested_period_start || '', submitting: false
+    } });
+  },
+
+  onCloseFavorites() {
+    if (!this.data.favoriteSheet.submitting) this.setData({ 'favoriteSheet.open': false });
+  },
+
+  onFavoritePick(e) {
+    const index = Number(e.detail.value) || 0;
+    const favorite = this.data.favorites[index] || {};
+    this.setData({ 'favoriteSheet.index': index,
+      'favoriteSheet.periodStart': favorite.suggested_period_start || this.data.favoriteSheet.periodStart });
+  },
+
+  onFavoriteDate(e) {
+    this.setData({ 'favoriteSheet.periodStart': e.detail.value });
+  },
+
+  onCreateFavoriteDraft() {
+    const sheet = this.data.favoriteSheet;
+    const favorite = (this.data.favorites || [])[sheet.index];
+    if (!favorite || !sheet.periodStart || sheet.submitting) return;
+    this.setData({ 'favoriteSheet.submitting': true });
+    api.createDraftFromPlanScheduleFavorite(favorite.id, sheet.periodStart)
+      .then(res => {
+        const scheduleId = res && res.schedule && res.schedule.id;
+        if (!scheduleId) throw new Error('草稿创建结果无效');
+        this.setData({ 'favoriteSheet.open': false, 'favoriteSheet.submitting': false });
+        wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + scheduleId });
+      })
+      .catch(err => {
+        this.setData({ 'favoriteSheet.submitting': false });
+        wx.showToast({ title: (err && (err.error || err.message)) || '生成草稿失败', icon: 'none' });
+      });
+  },
+
+  onDeleteFavorite() {
+    const favorite = (this.data.favorites || [])[this.data.favoriteSheet.index];
+    if (!favorite || this.data.favoriteSheet.submitting) return;
+    wx.showModal({ title: '删除常用计划', content: '仅删除收藏模板，不影响原计划和已有草稿。', confirmColor: '#ef4444',
+      success: result => {
+        if (!result.confirm) return;
+        api.deletePlanScheduleFavorite(favorite.id).then(() => {
+          this.setData({ 'favoriteSheet.open': false });
+          wx.showToast({ title: '已删除收藏', icon: 'success' });
+          this.load();
+        }).catch(err => wx.showToast({ title: (err && err.error) || '删除失败', icon: 'none' }));
+      }
+    });
   },
 
   // 建议必须由人显式确认后才落为草稿；创建后直接进入现有排程编辑页。
@@ -133,5 +198,14 @@ Page({
   onEdit(e) {
     const id = e.currentTarget.dataset.id;
     wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + id });
+  }
+  ,
+  onDelete(e) {
+    const id = e.currentTarget.dataset.id;
+    wx.showModal({ title: '删除草稿', content: '仅删除未提交或已退回的草稿，确定继续？', confirmColor: '#ef4444', success: (r) => {
+      if (!r.confirm) return;
+      api.deletePlanSchedule(id).then(() => { wx.showToast({ title: '草稿已删除', icon: 'success' }); this.load(); })
+        .catch(err => wx.showToast({ title: (err && err.error) || '删除失败', icon: 'none' }));
+    }});
   }
 });

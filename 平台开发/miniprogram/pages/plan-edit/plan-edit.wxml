@@ -35,6 +35,11 @@
     <text class="change-banner-tx">正在变更已批准计划（原因：{{changeReason || '—'}}），提交后需重新审核</text>
   </view>
 
+  <view class="coverage-warning" wx:if="{{coverageWarning}}">
+    <text class="risk-title">需处理：未覆盖站点</text>
+    <text class="risk-text">{{coverageWarning}}</text>
+  </view>
+
   <!-- 周期信息 + 频次选择 -->
   <view class="period-bar">
     <text class="period-text">{{periodStart}} ~ {{periodEnd}}</text>
@@ -49,6 +54,17 @@
       <view class="add-day-btn">＋ 添加巡检日期</view>
     </picker>
     <text class="add-day-hint">已添加 {{days.length}} 天</text>
+  </view>
+
+  <view class="card template-card" wx:if="{{templateContext.length}}">
+    <view class="suggest-head">
+      <text class="suggest-title">本周期执行模板</text>
+      <text class="suggest-count">审批后自动生成检查项</text>
+    </view>
+    <view class="template-item" wx:for="{{templateContext}}" wx:key="index">
+      <text class="template-site">{{item.site_name}}</text>
+      <text class="template-name">{{item.template_name}} · {{item.item_count}} 项</text>
+    </view>
   </view>
 
   <!-- 智能建议 -->
@@ -73,8 +89,13 @@
       <view class="day-ops">
         <text class="day-count" wx:if="{{ft.daySiteCount(day)}}">{{ft.daySiteCount(day)}} 站</text>
         <text class="day-all" data-day-idx="{{di}}" bindtap="onToggleAll">全选</text>
-        <text class="day-del" data-date="{{day.date}}" bindtap="onRemoveDay">移除</text>
+        <text class="day-del" data-date="{{day.date}}" bindtap="onRemoveDay">{{scheduleType === 'weekly' ? '清空' : '移除'}}</text>
       </view>
+    </view>
+
+    <view class="day-warning" wx:if="{{day.warning_text}}">
+      <text class="risk-title">调整建议</text>
+      <text class="risk-text">{{day.warning_text}}</text>
     </view>
 
     <!-- 站点选择 chips -->
@@ -120,7 +141,7 @@
 
   <!-- 空态：未添加巡检日期（月/季/年检） -->
   <view class="empty" wx:if="{{!days.length && scheduleType !== 'weekly'}}">
-    <view class="empty-circle">期</view>
+    <view class="empty-circle"></view>
     <text class="empty-tx">点击上方"添加巡检日期"开始排程</text>
   </view>
 

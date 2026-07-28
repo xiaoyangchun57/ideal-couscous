@@ -21,6 +21,7 @@
 
 # Generated exports and local captures
 *.xlsx
+/outputs/
 平台开发/*.png
 平台开发/frontend/uploads/
 平台开发/frontend/v2/

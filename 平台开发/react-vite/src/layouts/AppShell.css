@@ -280,6 +280,13 @@ select {
   background: rgba(100, 116, 139, 0.45);
 }
 
+/* 工单列宽已在桌面端完整展示；仅保留纵向滚动，避免滚动条挤压后产生无效横向滚动。 */
+@media (min-width: 640px) {
+  .workorders-table .ant-table-body {
+    overflow-x: hidden !important;
+  }
+}
+
 @media (max-width: 1180px) {
   .app-header {
     grid-template-columns: minmax(160px, 1fr) minmax(220px, 340px) auto;

@@ -24,11 +24,17 @@ import {
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import {
-  alertLevelColor, alertLevelLabel, alertStatusMap,
+  alertLevelColor, alertLevelLabel, alertStatusMap, alertStatusBadge,
   CONCLUSION_OPTIONS,
 } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
 import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
+import { statusColors } from '../../theme/tokens';
+import FilterBar from '../../components/FilterBar';
+import {
+  pageRootStyle, cardStyleBase, tableCardStyle, tableCardBody,
+  filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
+} from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
@@ -36,14 +42,8 @@ const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red'
 const { Text, Title } = Typography;
 
 // ---------------------------------------------------------------------------
-// Status color / badge mapping
+// Status icon mapping（状态色统一走 constants.alertStatusBadge，禁页内硬编码）
 // ---------------------------------------------------------------------------
-const statusColorMap = {
-  pending: '#faad14',
-  acknowledged: '#1890ff',
-  resolved: '#52c41a',
-};
-
 const statusIconMap = {
   pending: <ExclamationCircleOutlined />,
   acknowledged: <ClockCircleOutlined />,
@@ -61,10 +61,10 @@ const alertSeverityLabel = {
 };
 
 const alertSeverityTag = {
-  blue: { color: '#38bdf8', label: 'IV级', desc: '一般关注' },
-  yellow: { color: '#facc15', label: 'III级', desc: '一般告警' },
-  orange: { color: '#fb923c', label: 'II级', desc: '较重告警' },
-  red: { color: '#ef4444', label: 'I级', desc: '紧急告警' },
+  blue: { color: alertLevelColor.blue, label: 'IV级', desc: '一般关注' },
+  yellow: { color: alertLevelColor.yellow, label: 'III级', desc: '一般告警' },
+  orange: { color: alertLevelColor.orange, label: 'II级', desc: '较重告警' },
+  red: { color: alertLevelColor.red, label: 'I级', desc: '紧急告警' },
 };
 
 // ---------------------------------------------------------------------------
@@ -605,8 +605,7 @@ function AlertRuleEngineTab({ tokens, isDark }) {
           size="small"
           columns={[
             { title: '级别', dataIndex: 'level', width: 80, render: v => {
-              const colorMap = {blue:'#1890ff',yellow:'#faad14',orange:'#fa8c16',red:'#f5222d'};
-              return <Tag color={colorMap[v] || 'default'}>{v === 'blue' ? '蓝' : v === 'yellow' ? '黄' : v === 'orange' ? '橙' : '红'}</Tag>;
+              return <Tag color={alertLevelColor[v] || 'default'}>{v === 'blue' ? '蓝' : v === 'yellow' ? '黄' : v === 'orange' ? '橙' : '红'}</Tag>;
             }},
             { title: 'SLA（分钟）', dataIndex: 'sla_minutes', width: 100 },
             { title: '自动工单', dataIndex: 'auto_workorder', width: 80, render: v => v ? '✅' : '❌' },
@@ -757,6 +756,15 @@ export default function AlertsPage() {
   useEffect(() => {
     const urlSearch = searchParams.get('search') || '';
     setSearchText(urlSearch);
+  }, [searchParams]);
+
+  // 兼容旧“异常上报”入口：进入事件中心后直接打开人工上报动作。
+  useEffect(() => {
+    if (searchParams.get('source') === 'manual') {
+      setPrimaryTab('events');
+      setActiveTab('alerts');
+      setManualAlertOpen(true);
+    }
   }, [searchParams]);
 
   // ---- Compute counts from the full list -----------------------------------
@@ -990,7 +998,7 @@ export default function AlertsPage() {
       key: 'site_level',
       width: 220,
       render: (_, record) => {
-        const severity = alertSeverityTag[record.level] || { color: '#999', label: '?', desc: '未知' };
+        const severity = alertSeverityTag[record.level] || { color: tokens.colorTextTertiary, label: '?', desc: '未知' };
         return (
           <div>
             <Text strong style={{ color: tokens.colorText, display: 'block', marginBottom: 4 }}>
@@ -1030,7 +1038,7 @@ export default function AlertsPage() {
       render: (status) => (
         <Tag
           icon={statusIconMap[status]}
-          color={statusColorMap[status] || '#999'}
+          color={alertStatusBadge[status] || 'default'}
           style={{ borderRadius: 4 }}
         >
           {alertStatusMap[status] || status || '未知'}
@@ -1093,7 +1101,7 @@ export default function AlertsPage() {
               size="small"
               loading={isLoading}
               onClick={() => handleResolve(record)}
-              style={{ color: tokens.colorSuccess || '#52c41a' }}
+              style={{ color: tokens.colorSuccess }}
             >
               办结
             </Button>
@@ -1102,7 +1110,7 @@ export default function AlertsPage() {
               size="small"
               loading={isLoading}
               onClick={() => handleUrge(record)}
-              style={{ color: tokens.colorWarning || '#faad14' }}
+              style={{ color: tokens.colorWarning }}
             >
               督办
             </Button>
@@ -1127,16 +1135,8 @@ export default function AlertsPage() {
   }), [selectedRowKeys]);
 
   // ---- Styles --------------------------------------------------------------
-  const cardStyle = useMemo(() => ({
-    borderRadius: 12,
-    background: isDark
-      ? 'linear-gradient(135deg, rgba(12,28,52,0.85), rgba(8,20,42,0.9))'
-      : '#ffffff',
-    border: `1px solid ${tokens.colorBorder}`,
-    boxShadow: isDark
-      ? '0 2px 12px rgba(0,0,0,0.3)'
-      : '0 2px 8px rgba(0,0,0,0.06)',
-  }), [isDark, tokens.colorBorder]);
+  const cardStyle = cardStyleBase(tokens, isDark);
+  const infoColor = statusColors.info[isDark ? 'dark' : 'light'];
 
   // ---- Stat cards config ---------------------------------------------------
   const statCards = useMemo(() => [
@@ -1149,29 +1149,29 @@ export default function AlertsPage() {
     {
       title: '待处理',
       value: counts.pending,
-      icon: <ExclamationCircleOutlined style={{ fontSize: 16, color: '#faad14' }} />,
-      color: '#faad14',
+      icon: <ExclamationCircleOutlined style={{ fontSize: 16, color: tokens.colorWarning }} />,
+      color: tokens.colorWarning,
     },
     {
       title: '处理中',
       value: counts.acknowledged,
-      icon: <ClockCircleOutlined style={{ fontSize: 16, color: '#1890ff' }} />,
-      color: '#1890ff',
+      icon: <ClockCircleOutlined style={{ fontSize: 16, color: tokens.colorInfo }} />,
+      color: tokens.colorInfo,
     },
     {
       title: '已办结',
       value: counts.resolved,
-      icon: <CheckCircleOutlined style={{ fontSize: 16, color: '#52c41a' }} />,
-      color: '#52c41a',
+      icon: <CheckCircleOutlined style={{ fontSize: 16, color: tokens.colorSuccess }} />,
+      color: tokens.colorSuccess,
     },
-  ], [counts, tokens.colorPrimary]);
+  ], [counts, tokens.colorPrimary, tokens.colorWarning, tokens.colorInfo, tokens.colorSuccess]);
 
   // ---- Render --------------------------------------------------------------
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 24 }}>
+    <div style={pageRootStyle}>
       {/* Page Header */}
       <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, flexShrink: 0 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>告警管理中心</Title>
+        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>告警与事件</Title>
 
         {/* 一级 Tab Bar */}
         <div style={{ display: 'flex', gap: 4, background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)', borderRadius: 8, padding: 3 }}>
@@ -1186,7 +1186,7 @@ export default function AlertsPage() {
                 borderRadius: 6,
                 fontWeight: primaryTab === tab.key ? 600 : 400,
                 background: primaryTab === tab.key ? tokens.colorPrimary : 'transparent',
-                color: primaryTab === tab.key ? '#fff' : tokens.colorTextSecondary,
+                color: primaryTab === tab.key ? tokens.colorTextLightSolid : tokens.colorTextSecondary,
               }}
             >
               {tab.label}
@@ -1208,7 +1208,7 @@ export default function AlertsPage() {
                 borderRadius: 6,
                 fontWeight: activeTab === leaf.key ? 600 : 400,
                 background: activeTab === leaf.key ? tokens.colorPrimary : 'transparent',
-                color: activeTab === leaf.key ? '#fff' : tokens.colorTextSecondary,
+                color: activeTab === leaf.key ? tokens.colorTextLightSolid : tokens.colorTextSecondary,
               }}
             >
               {leaf.label}
@@ -1238,39 +1238,47 @@ export default function AlertsPage() {
             </div>
 
             {/* Filter Bar */}
-            <div style={{
-              padding: '8px 0', borderTop: `1px solid ${tokens.colorBorder}`,
-              borderBottom: `1px solid ${tokens.colorBorder}`, flexShrink: 0,
-            }}>
-              <Row gutter={[12, 12]} align="middle">
-                <Col flex="auto">
-                  <Space wrap size={12}>
-                    <Input
-                      placeholder="搜索站点名称或告警内容..."
-                      prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-                      allowClear
-                      value={searchText}
-                      onChange={(e) => setSearchText(e.target.value)}
-                      onPressEnter={fetchAlerts}
-                      style={{ width: 280, borderRadius: 8 }}
-                    />
-                    <Select
-                      placeholder="告警状态"
-                      allowClear
-                      value={statusFilter}
-                      onChange={(val) => setStatusFilter(val ?? null)}
-                      style={{ width: 140 }}
+            <FilterBar
+              extra={(
+                <Space>
+                  <Button icon={<ReloadOutlined />} onClick={resetFilters}>
+                    重置
+                  </Button>
+                  <Button icon={<PlusOutlined />} onClick={() => setManualAlertOpen(true)} type="primary" ghost>
+                    人工上报
+                  </Button>
+                  <Button onClick={fetchAlerts} loading={loading} style={{ borderRadius: 8 }}>
+                    刷新
+                  </Button>
+                </Space>
+              )}
+            >
+              <Input
+                placeholder="搜索站点名称或告警内容..."
+                prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+                allowClear
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                onPressEnter={fetchAlerts}
+                style={{ width: filterInputWidth, borderRadius: 8 }}
+              />
+              <Select
+                placeholder="告警状态"
+                allowClear
+                value={statusFilter}
+                onChange={(val) => setStatusFilter(val ?? null)}
+                style={{ width: filterSelectWidth }}
                       options={Object.entries(alertStatusMap).map(([value, label]) => ({
                         value,
                         label,
                       }))}
                     />
-                    <Select
-                      placeholder="告警等级"
-                      allowClear
-                      value={levelFilter}
-                      onChange={(val) => setLevelFilter(val ?? null)}
-                      style={{ width: 140 }}
+              <Select
+                placeholder="告警等级"
+                allowClear
+                value={levelFilter}
+                onChange={(val) => setLevelFilter(val ?? null)}
+                style={{ width: filterSelectWidth }}
                       options={[
                         { value: 'red', label: 'I级 紧急告警' },
                         { value: 'orange', label: 'II级 较重告警' },
@@ -1278,10 +1286,10 @@ export default function AlertsPage() {
                         { value: 'blue', label: 'IV级 一般关注' },
                       ]}
                     />
-                    <Select
-                      value={dateRange}
-                      onChange={setDateRange}
-                      style={{ width: 120 }}
+              <Select
+                value={dateRange}
+                onChange={setDateRange}
+                style={{ width: filterSmallSelectWidth }}
                       options={dateRangeOptions}
                     />
                     {(statusFilter || levelFilter || dateRange || searchText) && (
@@ -1289,43 +1297,23 @@ export default function AlertsPage() {
                         已筛选 {filteredAlerts.length} 条结果
                       </Text>
                     )}
-                  </Space>
-                </Col>
-                <Col>
-                  <Space>
-                    <Button icon={<ReloadOutlined />} onClick={resetFilters}>
-                      重置
-                    </Button>
-                    <Button icon={<PlusOutlined />} onClick={() => setManualAlertOpen(true)} type="primary" ghost>
-                      人工上报
-                    </Button>
-                    <Button
-                      onClick={fetchAlerts}
-                      loading={loading}
-                      style={{ borderRadius: 8 }}
-                    >
-                      刷新
-                    </Button>
-                  </Space>
-                </Col>
-              </Row>
+            </FilterBar>
 
-              {/* Batch Operations Bar */}
-              {selectedRowKeys.length > 0 && (
-                <div
-                  style={{
-                    marginTop: 8,
-                    padding: '6px 10px',
-                    borderRadius: 6,
-                    background: isDark
-                      ? 'rgba(24, 144, 255, 0.08)'
-                      : 'rgba(24, 144, 255, 0.06)',
-                    border: `1px solid ${isDark ? 'rgba(24,144,255,0.25)' : 'rgba(24,144,255,0.2)'}`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                  }}
-                >
+            {/* Batch Operations Bar */}
+            {selectedRowKeys.length > 0 && (
+              <div
+                style={{
+                  marginTop: 8,
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  background: `${infoColor}14`,
+                  border: `1px solid ${infoColor}40`,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  flexShrink: 0,
+                }}
+              >
                   <Text style={{ color: tokens.colorTextSecondary, fontSize: 13 }}>
                     已选择 <Badge count={selectedRowKeys.length} style={{ backgroundColor: tokens.colorPrimary }} /> 条告警
                   </Text>
@@ -1365,14 +1353,13 @@ export default function AlertsPage() {
                   </Space>
                 </div>
               )}
-            </div>
 
             {incidentGroups.length > 0 && (
               <Card
                 title="事件聚合"
                 extra={<Text type="secondary" style={{ fontSize: 12 }}>同类型告警按 30 分钟窗口归并</Text>}
                 style={{ ...cardStyle, marginTop: 8 }}
-                bodyStyle={{ padding: '6px 12px' }}
+                styles={{ body: { padding: '6px 12px' } }}
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {incidentGroups.slice(0, 4).map((group) => (
@@ -1392,8 +1379,8 @@ export default function AlertsPage() {
 
             {/* Alerts Table */}
             <Card
-              style={{ ...cardStyle, marginTop: 8, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}
-              bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+              style={{ ...tableCardStyle(tokens, isDark), marginTop: 8 }}
+              styles={{ body: tableCardBody }}
             >
               {/* Error State */}
               {error && (
@@ -1403,7 +1390,7 @@ export default function AlertsPage() {
                     textAlign: 'center',
                   }}
                 >
-                  <ExclamationCircleOutlined style={{ fontSize: 40, color: '#ff4d4f', marginBottom: 12 }} />
+                  <ExclamationCircleOutlined style={{ fontSize: 40, color: tokens.colorError, marginBottom: 12 }} />
                   <div>
                     <Text style={{ color: tokens.colorError, fontSize: 14 }}>{error}</Text>
                   </div>
@@ -1431,7 +1418,7 @@ export default function AlertsPage() {
                   locale={{
                     emptyText: (
                       <div style={{ padding: '40px 0' }}>
-                        <CheckCircleOutlined style={{ fontSize: 40, color: '#52c41a', marginBottom: 12 }} />
+                        <CheckCircleOutlined style={{ fontSize: 40, color: tokens.colorSuccess, marginBottom: 12 }} />
                         <div>
                           <Text style={{ color: tokens.colorTextTertiary }}>
                             当前筛选条件下暂无告警记录
@@ -1440,7 +1427,7 @@ export default function AlertsPage() {
                       </div>
                     ),
                   }}
-                  size="middle"
+                  size="small"
                   style={{ borderRadius: 12, overflow: 'hidden' }}
                 />
                 </div>
@@ -1454,8 +1441,8 @@ export default function AlertsPage() {
         ) : activeTab === 'reagent' ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             <Card
-              style={{ ...cardStyle, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}
-              bodyStyle={{ padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+              style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }}
+              styles={{ body: tableCardBody }}
             >
               <div ref={reagentWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
                 <Table
@@ -1463,7 +1450,7 @@ export default function AlertsPage() {
                   rowKey={(r) => `${r.site_id}-${r.reagent_id}`}
                   loading={reagentLoading}
                   pagination={false}
-                  size="middle"
+                  size="small"
                   scroll={reagentH ? { y: reagentH } : undefined}
                   style={{ borderRadius: 12, overflow: 'hidden' }}
                   locale={{ emptyText: <Empty description="暂无临期/低余量试剂" /> }}
@@ -1477,7 +1464,7 @@ export default function AlertsPage() {
                     {
                       title: '剩余可用天数', dataIndex: 'remaining_days', width: 140,
                       render: (v) => v == null ? '—'
-                        : <Text strong style={{ color: v <= 0 ? '#ff4d4f' : v <= 7 ? '#faad14' : '#52c41a' }}>{v} 天</Text>,
+                        : <Text strong style={{ color: v <= 0 ? tokens.colorError : v <= 7 ? tokens.colorWarning : tokens.colorSuccess }}>{v} 天</Text>,
                     },
                     {
                       title: '余量', dataIndex: 'current_qty', width: 100,
@@ -1515,7 +1502,7 @@ export default function AlertsPage() {
       >
         {resolveTarget && (
           <div style={{ marginTop: 16 }}>
-            <div style={{ padding: '10px 14px', borderRadius: 8, background: isDark ? 'rgba(0,200,180,0.06)' : 'rgba(0,0,0,0.02)', marginBottom: 16 }}>
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: tokens.colorPrimaryBg, marginBottom: 16 }}>
               <Text style={{ fontSize: 13, color: tokens.colorTextSecondary }}>
                 站点：<Text strong>{resolveTarget.site_name || '-'}</Text>
                 <br />
@@ -1565,7 +1552,7 @@ export default function AlertsPage() {
       >
         {urgeTarget && (
           <div style={{ marginTop: 16 }}>
-            <div style={{ padding: '10px 14px', borderRadius: 8, background: isDark ? 'rgba(250,173,20,0.06)' : 'rgba(250,173,20,0.04)', marginBottom: 16 }}>
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: `${statusColors.warning[isDark ? 'dark' : 'light']}0F`, marginBottom: 16 }}>
               <Text style={{ fontSize: 13, color: tokens.colorTextSecondary }}>
                 站点：<Text strong>{urgeTarget.site_name || '-'}</Text>
                 <br />

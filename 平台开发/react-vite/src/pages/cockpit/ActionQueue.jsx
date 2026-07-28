@@ -82,11 +82,11 @@ export default function ActionQueue() {
   const total = Object.values(items).reduce((sum, count) => sum + count, 0);
 
   const rows = [
-    { key: 'businessApprovals', icon: <AuditOutlined />, label: '业务申请待审批', count: items.businessApprovals, to: '/audit?tab=spareparts', color: '#fa8c16' },
-    { key: 'planApprovals', icon: <AuditOutlined />, label: '巡检计划待审批', count: items.planApprovals, to: '/plan-schedules?status=submitted', color: '#fa8c16' },
-    { key: 'photoReviews', icon: <AuditOutlined />, label: '巡检照片待审核', count: items.photoReviews, to: '/batch-review', color: '#fa8c16' },
-    { key: 'incidents', icon: <WarningOutlined />, label: '异常事件（按站点聚合）', count: items.incidents, to: '/alerts?status=pending', color: '#f5222d' },
-    { key: 'workorders', icon: <FileTextOutlined />, label: '工单待处理', count: items.workorders, to: '/workorders', color: '#2b6cff' },
+    { key: 'businessApprovals', icon: <AuditOutlined />, label: '业务申请待审批', count: items.businessApprovals, to: '/audit?tab=spareparts', color: tokens.colorWarning },
+    { key: 'planApprovals', icon: <AuditOutlined />, label: '巡检计划待审批', count: items.planApprovals, to: '/plan-schedules?status=submitted', color: tokens.colorWarning },
+    { key: 'photoReviews', icon: <AuditOutlined />, label: '巡检照片待审核', count: items.photoReviews, to: '/batch-review', color: tokens.colorWarning },
+    { key: 'incidents', icon: <WarningOutlined />, label: '异常事件（按站点聚合）', count: items.incidents, to: '/alerts?status=pending', color: tokens.colorError },
+    { key: 'workorders', icon: <FileTextOutlined />, label: '工单待处理', count: items.workorders, to: '/workorders', color: tokens.colorInfo },
   ].filter((row) => row.count > 0);
 
   // 折叠态：仅一个悬浮计数按钮

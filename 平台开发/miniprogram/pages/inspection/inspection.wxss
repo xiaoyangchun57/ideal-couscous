@@ -1,26 +1,49 @@
-.site-chips { white-space: nowrap; padding: 20rpx 24rpx 0; }
-.package-switch { display: flex; gap: 12rpx; overflow-x: auto; white-space: nowrap; padding: 20rpx 24rpx 0; }
-.package-chip { flex: 0 0 auto; padding: 10rpx 18rpx; color: var(--text-2); background: var(--fill-2); border-radius: 10rpx; font-size: 23rpx; }
-.package-chip-on { background: var(--brand); color: #fff; }
+/* 执行包切换已迁移至 app.wxss 全局 .seg-strip/.seg-item/.seg-on；
+   站点 chip（.site-chips/.chip/.chip-on）已登记至 app.wxss（巡检执行流专用） */
 .package-head { display: flex; justify-content: space-between; align-items: center; margin: 18rpx 24rpx 0; padding: 18rpx 20rpx; background: var(--brand-weak); border-left: 6rpx solid var(--brand); }
 .package-title { display: block; color: var(--text); font-size: 28rpx; font-weight: 500; }
 .package-meta { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
 .package-vehicle { color: var(--brand); font-size: 24rpx; font-weight: 500; }
-.departure-confirmation { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 12rpx; }
+.departure-confirmation { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; background: var(--card); border: 1rpx solid var(--line); border-radius: 12rpx; }
 .departure-copy { min-width: 0; display: flex; flex-direction: column; }
 .departure-label { color: var(--text); font-size: 25rpx; font-weight: 500; }
 .departure-hint { margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
 .departure-action { display: flex; align-items: center; flex-shrink: 0; }
 .departure-status { font-size: 23rpx; }
 .departure-confirmed { color: var(--green); }
-.departure-pending { color: #A15C00; }
-.departure-button { margin-left: 14rpx; padding: 10rpx 16rpx; color: #FFFFFF; background: var(--brand); border-radius: 10rpx; font-size: 23rpx; line-height: 1; }
-.chip {
-  display: inline-block; padding: 12rpx 28rpx; margin-right: 16rpx;
-  background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 999rpx;
-  font-size: 26rpx; color: var(--text-2);
-}
-.chip-on { background: var(--brand); color: #FFFFFF; border-color: var(--brand); }
+.departure-pending { color: var(--amber); }
+.departure-button { margin-left: 14rpx; padding: 10rpx 16rpx; color: var(--card); background: var(--brand); border-radius: 10rpx; font-size: 23rpx; line-height: 1; }
+.parts-issue-card { display: flex; align-items: center; justify-content: space-between; gap: 18rpx; margin: 12rpx 24rpx 0; padding: 18rpx 20rpx; background: var(--card); border: 1rpx solid var(--brand-line); border-radius: 12rpx; }
+.parts-issue-copy { flex: 1; min-width: 0; }
+.parts-issue-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 500; }
+.parts-issue-meta { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.4; }
+.parts-issue-button { flex-shrink: 0; padding: 11rpx 16rpx; color: var(--card); background: var(--brand); border-radius: 10rpx; font-size: 23rpx; line-height: 1; }
+.parts-issue-done { color: var(--green); background: rgba(34, 197, 94, .1); }
+.parts-sheet-hint { display: block; margin-bottom: 12rpx; color: var(--amber); font-size: 23rpx; line-height: 1.5; }
+.parts-sheet-row { display: flex; align-items: center; gap: 12rpx; padding: 18rpx 0; border-bottom: 1rpx solid var(--line); }
+.parts-sheet-copy { flex: 1; min-width: 0; }
+.parts-sheet-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 25rpx; }
+.parts-sheet-meta { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 21rpx; }
+.parts-sheet-input { width: 104rpx; height: 66rpx; padding: 0 12rpx; text-align: center; color: var(--text); background: var(--fill-2); border: 1rpx solid var(--line); border-radius: 10rpx; font-size: 26rpx; }
+.parts-sheet-unit { flex-shrink: 0; width: 38rpx; color: var(--text-3); font-size: 22rpx; }
+.vehicle-dispatch { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; background: var(--card); border: 1rpx solid var(--brand-line); border-radius: 12rpx; }
+.vehicle-dispatch-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 500; }
+.vehicle-dispatch-meta { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
+.vehicle-dispatch-btn { padding: 11rpx 16rpx; color: var(--card); background: var(--brand); border-radius: 10rpx; font-size: 23rpx; line-height: 1; }
+.vehicle-dispatch-done { color: var(--green); background: rgba(34, 197, 94, .1); }
+.vehicle-dispatch-returned { color: var(--text-3); background: var(--fill); }
+.vehicle-live-actions { display: flex; gap: 12rpx; margin: 10rpx 24rpx 0; }
+.vehicle-live-action { flex: 1; padding: 16rpx 0; text-align: center; color: var(--brand); border: 1rpx solid var(--brand-line); border-radius: 10rpx; background: var(--card); font-size: 24rpx; }
+.vehicle-live-danger { color: var(--red); border-color: rgba(250, 81, 81, .35); }
+.vehicle-check-hint { display: block; color: var(--text-3); font-size: 23rpx; line-height: 1.6; }
+.vehicle-doc-warning { color: var(--red); }
+.vehicle-check-row { display: flex; align-items: center; justify-content: space-between; gap: 14rpx; padding: 18rpx 0; border-bottom: 1rpx solid var(--line); }
+.vehicle-check-label { flex: 1; min-width: 0; color: var(--text); font-size: 24rpx; }
+.vehicle-check-options { display: flex; flex-shrink: 0; gap: 8rpx; }
+.vehicle-check-option { padding: 8rpx 10rpx; border: 1rpx solid var(--line); border-radius: 8rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.2; }
+.vehicle-check-ok { color: var(--green); border-color: rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .08); }
+.vehicle-check-attention { color: var(--amber); border-color: rgba(245, 158, 11, .45); background: var(--amber-bg); }
+.vehicle-check-blocked { color: var(--red); border-color: rgba(250, 81, 81, .45); background: rgba(250, 81, 81, .08); }
 
 .site-head { display: flex; align-items: center; justify-content: space-between; margin: 20rpx 24rpx 0; }
 .site-head-info { display: flex; flex-direction: column; }
@@ -31,15 +54,20 @@
 .op-warn { color: var(--red); border-color: rgba(250,81,81,.35); }
 .report-photo { margin-top: 18rpx; padding: 24rpx; text-align: center; color: var(--brand); background: var(--brand-weak); border-radius: 12rpx; font-size: 25rpx; }
 
-.station-panel { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; background: #FFFFFF; border: 1rpx solid var(--line); border-radius: 12rpx; }
+.station-panel { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; background: var(--card); border: 1rpx solid var(--line); border-radius: 12rpx; }
 .station-panel-main { display: flex; align-items: center; min-width: 0; }
 .station-panel-label { color: var(--text); font-size: 26rpx; font-weight: 500; }
 .station-stage { margin-left: 14rpx; padding: 5rpx 12rpx; font-size: 22rpx; border-radius: 999rpx; }
 .station-stage-wait { color: var(--text-2); background: var(--fill); }
-.station-stage-pending { color: #A15C00; background: #FFF3D9; }
+.station-stage-pending { color: var(--amber); background: var(--amber-bg); }
 .station-stage-ok { color: var(--green); background: rgba(34, 197, 94, 0.1); }
 .station-panel-meta { flex-shrink: 0; color: var(--text-3); font-size: 23rpx; }
-.reagent-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; border: 1rpx solid var(--line); border-radius: 12rpx; background: #fff; }
+.linked-orders { margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; border: 1rpx solid var(--amber-line); border-radius: 12rpx; background: var(--amber-bg); }
+.linked-orders-head { display: flex; justify-content: space-between; color: var(--amber); font-size: 24rpx; font-weight: 500; }
+.linked-order { display: flex; justify-content: space-between; margin-top: 12rpx; padding-top: 12rpx; border-top: 1rpx solid var(--amber-line); }
+.linked-order-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 24rpx; }
+.linked-order-status { flex-shrink: 0; margin-left: 12rpx; color: var(--amber); font-size: 22rpx; }
+.reagent-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 16rpx 20rpx; border: 1rpx solid var(--line); border-radius: 12rpx; background: var(--card); }
 .reagent-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 500; }
 .reagent-meta { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
 .reagent-action { color: var(--brand); font-size: 24rpx; }
@@ -64,6 +92,7 @@
 .item-left { flex: 1; min-width: 0; }
 .item-name { font-size: 28rpx; color: var(--text); }
 .item-meta { margin-top: 10rpx; display: flex; align-items: center; }
+.item-review-reject { margin-top: 8rpx; color: var(--red); font-size: 22rpx; line-height: 1.4; }
 .item-time { font-size: 22rpx; color: var(--text-3); margin-left: 16rpx; }
 .item-right { flex-shrink: 0; margin-left: 20rpx; }
 .item-status { display: inline-flex; align-items: center; line-height: 1; font-size: 24rpx; font-weight: 500; padding: 8rpx 18rpx; border-radius: 999rpx; }
@@ -75,19 +104,20 @@
 .sheet-freq { font-size: 23rpx; color: var(--text-3); margin-bottom: 16rpx; display: block; }
 .field-label { font-size: 25rpx; color: var(--text-2); margin: 24rpx 0 12rpx; }
 .seg { display: flex; background: var(--fill); border-radius: 16rpx; padding: 6rpx; }
-.seg-item { flex: 1; text-align: center; padding: 16rpx 0; font-size: 28rpx; color: var(--text-2); border-radius: 12rpx; }
-.seg-on-ok { background: #FFFFFF; color: var(--green); font-weight: 500; }
-.seg-on-bad { background: #FFFFFF; color: var(--red); font-weight: 500; }
+.seg-opt { flex: 1; text-align: center; padding: 16rpx 0; font-size: 28rpx; color: var(--text-2); border-radius: 12rpx; }
+.seg-on-ok { background: var(--card); color: var(--green); font-weight: 500; }
+.seg-on-bad { background: var(--card); color: var(--red); font-weight: 500; }
 .ta { width: 100%; height: 130rpx; background: var(--fill-2); border-radius: 16rpx; padding: 18rpx; font-size: 26rpx; }
 .inline-input { width: 100%; height: 76rpx; background: var(--fill-2); border-radius: 16rpx; padding: 0 18rpx; font-size: 26rpx; margin-bottom: 14rpx; }
 
 .photos { display: flex; flex-wrap: wrap; }
 .photo { width: 150rpx; height: 150rpx; margin: 0 16rpx 16rpx 0; position: relative; border-radius: 12rpx; overflow: hidden; }
 .photo-img { width: 100%; height: 100%; }
-.photo-del { position: absolute; top: 4rpx; right: 4rpx; width: 36rpx; height: 36rpx; line-height: 36rpx; text-align: center; background: rgba(0,0,0,0.5); color: #fff; border-radius: 50%; font-size: 28rpx; }
+.photo-del { position: absolute; top: 4rpx; right: 4rpx; width: 36rpx; height: 36rpx; line-height: 36rpx; text-align: center; background: rgba(0,0,0,0.5); color: var(--card); border-radius: 50%; font-size: 28rpx; }
 .photo-add { width: 150rpx; height: 150rpx; margin-bottom: 16rpx; border: 1rpx dashed var(--line); border-radius: 12rpx; text-align: center; line-height: 150rpx; color: var(--text-3); font-size: 56rpx; }
 
 .submit-btn { margin-top: 28rpx; }
+.btn-danger { color: var(--card); background: var(--red); }
 
 /* 站点级拍照进度 */
 .photo-progress { margin: 12rpx 24rpx 0; padding: 14rpx 20rpx; background: var(--fill-2); border-radius: 12rpx; }

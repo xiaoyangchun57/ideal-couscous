@@ -3,6 +3,12 @@ import { Table, Card, Select, Space, Typography, message, Statistic, Row, Col, T
 import { DownloadOutlined, FileExcelOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
+import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
+import { evaluationRateColor } from '../../services/constants';
+import FilterBar from '../../components/FilterBar';
+import {
+  pageRootStyle, tableCardStyle, tableCardBody, filterSmallSelectWidth,
+} from '../../services/pageStyles';
 
 const { Title, Text } = Typography;
 
@@ -15,12 +21,9 @@ const PERIOD_OPTS = [
   { value: 'year', label: '本年度' },
 ];
 
-// 达标率/闭环率通用配色
-const rateColor = (r) => (r >= 80 ? 'green' : r >= 60 ? 'gold' : 'red');
-const healthColor = (r) => (r >= 90 ? '#52c41a' : r >= 75 ? '#faad14' : '#f5222d');
-
 export default function EvaluationPage() {
-  const { tokens } = useTheme();
+  const { tokens, isDark } = useTheme();
+  const [siteWrapRef, siteBodyH] = useTableAutoHeight();
   const [period, setPeriod] = useState('month');
   const [health, setHealth] = useState(null);
   const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '' });
@@ -77,29 +80,19 @@ export default function EvaluationPage() {
     { key: 'year', label: '本年度运维报告' },
   ];
 
-  // ===== 人员运维绩效（主区，多维指标）=====
+  // 主表只保留管理者扫描绩效所需的五列；明细指标在单元格内成组呈现，避免横向滚动。
   const personCols = [
-    { title: '姓名', dataIndex: 'real_name', key: 'real_name', fixed: 'left', width: 90,
-      render: (v) => <Text strong>{v}</Text> },
-    { title: '角色', dataIndex: 'role', key: 'role', width: 80, render: (v) => ROLE_CN[v] || v },
-    { title: '工单处理', dataIndex: 'wo_total', key: 'wo_total', width: 90,
-      sorter: (a, b) => a.wo_total - b.wo_total },
-    { title: '闭环数', dataIndex: 'wo_closed', key: 'wo_closed', width: 80 },
-    { title: '闭环率', dataIndex: 'wo_closed_rate', key: 'wo_closed_rate', width: 90,
-      sorter: (a, b) => a.wo_closed_rate - b.wo_closed_rate,
-      render: (v) => <Tag color={rateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '平均响应(h)', dataIndex: 'response_hours', key: 'response_hours', width: 110,
-      sorter: (a, b) => (a.response_hours ?? 1e9) - (b.response_hours ?? 1e9),
-      render: (v) => (v === null || v === undefined ? <Text type="secondary">—</Text> : `${v}h`) },
-    { title: '平均处理(天)', dataIndex: 'wo_avg_days', key: 'wo_avg_days', width: 110,
-      render: (v) => (v === null || v === undefined ? <Text type="secondary">—</Text> : `${v}天`) },
-    { title: 'SLA超时', dataIndex: 'sla_breach', key: 'sla_breach', width: 90,
-      render: (v) => (Number(v) > 0 ? <Tag color="red">{v}</Tag> : <Text type="secondary">0</Text>) },
-    { title: 'SLA达标率', dataIndex: 'on_time_rate', key: 'on_time_rate', width: 100,
-      sorter: (a, b) => a.on_time_rate - b.on_time_rate,
-      render: (v) => <Tag color={rateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '巡检执行', dataIndex: 'insp_done', key: 'insp_done', width: 90 },
-    { title: '巡检审核', dataIndex: 'insp_reviewed', key: 'insp_reviewed', width: 90 },
+    { title: '人员', key: 'person', width: 150,
+      render: (_, r) => <><Text strong>{r.real_name || '未命名'}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{ROLE_CN[r.role] || r.role || '—'}</Text></> },
+    { title: '工单量', dataIndex: 'wo_total', key: 'workorders', width: 130,
+      sorter: (a, b) => (a.wo_total || 0) - (b.wo_total || 0),
+      render: (_, r) => <><Text strong>{r.wo_total || 0} 件</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>已闭环 {r.wo_closed || 0} 件</Text></> },
+    { title: '闭环与 SLA', key: 'quality', width: 180,
+      render: (_, r) => <Space size={[4, 4]} wrap><Tag color={evaluationRateColor(Number(r.wo_closed_rate) || 0)}>闭环 {Number(r.wo_closed_rate) || 0}%</Tag><Tag color={evaluationRateColor(Number(r.on_time_rate) || 0)}>SLA {Number(r.on_time_rate) || 0}%</Tag>{Number(r.sla_breach) > 0 && <Tag color="red">超时 {r.sla_breach}</Tag>}</Space> },
+    { title: '响应与处置', key: 'duration', width: 160,
+      render: (_, r) => <><Text>{r.response_hours == null ? '响应 —' : `响应 ${r.response_hours}h`}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{r.wo_avg_days == null ? '处置 —' : `平均处置 ${r.wo_avg_days} 天`}</Text></> },
+    { title: '巡检', key: 'inspection', width: 130,
+      render: (_, r) => <><Text>执行 {r.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {r.insp_reviewed || 0} 项</Text></> },
   ];
 
   // 人员绩效人均概览卡
@@ -121,24 +114,24 @@ export default function EvaluationPage() {
     { title: '负责人', dataIndex: 'manager', key: 'manager', render: (v) => <Text strong>{v || '未分配'}</Text> },
     { title: '负责站点', dataIndex: 'site_count', key: 'site_count' },
     { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '当前及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
   ];
 
   const siteCols = [
-    { title: '站点', dataIndex: 'site_name', key: 'site_name' },
-    { title: '负责人', dataIndex: 'manager', key: 'manager', render: (v) => v || '未分配' },
+    { title: '站点', dataIndex: 'site_name', key: 'site_name', ellipsis: true },
+    { title: '负责人', dataIndex: 'manager', key: 'manager', ellipsis: true, render: (v) => v || '未分配' },
     { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '当前及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate',
-      render: (v) => <Tag color={healthColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
   ];
@@ -177,37 +170,43 @@ export default function EvaluationPage() {
   }, [baseline]);
 
   return (
-    <div className="evaluation-page">
-      <div className="evaluation-header">
+    <div style={pageRootStyle}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16, flexShrink: 0 }}>
         <Space align="baseline">
           <Title level={3} style={{ margin: 0 }}>人员评估</Title>
           {personnel.period_label && <Text type="secondary">考核期：{personnel.period_label}</Text>}
         </Space>
-        <Space className="evaluation-actions" wrap>
-          <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/evaluation?period=' + period, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>
-            导出评估表
-          </Button>
-          <Dropdown
-            menu={{
-              items: reportItems,
-              onClick: ({ key }) => downloadExport('/api/export/ops-report?period=' + key, `运维报告_${key === 'quarter' ? '本季度' : '本年度'}.xlsx`, key),
-            }}
-          >
-            <Button icon={<FileExcelOutlined />} type="primary">导出运维报告</Button>
-          </Dropdown>
-          <Text type="secondary">统计周期：</Text>
-          <Select value={period} onChange={setPeriod} options={PERIOD_OPTS} style={{ width: 120 }} />
-        </Space>
       </div>
+      <FilterBar
+        style={{ marginBottom: 16 }}
+        extra={(
+          <Space wrap>
+            <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/evaluation?period=' + period, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>
+              导出评估表
+            </Button>
+            <Dropdown
+              menu={{
+                items: reportItems,
+                onClick: ({ key }) => downloadExport('/api/export/ops-report?period=' + key, `运维报告_${key === 'quarter' ? '本季度' : '本年度'}.xlsx`, key),
+              }}
+            >
+              <Button icon={<FileExcelOutlined />} type="primary">导出运维报告</Button>
+            </Dropdown>
+          </Space>
+        )}
+      >
+        <Text type="secondary">统计周期：</Text>
+        <Select value={period} onChange={setPeriod} options={PERIOD_OPTS} style={{ width: filterSmallSelectWidth }} />
+      </FilterBar>
 
       {baselineItems.length > 0 && (
-        <Card title="运营基线（仅记录当前值，不设目标）" style={{ marginBottom: 16 }}>
+        <Card title="运营基线（仅记录当前值，不设目标）" style={{ marginBottom: 16, flexShrink: 0 }}>
           <Row gutter={[12, 12]}>
             {baselineItems.map((item) => (
               <Col key={item.key} xs={12} sm={12} lg={6}>
-                <div className="baseline-metric">
+                <div style={{ minHeight: 94, padding: 12, border: `1px solid ${tokens.colorBorder}`, borderRadius: 6 }}>
                   <Text type="secondary">{item.label}</Text>
-                  <div><Text strong className="baseline-value">{item.value}</Text></div>
+                  <div><Text strong style={{ fontSize: 24, lineHeight: 1.5 }}>{item.value}</Text></div>
                   <Tag color={item.color}>{item.detail}</Tag>
                 </div>
               </Col>
@@ -221,7 +220,7 @@ export default function EvaluationPage() {
 
       {/* 人员运维绩效人均概览 */}
       {personOverview && (
-        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        <Row gutter={[12, 12]} style={{ marginBottom: 16, flexShrink: 0 }}>
           {personOverview.map((o) => (
             <Col key={o.label} xs={12} sm={8} lg={4}>
               <Card size="small">
@@ -233,7 +232,7 @@ export default function EvaluationPage() {
       )}
 
       {/* 人员运维绩效（主区） */}
-      <Card title="人员运维绩效（工单响应 / 处理时效 / SLA / 巡检）" style={{ marginBottom: 16 }}>
+      <Card title="人员运维绩效（工单响应 / 处理时效 / SLA / 巡检）" style={{ marginBottom: 16, flexShrink: 0 }}>
         <Table
           rowKey={(r) => r.id}
           loading={loading}
@@ -241,14 +240,13 @@ export default function EvaluationPage() {
           dataSource={personnel.list}
           pagination={false}
           size="small"
-          scroll={{ x: 1040 }}
           locale={{ emptyText: '暂无数据' }}
         />
       </Card>
 
       {/* 数据健康度维度 */}
       {healthOverview && (
-        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        <Row gutter={[12, 12]} style={{ marginBottom: 16, flexShrink: 0 }}>
           {healthOverview.map((o) => (
             <Col key={o.label} xs={12} sm={8} lg={Math.floor(24 / healthOverview.length)}>
               <Card size="small">
@@ -259,7 +257,7 @@ export default function EvaluationPage() {
         </Row>
       )}
 
-      <Card title="负责人站点数据情况（排障参考，不直接计入个人绩效）" style={{ marginBottom: 16 }}>
+      <Card title="负责人站点数据情况（排障参考，不直接计入个人绩效）" style={{ marginBottom: 16, flexShrink: 0 }}>
         <Table
           rowKey={(r) => r.manager || 'x'}
           loading={loading}
@@ -267,36 +265,24 @@ export default function EvaluationPage() {
           dataSource={byManager}
           pagination={false}
           size="small"
-          scroll={{ x: 760 }}
           locale={{ emptyText: '暂无数据' }}
         />
       </Card>
 
-      <Card title="各站点数据质量维度">
-        <Table
-          rowKey={(r) => r.site_id || r.site_name}
-          loading={loading}
-          columns={siteCols}
-          dataSource={bySite}
-          pagination={{ pageSize: 10 }}
-          size="small"
-          scroll={{ x: 760 }}
-          locale={{ emptyText: '暂无数据' }}
-        />
+      <Card title="各站点数据质量维度" style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
+        <div ref={siteWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <Table
+            rowKey={(r) => r.site_id || r.site_name}
+            loading={loading}
+            columns={siteCols}
+            dataSource={bySite}
+            pagination={false}
+            size="small"
+            scroll={siteBodyH ? { y: siteBodyH } : undefined}
+            locale={{ emptyText: '暂无数据' }}
+          />
+        </div>
       </Card>
-      <style>{`
-        .evaluation-page { padding: 24px; }
-        .evaluation-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-        .evaluation-actions { justify-content: flex-end; }
-        .baseline-metric { min-height: 94px; padding: 12px; border: 1px solid ${tokens.colorBorder}; border-radius: 6px; }
-        .baseline-value { font-size: 24px; line-height: 1.5; }
-        @media (max-width: 639px) {
-          .evaluation-page { padding: 16px 12px; }
-          .evaluation-header { align-items: flex-start; }
-          .evaluation-actions { width: 100%; justify-content: flex-start; }
-          .evaluation-actions .ant-btn { padding-inline: 9px; }
-        }
-      `}</style>
     </div>
   );
 }

@@ -2,6 +2,7 @@
 page {
   --bg: #F5F6F8;
   --card: #FFFFFF;
+  --on-brand: #FFFFFF;   /* 品牌色上的反白内容 */
   --line: rgba(0, 0, 0, 0.06);
   --brand: #0D9488;        /* 品牌青绿（与 PC 端统一） */
   --red: #FA5151;
@@ -17,6 +18,9 @@ page {
   --brand-weak: rgba(13,148,136,0.08);   /* 品牌浅底 */
   --brand-line: rgba(13,148,136,0.30);    /* 品牌描边 */
   --disabled: #B0B4B9;     /* 禁用态灰 */
+  --amber: #C77D00;        /* 深琥珀：待确认/进行中/复查等强调文字 */
+  --amber-bg: #FFF3D9;     /* 浅琥珀底：与 --amber 配套的弱背景 */
+  --amber-line: rgba(199,125,0,0.35);
   background: var(--bg);
   color: var(--text);
   font-size: 26rpx;
@@ -27,10 +31,15 @@ page {
 
 view, text, button, input { box-sizing: border-box; }
 
+/* 页面包裹兜底：仅最小高与背景，不加 padding——
+   非 tab 页（review/message/reports/plan-detail/plan-edit）在各自 wxss 定义了带 padding 的 .page，
+   页面 wxss 同特异性覆盖此处，padding 由各页自管 */
+.page { min-height: 100vh; box-sizing: border-box; background: var(--bg); }
+
 /* 卡片：纯白、24rpx 圆角、0.5px 极细边框、零阴影零渐变 */
 .card {
   background: var(--card);
-  border-radius: 24rpx;
+  border-radius: 16rpx;
   border: 1rpx solid var(--line);
   padding: 28rpx;
 }
@@ -46,18 +55,51 @@ view, text, button, input { box-sizing: border-box; }
 }
 .section-more { font-size: 24rpx; color: var(--text-3); font-weight: 400; }
 
+/* 列表卡 + 行（权威结构，视觉以 alert 页为基准）：
+   [可选 .row-left 状态点] + .row-main(.row-title/.row-sub) + [可选 .row-right 标签] */
+.list-card {
+  margin: 16rpx 24rpx 0; padding: 8rpx 28rpx;
+  background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line);
+}
+.row { display: flex; align-items: center; padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
+.row:last-child { border-bottom: none; }
+.row-left { width: 28rpx; display: flex; align-items: center; }
+.row-main { flex: 1; min-width: 0; }
+.row-left + .row-main { margin-left: 16rpx; }
+.row-title { flex: 1; min-width: 0; font-size: 28rpx; color: var(--text); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-sub { font-size: 23rpx; color: var(--text-3); margin-top: 6rpx; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-right { display: flex; flex-direction: column; align-items: flex-end; margin-left: 16rpx; }
+.row-right .tag + .tag { margin-top: 8rpx; }
+
+/* 统一横向选择条（胶囊范式）：工单/告警/计划/巡检页顶部筛选一律走此组件，
+   原 .tabs/.tab（下划线式）与 .filter-bar/.filter-item（胶囊）合并为此一套 */
+.seg-strip { display: flex; gap: 16rpx; margin: 16rpx 24rpx 0; overflow-x: auto; white-space: nowrap; }
+.seg-strip::-webkit-scrollbar { display: none; }
+.seg-item { flex: 0 0 auto; padding: 12rpx 32rpx; border-radius: 999rpx; font-size: 26rpx; background: var(--card); border: 1rpx solid var(--line); color: var(--text-2); }
+.seg-on { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
+
+/* 站点 chip：巡检执行流专用（站点横向滚动选择）。
+   以 .site-chips 容器作用域登记，避免与 plan-edit 等页的同名 .chip 互相干扰 */
+.site-chips { white-space: nowrap; padding: 20rpx 24rpx 0; }
+.site-chips .chip {
+  display: inline-block; padding: 12rpx 28rpx; margin-right: 16rpx;
+  background: var(--card); border: 1rpx solid var(--line); border-radius: 999rpx;
+  font-size: 26rpx; color: var(--text-2);
+}
+.site-chips .chip-on { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
+
 /* 主操作按钮：品牌青绿，无渐变无阴影 */
 .btn-primary {
   display: flex; align-items: center; justify-content: center; padding: 0;
-  background: var(--brand); color: #FFFFFF; border-radius: 16rpx;
+  background: var(--brand); color: var(--on-brand); border-radius: 16rpx;
   font-size: 30rpx; font-weight: 500; height: 88rpx;
   border: none;
 }
 .btn-primary::after { border: none; }
-.btn-primary[disabled] { background: var(--disabled); color: #FFFFFF; }
+.btn-primary[disabled] { background: var(--disabled); color: var(--on-brand); }
 .btn-ghost {
   display: flex; align-items: center; justify-content: center; padding: 0;
-  background: #FFFFFF; color: var(--text-2); border-radius: 16rpx;
+  background: var(--card); color: var(--text-2); border-radius: 16rpx;
   font-size: 28rpx; height: 80rpx;
   border: 1rpx solid var(--line);
 }
@@ -69,7 +111,15 @@ view, text, button, input { box-sizing: border-box; }
   border: 1rpx solid rgba(255,143,31,0.4);
 }
 .btn-warn::after { border: none; }
+.btn-danger {
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  background: rgba(250,81,81,0.10); color: var(--red); border-radius: 16rpx;
+  font-size: 30rpx; font-weight: 500; height: 88rpx;
+  border: 1rpx solid rgba(250,81,81,0.28);
+}
+.btn-danger::after { border: none; }
 .btn-sm { height: 60rpx; line-height: 60rpx; font-size: 24rpx; border-radius: 12rpx; display: inline-flex; align-items: center; justify-content: center; padding: 0 28rpx; }
+.btn-sm::after { border: none; }
 
 /* 状态点 */
 .dot { width: 12rpx; height: 12rpx; border-radius: 50%; display: inline-block; }
@@ -94,7 +144,7 @@ view, text, button, input { box-sizing: border-box; }
 
 /* 空态 */
 .empty { display: flex; flex-direction: column; align-items: center; padding: 80rpx 0; }
-.empty-circle { width: 120rpx; height: 120rpx; border-radius: 50%; background: var(--fill); color: #C9CCD1; font-size: 40rpx; text-align: center; line-height: 120rpx; }
+.empty-circle { width: 120rpx; height: 120rpx; border-radius: 50%; background: var(--fill); color: var(--disabled); font-size: 40rpx; text-align: center; line-height: 120rpx; }
 .empty-tx { font-size: 24rpx; color: var(--text-3); margin-top: 16rpx; }
 
 /* 底部弹层（行动/详情）*/
@@ -104,13 +154,21 @@ view, text, button, input { box-sizing: border-box; }
 }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 51;
-  background: #FFFFFF; border-radius: 28rpx 28rpx 0 0;
+  background: var(--card); border-radius: 28rpx 28rpx 0 0;
   padding: 36rpx 28rpx calc(36rpx + env(safe-area-inset-bottom));
   max-height: 84vh; overflow-y: auto;
 }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24rpx; }
 .sheet-title { font-size: 32rpx; font-weight: 500; }
 .sheet-close { font-size: 44rpx; color: var(--text-3); line-height: 1; padding: 0 8rpx; }
+
+/* 详情弹层字段行（workorder/alert 等详情 sheet 共用，页面不再重复定义） */
+.d-tag { margin-bottom: 20rpx; }
+.d-tag .tag { margin-right: 12rpx; }
+.d-row { display: flex; padding: 14rpx 0; }
+.d-k { width: 120rpx; font-size: 26rpx; color: var(--text-3); }
+.d-v { flex: 1; font-size: 26rpx; color: var(--text); }
+.d-desc { font-size: 25rpx; color: var(--text-2); line-height: 1.6; margin: 12rpx 0 8rpx; padding: 18rpx; background: var(--fill-2); border-radius: 14rpx; }
 
 /* 弱网同步条 */
 .sync-bar {

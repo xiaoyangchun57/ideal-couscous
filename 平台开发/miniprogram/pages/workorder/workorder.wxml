@@ -1,16 +1,18 @@
 <view class="page">
-  <view class="tabs">
-    <view class="tab {{tab === item.key ? 'tab-on' : ''}}" wx:for="{{tabs}}" wx:key="key" bindtap="onTab" data-t="{{item.key}}">{{item.label}}</view>
+  <view class="sync-bar" wx:if="{{!online}}">当前离线，提交操作会暂存并在联网后自动同步</view>
+  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
+  <view class="seg-strip">
+    <view class="seg-item {{tab === item.key ? 'seg-on' : ''}}" wx:for="{{tabs}}" wx:key="key" bindtap="onTab" data-t="{{item.key}}">{{item.label}}</view>
   </view>
 
-  <view class="card list-card" wx:if="{{list.length}}">
+  <view class="list-card" wx:if="{{list.length}}">
     <view class="row" wx:for="{{list}}" wx:key="order_no" bindtap="onOpen" data-no="{{item.order_no}}">
       <view class="row-main">
-        <view class="row-top">
-          <text class="row-title">{{item.title}}</text>
-          <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
-        </view>
+        <text class="row-title">{{item.title}}</text>
         <text class="row-sub">{{item.site_name}} · {{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}"> · {{item.level_cn}}</text></text>
+      </view>
+      <view class="row-right">
+        <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
       </view>
     </view>
   </view>
@@ -56,7 +58,10 @@
     <view class="blk">
       <text class="blk-tx">处置影像（{{sheet.item.images_arr.length}}/6）</text>
       <view class="img-grid">
-        <image wx:for="{{sheet.item.images_arr}}" wx:key="*this" class="img-cell" src="{{item}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{item}}"></image>
+        <view wx:for="{{sheet.item.images_arr}}" wx:key="*this" class="img-wrap">
+          <image class="img-cell" src="{{item}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{item}}"></image>
+          <view wx:if="{{canWrite && sheet.item.status === 'in_progress'}}" class="img-delete" catchtap="onDeleteImage" data-src="{{item}}">×</view>
+        </view>
         <view class="img-add" wx:if="{{canWrite && sheet.item.status === 'in_progress'}}" bindtap="onUploadImage">+</view>
       </view>
     </view>
@@ -105,19 +110,27 @@
     </view>
   </view>
 
-  <!-- 备件申请（可选关联库存） -->
+  <!-- 统一备件需求：库存领用 / 附近急购 / 厂家订购 -->
   <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onCloseParts"></view>
   <view class="sheet" wx:if="{{partsApply.open}}">
-    <view class="sheet-head"><text class="sheet-title">申请备件</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
+    <view class="sheet-head"><text class="sheet-title">备件需求</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
     <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
-    <picker mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
+    <picker mode="selector" range="{{partsFulfillmentOptions}}" range-key="label" value="{{partsApply.fulfillmentIndex}}" bindchange="onPartsFulfillmentPick">
+      <view class="d-row"><text class="d-k">处理方式</text><text class="d-v">{{partsFulfillmentOptions[partsApply.fulfillmentIndex].label}} ›</text></view>
+    </picker>
+    <view class="parts-route-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">批准只代表允许使用，不锁库；实际拿到备件时才扣库。</view>
+    <view class="parts-route-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">主管批准后可在附近购买，回来只需补票据和实际金额。</view>
+    <view class="parts-route-note" wx:else>批准后记录厂家和快递，到货时一次确认入库或现场直用。</view>
+    <picker wx:if="{{partsApply.fulfillment_type === 'stock'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
       <view class="d-row"><text class="d-k">库存备件</text><text class="d-v">{{partsOptions[partsApply.index].label}}</text></view>
     </picker>
     <view class="field"><text class="field-label">备件名称</text><input class="field-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
+    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">规格型号</text><input class="field-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/></view>
     <view class="field"><text class="field-label">数量</text><input class="field-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
+    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">预计金额（可不填）</text><input class="field-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/></view>
     <view class="field"><text class="field-label">申请事由</text><textarea class="field-input" placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
     <view class="sheet-ops">
-      <button class="btn-primary op-btn" bindtap="submitParts">提交申请</button>
+      <button class="btn-primary op-btn" bindtap="submitParts">提交需求</button>
       <button class="btn-ghost op-btn" bindtap="onCloseParts">取 消</button>
     </view>
   </view>

@@ -34,6 +34,16 @@
 .suggest-item { display: flex; align-items: flex-start; margin-bottom: 14rpx; }
 .suggest-item .dot { margin-top: 10rpx; margin-right: 14rpx; flex-shrink: 0; }
 .suggest-text { font-size: 25rpx; color: var(--text-2); line-height: 1.5; }
+.template-card { margin: 20rpx 24rpx 0; }
+.template-item { display: flex; align-items: baseline; gap: 12rpx; padding: 12rpx 0; border-top: 1rpx solid var(--line); }
+.template-item:first-of-type { border-top: 0; }
+.template-site { flex: 0 0 150rpx; font-size: 24rpx; color: var(--text-2); }
+.template-name { flex: 1; font-size: 24rpx; color: var(--text); line-height: 1.4; }
+.coverage-warning, .day-warning { margin: 16rpx 24rpx 0; padding: 16rpx 20rpx; background: rgba(250,81,81,.08); border-left: 6rpx solid var(--red); border-radius: 8rpx; }
+.day-warning { margin: 0 0 16rpx; background: rgba(255,143,31,.10); border-left-color: var(--orange); }
+.risk-title { display: block; color: var(--red); font-size: 24rpx; font-weight: 600; margin-bottom: 6rpx; }
+.day-warning .risk-title { color: var(--orange); }
+.risk-text { display: block; color: var(--text-2); font-size: 23rpx; line-height: 1.5; white-space: pre-line; }
 
 /* 日卡片 */
 .day-card { margin: 20rpx 24rpx 0; }
@@ -79,7 +89,7 @@
 .bottom-bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   display: flex; gap: 20rpx; padding: 20rpx 28rpx calc(20rpx + env(safe-area-inset-bottom));
-  background: #FFFFFF; border-top: 1rpx solid var(--line);
+  background: var(--card); border-top: 1rpx solid var(--line);
 }
 .bottom-btn { flex: 1; }
 

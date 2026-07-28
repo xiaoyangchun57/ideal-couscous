@@ -10,6 +10,7 @@
     "pages/message/message",
     "pages/reports/reports",
     "pages/review/view",
+    "pages/vehicle/vehicle",
     "pages/plan/plan",
     "pages/plan-edit/plan-edit",
     "pages/plan-detail/plan-detail"
@@ -26,10 +27,9 @@
     "backgroundColor": "#FFFFFF",
     "borderStyle": "white",
     "list": [
-      { "pagePath": "pages/index/index", "text": "首页", "iconPath": "images/tab-home.png", "selectedIconPath": "images/tab-home-on.png" },
-      { "pagePath": "pages/inspection/inspection", "text": "巡检", "iconPath": "images/tab-inspection.png", "selectedIconPath": "images/tab-inspection-on.png" },
-      { "pagePath": "pages/workorder/workorder", "text": "工单", "iconPath": "images/tab-workorder.png", "selectedIconPath": "images/tab-workorder-on.png" },
-      { "pagePath": "pages/alert/alert", "text": "告警", "iconPath": "images/tab-alert.png", "selectedIconPath": "images/tab-alert-on.png" },
+      { "pagePath": "pages/index/index", "text": "今日任务", "iconPath": "images/tab-home.png", "selectedIconPath": "images/tab-home-on.png" },
+      { "pagePath": "pages/inspection/inspection", "text": "现场", "iconPath": "images/tab-inspection.png", "selectedIconPath": "images/tab-inspection-on.png" },
+      { "pagePath": "pages/message/message", "text": "消息", "iconPath": "images/tab-alert.png", "selectedIconPath": "images/tab-alert-on.png" },
       { "pagePath": "pages/mine/mine", "text": "我的", "iconPath": "images/tab-mine.png", "selectedIconPath": "images/tab-mine-on.png" }
     ]
   },

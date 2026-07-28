@@ -10,6 +10,8 @@ const SUBSCRIBE_TMPL = ['x_KtbMzoSIbxpUZGf040r9uvuNqd9pfhOynKaT72Ub4', '4MrY8lzI
 function decorate(n) {
   return {
     id: n.id,
+    source_type: n.source_type || '',
+    source_id: n.source_id || '',
     title: n.title,
     content: n.content || '',
     is_read: !!n.is_read,
@@ -57,16 +59,45 @@ Page({
       });
   },
 
+  openBusinessTarget(item) {
+    const sourceType = item.source_type;
+    if (sourceType === 'workorder' || sourceType === 'workorder_review') {
+      getApp().globalData.selWorkorderNo = item.source_id;
+      wx.navigateTo({ url: '/pages/workorder/workorder' });
+      return;
+    }
+    if (sourceType === 'inspection' || sourceType === 'reagent_qc') {
+      wx.switchTab({ url: '/pages/inspection/inspection' });
+      return;
+    }
+    if (sourceType === 'plan_schedule') {
+      wx.navigateTo({ url: '/pages/plan/plan' });
+      return;
+    }
+    if (sourceType === 'alert' || sourceType === 'manual_report') {
+      wx.navigateTo({ url: '/pages/alert/alert' });
+      return;
+    }
+    if (['inspection_review', 'photo_review', 'data_review', 'parts_request', 'spare_part_request', 'vehicle_application'].includes(sourceType)) {
+      wx.navigateTo({ url: '/pages/review/view' });
+    }
+  },
+
   onTap(e) {
     const id = e.currentTarget.dataset.id;
     const item = this.data.list.find(n => n.id === id);
-    if (item && !item.is_read) {
+    if (!item) return;
+    const open = () => this.openBusinessTarget(item);
+    if (!item.is_read) {
       api.readNotification(id)
         .then(() => {
           const list = this.data.list.map(n => n.id === id ? Object.assign({}, n, { is_read: true }) : n);
           this.setData({ list });
+          open();
         })
-        .catch(() => {});
+        .catch(open);
+    } else {
+      open();
     }
   },
 

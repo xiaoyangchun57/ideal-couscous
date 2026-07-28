@@ -38,6 +38,14 @@
     </view>
   </view>
 
+  <view class="reuse-entry" wx:if="{{canFavorite}}" bindtap="onFavorite">
+    <view>
+      <text class="reuse-title">收藏为常用计划</text>
+      <text class="reuse-hint">保存本站点组合、相对日期、车辆和备件</text>
+    </view>
+    <text class="reuse-action">{{favoriting ? '保存中…' : '收藏 ›'}}</text>
+  </view>
+
   <!-- 出发前准备：车辆、备件、顺路工单集中呈现，避免临出发再切换多个页面核对。 -->
   <block wx:if="{{resourceDays.length || resourceParts.length || linkedWorkorders.length}}">
     <view class="section">
@@ -83,7 +91,7 @@
     </view>
   </view>
   <view class="empty" wx:if="{{!days.length}}">
-    <view class="empty-circle">空</view>
+    <view class="empty-circle"></view>
     <text class="empty-tx">暂无行程安排</text>
   </view>
 
@@ -105,7 +113,8 @@
     <button class="btn-ghost bottom-btn" bindtap="onEdit">编辑</button>
     <button class="btn-primary bottom-btn" bindtap="onSubmit" wx:if="{{detail.status === 'draft' || detail.status === 'rejected'}}">提交审批</button>
   </view>
-  <view class="bottom-bar" wx:if="{{canChange}}">
-    <button class="btn-warn bottom-btn" bindtap="onChangeRequest">发起变更</button>
+  <view class="bottom-bar" wx:if="{{canChange || canExecute}}">
+    <button class="btn-warn bottom-btn" wx:if="{{canChange}}" bindtap="onChangeRequest">发起变更</button>
+    <button class="btn-primary bottom-btn" wx:if="{{canExecute}}" bindtap="onGoExecution">进入现场执行</button>
   </view>
 </view>
