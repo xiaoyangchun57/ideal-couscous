@@ -1,57 +1,69 @@
 <view class="page">
   <!-- 弱网待同步条 -->
   <view class="sync-bar" wx:if="{{!online}}">
-    当前离线，现场记录会暂存并在联网后自动同步
+    <text>当前离线 · 现场记录已本地保存</text>
   </view>
   <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">
-    有 {{syncCount}} 项待同步（弱网已离线保存）· 点击立即同步
+    <text>{{syncCount}} 项待同步 · 弱网记录已保存</text>
+    <text class="sync-action">立即同步</text>
   </view>
 
-  <!-- 仅展示今日已批准排程生成的执行包，避免从任意站点发起无来源巡检 -->
+  <!-- 展示今日已批准执行包，以及此前仍有未完成项的结转执行包 -->
   <view class="package-switch" wx:if="{{packages.length}}">
     <view class="package-chip {{selectedPlanId === item.plan_id ? 'package-chip-on' : ''}}"
       wx:for="{{packages}}" wx:key="plan_id" bindtap="onSelectPackage" data-id="{{item.plan_id}}">
-      {{item.schedule_type === 'weekly' ? '周检' : (item.schedule_type === 'monthly' ? '月检' : (item.schedule_type === 'quarterly' ? '季检' : '年检'))}} · {{item.sites.length}}站
+      {{item.is_carryover ? '补做' : ''}}{{item.schedule_type === 'weekly' ? '周检' : (item.schedule_type === 'monthly' ? '月检' : (item.schedule_type === 'quarterly' ? '季检' : '年检'))}} · {{item.sites.length}}站
     </view>
   </view>
 
-  <view class="package-head" wx:if="{{currentPackage}}">
-    <view>
-      <text class="package-title">今日执行路线</text>
-      <text class="package-meta">第 {{currentPackage.version}} 版 · {{currentPackage.sites.length}} 个站点</text>
+  <view class="journey" wx:if="{{currentPackage}}">
+    <view class="journey-summary" bindtap="onToggleTrip">
+      <view class="journey-copy">
+        <view class="journey-title-row">
+          <text class="journey-title">{{currentPackage.is_carryover ? '结转任务' : '今日行程'}}</text>
+          <text class="journey-ready {{currentPackage.is_carryover ? 'journey-ready-carryover' : (tripReady ? 'journey-ready-ok' : 'journey-ready-wait')}}">{{currentPackage.is_carryover ? ('原日期 ' + currentPackage.work_date) : (tripReady ? '已就绪' : '待准备')}}</text>
+        </view>
+        <text class="journey-meta">{{currentPackage.sites.length}} 个站点 · 第 {{currentPackage.version}} 版{{currentPackage.is_carryover ? (' · 逾期 ' + currentPackage.overdue_days + ' 天') : (currentPackage.vehicle ? ' · ' + currentPackage.vehicle.plate_no : '')}}</text>
+      </view>
+      <text class="journey-toggle">{{tripExpanded || !tripReady ? '收起' : '展开'}} {{tripExpanded || !tripReady ? '⌃' : '⌄'}}</text>
     </view>
-    <text class="package-vehicle" wx:if="{{currentPackage.vehicle}}">{{currentPackage.vehicle.plate_no}}</text>
-  </view>
-  <view class="departure-confirmation" wx:if="{{currentPackage}}">
-    <view class="departure-copy">
-      <text class="departure-label">出发资源</text>
-      <text class="departure-hint">仅留痕，不锁车、不扣库</text>
-    </view>
-    <view class="departure-action">
-      <text class="departure-status {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? 'departure-confirmed' : 'departure-pending'}}">
-        {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? '已确认' : '待确认'}}
-      </text>
-      <view class="departure-button" wx:if="{{!(currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed)}}" bindtap="onConfirmDeparture">
-        {{confirmingDeparture ? '提交中…' : '一键确认'}}
+
+    <view class="journey-details" wx:if="{{tripExpanded || !tripReady}}">
+      <view class="carryover-note" wx:if="{{currentPackage.is_carryover}}">
+        此任务来自 {{currentPackage.work_date}} 未完成检查项，仅补做现场记录；车辆、备件和出发确认不再重复办理。
+      </view>
+      <view class="departure-confirmation" wx:else>
+        <view class="departure-copy">
+          <text class="departure-label">出发资源</text>
+          <text class="departure-hint">仅留痕，不锁车、不扣库</text>
+        </view>
+        <view class="departure-action">
+          <text class="departure-status {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? 'departure-confirmed' : 'departure-pending'}}">
+            {{currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed ? '已确认' : '待确认'}}
+          </text>
+          <view class="departure-button" wx:if="{{!(currentPackage.departure_confirmation && currentPackage.departure_confirmation.vehicle_confirmed && currentPackage.departure_confirmation.parts_confirmed)}}" bindtap="onConfirmDeparture">
+            {{confirmingDeparture ? '提交中…' : '一键确认'}}
+          </view>
+        </view>
+      </view>
+      <view class="parts-issue-card" wx:if="{{!currentPackage.is_carryover && currentPackage.resource_parts && currentPackage.resource_parts.length}}">
+        <view class="parts-issue-copy">
+          <text class="parts-issue-title">备件现场领用</text>
+          <text class="parts-issue-meta">{{currentPackage.resource_summary.totalKinds}} 种 · {{currentPackage.resource_summary.remainingKinds}} 种待领 · 领用即扣库</text>
+        </view>
+        <view class="parts-issue-button {{currentPackage.resource_summary.remaining === 0 ? 'parts-issue-done' : ''}}" bindtap="onOpenPartsIssue">
+          {{currentPackage.resource_summary.remaining === 0 ? '已领用' : (currentPackage.departure_confirmation && currentPackage.departure_confirmation.parts_confirmed ? '确认领用' : '待确认')}}
+        </view>
+      </view>
+      <view class="vehicle-dispatch" wx:if="{{!currentPackage.is_carryover && currentPackage.vehicle}}">
+        <view class="vehicle-dispatch-copy"><text class="vehicle-dispatch-title">{{currentPackage.vehicle.plate_no}}</text><text class="vehicle-dispatch-meta {{currentPackage.vehicle.document_warning ? 'vehicle-doc-warning' : ''}}">{{currentPackage.vehicle.document_warning || (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车，行程已归档' : (currentPackage.vehicle_can_return ? '计划末日，完成还车验车后归档' : '行程中，到站打卡自动记录节点')) : '出发前完成车况和里程登记')}}</text></view>
+        <view class="vehicle-dispatch-btn {{currentPackage.vehicle_use && currentPackage.vehicle_use.returned_at ? 'vehicle-dispatch-returned' : (currentPackage.vehicle_use ? 'vehicle-dispatch-done' : '')}}" bindtap="onOpenVehicleCheckout">{{currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车' : (currentPackage.vehicle_can_return ? '还车登记' : '行程中')) : '出车登记'}}</view>
+      </view>
+      <view class="vehicle-live-actions" wx:if="{{!currentPackage.is_carryover && currentPackage.vehicle_use && !currentPackage.vehicle_use.returned_at}}">
+        <view class="vehicle-live-action" bindtap="onOpenRefuel">{{currentPackage.vehicle.fuel_type === 'electric' ? '充电记录' : '加油记录'}}</view>
+        <view class="vehicle-live-action vehicle-live-danger" bindtap="onOpenVehicleFault">车辆故障</view>
       </view>
     </view>
-  </view>
-  <view class="parts-issue-card" wx:if="{{currentPackage && currentPackage.resource_parts && currentPackage.resource_parts.length}}">
-    <view class="parts-issue-copy">
-      <text class="parts-issue-title">备件现场领用</text>
-      <text class="parts-issue-meta">{{currentPackage.resource_summary.totalKinds}} 种备件 · {{currentPackage.resource_summary.remainingKinds}} 种待领 · 领用后立即扣库</text>
-    </view>
-    <view class="parts-issue-button {{currentPackage.resource_summary.remaining === 0 ? 'parts-issue-done' : ''}}" bindtap="onOpenPartsIssue">
-      {{currentPackage.resource_summary.remaining === 0 ? '已全部领用' : (currentPackage.departure_confirmation && currentPackage.departure_confirmation.parts_confirmed ? '确认领用' : '先确认资源')}}
-    </view>
-  </view>
-  <view class="vehicle-dispatch" wx:if="{{currentPackage.vehicle}}">
-    <view><text class="vehicle-dispatch-title">{{currentPackage.vehicle.plate_no}}</text><text class="vehicle-dispatch-meta {{currentPackage.vehicle.document_warning ? 'vehicle-doc-warning' : ''}}">{{currentPackage.vehicle.document_warning || (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车，行程已归档' : '已出车，待还车验车') : '出发前完成车况检查和里程登记')}}</text></view>
-    <view class="vehicle-dispatch-btn {{currentPackage.vehicle_use && currentPackage.vehicle_use.returned_at ? 'vehicle-dispatch-returned' : (currentPackage.vehicle_use ? 'vehicle-dispatch-done' : '')}}" bindtap="onOpenVehicleCheckout">{{currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车' : '还车登记') : '出车登记'}}</view>
-  </view>
-  <view class="vehicle-live-actions" wx:if="{{currentPackage.vehicle_use && !currentPackage.vehicle_use.returned_at}}">
-    <view class="vehicle-live-action" bindtap="onOpenRefuel">{{currentPackage.vehicle.fuel_type === 'electric' ? '充电记录' : '加油记录'}}</view>
-    <view class="vehicle-live-action vehicle-live-danger" bindtap="onOpenVehicleFault">车辆故障</view>
   </view>
 
   <!-- 站点选择 -->
@@ -60,15 +72,26 @@
           bindtap="onSelectSite" data-id="{{item.id}}">{{item.name}}</view>
   </scroll-view>
 
-  <view wx:if="{{selSite}}" class="site-head">
-    <view class="site-head-info">
-      <text class="site-head-name">{{selSite.name}}</text>
-      <text class="site-head-type">{{selSite.type_cn}}</text>
+  <view wx:if="{{selSite && stationStage}}" class="site-focus">
+    <view class="site-head">
+      <view class="site-head-info">
+        <text class="site-head-name">{{selSite.name}}</text>
+        <text class="site-head-type">{{selSite.type_cn}}</text>
+      </view>
+      <text class="station-stage {{stationStage.cls}}">{{stationStage.label}}</text>
     </view>
-    <view class="site-head-ops">
-      <view class="op" bindtap="onCheckIn">到站打卡</view>
-      <view class="op op-warn" bindtap="onOpenReport">异常上报</view>
-      <view class="op" bindtap="goSite">站点信息</view>
+    <view class="checkin-primary" wx:if="{{stationStage.code === 'unvisited'}}" bindtap="onCheckIn">
+      <text class="checkin-primary-title">到站打卡</text>
+      <text class="checkin-primary-hint">获取当前位置后开始本站巡检</text>
+    </view>
+    <view class="checked-in-summary" wx:else>
+      <text class="checked-in-mark">✓</text>
+      <text>{{stationStage.code === 'local_pending' ? '到站记录已保存，等待联网同步' : '已完成到站打卡，可以开始巡检'}}</text>
+    </view>
+    <view class="site-secondary-actions">
+      <view class="site-secondary-action site-secondary-danger" bindtap="onOpenReport">异常上报</view>
+      <view class="site-secondary-action" bindtap="onOpenPartsApply">备件申请</view>
+      <view class="site-secondary-action" bindtap="goSite">站点信息</view>
     </view>
   </view>
   <view wx:if="{{selSite && selSite.linked_workorders && selSite.linked_workorders.length}}" class="linked-orders">
@@ -76,33 +99,46 @@
     <view class="linked-order" wx:for="{{selSite.linked_workorders}}" wx:key="order_no" data-order-no="{{item.order_no}}" bindtap="onLinkedWorkorder"><text class="linked-order-title">{{item.display_title}}</text><text class="linked-order-status">{{item.status_cn}} ›</text></view>
   </view>
 
-  <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view><view class="sheet" wx:if="{{reportSheet.open}}"><view class="sheet-head"><text class="sheet-title">现场异常上报</text><text class="sheet-close" bindtap="onCloseReport">×</text></view><picker range="{{['感官异常','设备异常','环境异常','违规操作','污染事件']}}" value="{{reportSheet.typeIndex}}" bindchange="onReportType"><view class="reagent-picker">异常类别 ›</view></picker><picker range="{{anomalyCodes}}" range-key="code" value="{{reportSheet.codeIndex}}" bindchange="onReportCode"><view class="reagent-picker">异常编码（可选） ›</view></picker><textarea class="ta" placeholder="说明现场异常及已采取措施" value="{{reportSheet.description}}" bindinput="onReportDescription"/><view class="report-photo" bindtap="onAddReportPhoto">{{reportSheet.photos.length ? '现场照片已上传，点击重拍' : '拍摄现场照片（必填）'}}</view><button class="btn-primary submit-btn" loading="{{reportSheet.submitting}}" bindtap="onSubmitReport">上报并生成工单</button></view>
-
-  <view wx:if="{{selSite && stationStage}}" class="station-panel">
-    <view class="station-panel-main">
-      <text class="station-panel-label">现场执行</text>
-      <text class="station-stage {{stationStage.cls}}">{{stationStage.label}}</text>
+  <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view>
+  <view class="sheet" wx:if="{{reportSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">现场异常上报</text><text class="sheet-close" bindtap="onCloseReport">×</text></view>
+    <picker range="{{['感官异常','设备异常','环境异常','违规操作','污染事件']}}" value="{{reportSheet.typeIndex}}" bindchange="onReportType"><view class="reagent-picker">异常类别 ›</view></picker>
+    <picker range="{{anomalyCodes}}" range-key="code" value="{{reportSheet.codeIndex}}" bindchange="onReportCode"><view class="reagent-picker">异常编码（可选） ›</view></picker>
+    <textarea class="ta" placeholder="说明现场异常及已采取措施" value="{{reportSheet.description}}" bindinput="onReportDescription"/>
+    <view class="report-photo" bindtap="onAddReportPhoto">{{reportSheet.photos.length ? '继续添加现场照片' : '拍摄现场照片（至少 1 张）'}}</view>
+    <view class="report-photo-count" wx:if="{{reportSheet.photos.length}}">已添加 {{reportSheet.photos.length}}/6 张</view>
+    <view class="report-photo-grid" wx:if="{{reportSheet.photos.length}}">
+      <view class="report-photo-item" wx:for="{{reportSheet.photos}}" wx:key="*this">
+        <image class="report-photo-image" src="{{item}}" mode="aspectFill" bindtap="onPreviewReportPhoto" data-url="{{item}}"/>
+        <text class="report-photo-remove" bindtap="onRemoveReportPhoto" data-url="{{item}}">×</text>
+      </view>
     </view>
-    <text class="station-panel-meta">巡检 {{completed}}/{{total}} 项</text>
+    <button class="btn-primary submit-btn" loading="{{reportSheet.submitting}}" bindtap="onSubmitReport">上报并生成工单</button>
+  </view>
+
+  <view class="work-summary" wx:if="{{selSite}}">
+    <view class="work-summary-head">
+      <text class="work-summary-title">现场进度</text>
+      <text class="work-summary-percent">{{completionPercent}}%</text>
+    </view>
+    <view class="work-metrics">
+      <view class="work-metric"><text class="work-metric-value">{{completed}}/{{total}}</text><text class="work-metric-label">检查项</text></view>
+      <view class="work-metric"><text class="work-metric-value {{photoProgress.missing > 0 ? 'metric-danger' : ''}}">{{photoProgress.taken}}/{{photoProgress.req}}</text><text class="work-metric-label">照片</text></view>
+      <view class="work-metric"><text class="work-metric-value {{abnormalCount > 0 ? 'metric-danger' : ''}}">{{abnormalCount}}</text><text class="work-metric-label">异常</text></view>
+    </view>
+    <view class="progress-bar"><view class="progress-fill" style="width:{{total? completed/total*100 : 0}}%"></view></view>
   </view>
   <view wx:if="{{selSite}}" class="reagent-entry" bindtap="onOpenReagentSheet">
     <view><text class="reagent-title">现场试剂</text><text class="reagent-meta">更换后需完成标定</text></view>
-    <text class="reagent-action">{{reagents.length ? '处理 ›' : '暂无记录'}}</text>
+    <text class="reagent-action">{{reagentAction}}</text>
   </view>
-
-  <view class="progress" wx:if="{{selSite}}">
-    <view class="progress-bar"><view class="progress-fill" style="width:{{total? completed/total*100 : 0}}%"></view></view>
-    <text class="progress-text">已完成 {{completed}}/{{total}}</text>
-  </view>
-
-  <!-- 拍照进度（站点级） -->
-  <view class="photo-progress" wx:if="{{selSite && photoProgress.req > 0}}">
-    <text class="photo-progress-text">📷 需拍 {{photoProgress.req}} 张 · 已拍 {{photoProgress.taken}} 张<text wx:if="{{photoProgress.missing > 0}}" class="photo-missing"> · 缺 {{photoProgress.missing}} 张</text></text>
+  <view class="work-locked" wx:if="{{selSite && stationStage.code === 'unvisited'}}">
+    完成到站打卡后即可填写检查项
   </view>
 
   <!-- 分类与检查项 -->
   <block wx:if="{{categories.length}}">
-    <view class="cat" wx:for="{{categories}}" wx:key="category" wx:for-item="cat">
+    <view class="cat {{stationStage.code === 'unvisited' ? 'cat-locked' : ''}}" wx:for="{{categories}}" wx:key="category" wx:for-item="cat">
       <view class="cat-head">
         <text class="cat-name">{{cat.category_cn}}</text>
         <text class="cat-count">{{cat.completed}}/{{cat.total}}</text>
@@ -163,6 +199,23 @@
       <text class="parts-sheet-unit">{{part.unit || '件'}}</text>
     </view>
     <button class="btn-primary submit-btn" loading="{{partsIssueSheet.submitting}}" disabled="{{partsIssueSheet.submitting}}" bindtap="onSubmitPartsIssue">确认领用并扣库</button>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onClosePartsApply"></view>
+  <view class="sheet" wx:if="{{partsApply.open}}">
+    <view class="sheet-head"><text class="sheet-title">备品备件需求</text><text class="sheet-close" bindtap="onClosePartsApply">×</text></view>
+    <view class="parts-linked-site">关联站点：{{selSite.name}}</view>
+    <picker mode="selector" range="{{partsFulfillmentOptions}}" range-key="label" value="{{partsApply.fulfillmentIndex}}" bindchange="onPartsFulfillmentPick"><view class="field-picker"><text>处理方式</text><text>{{partsFulfillmentOptions[partsApply.fulfillmentIndex].label}} ›</text></view></picker>
+    <view class="parts-route-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">库存领用批准后不锁库，现场实际拿到时再扣库。</view>
+    <view class="parts-route-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">附近可以买到时，先电话确认，回来补票据、金额和领用记录。</view>
+    <view class="parts-route-note" wx:else>无法本地采购时走厂家订购，到货后再确认入库或现场直用。</view>
+    <picker wx:if="{{partsApply.fulfillment_type === 'stock'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick"><view class="field-picker"><text>库存备件</text><text>{{partsOptions[partsApply.index].label}}</text></view></picker>
+    <view class="parts-form-field"><text class="parts-form-label">备件名称</text><input class="parts-form-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
+    <view class="parts-form-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="parts-form-label">规格型号</text><input class="parts-form-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/></view>
+    <view class="parts-form-field"><text class="parts-form-label">数量</text><input class="parts-form-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
+    <view class="parts-form-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="parts-form-label">预计金额（可不填）</text><input class="parts-form-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/></view>
+    <view class="parts-form-field"><text class="parts-form-label">申请事由</text><textarea class="parts-form-input parts-form-textarea" placeholder="说明现场发现的问题、是否影响运行" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
+    <button class="btn-primary submit-btn" loading="{{partsApply.submitting}}" disabled="{{partsApply.submitting}}" bindtap="onSubmitPartsApply">提交备件需求</button>
   </view>
 
   <view class="sheet-mask" wx:if="{{refuelSheet.open}}" bindtap="onCloseRefuel"></view>

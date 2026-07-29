@@ -54,14 +54,12 @@
       <text class="package-label">顺路工单</text>
       <text class="package-value">{{workPackage.readiness.linked_workorders}} 张</text>
     </view>
+    <view class="package-start-action" bindtap="goInspection">进入现场作业</view>
   </view>
 
   <!-- 我的计划（快捷入口） -->
   <view class="card plan-entry" bindtap="goPlan">
-    <view class="plan-entry-l">
-      <text class="plan-entry-icon">📋</text>
-      <text class="plan-entry-label">我的计划</text>
-    </view>
+    <text class="plan-entry-label">我的计划</text>
     <text class="plan-entry-r">排程 · 审批进度 ›</text>
   </view>
 
@@ -87,6 +85,7 @@
       <view class="site-card-main">
         <text class="site-card-name">{{item.site_name}}</text>
         <text class="site-card-type">{{item.site_type_cn}}</text>
+        <text class="site-carryover" wx:if="{{item.has_carryover}}">补做 · 昨日遗留 {{item.carryover_items}} 项</text>
       </view>
       <view class="site-card-foot">
         <text class="site-card-num">{{item.pending_items}}</text>

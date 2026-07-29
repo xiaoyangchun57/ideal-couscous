@@ -14,6 +14,10 @@ const selected = selectExecutionSite(packages, 11, 22);
 assert.equal(selected.currentPackage.plan_id, 12);
 assert.equal(selected.site.site_id, 22);
 
+const selectedFromHome = selectExecutionSite(packages, null, '22');
+assert.equal(selectedFromHome.currentPackage.plan_id, 12);
+assert.equal(selectedFromHome.site.site_id, 22);
+
 assert.deepEqual(
   photoRequirement(2, 1, 0),
   { required: 2, captured: 1, missing: 1, ready: false },

@@ -14,7 +14,6 @@ import {
   SettingOutlined,
   ReloadOutlined,
   ExperimentOutlined,
-  PlusOutlined,
   EditOutlined,
   DeleteOutlined,
   UserOutlined,
@@ -715,10 +714,6 @@ export default function AlertsPage() {
   const [urgeTarget, setUrgeTarget] = useState(null);
   const [urgeForm] = Form.useForm();
 
-  // Manual report state
-  const [manualAlertOpen, setManualAlertOpen] = useState(false);
-  const [manualForm] = Form.useForm();
-
   // Convert confirm modal state (replaces Modal.confirm for React 19 compat)
   const [convertModalOpen, setConvertModalOpen] = useState(false);
   const [convertTarget, setConvertTarget] = useState(null);
@@ -758,14 +753,12 @@ export default function AlertsPage() {
     setSearchText(urlSearch);
   }, [searchParams]);
 
-  // 兼容旧“异常上报”入口：进入事件中心后直接打开人工上报动作。
+  // 兼容旧入口：人工异常应从现场执行包发起，网页端仅提供证据审阅与闭环。
   useEffect(() => {
     if (searchParams.get('source') === 'manual') {
-      setPrimaryTab('events');
-      setActiveTab('alerts');
-      setManualAlertOpen(true);
+      navigate('/reports', { replace: true });
     }
-  }, [searchParams]);
+  }, [searchParams, navigate]);
 
   // ---- Compute counts from the full list -----------------------------------
   useEffect(() => {
@@ -1244,9 +1237,6 @@ export default function AlertsPage() {
                   <Button icon={<ReloadOutlined />} onClick={resetFilters}>
                     重置
                   </Button>
-                  <Button icon={<PlusOutlined />} onClick={() => setManualAlertOpen(true)} type="primary" ghost>
-                    人工上报
-                  </Button>
                   <Button onClick={fetchAlerts} loading={loading} style={{ borderRadius: 8 }}>
                     刷新
                   </Button>
@@ -1626,38 +1616,6 @@ export default function AlertsPage() {
         </div>
       </Modal>
 
-      {/* 人工上报 Modal */}
-      <Modal open={manualAlertOpen} title="人工上报" onCancel={() => setManualAlertOpen(false)} okText="提交" cancelText="取消" onOk={async () => {
-        try {
-          const v = await manualForm.validateFields();
-          v.reporter_id = 1;
-          await api.post('/manual-reports', v);
-          message.success('已上报，告警+工单已生成');
-          setManualAlertOpen(false);
-          manualForm.resetFields();
-          fetchAlerts();
-        } catch (e) { message.error('提交失败：' + e.message); }
-      }} okText="提交" width={520} destroyOnClose>
-        <Form form={manualForm} layout="vertical" initialValues={{ report_type: 'sensory' }}>
-          <Form.Item name="report_type" label="类型" rules={[{ required: true }]}>
-            <Select options={[
-              { value: 'sensory', label: '感官异常' }, { value: 'equipment', label: '设备异常' },
-              { value: 'environment', label: '环境异常' }, { value: 'violation', label: '违规操作' },
-              { value: 'pollution', label: '污染事件' },
-            ]} />
-          </Form.Item>
-          <Form.Item name="site_id" label="关联站点">
-            <Select showSearch optionFilterProp="label" allowClear placeholder="可选"
-              options={sites.map(s => ({ value: s.id, label: s.name }))} />
-          </Form.Item>
-          <Form.Item name="description" label="现场描述" rules={[{ required: true }]}>
-            <Input.TextArea rows={3} placeholder="请详细描述异常情况" />
-          </Form.Item>
-          <Form.Item name="photo_urls" label="照片链接（每行一个）">
-            <Input.TextArea rows={2} placeholder="https://..." />
-          </Form.Item>
-        </Form>
-      </Modal>
     </div>
   );
 }

@@ -11,6 +11,61 @@ function vehicleLabel(item) {
   return (item.plate_no || '未指定车辆') + (item.model ? (' · ' + item.model) : '');
 }
 
+function dateOnly(value) {
+  return value ? String(value).slice(0, 10) : '';
+}
+
+function cleanPurpose(item) {
+  const destination = item.destination || '目的地待定';
+  const reason = String(item.reason || '').replace(/巡检计划#\d+用车/g, '巡检用车').replace(/计划#\d+/g, '计划').trim();
+  return destination + (reason ? (' · ' + reason) : '');
+}
+
+function decorateApplication(item, use) {
+  const state = APPLICATION_STATUS[item.status] || [item.status || '未知', 'gray'];
+  const today = todayStr();
+  const useDate = dateOnly(item.start_at);
+  let statusCn = state[0];
+  let statusCls = state[1];
+  let canCheckout = false;
+  if (use) {
+    statusCn = use.returned_at ? '已归档' : '使用中';
+    statusCls = use.returned_at ? 'green' : 'brand';
+  } else if (item.status === 'approved') {
+    if (useDate && useDate < today) {
+      statusCn = '已过期';
+      statusCls = 'gray';
+    } else if (useDate && useDate > today) {
+      statusCn = '已安排';
+      statusCls = 'gray';
+    } else {
+      statusCn = '待出车';
+      statusCls = 'brand';
+      canCheckout = true;
+    }
+  }
+  return Object.assign({}, item, {
+    vehicle_label: vehicleLabel(item),
+    purpose_label: cleanPurpose(item),
+    status_cn: statusCn,
+    status_cls: statusCls,
+    can_checkout: canCheckout
+  });
+}
+
+function decorateUse(item) {
+  const tripEnd = dateOnly(item.end_at);
+  const isPlanTrip = String(item.reason || '').indexOf('巡检计划#') >= 0;
+  const canReturn = !isPlanTrip || !tripEnd || tripEnd <= todayStr() || item.vehicle_status === 'restricted';
+  return Object.assign({}, item, {
+    vehicle_label: vehicleLabel(item),
+    is_plan_trip: isPlanTrip,
+    trip_end_date: tripEnd,
+    plan_schedule_id: item.plan_schedule_id || null,
+    can_return: canReturn
+  });
+}
+
 function inspectionItems() {
   return ['驾驶证随车', '保险与年检', '灯光与信号灯', '后视镜', '轮胎及胎压', '车内卫生']
     .map(key => ({ key, label: key, status: 'normal', remark: '' }));
@@ -36,17 +91,12 @@ Page({
   load(done) {
     Promise.all([api.vehicleApplications(), api.vehicleUseRecords(), api.vehicles()])
       .then(([applications, uses, vehicles]) => {
-        const decoratedUses = (uses || []).map(item => Object.assign({}, item, { vehicle_label: vehicleLabel(item) }));
+        const decoratedUses = (uses || []).map(decorateUse);
         const useByApplication = {};
         decoratedUses.forEach(item => { useByApplication[item.application_id] = item; });
         const decoratedApplications = (applications || []).map(item => {
-          const state = APPLICATION_STATUS[item.status] || [item.status || '未知', 'gray'];
           const use = useByApplication[item.id];
-          return Object.assign({}, item, {
-            vehicle_label: vehicleLabel(item),
-            status_cn: use ? (use.returned_at ? '已归档' : '使用中') : state[0],
-            status_cls: use ? (use.returned_at ? 'green' : 'brand') : state[1]
-          });
+          return decorateApplication(item, use);
         });
         this.setData({
           loaded: true,
@@ -63,6 +113,7 @@ Page({
   onOpenCheckout(e) {
     const application = (this.data.applications || []).find(item => String(item.id) === String(e.currentTarget.dataset.id));
     if (!application || !application.vehicle_id) { wx.showToast({ title: '该安排尚未指定车辆', icon: 'none' }); return; }
+    if (!application.can_checkout) { wx.showToast({ title: application.status_cn || '当前不可出车', icon: 'none' }); return; }
     const vehicle = (this.data.vehicles || []).find(item => String(item.id) === String(application.vehicle_id));
     api.vehicleInspectionTemplate().then(items => {
       this.setData({ checkoutSheet: { open: true, application, mileage: String((vehicle && vehicle.current_mileage) || ''), remarks: '', items: items || inspectionItems(), submitting: false } });
@@ -110,8 +161,18 @@ Page({
 
   onOpenReturn() {
     const use = this.data.activeUse; if (!use) return;
+    if (!use.can_return) { wx.showToast({ title: '计划行程未结束，到站打卡会继续记录行程节点', icon: 'none' }); return; }
     api.vehicleInspectionTemplate().then(items => this.setData({ returnSheet: { open: true, mileage: String(use.start_mileage || ''), remarks: '', items: items || inspectionItems(), submitting: false } }))
       .catch(() => this.setData({ returnSheet: { open: true, mileage: String(use.start_mileage || ''), remarks: '', items: inspectionItems(), submitting: false } }));
+  },
+  onVehiclePrimaryAction() {
+    if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
+    else this.onOpenPlanChange();
+  },
+  onOpenPlanChange() {
+    const use = this.data.activeUse;
+    if (!use || !use.plan_schedule_id) { wx.showToast({ title: '未找到关联巡检计划', icon: 'none' }); return; }
+    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + use.plan_schedule_id });
   },
   onCloseReturn() { this.setData({ 'returnSheet.open': false }); },
   onReturnMileage(e) { this.setData({ 'returnSheet.mileage': e.detail.value }); },
@@ -119,6 +180,7 @@ Page({
   onReturnItem(e) { const { index, status } = e.currentTarget.dataset; this.setData({ ['returnSheet.items[' + index + '].status']: status }); },
   onSubmitReturn() {
     const use = this.data.activeUse; const sheet = this.data.returnSheet; const mileage = Number(sheet.mileage);
+    if (use && !use.can_return) { wx.showToast({ title: '计划行程未结束，请先发起计划变更', icon: 'none' }); return; }
     if (!use || !Number.isFinite(mileage) || mileage < Number(use.start_mileage || 0)) { wx.showToast({ title: '结束里程不能小于出车里程', icon: 'none' }); return; }
     const blocked = sheet.items.some(item => item.status === 'blocked'); const attention = sheet.items.some(item => item.status === 'attention');
     if ((blocked || attention) && !sheet.remarks.trim()) { wx.showToast({ title: '发现异常时请填写现场说明', icon: 'none' }); return; }

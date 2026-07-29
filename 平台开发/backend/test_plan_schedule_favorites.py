@@ -79,6 +79,9 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                 '2026-07-21': {'sites': [10], 'notes': '先做一号站'},
                 '2026-07-23': {'sites': [11], 'notes': ''},
             }
+            second_plan_data = {
+                '2026-07-28': {'sites': [10, 11], 'notes': '两个站同日巡检'},
+            }
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
                  spare_parts,work_order_ids,status,remarks,tasks_generated)
@@ -86,6 +89,12 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                 (json.dumps(plan_data), json.dumps({'2026-07-21': 7}),
                  json.dumps([{'part_id': 8, 'quantity': 2, 'part_name': '滤芯'}]),
                  json.dumps([99]), '固定路线'))
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,remarks,tasks_generated)
+                VALUES (2,2,'weekly','2026-07-27','2026-08-02',?,?,?,?, 'approved',?,1)''',
+                (json.dumps(second_plan_data), json.dumps({'2026-07-28': 7}),
+                 json.dumps([]), json.dumps([]), '另一条固定路线'))
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -129,10 +138,13 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                                  json={'schedule_id': 1})
         duplicate = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),
                                      json={'schedule_id': 1})
+        second = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),
+                                  json={'schedule_id': 2})
         other = self.client.post('/api/plan-schedule-favorites', headers=self.headers('other-token'),
                                  json={'schedule_id': 1})
         self.assertEqual(first.status_code, 201, first.json)
         self.assertEqual(duplicate.status_code, 409, duplicate.json)
+        self.assertEqual(second.status_code, 201, second.json)
         self.assertEqual(other.status_code, 403, other.json)
 
 

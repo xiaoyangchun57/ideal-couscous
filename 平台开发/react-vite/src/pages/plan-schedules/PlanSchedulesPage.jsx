@@ -587,9 +587,18 @@ export default function PlanSchedulesPage() {
                         <Text strong style={{ fontSize: 13 }}>{date}</Text>
                         <Tag style={{ fontSize: 10 }}>{weekdayOf(date)}</Tag>
                       </Space>
-                      {detail.vehicle_days?.[date] && (
-                        <Space size={4}><CarOutlined style={{ color: tokens.colorTextSecondary }} /><Text style={{ fontSize: 12 }}>用车 #{detail.vehicle_days[date]}</Text></Space>
-                      )}
+                      {detail.vehicle_days?.[date] && (() => {
+                        const vehicleId = detail.vehicle_days[date];
+                        const vehicle = detail.vehicle_map?.[vehicleId];
+                        return (
+                          <Space size={4}>
+                            <CarOutlined style={{ color: tokens.colorTextSecondary }} />
+                            <Text style={{ fontSize: 12 }}>
+                              {vehicle?.plate_no || `车辆已删除（原编号 #${vehicleId}）`}
+                            </Text>
+                          </Space>
+                        );
+                      })()}
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                       {(dayData.sites || []).slice(0, 10).map(sid => {

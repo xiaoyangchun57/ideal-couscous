@@ -20,6 +20,7 @@ const EvaluationPage = lazy(() => import('./pages/evaluation/EvaluationPage'));
 const VehiclesPage = lazy(() => import('./pages/vehicles/VehiclesPage'));
 const ReagentMasterPage = lazy(() => import('./pages/reagents/ReagentMasterPage'));
 const PlanSchedulesPage = lazy(() => import('./pages/plan-schedules/PlanSchedulesPage'));
+const ReportsPage = lazy(() => import('./pages/reports/ReportsPage'));
 
 function RouteFallback() {
   return (
@@ -51,6 +52,9 @@ function AppRoutes() {
         <Route path="alerts" element={<Deferred><AlertsPage /></Deferred>} />
         <Route path="workorders" element={<Deferred><WorkOrdersPage /></Deferred>} />
         <Route path="plan-schedules" element={<Deferred><PlanSchedulesPage /></Deferred>} />
+        <Route path="reports" element={(
+          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><ReportsPage /></Deferred></ProtectedRoute>
+        )} />
         {/* 旧 inspection-v2 计划链路已停用；执行记录统一从计划调度详情查看。 */}
         <Route path="maintenance" element={<Navigate to="/plan-schedules" replace />} />
         <Route path="audit" element={(
@@ -68,7 +72,6 @@ function AppRoutes() {
         <Route path="evaluation" element={(
           <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><EvaluationPage /></Deferred></ProtectedRoute>
         )} />
-        <Route path="reports" element={<Navigate to="/alerts?source=manual" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

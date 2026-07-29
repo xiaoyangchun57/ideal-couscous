@@ -24,6 +24,7 @@ export const routeMeta = {
   '/analysis': { title: '数据分析', group: '查询与分析', icon: <BarChartOutlined /> },
   '/workorders': { title: '工单', group: '任务闭环', icon: <FileTextOutlined /> },
   '/plan-schedules': { title: '巡检计划', group: '任务闭环', icon: <ScheduleOutlined /> },
+  '/reports': { title: '异常闭环', group: '任务闭环', icon: <FileTextOutlined /> },
   '/audit': { title: '统一审核', group: '任务闭环', icon: <AuditOutlined /> },
   '/sites': { title: '站点全景', group: '站点与资产', icon: <EnvironmentOutlined /> },
   '/equipment': { title: '设备与物资', group: '站点与资产', icon: <ToolOutlined /> },
@@ -45,6 +46,7 @@ const pageRoles = {
   '/analysis': ['admin', 'reviewer'],
   '/workorders': ['admin', 'operator'],
   '/plan-schedules': ['admin', 'operator'],
+  '/reports': ['admin', 'reviewer'],
   '/equipment': ['admin'],
   '/vehicles': ['admin'],
   '/audit': ['admin', 'reviewer'],
@@ -64,7 +66,7 @@ export function getNavigation(roles) {
     {
       key: 'monitoring',
       label: '任务闭环',
-      children: ['/workorders', '/plan-schedules', '/audit'],
+      children: ['/workorders', '/plan-schedules', '/reports', '/audit'],
     },
     {
       key: 'operations',

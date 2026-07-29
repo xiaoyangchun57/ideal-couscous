@@ -18,10 +18,19 @@
 .package-value { font-size: 25rpx; color: var(--text); font-weight: 500; }
 .package-ready { color: var(--brand); }
 .package-warn { color: var(--orange); }
+.package-start-action {
+  margin: 18rpx 0 10rpx;
+  height: 72rpx;
+  border-radius: 10rpx;
+  background: var(--brand);
+  color: #fff;
+  font-size: 27rpx;
+  font-weight: 500;
+  line-height: 72rpx;
+  text-align: center;
+}
 
 .plan-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 24rpx 28rpx; }
-.plan-entry-l { display: flex; align-items: center; gap: 12rpx; }
-.plan-entry-icon { font-size: 32rpx; }
 .plan-entry-label { font-size: 28rpx; font-weight: 500; color: var(--text); }
 .plan-entry-r { font-size: 23rpx; color: var(--text-3); }
 
@@ -40,6 +49,7 @@
 .site-card-main { padding-left: 14rpx; }
 .site-card-name { font-size: 28rpx; font-weight: 500; color: var(--text); display: block; }
 .site-card-type { font-size: 22rpx; color: var(--text-3); margin-top: 8rpx; display: block; }
+.site-carryover { display: block; margin-top: 10rpx; color: var(--red); font-size: 21rpx; }
 .site-card-foot { margin-top: 24rpx; padding-left: 14rpx; display: flex; align-items: baseline; }
 .site-card-num { font-size: 40rpx; font-weight: 500; color: var(--brand); }
 .site-card-unit { font-size: 22rpx; color: var(--text-3); margin-left: 8rpx; }

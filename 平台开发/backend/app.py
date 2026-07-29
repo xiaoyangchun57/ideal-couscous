@@ -12734,13 +12734,14 @@ def mobile_my_today():
         allowed = _filter_site_ids()  # None=全部（管理员/无绑定），否则为可见站点列表
 
         # 首页不能把同一站点其他人员的任务混入“我的今日任务”。
-        insp_q = """SELECT pi.*, s.name as site_name, s.code as site_code,
+        insp_q = """SELECT pi.*, ip.generate_date AS task_date,
+                           s.name as site_name, s.code as site_code,
                            s.gps_lat as lat, s.gps_lng as lng, s.type as site_type
                     FROM insp_plan_items pi
                     JOIN insp_plans ip ON ip.id = pi.plan_id
                     JOIN sites s ON s.id = pi.site_id
                     LEFT JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-                    WHERE pi.result IS NULL AND ip.assignee_id=? AND date(ip.generate_date)=?
+                    WHERE pi.result IS NULL AND ip.assignee_id=? AND date(ip.generate_date)<=?
                       AND ip.status IN ('active','completed')
                       AND COALESCE(pi.execution_status, 'active')='active'
                       AND (ip.plan_schedule_id IS NULL OR ps.status='approved')"""
@@ -12766,6 +12767,7 @@ def mobile_my_today():
                     'site_type': item['site_type'],
                     'items': [],
                     'categories': {},
+                    'carryover_items': 0,
                 }
             freq_cn = _FREQ_CN.get(item['frequency'] or '', item['frequency'] or '')
             item_dict = {
@@ -12776,12 +12778,15 @@ def mobile_my_today():
                 'frequency': item['frequency'] or '',
                 'frequency_cn': freq_cn,
                 'result': item['result'],
+                'task_date': item['task_date'],
                 'calibrator': item['calibrator'],
                 'calibration_values': item['calibration_values'],
                 'photo_urls': item['photo_urls'],
                 'remark': item['remark'],
             }
             site_tasks[sid]['items'].append(item_dict)
+            if str(item['task_date'])[:10] < today:
+                site_tasks[sid]['carryover_items'] += 1
             cat = item['category'] or '其他'
             if cat not in site_tasks[sid]['categories']:
                 site_tasks[sid]['categories'][cat] = []
@@ -12791,11 +12796,12 @@ def mobile_my_today():
         stat_q = """SELECT pi.result FROM insp_plan_items pi
                     JOIN insp_plans ip ON ip.id=pi.plan_id
                     LEFT JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-                    WHERE ip.assignee_id=? AND date(ip.generate_date)=?
+                    WHERE ip.assignee_id=?
+                      AND (date(ip.generate_date)=? OR (date(ip.generate_date)<? AND pi.result IS NULL))
                       AND ip.status IN ('active','completed')
                       AND COALESCE(pi.execution_status, 'active')='active'
                       AND (ip.plan_schedule_id IS NULL OR ps.status='approved')"""
-        stat_params = [user['id'], today]
+        stat_params = [user['id'], today, today]
         if allowed is not None:
             ph = ','.join('?' * len(allowed))
             stat_q += f" AND pi.site_id IN ({ph})"
@@ -12826,9 +12832,12 @@ def mobile_my_today():
                 'site_type': st['site_type'],
                 'site_type_cn': _TM_CN.get(st['site_type'], st['site_type']),
                 'pending_items': len(st['items']),
+                'carryover_items': st['carryover_items'],
+                'has_carryover': st['carryover_items'] > 0,
                 'categories': cats_summary,
             })
-        sites_list.sort(key=lambda x: x['site_name'])
+        # Put carryover work before regular pending work so a prior-day site is never hidden by name sorting.
+        sites_list.sort(key=lambda x: (not x.get('has_carryover'), x['site_name']))
 
         # ---- 2. 待处理工单：仅本人接收的工单，避免把站点全部工单当作待办 ----
         wo_q = """SELECT order_no, title, status, source, level, site_id,
@@ -13170,7 +13179,7 @@ def _effective_site_linked_workorders(db, site_id, limit=5):
 @app.route('/api/mobile/today-execution')
 @login_required
 def mobile_today_execution():
-    """移动端唯一巡检入口：当前用户今日、已审批排程生成的执行包。"""
+    """移动端巡检入口：今日执行包，以及此前仍有未完成项的结转执行包。"""
     user = g.current_user
     today = request.args.get('date') or datetime.now().strftime('%Y-%m-%d')
     with get_db() as db:
@@ -13178,19 +13187,26 @@ def mobile_today_execution():
                 ip.plan_schedule_id, ps.schedule_type, ps.vehicle_days, ps.spare_parts, ps.work_order_ids,
                 ps.version, ps.remarks
             FROM insp_plans ip JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-            WHERE ip.assignee_id=? AND ip.generate_date=? AND ps.status='approved'
+            WHERE ip.assignee_id=? AND date(ip.generate_date)<=? AND ps.status='approved'
               AND ip.status IN ('active','completed')
-            ORDER BY ip.id""", (user['id'], today)).fetchall()
+              AND (date(ip.generate_date)=? OR EXISTS (
+                    SELECT 1 FROM insp_plan_items pending
+                    WHERE pending.plan_id=ip.id AND pending.result IS NULL
+                      AND COALESCE(pending.execution_status,'active')='active'
+              ))
+            ORDER BY date(ip.generate_date), ip.id""", (user['id'], today, today)).fetchall()
         packages = []
         for row in rows:
             p = dict(row)
+            work_date = str(p['generate_date'])[:10]
+            is_carryover = work_date < today
             try: vehicle_days = json.loads(p['vehicle_days'] or '{}')
             except Exception: vehicle_days = {}
             try: parts = json.loads(p['spare_parts'] or '[]')
             except Exception: parts = []
             try: order_ids = json.loads(p['work_order_ids'] or '[]')
             except Exception: order_ids = []
-            vehicle_id = vehicle_days.get(today)
+            vehicle_id = vehicle_days.get(work_date)
             vehicle = db.execute("SELECT id, plate_no, model, status, current_mileage FROM vehicles WHERE id=?", (vehicle_id,)).fetchone() if vehicle_id else None
             vehicle_data = dict(vehicle) if vehicle else None
             if vehicle_data:
@@ -13203,16 +13219,20 @@ def mobile_today_execution():
                     vehicle_data['document_warning'] = '证照已到期，禁止出车'
                 elif document_state['due_soon']:
                     vehicle_data['document_warning'] = '证照30天内到期，请关注'
-            vehicle_application = db.execute("""SELECT id FROM vehicle_applications
-                WHERE vehicle_id=? AND applicant_id=? AND date(start_at)=? AND status='approved'
-                  AND reason LIKE ? ORDER BY id DESC LIMIT 1""",
-                (vehicle_id, user['id'], today, f'%计划#{p["plan_schedule_id"]}%')).fetchone() if vehicle_id else None
+            # 一个巡检计划中的同一车辆是一段连续行程，而不是每天重复出、还车。
+            # 因此工作日只需落在申请的起止区间内即可取得同一用车单。
+            vehicle_application = db.execute("""SELECT id, date(start_at) AS trip_start_date,
+                    date(end_at) AS trip_end_date FROM vehicle_applications
+                WHERE vehicle_id=? AND applicant_id=? AND date(start_at)<=? AND date(end_at)>=?
+                  AND status='approved' AND reason LIKE ? ORDER BY id DESC LIMIT 1""",
+                (vehicle_id, user['id'], work_date, work_date,
+                 f'%计划#{p["plan_schedule_id"]}%')).fetchone() if vehicle_id else None
             vehicle_use = db.execute("""SELECT id, start_mileage, end_mileage, returned_at, status
                 FROM vehicle_use_records WHERE application_id=? ORDER BY id DESC LIMIT 1""",
                 (vehicle_application['id'],)).fetchone() if vehicle_application else None
             confirmation = db.execute("""SELECT vehicle_confirmed, parts_confirmed, note, confirmed_at
                 FROM plan_departure_confirmations WHERE schedule_id=? AND user_id=? AND work_date=?""",
-                (p['plan_schedule_id'], user['id'], today)).fetchone()
+                (p['plan_schedule_id'], user['id'], work_date)).fetchone()
             resource_parts = _ps_resource_parts(db, p['plan_schedule_id'])
             site_rows = db.execute("""SELECT pi.site_id, s.name, s.type, s.code,
                     COUNT(*) AS total, SUM(CASE WHEN pi.result IS NOT NULL THEN 1 ELSE 0 END) AS completed,
@@ -13223,6 +13243,8 @@ def mobile_today_execution():
             sites = []
             for site_row in site_rows:
                 site_item = dict(site_row)
+                if is_carryover and int(site_item['completed'] or 0) >= int(site_item['total'] or 0):
+                    continue
                 checkin = db.execute("""SELECT 1 FROM inspection_checkins
                     WHERE site_id=? AND user_id=? AND date(check_time)=date('now','localtime')
                     LIMIT 1""", (site_item['site_id'], user['id'])).fetchone()
@@ -13230,13 +13252,20 @@ def mobile_today_execution():
                 site_item['linked_workorders'] = _effective_site_linked_workorders(
                     db, site_item['site_id'])
                 sites.append(site_item)
+            if not sites:
+                continue
             packages.append({
                 'plan_id': p['id'], 'schedule_id': p['plan_schedule_id'], 'schedule_type': p['schedule_type'],
                 'version': p['version'], 'status': p['status'], 'progress': p['completion_rate'],
+                'work_date': work_date, 'is_carryover': is_carryover,
+                'overdue_days': (datetime.strptime(today, '%Y-%m-%d') - datetime.strptime(work_date, '%Y-%m-%d')).days,
                 'vehicle': vehicle_data, 'spare_parts': parts, 'work_order_ids': order_ids,
                 'resource_parts': resource_parts,
                 'vehicle_application_id': vehicle_application['id'] if vehicle_application else None,
                 'vehicle_use': dict(vehicle_use) if vehicle_use else None,
+                'vehicle_trip_start_date': vehicle_application['trip_start_date'] if vehicle_application else None,
+                'vehicle_trip_end_date': vehicle_application['trip_end_date'] if vehicle_application else None,
+                'vehicle_can_return': bool(vehicle_application and work_date >= vehicle_application['trip_end_date']),
                 'departure_confirmation': dict(confirmation) if confirmation else None,
                 'remarks': p['remarks'], 'sites': sites,
             })
@@ -13327,15 +13356,12 @@ def mobile_issue_execution_parts(plan_id):
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>')
 @login_required
 def mobile_execution_site_tasks(plan_id, site_id):
-    """只允许从今日已批准执行包进入单站检查，不再暴露按任意站点取任务的入口。"""
+    """只允许从今日执行包或历史未完成结转包进入单站检查。"""
     user = g.current_user
     with get_db() as db:
-        plan = db.execute("""SELECT ip.*, ps.status AS schedule_status FROM insp_plans ip
-            JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-            WHERE ip.id=? AND ip.assignee_id=? AND ps.status='approved' AND ip.status IN ('active','completed')""",
-            (plan_id, user['id'])).fetchone()
-        if not plan:
-            return jsonify({'error': '该执行任务不存在、未批准或不属于当前用户'}), 404
+        if not _mobile_execution_site_access(db, plan_id, site_id, user):
+            return jsonify({'error': '该执行任务不存在、未批准、不属于当前用户或已完成归档'}), 404
+        plan = db.execute("SELECT generate_date FROM insp_plans WHERE id=?", (plan_id,)).fetchone()
         site = db.execute("SELECT * FROM sites WHERE id=?", (site_id,)).fetchone()
         if not site:
             return jsonify({'error': '站点不存在'}), 404
@@ -13345,17 +13371,23 @@ def mobile_execution_site_tasks(plan_id, site_id):
         return jsonify({'site': {'id': site['id'], 'name': site['name'], 'code': site['code'],
                          'lat': site['gps_lat'], 'lng': site['gps_lng'], 'type': site['type'],
                          'type_cn': {'water_quality':'水质自动站','manual_station':'水质手动站','drinking_source':'饮用水源站','cross_boundary':'跨界断面站','groundwater':'地下水站'}.get(site['type'], site['type'])},
-                        'plan_id': plan_id, 'categories': categories, 'total': total, 'completed': completed})
+                        'plan_id': plan_id, 'work_date': str(plan['generate_date'])[:10] if plan else '',
+                        'is_carryover': bool(plan and str(plan['generate_date'])[:10] < datetime.now().strftime('%Y-%m-%d')),
+                        'categories': categories, 'total': total, 'completed': completed})
 
 
 def _mobile_execution_site_access(db, plan_id, site_id, user):
-    """验证移动端现场操作只来自本人当天、已批准的执行包。"""
+    """验证现场操作来自本人今日执行包或尚未完成的历史结转执行包。"""
     today = datetime.now().strftime('%Y-%m-%d')
     plan = db.execute("""SELECT ip.id FROM insp_plans ip
         JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-        WHERE ip.id=? AND ip.assignee_id=? AND ip.generate_date=?
-          AND ip.status IN ('active','completed') AND ps.status='approved'""",
-        (plan_id, user['id'], today)).fetchone()
+        WHERE ip.id=? AND ip.assignee_id=? AND date(ip.generate_date)<=?
+          AND ip.status IN ('active','completed') AND ps.status='approved'
+          AND (date(ip.generate_date)=? OR EXISTS (
+                SELECT 1 FROM insp_plan_items pending
+                WHERE pending.plan_id=ip.id AND pending.result IS NULL
+                  AND COALESCE(pending.execution_status,'active')='active'
+          ))""", (plan_id, user['id'], today, today)).fetchone()
     if not plan:
         return False
     return bool(db.execute("""SELECT 1 FROM insp_plan_items
@@ -13782,7 +13814,8 @@ def mobile_upload_site_photo():
                 return jsonify(cached)
         photo_dir = os.path.join(UPLOAD_DIR, 'site_photos')
         os.makedirs(photo_dir, exist_ok=True)
-        filename = f"site_{site_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+        # A timestamp alone collides when several field photos are uploaded in one second.
+        filename = f"site_{site_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
         filepath = os.path.join(photo_dir, filename)
         with open(filepath, 'wb') as f:
             f.write(img_data)
@@ -13811,6 +13844,39 @@ def mobile_upload_site_photo():
         return jsonify(response)
     except Exception as e:
         return jsonify({'error': f'保存失败: {str(e)}'}), 500
+
+
+@app.route('/api/mobile/site-photos/delete', methods=['POST'])
+@login_required
+def mobile_delete_pending_site_photo():
+    """Delete an unsubmitted field photo owned by the current operator.
+
+    Photos promoted to an inspection item, work order, or manual report are evidence and
+    must be deleted through their corresponding workflow instead.
+    """
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    if not url.startswith('/uploads/site_photos/'):
+        return jsonify({'error': '照片地址无效'}), 400
+
+    with get_db() as db:
+        attachment = db.execute(
+            """SELECT id, filename FROM operation_attachments
+               WHERE stored_path=? AND uploader_id=? AND source_type='site_photo' AND source_id=0""",
+            (url, g.current_user['id']),
+        ).fetchone()
+        if not attachment:
+            return jsonify({'error': '照片不存在、已提交或无权删除'}), 404
+        db.execute('DELETE FROM operation_attachments WHERE id=?', (attachment['id'],))
+        db.commit()
+
+    filepath = os.path.join(UPLOAD_DIR, 'site_photos', attachment['filename'])
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+    return jsonify({'success': True})
 
 
 @app.route('/api/mobile/workorder/<order_no>/image', methods=['POST'])
@@ -14981,7 +15047,7 @@ def api_vehicle_use_records():
     if request.method == 'GET':
         vehicle_id = request.args.get('vehicle_id', type=int)
         with get_db() as db:
-            q = '''SELECT r.*, v.id AS vehicle_id, v.plate_no, v.model, v.fuel_type, va.start_at, va.end_at, va.destination, va.reason,
+            q = '''SELECT r.*, v.id AS vehicle_id, v.plate_no, v.model, v.fuel_type, v.status AS vehicle_status, va.start_at, va.end_at, va.destination, va.reason,
                           u.real_name as applicant_name
                    FROM vehicle_use_records r
                    JOIN vehicle_applications va ON r.application_id = va.id
@@ -14995,7 +15061,13 @@ def api_vehicle_use_records():
                 q += ' AND v.id=?'; params.append(vehicle_id)
             q += ' ORDER BY r.id DESC'
             rows = db.execute(q, params).fetchall()
-            return jsonify([dict(r) for r in rows])
+            result = []
+            for row in rows:
+                item = dict(row)
+                match = re.search(r'巡检计划#(\d+)', str(item.get('reason') or ''))
+                item['plan_schedule_id'] = int(match.group(1)) if match else None
+                result.append(item)
+            return jsonify(result)
 
     data = request.get_json() or {}
     application_id = data.get('application_id')
@@ -15052,14 +15124,23 @@ def api_vehicle_use_record_return(rec_id):
         return jsonify({'error': '请填写有效的还车里程'}), 400
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with get_db() as db:
-        rec = db.execute('''SELECT r.*, va.vehicle_id, va.applicant_id FROM vehicle_use_records r
-                            JOIN vehicle_applications va ON va.id=r.application_id WHERE r.id=?''', (rec_id,)).fetchone()
+        rec = db.execute('''SELECT r.*, va.vehicle_id, va.applicant_id, va.end_at, va.reason,
+                            v.status AS vehicle_status FROM vehicle_use_records r
+                            JOIN vehicle_applications va ON va.id=r.application_id
+                            JOIN vehicles v ON v.id=va.vehicle_id WHERE r.id=?''', (rec_id,)).fetchone()
         if not rec:
             return jsonify({'error': '出车记录不存在'}), 404
         if not _vehicle_user_can_operate(rec, g.current_user):
             return jsonify({'error': '仅申请人或管理者可以还车'}), 403
         if rec['returned_at']:
             return jsonify({'error': '该车辆已经归还'}), 409
+        # 巡检排程的同车多站/多日安排是一段行程，不能在中途被任意入口提前归档。
+        # 车辆已因故障受限时保留安全还车的例外，其他突发情况应先走计划变更。
+        trip_end = str(rec['end_at'] or '')[:10]
+        is_plan_trip = '巡检计划#' in str(rec['reason'] or '')
+        if is_plan_trip and trip_end and datetime.now().strftime('%Y-%m-%d') < trip_end \
+                and rec['vehicle_status'] != 'restricted':
+            return jsonify({'error': '本巡检计划行程尚未结束；如需提前结束，请先发起计划变更'}), 409
         if end_mileage < float(rec['start_mileage'] or 0):
             return jsonify({'error': '还车里程不能小于出车里程'}), 400
         inspection_id = data.get('return_inspection_id')
@@ -15408,6 +15489,8 @@ def _ps_favorite_snapshot(schedule):
             relative_vehicles[str(offset)] = int(vehicle_id)
     return {
         'schedule_type': parsed['schedule_type'],
+        'source_period_start': parsed['period_start'],
+        'source_period_end': parsed['period_end'],
         'duration_days': max(1, (end - start).days + 1),
         'plan_data': relative_plan,
         'vehicle_days': relative_vehicles,
@@ -15493,14 +15576,25 @@ def api_plan_schedule_favorites_create():
             return jsonify({'error': '空排程不能收藏'}), 400
         name = (data.get('name') or '').strip()[:60]
         if not name:
+            start_label = str(schedule['period_start'] or '')[5:10]
             name = f'{_PS_FREQ_CN.get(schedule["schedule_type"], "巡检")}常用计划 · {site_count}站'
-        duplicate = db.execute("""SELECT id FROM plan_schedule_favorites
-            WHERE user_id=? AND source_schedule_id=? LIMIT 1""", (g.current_user['id'], schedule_id)).fetchone()
+            if start_label:
+                name += f' · {start_label}'
+        duplicate = None
+        for existing in db.execute("""SELECT id, snapshot FROM plan_schedule_favorites
+                WHERE user_id=?""", (g.current_user['id'],)).fetchall():
+            try:
+                if json.loads(existing['snapshot'] or '{}') == snapshot:
+                    duplicate = existing
+                    break
+            except (TypeError, ValueError):
+                continue
         if duplicate:
-            return jsonify({'error': '该计划已收藏，可直接从常用计划生成草稿', 'favorite_id': duplicate['id']}), 409
+            return jsonify({'error': '相同内容的计划已收藏，可直接从常用计划生成草稿', 'favorite_id': duplicate['id']}), 409
         cursor = db.execute("""INSERT INTO plan_schedule_favorites
             (user_id, source_schedule_id, name, snapshot) VALUES (?,?,?,?)""",
-            (g.current_user['id'], schedule_id, name, json.dumps(snapshot, ensure_ascii=False)))
+            (g.current_user['id'], schedule_id, name,
+             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':'))))
         db.commit()
         row = db.execute('SELECT * FROM plan_schedule_favorites WHERE id=?', (cursor.lastrowid,)).fetchone()
         return jsonify(_ps_favorite_response(row)), 201
@@ -16061,26 +16155,33 @@ def _ps_auto_flow(db, schedule):
         pc, ti = _ps_generate_tasks(db, schedule)
         result['plans_created'], result['items_created'] = pc, ti
         db.execute("UPDATE plan_schedules SET tasks_generated=1 WHERE id=?", (schedule['id'],))
-    # 2. 锁定车辆（每天一条 approved 用车申请，幂等跳过已存在的）
+    # 2. 锁定车辆（同一计划同一车辆合并为一条行程，避免多站/多天巡检被切碎归档）
     try:
         vehicle_days = json.loads(schedule['vehicle_days'] or '{}')
     except Exception:
         vehicle_days = {}
+    vehicle_ranges = {}
     for date_str, vid in vehicle_days.items():
-        if not vid:
+        if not vid or not date_str:
             continue
+        vehicle_ranges.setdefault(int(vid), []).append(str(date_str)[:10])
+    for vid, dates in vehicle_ranges.items():
+        dates = sorted(set(dates))
+        if not dates:
+            continue
+        start_date, end_date = dates[0], dates[-1]
         exists = db.execute("""
             SELECT id FROM vehicle_applications
-            WHERE vehicle_id=? AND applicant_id=? AND date(start_at)=? AND reason LIKE ?
+            WHERE vehicle_id=? AND applicant_id=? AND reason LIKE ?
             LIMIT 1
-        """, (vid, schedule['user_id'], date_str, f'%计划#{schedule["id"]}%')).fetchone()
+        """, (vid, schedule['user_id'], f'%计划#{schedule["id"]}%')).fetchone()
         if exists:
             continue
         db.execute("""
             INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
             VALUES (?,?,?,?,?,?,?)
-        """, (vid, schedule['user_id'], f'{date_str} 08:00:00', f'{date_str} 18:00:00',
-              '巡检', f'巡检计划#{schedule["id"]}用车', 'approved'))
+        """, (vid, schedule['user_id'], f'{start_date} 08:00:00', f'{end_date} 18:00:00',
+              '巡检', f'巡检计划#{schedule["id"]}用车（{start_date}至{end_date}）', 'approved'))
         result['vehicle_locked'] += 1
     # 3. 只记录计划需求，不占库；现场确认拿到实物时再扣库存。
     result['parts_planned'] = _ps_reserve_parts(db, schedule)
@@ -16539,13 +16640,19 @@ def api_plan_schedules_approve(sid):
                 changed_vehicle_days = json.loads(fresh['vehicle_days'] or '{}')
             except Exception:
                 changed_vehicle_days = {}
+            changed_ranges = {}
             for date_str, vid in changed_vehicle_days.items():
                 if not vid or date_str < datetime.now().strftime('%Y-%m-%d'):
                     continue
+                changed_ranges.setdefault(int(vid), []).append(str(date_str)[:10])
+            for vid, dates in changed_ranges.items():
+                dates = sorted(set(dates))
+                if not dates:
+                    continue
                 db.execute("""INSERT INTO vehicle_applications
                     (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
-                    VALUES (?,?,?,?,?,?,?)""", (vid, fresh['user_id'], f'{date_str} 08:00:00',
-                    f'{date_str} 18:00:00', '巡检', f'巡检计划#{sid}用车（v{fresh["version"]}）', 'approved'))
+                    VALUES (?,?,?,?,?,?,?)""", (vid, fresh['user_id'], f'{dates[0]} 08:00:00',
+                    f'{dates[-1]} 18:00:00', '巡检', f'巡检计划#{sid}用车（v{fresh["version"]}，{dates[0]}至{dates[-1]}）', 'approved'))
             # 变更审批通过：保留已执行内容，取消未执行旧项并生成新增日执行包。
             flow = _ps_rebuild_tasks_on_change(db, fresh)
             _create_notification(fresh['user_id'], 'plan_schedule', sid, '计划变更已通过',
@@ -17071,6 +17178,13 @@ def api_manual_reports_create():
     report_type = data['report_type']
     description = data.get('description', '')
     photo_urls = data.get('photo_urls', [])
+    if not isinstance(photo_urls, list):
+        return jsonify({'error': '现场照片格式无效'}), 400
+    photo_urls = list(dict.fromkeys(url for url in photo_urls if isinstance(url, str) and url.startswith('/uploads/')))
+    if not photo_urls:
+        return jsonify({'error': '请至少提交一张现场照片'}), 400
+    if len(photo_urls) > 6:
+        return jsonify({'error': '现场照片最多 6 张'}), 400
     gps_lat = data.get('gps_lat')
     gps_lng = data.get('gps_lng')
     # 上报人必须来自已认证的请求上下文，不能信任客户端传入的 user id。
@@ -17111,6 +17225,15 @@ def api_manual_reports_create():
 
         # 关联工单号回写
         db.execute('UPDATE manual_reports SET order_no=?, status="dispatched" WHERE id=?', (order_no, report_id))
+        # 将上传暂存照片提升为异常上报证据；审核队列由此可直接追溯到本次上报。
+        marks = ','.join('?' * len(photo_urls))
+        db.execute(
+            f"""UPDATE operation_attachments
+                SET source_type='manual_report', source_id=?, description=?
+                WHERE stored_path IN ({marks}) AND site_id=? AND uploader_id=?
+                  AND source_type='site_photo' AND source_id=0""",
+            [report_id, f'异常上报#{report_id}现场证据', *photo_urls, site_id, reporter_id],
+        )
         db.commit()
 
         row = db.execute('SELECT * FROM manual_reports WHERE id=?', (report_id,)).fetchone()

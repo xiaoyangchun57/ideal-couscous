@@ -15,6 +15,7 @@
       <button class="btn-ghost op-btn" bindtap="onNavigate">导航到站</button>
       <button class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
     </view>
+    <button class="btn-ghost parts-apply-btn" bindtap="onOpenPartsApply">申请备品备件</button>
   </view>
 
   <view class="card info-card">
@@ -23,6 +24,27 @@
     <view class="info-row"><text class="info-k">纬度</text><text class="info-v">{{site.lat || '—'}}</text></view>
     <view class="hairline"></view>
     <view class="info-row"><text class="info-k">类型</text><text class="info-v">{{site.type_cn}}</text></view>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onClosePartsApply"></view>
+  <view class="sheet" wx:if="{{partsApply.open}}">
+    <view class="sheet-head"><text class="sheet-title">备品备件需求</text><text class="sheet-close" bindtap="onClosePartsApply">×</text></view>
+    <view class="parts-linked-site">关联站点：{{site.name}}</view>
+    <picker mode="selector" range="{{partsFulfillmentOptions}}" range-key="label" value="{{partsApply.fulfillmentIndex}}" bindchange="onPartsFulfillmentPick">
+      <view class="field-picker"><text>处理方式</text><text>{{partsFulfillmentOptions[partsApply.fulfillmentIndex].label}} ›</text></view>
+    </picker>
+    <view class="parts-route-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">库存领用批准后不锁库，现场实际拿到时再扣库。</view>
+    <view class="parts-route-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">买得到时先电话确认，回来补票据、金额和领用记录。</view>
+    <view class="parts-route-note" wx:else>买不到时走厂家订购，到货后再确认入库或现场直用。</view>
+    <picker wx:if="{{partsApply.fulfillment_type === 'stock'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
+      <view class="field-picker"><text>库存备件</text><text>{{partsOptions[partsApply.index].label}}</text></view>
+    </picker>
+    <view class="field"><text class="field-label">备件名称</text><input class="field-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
+    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">规格型号</text><input class="field-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/></view>
+    <view class="field"><text class="field-label">数量</text><input class="field-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
+    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">预计金额（可不填）</text><input class="field-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/></view>
+    <view class="field"><text class="field-label">申请事由</text><textarea class="field-input textarea" placeholder="说明现场发现的问题、是否影响运行" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
+    <button class="btn-primary submit-btn" loading="{{partsApply.submitting}}" disabled="{{partsApply.submitting}}" bindtap="onSubmitPartsApply">提交备件需求</button>
   </view>
 </view>
 <view class="empty" wx:else>站点信息加载中…</view>

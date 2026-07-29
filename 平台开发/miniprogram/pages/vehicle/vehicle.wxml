@@ -1,16 +1,16 @@
 <view class="page">
   <view class="vehicle-hero" wx:if="{{activeUse}}">
     <text class="hero-kicker">当前行程</text><text class="hero-plate">{{activeUse.vehicle_label}}</text>
-    <text class="hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km</text>
-    <view class="hero-actions"><view class="hero-action" bindtap="onOpenRefuel">{{activeUse.fuel_type === 'electric' ? '充电' : '加油'}}</view><view class="hero-action" bindtap="onOpenFault">故障上报</view><view class="hero-action hero-action-main" bindtap="onOpenReturn">还车</view></view>
+    <text class="hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.can_return ? '计划末日，可还车' : ('计划行程至 ' + activeUse.trip_end_date)}}</text></text>
+    <view class="hero-actions"><view class="hero-action" bindtap="onOpenRefuel">{{activeUse.fuel_type === 'electric' ? '充电' : '加油'}}</view><view class="hero-action" bindtap="onOpenFault">故障上报</view><view class="hero-action hero-action-main {{activeUse.can_return ? '' : 'hero-action-muted'}}" bindtap="onVehiclePrimaryAction">{{activeUse.can_return ? '还车' : '变更计划'}}</view></view>
   </view>
   <view class="card no-active" wx:elif="{{loaded}}"><text class="no-active-title">当前没有进行中的车辆行程</text><text class="no-active-copy">从获批安排完成出车检查，或提交新的用车申请。</text><button class="btn-primary no-active-btn" bindtap="onOpenApply">申请用车</button></view>
 
   <view class="section"><view class="section-title">我的用车安排<text class="section-more" bindtap="onOpenApply">申请用车 ›</text></view></view>
   <view class="list-card" wx:if="{{applications.length}}">
     <view class="application-row" wx:for="{{applications}}" wx:key="id">
-      <view class="application-main"><view class="application-head"><text class="application-title">{{item.vehicle_label}}</text><text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text></view><text class="application-sub">{{item.start_at || '时间待定'}}<text wx:if="{{item.end_at}}"> ~ {{item.end_at}}</text></text><text class="application-sub">{{item.destination || '目的地待定'}} · {{item.reason}}</text><text class="application-reject" wx:if="{{item.status === 'rejected' && item.reject_reason}}">驳回原因：{{item.reject_reason}}</text></view>
-      <button wx:if="{{item.status === 'approved' && !activeUse}}" class="btn-sm btn-primary application-action" bindtap="onOpenCheckout" data-id="{{item.id}}">出车登记</button>
+      <view class="application-main"><view class="application-head"><text class="application-title">{{item.vehicle_label}}</text><text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text></view><text class="application-sub">{{item.start_at || '时间待定'}}<text wx:if="{{item.end_at}}"> ~ {{item.end_at}}</text></text><text class="application-sub">{{item.purpose_label}}</text><text class="application-reject" wx:if="{{item.status === 'rejected' && item.reject_reason}}">驳回原因：{{item.reject_reason}}</text></view>
+      <button wx:if="{{item.can_checkout && !activeUse}}" class="btn-sm btn-primary application-action" bindtap="onOpenCheckout" data-id="{{item.id}}">出车登记</button>
     </view>
   </view>
   <view class="empty compact-empty" wx:elif="{{loaded}}"><text class="empty-tx">暂无用车安排</text></view>

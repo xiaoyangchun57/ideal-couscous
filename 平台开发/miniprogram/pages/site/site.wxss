@@ -7,8 +7,17 @@
 .checkin-btn { width: 100%; }
 .secondary-ops { display: flex; gap: 16rpx; margin-top: 16rpx; }
 .op-btn { flex: 1; margin: 0; font-size: 26rpx; }
+.parts-apply-btn { width: 100%; margin: 16rpx 0 0; font-size: 26rpx; }
 
 .info-card { margin: 24rpx; padding: 8rpx 28rpx; }
 .info-row { display: flex; align-items: center; justify-content: space-between; padding: 24rpx 0; }
 .info-k { font-size: 27rpx; color: var(--text-2); }
 .info-v { font-size: 27rpx; color: var(--text); }
+.parts-linked-site { margin-bottom: 16rpx; padding: 16rpx 18rpx; color: var(--text-2); background: var(--fill); border-radius: 10rpx; font-size: 24rpx; }
+.field-picker { display: flex; align-items: center; justify-content: space-between; min-height: 76rpx; margin-top: 16rpx; padding: 0 18rpx; color: var(--text); background: var(--fill-2); border-radius: 10rpx; font-size: 25rpx; }
+.parts-route-note { margin: 16rpx 0 4rpx; padding: 16rpx 18rpx; color: var(--text-2); background: var(--fill); border-left: 6rpx solid var(--brand); border-radius: 8rpx; font-size: 23rpx; line-height: 1.5; }
+.field { margin-top: 18rpx; }
+.field-label { display: block; margin-bottom: 10rpx; color: var(--text-2); font-size: 24rpx; }
+.field-input { width: auto; min-height: 76rpx; padding: 18rpx; color: var(--text); background: var(--fill-2); border-radius: 10rpx; font-size: 26rpx; }
+.textarea { min-height: 132rpx; }
+.submit-btn { margin-top: 24rpx; }

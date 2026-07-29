@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Table, Card, Button, Space, Tag, Typography, message, Modal, Form, Select, Input, Empty, Tooltip } from 'antd';
-import { PlusOutlined, ReloadOutlined, EnvironmentOutlined, FileTextOutlined, CheckOutlined, InboxOutlined } from '@ant-design/icons';
+import { Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty, Tooltip, Image } from 'antd';
+import { ReloadOutlined, CheckOutlined, InboxOutlined, EyeOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import { useTheme } from '../../hooks/useTheme';
@@ -23,12 +23,9 @@ export default function ReportsPage() {
   const [wrapRef, bodyHeight] = useTableAutoHeight();
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [sites, setSites] = useState([]);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterType, setFilterType] = useState('');
-  const [createOpen, setCreateOpen] = useState(false);
-  const [form] = Form.useForm();
-  const canCreate = ['admin', 'manager', 'operator'].includes(user?.role);
+  const [evidenceRecord, setEvidenceRecord] = useState(null);
   const canManage = ['admin', 'manager'].includes(user?.role);
 
   const load = async () => {
@@ -42,18 +39,11 @@ export default function ReportsPage() {
     } catch (e) { message.error('加载失败：' + e.message); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); api.get('/sites').then(s => setSites(Array.isArray(s) ? s : [])); }, [filterStatus, filterType]);
+  useEffect(() => { load(); }, [filterStatus, filterType]);
 
-  const onCreate = async () => {
-    try {
-      const v = await form.validateFields();
-      const v2 = { ...v, photo_urls: v.photo_urls ? v.photo_urls.split('\n').filter(Boolean) : [] };
-      await api.post('/manual-reports', v2);
-      message.success('上报成功，已自动生成工单');
-      setCreateOpen(false);
-      form.resetFields();
-      load();
-    } catch (e) { message.error('提交失败：' + e.message); }
+  const reportPhotos = (record) => {
+    if (Array.isArray(record.photo_urls)) return record.photo_urls.filter(Boolean);
+    try { return JSON.parse(record.photo_urls || '[]').filter(Boolean); } catch { return []; }
   };
 
   const onVerify = async (record) => {
@@ -78,6 +68,12 @@ export default function ReportsPage() {
       <Text strong ellipsis style={{ display: 'block', marginTop: 4 }}>{r.site_name || '未关联站点'}</Text>
     </> },
     { title: '现场描述', dataIndex: 'description', ellipsis: true },
+    { title: '现场证据', key: 'evidence', width: 108, render: (_, r) => {
+      const photos = reportPhotos(r);
+      return photos.length
+        ? <Button size="small" icon={<EyeOutlined />} onClick={() => setEvidenceRecord(r)}>照片 {photos.length}</Button>
+        : <Text type="secondary">缺失</Text>;
+    } },
     { title: '上报信息', key: 'reported', width: 160, render: (_, r) => <>
       <Text>{r.reporter_name || '—'}</Text>
       <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{r.reported_at || '—'}</Text>
@@ -107,12 +103,11 @@ export default function ReportsPage() {
 
   return (
     <div style={{ ...pageRootStyle, gap: 12, minWidth: 0 }}>
-      <Title level={4} style={{ margin: 0, flexShrink: 0 }}>异常上报</Title>
+      <Title level={4} style={{ margin: 0, flexShrink: 0 }}>异常闭环</Title>
       <FilterBar
         extra={(
           <Space>
             <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
-            {canCreate && <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建上报</Button>}
           </Space>
         )}
       >
@@ -121,10 +116,10 @@ export default function ReportsPage() {
         <Select value={filterType || undefined} onChange={v => setFilterType(v || '')} placeholder="全部类型" allowClear style={{ width: filterSelectWidth }}
           options={Object.entries(REPORT_TYPE).map(([k, v]) => ({ value: k, label: v }))} />
       </FilterBar>
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, minHeight: 22, flexShrink: 0 }} aria-label="异常上报状态汇总">
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, minHeight: 22, flexShrink: 0 }} aria-label="异常闭环状态汇总">
         {statusSummary.length ? statusSummary.map((item) => (
           <Tag key={item.status} color={item.color}>{item.label} {item.count}</Tag>
-        )) : <Text type="secondary">暂无异常上报记录</Text>}
+        )) : <Text type="secondary">暂无待闭环异常</Text>}
       </div>
       <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
         <div ref={wrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -134,21 +129,15 @@ export default function ReportsPage() {
             locale={{ emptyText: <Empty description="暂无上报记录" /> }} />
         </div>
       </Card>
-      <Modal open={createOpen} title="新建异常上报" onCancel={() => setCreateOpen(false)} onOk={onCreate} okText="提交" cancelText="取消" width={520} destroyOnClose>
-        <Form form={form} layout="vertical" initialValues={{ report_type: 'sensory' }}>
-          <Form.Item name="report_type" label="类型" rules={[{ required: true }]}>
-            <Select options={Object.entries(REPORT_TYPE).map(([k, v]) => ({ value: k, label: v }))} />
-          </Form.Item>
-          <Form.Item name="site_id" label="关联站点" rules={[{ required: true, message: '请选择关联站点' }]}>
-            <Select showSearch optionFilterProp="label" allowClear placeholder="可选" options={sites.map(s => ({ value: s.id, label: s.name }))} />
-          </Form.Item>
-          <Form.Item name="description" label="现场描述" rules={[{ required: true }]}>
-            <Input.TextArea rows={3} placeholder="请详细描述异常情况" />
-          </Form.Item>
-          <Form.Item name="photo_urls" label="照片链接（每行一个）">
-            <Input.TextArea rows={2} placeholder="https://..." />
-          </Form.Item>
-        </Form>
+      <Modal open={!!evidenceRecord} title={evidenceRecord ? `现场证据 · ${evidenceRecord.site_name || '异常上报'}` : '现场证据'}
+        footer={null} onCancel={() => setEvidenceRecord(null)} width={760} destroyOnClose>
+        <Image.PreviewGroup>
+          <Space wrap size={12}>
+            {evidenceRecord && reportPhotos(evidenceRecord).map((url, index) => (
+              <Image key={url} width={180} height={135} style={{ objectFit: 'cover', borderRadius: 6 }} src={url} alt={`现场照片 ${index + 1}`} />
+            ))}
+          </Space>
+        </Image.PreviewGroup>
       </Modal>
     </div>
   );

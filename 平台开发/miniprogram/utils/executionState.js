@@ -1,14 +1,15 @@
 function selectExecutionSite(packages, selectedPlanId, preferredSiteId) {
   const list = Array.isArray(packages) ? packages : [];
+  const preferredSiteKey = preferredSiteId == null ? null : String(preferredSiteId);
   const preferredPackage = preferredSiteId
-    ? list.find((pkg) => (pkg.sites || []).some((site) => site.site_id === preferredSiteId))
+    ? list.find((pkg) => (pkg.sites || []).some((site) => String(site.site_id) === preferredSiteKey))
     : null;
   const currentPackage = preferredPackage
     || list.find((pkg) => selectedPlanId != null && String(pkg.plan_id) === String(selectedPlanId))
     || list[0]
     || null;
   const sites = currentPackage ? currentPackage.sites || [] : [];
-  const site = sites.find((item) => item.site_id === preferredSiteId)
+  const site = sites.find((item) => String(item.site_id) === preferredSiteKey)
     || sites[0]
     || null;
   return { currentPackage, site };

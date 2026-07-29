@@ -61,6 +61,8 @@ const api = {
     request('/api/mobile/upload-site-photo', 'POST', {
       site_id: siteId, image, _idempotency_key: idempotencyKey || ''
     }, { queue: false }),
+  // 删除尚未提交到巡检、工单或异常上报的现场照片
+  deletePendingSitePhoto: (url) => request('/api/mobile/site-photos/delete', 'POST', { url }),
 
   trackEvent: (eventName, context) => request('/api/telemetry/events', 'POST', {
     event_id: 'evt_' + Date.now() + '_' + Math.floor(Math.random() * 1e6),

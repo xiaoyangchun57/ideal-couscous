@@ -126,8 +126,9 @@ export default function MainLayout() {
         return '/audit?tab=vehicle';
       case 'plan_schedule':
         return '/plan-schedules';
-      case 'alert':
       case 'manual_report':
+        return '/reports';
+      case 'alert':
         return '/alerts';
       case 'reagent_qc':
         return '/equipment';

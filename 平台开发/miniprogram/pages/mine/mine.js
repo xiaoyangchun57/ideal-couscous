@@ -2,6 +2,7 @@ const { getUser, getSites, clear } = require('../../utils/auth.js');
 const maps = require('../../services/maps.js');
 const api = require('../../services/api.js');
 const { chooseAndCompress, fileToBase64 } = require('../../utils/photos.js');
+const { todayStr } = require('../../utils/util.js');
 
 const app = getApp();
 
@@ -33,9 +34,18 @@ Page({
       this.setData({ partsRequests });
     }).catch(() => {});
     api.vehicleUseRecords().then(rows => {
-      const vehicleUses = (rows || []).map(row => Object.assign({}, row, {
-        vehicle_label: (row.plate_no || '车辆') + (row.model ? (' · ' + row.model) : '')
-      }));
+      const today = todayStr();
+      const vehicleUses = (rows || []).map(row => {
+        const tripEnd = row.end_at ? String(row.end_at).slice(0, 10) : '';
+        const isPlanTrip = String(row.reason || '').indexOf('巡检计划#') >= 0;
+        return Object.assign({}, row, {
+          vehicle_label: (row.plate_no || '车辆') + (row.model ? (' · ' + row.model) : ''),
+          is_plan_trip: isPlanTrip,
+          trip_end_date: tripEnd,
+          plan_schedule_id: row.plan_schedule_id || null,
+          can_return: !isPlanTrip || !tripEnd || tripEnd <= today || row.vehicle_status === 'restricted'
+        });
+      });
       const activeVehicleUse = vehicleUses.find(row => !row.returned_at) || null;
       this.setData({ activeVehicleUse, vehicleUses });
     }).catch(() => this.setData({ activeVehicleUse: null, vehicleUses: [] }));
@@ -45,6 +55,11 @@ Page({
   goReports() { wx.navigateTo({ url: '/pages/reports/reports' }); },
   goReview() { wx.navigateTo({ url: '/pages/review/view' }); },
   goVehicle() { wx.navigateTo({ url: '/pages/vehicle/vehicle' }); },
+  goPlanChange() {
+    const use = this.data.activeVehicleUse;
+    if (!use || !use.plan_schedule_id) { wx.showToast({ title: '未找到关联巡检计划', icon: 'none' }); return; }
+    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + use.plan_schedule_id });
+  },
   onOpenParts() { this.setData({ 'partsSheet.open': true }); },
   onCloseParts() { this.setData({ 'partsSheet.open': false }); },
   onOpenPartsIssue(e) {
@@ -112,6 +127,7 @@ Page({
 
   onOpenReturnVehicle() {
     if (!this.data.activeVehicleUse) return;
+    if (!this.data.activeVehicleUse.can_return) { wx.showToast({ title: '计划行程未结束，到站打卡会继续记录行程节点', icon: 'none' }); return; }
     this.setData({ returnSheet: { open: true, mileage: '', remarks: '', blocked: false, submitting: false } });
   },
   onCloseReturnVehicle() { this.setData({ 'returnSheet.open': false }); },
@@ -122,6 +138,7 @@ Page({
   onReturnBlocked(e) { this.setData({ 'returnSheet.blocked': !!e.detail.value.length }); },
   onSubmitReturnVehicle() {
     const record = this.data.activeVehicleUse; const sheet = this.data.returnSheet;
+    if (record && !record.can_return) { wx.showToast({ title: '计划行程未结束，请先发起计划变更', icon: 'none' }); return; }
     const mileage = Number(sheet.mileage);
     if (!record || !mileage || mileage < Number(record.start_mileage || 0)) { wx.showToast({ title: '结束里程不能小于出车里程', icon: 'none' }); return; }
     this.setData({ 'returnSheet.submitting': true });
