@@ -424,6 +424,57 @@ def migrate_vehicle_lifecycle_schema():
         except Exception as e:
             print(f'[Migrate] 车辆全生命周期迁移跳过: {e}')
 
+
+def _merge_legacy_plan_vehicle_trips(db):
+    """Merge old daily plan reservations into one continuous vehicle trip.
+
+    Historical use records stay untouched for audit. The first application becomes the
+    plan-level trip; redundant daily reservations no longer participate in dispatch.
+    """
+    rows = db.execute("""SELECT id, vehicle_id, applicant_id, start_at, end_at, status, reason
+                         FROM vehicle_applications
+                         WHERE vehicle_id IS NOT NULL AND applicant_id IS NOT NULL
+                           AND reason LIKE '%#%'""").fetchall()
+    groups = {}
+    for row in rows:
+        item = dict(row)
+        match = re.search(r'巡检计划#(\d+)', str(item.get('reason') or ''))
+        if match:
+            groups.setdefault((match.group(1), item['vehicle_id'], item['applicant_id']), []).append(item)
+
+    merged = 0
+    for (schedule_id, _vehicle_id, _applicant_id), items in groups.items():
+        if len([item for item in items if item['status'] == 'approved']) <= 1:
+            continue
+        ordered = sorted(items, key=lambda item: (str(item.get('start_at') or ''), item['id']))
+        primary = ordered[0]
+        start_at = min(str(item['start_at']) for item in items if item.get('start_at'))
+        end_at = max(str(item['end_at']) for item in items if item.get('end_at'))
+        reason = f'巡检计划#{schedule_id}用车（连续行程 {start_at[:10]} 至 {end_at[:10]}）'
+        db.execute("""UPDATE vehicle_applications
+                      SET start_at=?, end_at=?, reason=?, status='approved', reject_reason=NULL
+                      WHERE id=?""", (start_at, end_at, reason, primary['id']))
+        for item in ordered[1:]:
+            has_use = db.execute('SELECT 1 FROM vehicle_use_records WHERE application_id=? LIMIT 1',
+                                 (item['id'],)).fetchone()
+            status = 'archived' if has_use else 'cancelled'
+            db.execute('UPDATE vehicle_applications SET status=?, reject_reason=? WHERE id=?', (
+                status, f'已并入巡检计划#{schedule_id}连续行程（申请#{primary["id"]}）', item['id']))
+        merged += 1
+    return merged
+
+
+def migrate_legacy_plan_vehicle_trips():
+    """Apply the daily-reservation compatibility migration at startup."""
+    try:
+        with get_db() as db:
+            merged = _merge_legacy_plan_vehicle_trips(db)
+            db.commit()
+        if merged:
+            print(f'[Migrate] 已合并 {merged} 组旧版按日巡检用车申请为连续行程')
+    except Exception as e:
+        print(f'[Migrate] 旧版巡检用车合并跳过: {e}')
+
 def migrate_plan_schedules():
     """巡检计划调度层（周/月/季/年统一）：
     1. 创建 plan_schedules 表（不叫 inspection_schedules，该表名已被"检查项排程"占用）
@@ -18216,6 +18267,7 @@ if __name__ == '__main__':
     migrate_vehicle_applications_nullable()
     migrate_vehicle_lifecycle_schema()
     migrate_plan_schedules()
+    migrate_legacy_plan_vehicle_trips()
     migrate_reagent_qc()
     migrate_manual_report_closure()
     migrate_parts_requests_v2()

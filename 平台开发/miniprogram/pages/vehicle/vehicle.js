@@ -25,6 +25,8 @@ function decorateApplication(item, use) {
   const state = APPLICATION_STATUS[item.status] || [item.status || '未知', 'gray'];
   const today = todayStr();
   const useDate = dateOnly(item.start_at);
+  const tripEnd = dateOnly(item.end_at);
+  const isPlanTrip = String(item.reason || '').indexOf('巡检计划#') >= 0;
   let statusCn = state[0];
   let statusCls = state[1];
   let canCheckout = false;
@@ -32,7 +34,11 @@ function decorateApplication(item, use) {
     statusCn = use.returned_at ? '已归档' : '使用中';
     statusCls = use.returned_at ? 'green' : 'brand';
   } else if (item.status === 'approved') {
-    if (useDate && useDate < today) {
+    if (isPlanTrip && useDate <= today && (!tripEnd || today <= tripEnd)) {
+      statusCn = '待出车';
+      statusCls = 'brand';
+      canCheckout = true;
+    } else if (useDate && useDate < today) {
       statusCn = '已过期';
       statusCls = 'gray';
     } else if (useDate && useDate > today) {
@@ -47,10 +53,39 @@ function decorateApplication(item, use) {
   return Object.assign({}, item, {
     vehicle_label: vehicleLabel(item),
     purpose_label: cleanPurpose(item),
+    is_plan_trip: isPlanTrip,
+    trip_end_date: tripEnd,
     status_cn: statusCn,
     status_cls: statusCls,
     can_checkout: canCheckout
   });
+}
+
+function groupPlanHistory(uses) {
+  const grouped = {};
+  const history = [];
+  (uses || []).filter(item => item.returned_at).forEach(item => {
+    if (!item.is_plan_trip || !item.plan_schedule_id) {
+      history.push(item);
+      return;
+    }
+    const key = [item.plan_schedule_id, item.vehicle_id, item.applicant_id || ''].join(':');
+    (grouped[key] || (grouped[key] = [])).push(item);
+  });
+  Object.keys(grouped).forEach(key => {
+    const records = grouped[key].sort((a, b) => String(a.checked_out_at || '').localeCompare(String(b.checked_out_at || '')));
+    const first = records[0];
+    const last = records.slice().sort((a, b) => String(b.returned_at || '').localeCompare(String(a.returned_at || '')))[0];
+    history.push(Object.assign({}, first, {
+      id: 'plan-trip-' + key,
+      checked_out_at: first.checked_out_at,
+      returned_at: last.returned_at,
+      start_mileage: first.start_mileage,
+      end_mileage: last.end_mileage,
+      trip_record_count: records.length
+    }));
+  });
+  return history.sort((a, b) => String(b.returned_at || '').localeCompare(String(a.returned_at || '')));
 }
 
 function decorateUse(item) {
@@ -100,9 +135,9 @@ Page({
         });
         this.setData({
           loaded: true,
-          applications: decoratedApplications.filter(item => item.status !== 'cancelled'),
+          applications: decoratedApplications.filter(item => !['cancelled', 'archived'].includes(item.status)),
           activeUse: decoratedUses.find(item => !item.returned_at) || null,
-          history: decoratedUses.filter(item => item.returned_at).slice(0, 10),
+          history: groupPlanHistory(decoratedUses).slice(0, 10),
           vehicles: (vehicles || []).filter(item => item.dispatchable)
         });
         if (done) done();
