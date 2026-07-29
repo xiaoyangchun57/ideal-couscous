@@ -1,11 +1,12 @@
-version: "3.8"
-
+cat > docker-compose.yml << 'EOF'
 services:
   water-monitor:
     build: .
+    image: water-monitor-app:latest
     container_name: water-monitor
     restart: always
     ports:
       - "8080:5000"
     volumes:
       - ./backend/data:/app/data
+EOF
