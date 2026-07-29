@@ -1,3 +1,5 @@
+cd /opt/water-monitor/平台开发
+cat > Dockerfile << 'EOF'
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -6,21 +8,13 @@ WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制后端代码
-COPY backend/app.py .
-COPY backend/seed_demo.py .
-COPY backend/sl651_server.py .
-COPY backend/sl651_parser.py .
-COPY backend/sl651_mapping.json .
+# 复制整个后端目录（解决漏拷文件的问题）
+COPY backend/ ./
 
-# 复制数据库
-COPY backend/data/ data/
-
-# 复制前端构建产物
+# 复制前端
 COPY frontend/ frontend/
 
-# 端口
 EXPOSE 5005
 
-# 启动
 CMD ["python", "app.py"]
+EOF
