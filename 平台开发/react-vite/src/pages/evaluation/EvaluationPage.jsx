@@ -1,288 +1,210 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Table, Card, Select, Space, Typography, message, Statistic, Row, Col, Tag, Button, Dropdown } from 'antd';
-import { DownloadOutlined, FileExcelOutlined } from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Dropdown, Select, Space, Tabs, Tag, Typography, message } from 'antd';
+import { DownloadOutlined, FileExcelOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
-import { useTheme } from '../../hooks/useTheme';
-import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import { evaluationRateColor } from '../../services/constants';
-import FilterBar from '../../components/FilterBar';
-import {
-  pageRootStyle, tableCardStyle, tableCardBody, filterSmallSelectWidth,
-} from '../../services/pageStyles';
+import WorkspacePage, {
+  FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+} from '../../components/WorkspacePage';
+import { useTheme } from '../../hooks/useTheme';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
-const ROLE_CN = { admin: '管理员', manager: '主管', operator: '运维员', inspector: '审核员', viewer: '访客' };
+const ROLE_CN = { admin: '管理员', manager: '主管', operator: '运维人员', reviewer: '审核员', inspector: '审核员', viewer: '访客' };
 const PERIOD_OPTS = [
   { value: 'month', label: '本月' },
-  { value: '7d', label: '近7天' },
-  { value: '30d', label: '近30天' },
+  { value: '7d', label: '近 7 天' },
+  { value: '30d', label: '近 30 天' },
   { value: 'quarter', label: '本季度' },
   { value: 'year', label: '本年度' },
 ];
+const PERIOD_KEYS = new Set(PERIOD_OPTS.map((item) => item.value));
+const VIEW_KEYS = new Set(['people', 'managers', 'sites']);
+const CONFIG_STATUS = {
+  configured: { label: '已配置', color: 'green' },
+  metrics_unconfigured: { label: '参数未配置', color: 'orange' },
+  monitoring_disabled: { label: '未启用监测', color: 'default' },
+};
+
+const renderRate = (value) => value == null
+  ? <Text type="secondary">无样本</Text>
+  : <Tag color={evaluationRateColor(Number(value))}>{Number(value)}%</Tag>;
+
+const opsReportFilename = (period) => {
+  const now = new Date();
+  const year = now.getFullYear();
+  return period === 'quarter'
+    ? `运维报告_${year}年第${Math.floor(now.getMonth() / 3) + 1}季度.xlsx`
+    : `运维报告_${year}年度.xlsx`;
+};
 
 export default function EvaluationPage() {
-  const { tokens, isDark } = useTheme();
-  const [siteWrapRef, siteBodyH] = useTableAutoHeight();
-  const [period, setPeriod] = useState('month');
+  const { tokens } = useTheme();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const periodParam = searchParams.get('period') || 'month';
+  const period = PERIOD_KEYS.has(periodParam) ? periodParam : 'month';
+  const viewParam = searchParams.get('view') || 'people';
+  const activeView = VIEW_KEYS.has(viewParam) ? viewParam : 'people';
   const [health, setHealth] = useState(null);
-  const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '' });
-  const [baseline, setBaseline] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '', scope_label: '' });
+  const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState([]);
+  const [exporting, setExporting] = useState('');
 
-  const load = async () => {
+  const updateQuery = useCallback((patch) => {
+    const next = new URLSearchParams(searchParams);
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value && !((key === 'period' && value === 'month') || (key === 'view' && value === 'people'))) next.set(key, value);
+      else next.delete(key);
+    });
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [h, p, b] = await Promise.all([
-        api.get('/data/health?period=' + period),
-        api.get('/evaluation/personnel?period=' + period),
-        api.get('/operations/baseline?period=' + period),
-      ]);
-      setHealth(h || null);
-      setBaseline(b && !b.error ? b : null);
-      // 兼容旧数组格式与新对象格式
-      if (Array.isArray(p)) setPersonnel({ overview: null, list: p, period_label: '' });
-      else setPersonnel({ overview: p?.overview || null, list: p?.list || [], period_label: p?.period_label || '' });
-    } catch (e) {
-      message.error('加载失败：' + (e.message || e));
-    } finally {
-      setLoading(false);
-    }
-  };
+    const requests = [
+      ['数据质量', api.getStrict(`/data/health?period=${period}`)],
+      ['人员绩效', api.getStrict(`/evaluation/personnel?period=${period}`)],
+    ];
+    const results = await Promise.allSettled(requests.map(([, promise]) => promise));
+    const errors = [];
+    if (results[0].status === 'fulfilled') setHealth(results[0].value || null);
+    else errors.push(`数据质量：${results[0].reason?.message || '加载失败'}`);
+    if (results[1].status === 'fulfilled') {
+      const data = results[1].value;
+      setPersonnel(Array.isArray(data)
+        ? { overview: null, list: data, period_label: '', scope_label: '' }
+        : { overview: data?.overview || null, list: data?.list || [], period_label: data?.period_label || '', scope_label: data?.scope_label || '' });
+    } else errors.push(`人员绩效：${results[1].reason?.message || '加载失败'}`);
+    setLoadErrors(errors);
+    setLoading(false);
+  }, [period]);
 
-  useEffect(() => { load(); }, [period]);
-
-  // 报表自助埋点：进入评估/报表页记一次"打开"，导出时记"导出"
+  useEffect(() => { load(); }, [load]);
   useEffect(() => { api.track('report.opened', {}); }, []);
 
-  // xlsx 下载辅助：api 默认走 JSON，导出接口返回二进制，需单独 fetch
-  const downloadExport = async (url, filename, reportType) => {
-    if (reportType) api.track('report.exported', { report_type: reportType });
+  const downloadExport = useCallback(async (url, fallbackFilename, reportType) => {
+    if (exporting) return;
+    setExporting(reportType);
     try {
-      const token = (() => { try { return localStorage.getItem('water_ops_token') || ''; } catch { return ''; } })();
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error('导出失败：' + res.status);
-      const blob = await res.blob();
+      const result = await api.downloadStrict(url);
+      const objectUrl = URL.createObjectURL(result.blob);
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = filename;
+      link.href = objectUrl;
+      link.download = result.filename || fallbackFilename;
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(link.href);
-    } catch (e) {
-      message.error(e.message || '导出失败');
+      URL.revokeObjectURL(objectUrl);
+      await api.track('report.exported', { report_type: reportType });
+      message.success(`${link.download} 已开始下载`);
+    } catch (error) {
+      message.error(error.message || '导出失败，未生成文件');
+    } finally {
+      setExporting('');
     }
-  };
+  }, [exporting]);
 
-  const reportItems = [
-    { key: 'quarter', label: '本季度运维报告' },
-    { key: 'year', label: '本年度运维报告' },
-  ];
+  const personCols = useMemo(() => [
+    { title: '人员', key: 'person', width: 150, render: (_, row) => <><Text strong>{row.real_name || '未命名'}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{ROLE_CN[row.role] || row.role || '-'}</Text></> },
+    { title: '工单', key: 'workorders', width: 120, sorter: (a, b) => (a.wo_total || 0) - (b.wo_total || 0), render: (_, row) => <><Text strong>{row.wo_total || 0} 份</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>已闭环 {row.wo_closed || 0} 份</Text></> },
+    {
+      title: '闭环与 SLA', key: 'quality', width: 250, render: (_, row) => <Space size={[4, 4]} wrap>
+        {Number(row.wo_total) > 0 ? <Tag color={evaluationRateColor(Number(row.wo_closed_rate) || 0)}>闭环 {Number(row.wo_closed_rate) || 0}%</Tag> : <Text type="secondary">无工单样本</Text>}
+        {Number(row.closed_sla_sample) > 0 ? <Tag color={evaluationRateColor(Number(row.on_time_rate) || 0)}>已关单按时 {Number(row.on_time_rate) || 0}%</Tag> : <Text type="secondary">无已关单 SLA 样本</Text>}
+        {Number(row.closed_sla_breach) > 0 && <Tag color="red">已关单超时 {row.closed_sla_breach}</Tag>}
+        {Number(row.open_overdue) > 0 && <Tag color="orange">开放已逾期 {row.open_overdue}</Tag>}
+      </Space>,
+    },
+    { title: '响应与处置', key: 'duration', width: 170, render: (_, row) => <><Text>{row.response_hours == null ? '无到站签到样本' : `平均响应 ${row.response_hours}h`}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{row.wo_avg_days == null ? '无已关单处置样本' : `平均处置 ${row.wo_avg_days} 天`}</Text></> },
+    { title: '巡检', key: 'inspection', width: 130, render: (_, row) => <><Text>执行 {row.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {row.insp_reviewed || 0} 项</Text></> },
+  ], []);
 
-  // 主表只保留管理者扫描绩效所需的五列；明细指标在单元格内成组呈现，避免横向滚动。
-  const personCols = [
-    { title: '人员', key: 'person', width: 150,
-      render: (_, r) => <><Text strong>{r.real_name || '未命名'}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{ROLE_CN[r.role] || r.role || '—'}</Text></> },
-    { title: '工单量', dataIndex: 'wo_total', key: 'workorders', width: 130,
-      sorter: (a, b) => (a.wo_total || 0) - (b.wo_total || 0),
-      render: (_, r) => <><Text strong>{r.wo_total || 0} 件</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>已闭环 {r.wo_closed || 0} 件</Text></> },
-    { title: '闭环与 SLA', key: 'quality', width: 180,
-      render: (_, r) => <Space size={[4, 4]} wrap><Tag color={evaluationRateColor(Number(r.wo_closed_rate) || 0)}>闭环 {Number(r.wo_closed_rate) || 0}%</Tag><Tag color={evaluationRateColor(Number(r.on_time_rate) || 0)}>SLA {Number(r.on_time_rate) || 0}%</Tag>{Number(r.sla_breach) > 0 && <Tag color="red">超时 {r.sla_breach}</Tag>}</Space> },
-    { title: '响应与处置', key: 'duration', width: 160,
-      render: (_, r) => <><Text>{r.response_hours == null ? '响应 —' : `响应 ${r.response_hours}h`}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{r.wo_avg_days == null ? '处置 —' : `平均处置 ${r.wo_avg_days} 天`}</Text></> },
-    { title: '巡检', key: 'inspection', width: 130,
-      render: (_, r) => <><Text>执行 {r.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {r.insp_reviewed || 0} 项</Text></> },
-  ];
-
-  // 人员绩效人均概览卡
-  const personOverview = useMemo(() => {
-    const o = personnel.overview;
-    if (!o) return null;
-    return [
-      { label: '在岗人数', value: o.staff_count ?? 0 },
-      { label: '工单总量', value: o.wo_total ?? 0 },
-      { label: '整体闭环率', value: (o.closed_rate ?? 0) + '%' },
-      { label: 'SLA达标率', value: (o.on_time_rate ?? 0) + '%' },
-      { label: '平均响应', value: o.avg_response_hours == null ? '—' : o.avg_response_hours + 'h' },
-      { label: '巡检完成', value: o.insp_done ?? 0 },
-    ];
-  }, [personnel]);
-
-  // ===== 数据健康度（作为评估的一个维度）=====
-  const managerCols = [
-    { title: '负责人', dataIndex: 'manager', key: 'manager', render: (v) => <Text strong>{v || '未分配'}</Text> },
-    { title: '负责站点', dataIndex: 'site_count', key: 'site_count' },
-    { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '当前及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+  const managerCols = useMemo(() => [
+    { title: '负责人', dataIndex: 'manager', key: 'manager', render: (value) => <Text strong>{value || '未分配'}</Text> },
+    { title: '已配置 / 负责站点', key: 'configured', render: (_, row) => `${row.configured_site_count || 0} / ${row.site_count || 0}` },
+    { title: '应报', dataIndex: 'expected', key: 'expected' },
+    { title: '实到', dataIndex: 'actual', key: 'actual' },
+    { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate', render: renderRate },
+    { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate', render: renderRate },
+    { title: '及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate', render: renderRate },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
-  ];
+  ], []);
 
-  const siteCols = [
+  const siteCols = useMemo(() => [
     { title: '站点', dataIndex: 'site_name', key: 'site_name', ellipsis: true },
-    { title: '负责人', dataIndex: 'manager', key: 'manager', ellipsis: true, render: (v) => v || '未分配' },
-    { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
-    { title: '当前及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate',
-      render: (v) => <Tag color={evaluationRateColor(Number(v) || 0)}>{Number(v) || 0}%</Tag> },
+    { title: '负责人', dataIndex: 'manager', key: 'manager', ellipsis: true, render: (value) => value || '未分配' },
+    { title: '监测配置', dataIndex: 'configuration_status', key: 'configuration_status', render: (value) => { const status = CONFIG_STATUS[value] || { label: value || '未知', color: 'default' }; return <Tag color={status.color}>{status.label}</Tag>; } },
+    { title: '应报', dataIndex: 'expected', key: 'expected' },
+    { title: '实到', dataIndex: 'actual', key: 'actual' },
+    { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate', render: renderRate },
+    { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate', render: renderRate },
+    { title: '及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate', render: renderRate },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
+  ], []);
+
+  const byManager = useMemo(() => health?.by_manager || [], [health]);
+  const bySite = useMemo(() => health?.by_site || [], [health]);
+  const hasPersonnelActivity = personnel.list.some((row) => Number(row.wo_total) > 0 || Number(row.insp_done) > 0 || Number(row.insp_reviewed) > 0);
+  const hasMonitoringSamples = Number(health?.total?.actual) > 0;
+  const unconfiguredSites = Number(health?.total?.unconfigured_site_count) || 0;
+  const hasAnyLoadedData = personnel.list.length > 0 || byManager.length > 0 || bySite.length > 0;
+  const closedSlaBreach = personnel.list.reduce((sum, item) => sum + (Number(item.closed_sla_breach) || 0), 0);
+  const openOverdue = personnel.list.reduce((sum, item) => sum + (Number(item.open_overdue) || 0), 0);
+  const statusItems = [
+    { key: 'staff', label: '在岗人员', value: personnel.overview?.staff_count ?? personnel.list.length, always: true },
+    { key: 'workorders', label: '本周期工单', value: personnel.overview?.wo_total || 0, always: true },
+    { key: 'closed-breach', label: '已关单超时', value: closedSlaBreach, color: closedSlaBreach ? '#cf1322' : undefined, always: true },
+    { key: 'open-overdue', label: '开放已逾期', value: openOverdue, color: openOverdue ? tokens.colorWarning : undefined, always: true },
+    { key: 'inspection', label: '已完成巡检', value: personnel.overview?.insp_done || 0, always: true },
   ];
 
-  const byManager = useMemo(() => (health && health.by_manager) || [], [health]);
-  const bySite = useMemo(() => (health && health.by_site) || [], [health]);
+  const toolbar = <WorkspaceToolbar actions={<>
+    <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
+    <Button icon={<DownloadOutlined />} loading={exporting === 'evaluation'} disabled={Boolean(exporting)} onClick={() => downloadExport(`/export/evaluation?period=${period}`, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>导出评估</Button>
+    <Dropdown menu={{ items: [{ key: 'quarter', label: '本季度运维报告' }, { key: 'year', label: '本年度运维报告' }], onClick: ({ key }) => downloadExport(`/export/ops-report?period=${key}`, opsReportFilename(key), key) }} disabled={Boolean(exporting)}>
+      <Button type="primary" icon={<FileExcelOutlined />} loading={exporting === 'quarter' || exporting === 'year'}>导出运维报告</Button>
+    </Dropdown>
+  </>}>
+    <FilterField label="统计周期">
+      <Select aria-label="选择运营绩效统计周期" value={period} onChange={(value) => updateQuery({ period: value })} options={PERIOD_OPTS} style={{ width: 160 }} />
+    </FilterField>
+    {personnel.scope_label && <Text type="secondary">统计范围：{personnel.scope_label}</Text>}
+  </WorkspaceToolbar>;
 
-  const healthOverview = useMemo(() => {
-    if (!health || !health.total) return null;
-    const t = health.total;
-    return [
-      { label: '应报总数', value: t.expected || 0 },
-      { label: '完整性', value: (t.completeness_rate ?? 0) + '%' },
-      { label: '有效性', value: (t.validity_rate ?? 0) + '%' },
-      { label: '当前及时性', value: (t.timeliness_rate ?? 0) + '%' },
-      { label: '缺失 / 超限', value: `${t.missing || 0} / ${t.over_limit || 0}` },
-    ];
-  }, [health]);
+  const periodRule = '已关闭工单按关单时间归期，未关闭工单按创建时间归期；SLA 达标率只统计已关单且配置截止时间的样本';
+  if (!loading && loadErrors.length > 0 && !hasAnyLoadedData) {
+    return <WorkspacePage title="运营绩效" subtitle={periodRule} toolbar={toolbar}><WorkspaceEmpty type="error" description={`${loadErrors.join('；')}。当前不能判断是否无记录。`} onRefresh={load} /></WorkspacePage>;
+  }
 
-  const baselineItems = useMemo(() => {
-    if (!baseline) return [];
-    const metrics = baseline.north_star || {};
-    const labelMap = {
-      inspection_coverage: '巡检覆盖率',
-      work_order_online_closure_rate: '工单线上闭环率',
-      alert_online_handling_rate: '告警处置线上率',
-      review_online_completion_rate: '审核线上完成率',
-    };
-    return Object.entries(metrics).map(([key, metric]) => ({
-      key,
-      label: labelMap[key] || key,
-      value: metric.value == null ? '待采集' : `${metric.value}%`,
-      detail: metric.value == null ? '当前周期无有效样本' : `${metric.numerator}/${metric.denominator} 个样本`,
-      color: metric.value == null ? 'default' : 'blue',
-    }));
-  }, [baseline]);
+  const tabs = [
+    {
+      key: 'people', label: `人员绩效 ${personnel.list.length}`,
+      children: <WorkspaceTable rowKey={(row) => row.id} loading={loading} columns={personCols} dataSource={personnel.list} emptyType="sample" onRefresh={load} scroll={{ x: 820, y: 'calc(100vh - 410px)' }} />,
+    },
+    {
+      key: 'managers', label: `负责人数据质量 ${byManager.length}`,
+      children: <WorkspaceTable rowKey={(row) => row.manager || 'unassigned'} loading={loading} columns={managerCols} dataSource={byManager} emptyType="sample" onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 410px)' }} />,
+    },
+    {
+      key: 'sites', label: `站点数据质量 ${bySite.length}`,
+      children: <WorkspaceTable rowKey={(row) => row.site_id || row.site_name} loading={loading} columns={siteCols} dataSource={bySite} emptyType="sample" onRefresh={load} pagination={bySite.length > 20 ? { pageSize: 20, size: 'small', showSizeChanger: false } : false} scroll={{ x: 920, y: 'calc(100vh - 450px)' }} />,
+    },
+  ];
 
-  return (
-    <div style={pageRootStyle}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16, flexShrink: 0 }}>
-        <Space align="baseline">
-          <Title level={3} style={{ margin: 0 }}>人员评估</Title>
-          {personnel.period_label && <Text type="secondary">考核期：{personnel.period_label}</Text>}
-        </Space>
-      </div>
-      <FilterBar
-        style={{ marginBottom: 16 }}
-        extra={(
-          <Space wrap>
-            <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/evaluation?period=' + period, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>
-              导出评估表
-            </Button>
-            <Dropdown
-              menu={{
-                items: reportItems,
-                onClick: ({ key }) => downloadExport('/api/export/ops-report?period=' + key, `运维报告_${key === 'quarter' ? '本季度' : '本年度'}.xlsx`, key),
-              }}
-            >
-              <Button icon={<FileExcelOutlined />} type="primary">导出运维报告</Button>
-            </Dropdown>
-          </Space>
-        )}
-      >
-        <Text type="secondary">统计周期：</Text>
-        <Select value={period} onChange={setPeriod} options={PERIOD_OPTS} style={{ width: filterSmallSelectWidth }} />
-      </FilterBar>
-
-      {baselineItems.length > 0 && (
-        <Card title="运营基线（仅记录当前值，不设目标）" style={{ marginBottom: 16, flexShrink: 0 }}>
-          <Row gutter={[12, 12]}>
-            {baselineItems.map((item) => (
-              <Col key={item.key} xs={12} sm={12} lg={6}>
-                <div style={{ minHeight: 94, padding: 12, border: `1px solid ${tokens.colorBorder}`, borderRadius: 6 }}>
-                  <Text type="secondary">{item.label}</Text>
-                  <div><Text strong style={{ fontSize: 24, lineHeight: 1.5 }}>{item.value}</Text></div>
-                  <Tag color={item.color}>{item.detail}</Tag>
-                </div>
-              </Col>
-            ))}
-          </Row>
-          <Text type="secondary" style={{ display: 'block', marginTop: 12 }}>
-            离线闭环、审核耗时、报表自助和行动队列指标仍在采集，基线形成后再纳入月度复盘。
-          </Text>
-        </Card>
-      )}
-
-      {/* 人员运维绩效人均概览 */}
-      {personOverview && (
-        <Row gutter={[12, 12]} style={{ marginBottom: 16, flexShrink: 0 }}>
-          {personOverview.map((o) => (
-            <Col key={o.label} xs={12} sm={8} lg={4}>
-              <Card size="small">
-                <Statistic title={o.label} value={o.value} valueStyle={{ fontSize: 22 }} />
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      )}
-
-      {/* 人员运维绩效（主区） */}
-      <Card title="人员运维绩效（工单响应 / 处理时效 / SLA / 巡检）" style={{ marginBottom: 16, flexShrink: 0 }}>
-        <Table
-          rowKey={(r) => r.id}
-          loading={loading}
-          columns={personCols}
-          dataSource={personnel.list}
-          pagination={false}
-          size="small"
-          locale={{ emptyText: '暂无数据' }}
-        />
-      </Card>
-
-      {/* 数据健康度维度 */}
-      {healthOverview && (
-        <Row gutter={[12, 12]} style={{ marginBottom: 16, flexShrink: 0 }}>
-          {healthOverview.map((o) => (
-            <Col key={o.label} xs={12} sm={8} lg={Math.floor(24 / healthOverview.length)}>
-              <Card size="small">
-                <Statistic title={o.label} value={o.value} valueStyle={{ fontSize: 22 }} />
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      )}
-
-      <Card title="负责人站点数据情况（排障参考，不直接计入个人绩效）" style={{ marginBottom: 16, flexShrink: 0 }}>
-        <Table
-          rowKey={(r) => r.manager || 'x'}
-          loading={loading}
-          columns={managerCols}
-          dataSource={byManager}
-          pagination={false}
-          size="small"
-          locale={{ emptyText: '暂无数据' }}
-        />
-      </Card>
-
-      <Card title="各站点数据质量维度" style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
-        <div ref={siteWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <Table
-            rowKey={(r) => r.site_id || r.site_name}
-            loading={loading}
-            columns={siteCols}
-            dataSource={bySite}
-            pagination={false}
-            size="small"
-            scroll={siteBodyH ? { y: siteBodyH } : undefined}
-            locale={{ emptyText: '暂无数据' }}
-          />
-        </div>
-      </Card>
-    </div>
-  );
+  return <WorkspacePage
+    title="运营绩效"
+    subtitle={personnel.period_label ? `考核周期：${personnel.period_label}；${periodRule}` : periodRule}
+    statusItems={statusItems}
+    toolbar={toolbar}
+  >
+    {loadErrors.length > 0 && <Alert type="warning" showIcon message="部分数据未更新" description={loadErrors.join('；')} style={{ marginBottom: 8 }} />}
+    {activeView === 'people' && !hasPersonnelActivity && <Alert type="info" showIcon message="本周期没有人员执行样本" description="在岗人员仍保留在名单中；无工单或巡检记录不等同于绩效为 0 分。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
+    {activeView !== 'people' && unconfiguredSites > 0 && <Alert type="info" showIcon message={`${unconfiguredSites} 个站点没有可用的应报参数配置`} description="未启用监测或没有历史参数依据的站点不计算应报、缺失和完整性，不使用全局阈值参数代替站点配置。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
+    {activeView !== 'people' && unconfiguredSites === 0 && !hasMonitoringSamples && <Alert type="info" showIcon message="本周期未接收到监测样本" description="已配置站点按应报量计算缺失；有效性和及时性在无实到样本时保持“无样本”。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
+    <Tabs className="workspace-tabs" activeKey={activeView} onChange={(value) => updateQuery({ view: value })} items={tabs} />
+  </WorkspacePage>;
 }

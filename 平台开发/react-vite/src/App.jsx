@@ -1,11 +1,19 @@
 import { lazy, Suspense } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { App as AntApp, ConfigProvider, Skeleton } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
+import dayjs from 'dayjs';
+import 'dayjs/locale/zh-cn';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { ThemeProvider, useTheme } from './hooks/useTheme';
 import MainLayout from './layouts/MainLayout';
 import LoginPage from './pages/login/LoginPage';
+import ChangePasswordPage from './pages/login/ChangePasswordPage';
+import { pageRoles } from './config/navigation';
+import { buildLoginUrl, getSafeReturnTo } from './utils/authNavigation.js';
+
+dayjs.locale('zh-cn');
+const antdZhCN = zhCN?.default || zhCN;
 
 const CockpitPage = lazy(() => import('./pages/cockpit/CockpitPage'));
 const SitesPage = lazy(() => import('./pages/sites/SitesPage'));
@@ -21,6 +29,7 @@ const VehiclesPage = lazy(() => import('./pages/vehicles/VehiclesPage'));
 const ReagentMasterPage = lazy(() => import('./pages/reagents/ReagentMasterPage'));
 const PlanSchedulesPage = lazy(() => import('./pages/plan-schedules/PlanSchedulesPage'));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage'));
+const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 
 function RouteFallback() {
   return (
@@ -36,44 +45,94 @@ function Deferred({ children }) {
 
 function ProtectedRoute({ children, roles }) {
   const { isAuthenticated, user } = useAuth();
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  const location = useLocation();
+  if (!isAuthenticated) {
+    const returnTo = `${location.pathname}${location.search}${location.hash}`;
+    return <Navigate to={buildLoginUrl(returnTo)} replace />;
+  }
   if (!user) return <RouteFallback />;
+  if (user.must_change_password && location.pathname !== '/change-password') {
+    return <Navigate to="/change-password" replace />;
+  }
   if (roles?.length > 0 && !roles.some((role) => (user.roles || [user.role]).includes(role))) return <Navigate to="/" replace />;
   return children;
+}
+
+function ChangePasswordRoute() {
+  const { isAuthenticated, user } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (!user) return <RouteFallback />;
+  if (!user.must_change_password) return <Navigate to="/" replace />;
+  return <ChangePasswordPage />;
+}
+
+function LoginRoute() {
+  const { isAuthenticated, user } = useAuth();
+  const location = useLocation();
+  if (!isAuthenticated) return <LoginPage />;
+  if (!user) return <RouteFallback />;
+  if (user.must_change_password) {
+    const returnTo = getSafeReturnTo(location.search);
+    return <Navigate to={`/change-password?returnTo=${encodeURIComponent(returnTo)}`} replace />;
+  }
+  return <Navigate to={getSafeReturnTo(location.search)} replace />;
+}
+
+function PageRoute({ path, children }) {
+  return <ProtectedRoute roles={pageRoles[path]}>{children}</ProtectedRoute>;
 }
 
 function AppRoutes() {
   return (
     <Routes>
-      <Route path="/login" element={<LoginPage />} />
+      <Route path="/login" element={<LoginRoute />} />
+      <Route path="/change-password" element={<ChangePasswordRoute />} />
       <Route path="/" element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
         <Route index element={<Deferred><CockpitPage /></Deferred>} />
-        <Route path="sites" element={<Deferred><SitesPage /></Deferred>} />
-        <Route path="alerts" element={<Deferred><AlertsPage /></Deferred>} />
-        <Route path="workorders" element={<Deferred><WorkOrdersPage /></Deferred>} />
-        <Route path="plan-schedules" element={<Deferred><PlanSchedulesPage /></Deferred>} />
+        <Route path="sites" element={(
+          <PageRoute path="/sites"><Deferred><SitesPage /></Deferred></PageRoute>
+        )} />
+        <Route path="alerts" element={(
+          <PageRoute path="/alerts"><Deferred><AlertsPage /></Deferred></PageRoute>
+        )} />
+        <Route path="workorders" element={(
+          <PageRoute path="/workorders"><Deferred><WorkOrdersPage /></Deferred></PageRoute>
+        )} />
+        <Route path="plan-schedules" element={(
+          <PageRoute path="/plan-schedules"><Deferred><PlanSchedulesPage /></Deferred></PageRoute>
+        )} />
         <Route path="reports" element={(
-          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><ReportsPage /></Deferred></ProtectedRoute>
+          <PageRoute path="/reports"><Deferred><ReportsPage /></Deferred></PageRoute>
         )} />
         {/* 旧 inspection-v2 计划链路已停用；执行记录统一从计划调度详情查看。 */}
         <Route path="maintenance" element={<Navigate to="/plan-schedules" replace />} />
         <Route path="audit" element={(
-          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><AuditPage /></Deferred></ProtectedRoute>
+          <PageRoute path="/audit"><Deferred><AuditPage /></Deferred></PageRoute>
         )} />
         <Route path="batch-review" element={<Navigate to="/audit?tab=photo" replace />} />
-        <Route path="equipment" element={<Deferred><EquipmentPage /></Deferred>} />
-        <Route path="analysis" element={<Deferred><AnalysisPage /></Deferred>} />
-        <Route path="archive" element={<Deferred><ArchivePage /></Deferred>} />
+        <Route path="equipment" element={(
+          <PageRoute path="/equipment"><Deferred><EquipmentPage /></Deferred></PageRoute>
+        )} />
+        <Route path="analysis" element={(
+          <PageRoute path="/analysis"><Deferred><AnalysisPage /></Deferred></PageRoute>
+        )} />
+        <Route path="archive" element={(
+          <PageRoute path="/archive"><Deferred><ArchivePage /></Deferred></PageRoute>
+        )} />
         <Route path="users" element={(
-          <ProtectedRoute roles={['admin']}><Deferred><UsersPage /></Deferred></ProtectedRoute>
+          <PageRoute path="/users"><Deferred><UsersPage /></Deferred></PageRoute>
         )} />
-        <Route path="vehicles" element={<Deferred><VehiclesPage /></Deferred>} />
-        <Route path="reagents" element={<Deferred><ReagentMasterPage /></Deferred>} />
+        <Route path="vehicles" element={(
+          <PageRoute path="/vehicles"><Deferred><VehiclesPage /></Deferred></PageRoute>
+        )} />
+        <Route path="reagents" element={(
+          <PageRoute path="/reagents"><Deferred><ReagentMasterPage /></Deferred></PageRoute>
+        )} />
         <Route path="evaluation" element={(
-          <ProtectedRoute roles={['admin', 'reviewer']}><Deferred><EvaluationPage /></Deferred></ProtectedRoute>
+          <PageRoute path="/evaluation"><Deferred><EvaluationPage /></Deferred></PageRoute>
         )} />
+        <Route path="*" element={<Deferred><NotFoundPage /></Deferred>} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
@@ -81,7 +140,7 @@ function AppRoutes() {
 function ThemedApp() {
   const { themeConfig } = useTheme();
   return (
-    <ConfigProvider theme={themeConfig} locale={zhCN}>
+    <ConfigProvider theme={themeConfig} locale={antdZhCN}>
       <AntApp><AppRoutes /></AntApp>
     </ConfigProvider>
   );

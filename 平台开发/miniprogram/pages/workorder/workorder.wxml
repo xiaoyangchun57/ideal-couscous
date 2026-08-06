@@ -79,6 +79,10 @@
       </block>
 
       <block wx:elif="{{sheet.item.status === 'in_progress' && canWrite}}">
+        <view class="field workorder-resolution-field">
+          <text class="field-label">现场处置说明</text>
+          <textarea class="field-input" placeholder="说明做了什么、现场结果和仍需关注的事项" value="{{resolutionNote}}" bindinput="onResolutionNote" maxlength="500"></textarea>
+        </view>
         <button class="btn-ghost op-btn" bindtap="onUploadImage">上传影像</button>
         <button class="btn-ghost op-btn" bindtap="onApplyVehicle">申请用车</button>
         <button class="btn-ghost op-btn" bindtap="onApplyParts">申请备件</button>

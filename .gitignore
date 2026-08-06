@@ -21,7 +21,9 @@
 
 # Generated exports and local captures
 *.xlsx
+*.bak
 /outputs/
+/樟树/
 平台开发/*.png
 平台开发/frontend/uploads/
 平台开发/frontend/v2/

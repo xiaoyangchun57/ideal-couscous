@@ -10,12 +10,11 @@ let isDevtools = false;
 try {
   isDevtools = typeof wx !== 'undefined' && wx.getSystemInfoSync().platform === 'devtools';
 } catch (_) {
-  // Keep the deployed-device endpoint when runtime information is unavailable.
+  // Runtime information may be unavailable during static checks.
 }
 
 const CONFIG = {
-  // The simulator reaches the local Flask service directly; field devices keep the LAN endpoint.
-  BASE_URL: isDevtools ? 'http://127.0.0.1:5000' : 'http://192.168.2.110:5000'
+  BASE_URL: isDevtools ? 'http://127.0.0.1:5000' : 'https://ops.hhyc-tec.cn'
 };
 
 module.exports = CONFIG;

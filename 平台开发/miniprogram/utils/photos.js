@@ -16,6 +16,23 @@ function chooseAndCompress(maxCount) {
   });
 }
 
+// 巡检证据必须先保留原图，后端才能读取 EXIF 并在校验后生成压缩存储图。
+function chooseInspectionPhotos(maxCount, captureSource) {
+  const sourceType = captureSource === 'camera' ? ['camera'] : ['album'];
+  return new Promise((resolve, reject) => {
+    wx.chooseMedia({
+      count: maxCount || 1,
+      mediaType: ['image'],
+      sourceType,
+      sizeType: ['original'],
+      success(res) {
+        resolve((res.tempFiles || []).map(file => file.tempFilePath).filter(Boolean));
+      },
+      fail: reject
+    });
+  });
+}
+
 function compressOne(path) {
   return new Promise((resolve) => {
     wx.compressImage({
@@ -68,4 +85,4 @@ function captureFlushedPhoto(task, resp) {
   }
 }
 
-module.exports = { chooseAndCompress, fileToBase64, persistFile, captureFlushedPhoto };
+module.exports = { chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto };

@@ -1,27 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Empty, Input, List, Modal, Spin, Tag, Typography } from 'antd';
+import { Alert, Button, Empty, Input, List, Modal, Spin, Tag, Typography } from 'antd';
 import { EnvironmentOutlined, FileSearchOutlined, SearchOutlined, ToolOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
 import { getSearchablePages } from '../config/navigation';
+import { buildGlobalSearchPath } from '../utils/shellNavigation';
 
 const { Text } = Typography;
 const resultTypeLabels = {
   页面: '页面',
-  站点: '站点',
-  工单: '工单',
-  设备: '设备',
+  site: '站点',
+  workorder: '工单',
+  device: '设备',
 };
 
-function asArray(payload, keys) {
-  if (Array.isArray(payload)) return payload;
-  for (const key of keys) {
-    if (Array.isArray(payload?.[key])) return payload[key];
-  }
-  return [];
-}
+const resultIcons = {
+  site: <EnvironmentOutlined />,
+  workorder: <FileSearchOutlined />,
+  device: <ToolOutlined />,
+};
 
 export default function GlobalSearch({ open, onClose }) {
   const navigate = useNavigate();
@@ -30,45 +29,48 @@ export default function GlobalSearch({ open, onClose }) {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [records, setRecords] = useState([]);
+  const [loadError, setLoadError] = useState('');
+  const [searchVersion, setSearchVersion] = useState(0);
 
   useEffect(() => {
     if (!open) return;
     setQuery('');
-    let active = true;
-    setLoading(true);
-    Promise.all([api.get('/sites'), api.get('/workorders'), api.get('/devices')])
-      .then(([siteData, workorderData, deviceData]) => {
-        if (!active) return;
-        const sites = asArray(siteData, ['sites', 'data']).map((item) => ({
-          type: '站点',
-          title: item.name || item.site_name || `站点 ${item.id}`,
-          subtitle: item.code || item.site_code || item.type_name || '站点资料',
-          path: `/sites?archive=${item.id}`,
-          icon: <EnvironmentOutlined />,
-        }));
-        const workorders = asArray(workorderData, ['workorders', 'items', 'data']).map((item) => ({
-          type: '工单',
-          title: item.title || item.content || item.description || `工单 ${item.id}`,
-          subtitle: item.order_no || item.work_order_no || item.site_name || '工单详情',
-          path: `/workorders?search=${encodeURIComponent(item.order_no || item.work_order_no || item.id)}`,
-          icon: <FileSearchOutlined />,
-        }));
-        const devices = asArray(deviceData, ['devices', 'items', 'data']).map((item) => ({
-          type: '设备',
-          title: item.name || item.device_name || `设备 ${item.id}`,
-          subtitle: item.code || item.device_code || item.site_name || '设备台账',
-          path: `/equipment?search=${encodeURIComponent(item.code || item.device_code || item.name || item.id)}`,
-          icon: <ToolOutlined />,
-        }));
-        setRecords([...sites, ...workorders, ...devices]);
-      })
-      .finally(() => active && setLoading(false));
-    return () => { active = false; };
+    setRecords([]);
+    setLoadError('');
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const keyword = query.trim();
+    if (!keyword) {
+      setRecords([]);
+      setLoadError('');
+      setLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setRecords([]);
+    setLoadError('');
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const data = await api.getStrict(`/global-search?q=${encodeURIComponent(keyword)}`);
+        if (active) setRecords(Array.isArray(data?.results) ? data.results : []);
+      } catch (error) {
+        if (active) setLoadError(error.message || '业务对象搜索失败');
+      } finally {
+        if (active) setLoading(false);
+      }
+    }, 220);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [open, query, searchVersion]);
 
   const results = useMemo(() => {
     const pages = getSearchablePages(user?.roles || [user?.role]).map((item) => ({ ...item, icon: <SearchOutlined /> }));
-    const source = [...pages, ...records];
+    const source = [...pages, ...records.map((item) => ({ ...item, icon: resultIcons[item.type] || <SearchOutlined /> }))];
     const keyword = query.trim().toLowerCase();
     if (!keyword) return pages.slice(0, 10);
     return source
@@ -78,11 +80,19 @@ export default function GlobalSearch({ open, onClose }) {
 
   const openResult = (item) => {
     onClose();
-    navigate(item.path);
+    navigate(item.path || buildGlobalSearchPath(item));
+  };
+
+  const activateResult = (event, item) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openResult(item);
+    }
   };
 
   return (
     <Modal
+      className="global-search-modal"
       open={open}
       onCancel={onClose}
       footer={null}
@@ -100,9 +110,19 @@ export default function GlobalSearch({ open, onClose }) {
         value={query}
         onChange={(event) => setQuery(event.target.value)}
       />
-      <div style={{ minHeight: 280, maxHeight: 440, overflowY: 'auto', marginTop: 12 }}>
-        <Spin spinning={loading && records.length === 0}>
-          {results.length === 0 ? (
+      <div className="global-search-results">
+        <Spin spinning={loading}>
+          {loadError && (
+            <Alert
+              type="warning"
+              showIcon
+              message="部分搜索结果未加载"
+              description="页面入口仍可搜索，站点、工单和设备结果可能不完整。"
+              action={<Button size="small" onClick={() => setSearchVersion((value) => value + 1)}>重试</Button>}
+              style={{ marginBottom: 10 }}
+            />
+          )}
+          {results.length === 0 && !loading ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配结果" style={{ paddingTop: 64 }} />
           ) : (
             <List
@@ -110,7 +130,11 @@ export default function GlobalSearch({ open, onClose }) {
               renderItem={(item) => (
                 <List.Item
                   className="global-search-result"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${resultTypeLabels[item.type] || item.type}：${item.title}`}
                   onClick={() => openResult(item)}
+                  onKeyDown={(event) => activateResult(event, item)}
                   style={{ cursor: 'pointer', padding: '10px 12px', borderRadius: 6 }}
                 >
                   <List.Item.Meta
@@ -125,8 +149,8 @@ export default function GlobalSearch({ open, onClose }) {
           )}
         </Spin>
       </div>
-      <div style={{ color: tokens.colorTextTertiary, fontSize: 12, paddingTop: 10, borderTop: `1px solid ${tokens.colorBorderSecondary}` }}>
-        输入关键词筛选，点击结果直接前往
+      <div className="global-search-summary" style={{ color: tokens.colorTextTertiary, borderTopColor: tokens.colorBorderSecondary }}>
+        {query.trim() ? `找到 ${results.length} 个结果` : `可访问页面 ${results.length} 个`}
       </div>
     </Modal>
   );

@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Card, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, message, Typography } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons';
+import { useSearchParams } from 'react-router-dom';
+import { App, Alert, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, Typography, Empty } from 'antd';
+import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
-import AttachmentUpload from '../../components/AttachmentUpload';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
 import { filterInputWidth } from '../../services/pageStyles';
@@ -12,16 +12,29 @@ import { filterInputWidth } from '../../services/pageStyles';
 const { Text } = Typography;
 
 export default function ReagentMasterPage() {
+  const { message } = App.useApp();
   const { tokens } = useTheme();
   const { user } = useAuth();
-  const canWrite = user?.role === 'admin';
+  const [searchParams, setSearchParams] = useSearchParams();
+  const canWrite = (user?.roles || [user?.role]).includes('admin');
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState([]);
+  const [loadError, setLoadError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null); // null=新增，对象=编辑
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
-  const [search, setSearch] = useState('');
+  const search = searchParams.get('q') || '';
+
+  const updateSearch = useCallback((value) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      const q = value.trim();
+      if (q) next.set('q', q);
+      else next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
 
   const filteredData = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -36,10 +49,11 @@ export default function ReagentMasterPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await api.get('/reagents');
+      const d = await api.getStrict('/reagents');
       setData(Array.isArray(d) ? d : []);
-    } catch {
-      message.error('加载试剂主数据失败');
+      setLoadError('');
+    } catch (error) {
+      setLoadError(error.message || '试剂主数据加载失败，请检查网络后重试');
     } finally {
       setLoading(false);
     }
@@ -66,32 +80,36 @@ export default function ReagentMasterPage() {
   const submit = async () => {
     const name = (form.name || '').trim();
     if (!name) { message.warning('请填写试剂名称'); return; }
+    const unit = (form.unit || '').trim();
+    if (!unit) { message.warning('请填写计量单位'); return; }
+    if (!Number.isInteger(form.shelf_life_days) || form.shelf_life_days < 1 || form.shelf_life_days > 3650) {
+      message.warning('保质期应为 1 至 3650 天的整数');
+      return;
+    }
     setSubmitting(true);
     try {
       if (editing) {
-        await api.put(`/reagents/${editing.id}`, { ...form, name });
-        message.success('已保存修改');
+        await api.putStrict(`/reagents/${editing.id}`, { ...form, name, unit });
+        message.success(`已保存“${name}”`);
       } else {
-        await api.post('/reagents', { ...form, name });
-        message.success('已新增试剂');
+        await api.postStrict('/reagents', { ...form, name, unit });
+        message.success(`已新增“${name}”`);
       }
       setModalOpen(false);
       await load();
     } catch (e) {
-      const msg = e?.response?.data?.error || '操作失败，请重试';
-      message.error(msg);
+      message.error(e?.message || '保存失败，请重试');
     } finally {
       setSubmitting(false);
     }
   };
   const del = async (r) => {
     try {
-      await api.delete(`/reagents/${r.id}`);
+      await api.deleteStrict(`/reagents/${r.id}`);
       message.success(`已删除「${r.name}」`);
       await load();
     } catch (e) {
-      const msg = e?.response?.data?.error || '删除失败';
-      message.error(msg);
+      message.error(e?.message || '删除失败');
     }
   };
 
@@ -110,24 +128,28 @@ export default function ReagentMasterPage() {
     },
     { title: '单位', dataIndex: 'unit', key: 'unit', width: 90, render: (v) => v || '—' },
     {
-      title: '保质期(天)', dataIndex: 'shelf_life_days', key: 'shelf_life_days', width: 120,
+      title: '保质期（天）', dataIndex: 'shelf_life_days', key: 'shelf_life_days', width: 120,
       render: (v) => (v == null ? '—' : `${v} 天`),
     },
     {
       title: '操作', key: 'op', width: 140,
       render: (_, r) => (
         <Space size={0}>
-          {canWrite && <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(r)}>编辑</Button>}
+          {canWrite && (
+            <Button size="small" type="link" icon={<EditOutlined />} aria-label={`编辑试剂：${r.name}`} onClick={() => openEdit(r)}>
+              编辑
+            </Button>
+          )}
           {canWrite && (
             <Popconfirm
               title={`确认删除「${r.name}」？`}
-              description="删除后不可恢复"
+              description="仅尚未产生库存、告警或用量记录的误建项可以删除，删除后不可恢复。"
               okText="删除"
               cancelText="取消"
               okButtonProps={{ danger: true }}
               onConfirm={() => del(r)}
             >
-              <Button size="small" type="link" danger icon={<DeleteOutlined />}>删除</Button>
+              <Button size="small" type="link" danger icon={<DeleteOutlined />} aria-label={`删除试剂：${r.name}`}>删除</Button>
             </Popconfirm>
           )}
         </Space>
@@ -140,23 +162,33 @@ export default function ReagentMasterPage() {
       pageTitle="试剂主数据"
       pageSub="维护试剂目录；站点库存新增试剂时从此处选取。"
       tableMode="content"
-      filterSlot={<FilterBar
-        extra={canWrite && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增试剂</Button>}
-      >
-        <Input
-          placeholder="搜索试剂名称、厂家、规格..."
-          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-          allowClear
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ width: filterInputWidth, borderRadius: 8 }}
-        />
-        {search && (
-          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-            已筛选 {filteredData.length} 条结果
-          </Text>
+      filterSlot={<Space direction="vertical" size={8} style={{ width: '100%' }}>
+        {loadError && (
+          <Alert
+            type="error"
+            showIcon
+            message={data.length ? '刷新失败，当前显示上次成功加载的数据' : '试剂主数据加载失败'}
+            description={loadError}
+            action={<Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={load}>重新加载</Button>}
+          />
         )}
-      </FilterBar>}
+        <FilterBar
+          extra={<Space>
+            <Button icon={<ReloadOutlined />} aria-label="刷新试剂主数据" loading={loading} onClick={load} />
+            {canWrite && <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增试剂</Button>}
+          </Space>}
+        >
+          <Input
+            placeholder="搜索试剂名称、厂家、规格..."
+            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+            allowClear
+            value={search}
+            onChange={(event) => updateSearch(event.target.value)}
+            style={{ width: filterInputWidth, borderRadius: 8 }}
+          />
+          <Text type="secondary">共 {filteredData.length} 项</Text>
+        </FilterBar>
+      </Space>}
       tableSlot={<UnifiedTable
           mode="content"
           rowKey="id"
@@ -164,20 +196,9 @@ export default function ReagentMasterPage() {
           dataSource={filteredData}
           columns={columns}
           pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+          locale={{ emptyText: <Empty description={search ? '没有符合筛选条件的试剂' : '暂无试剂主数据'} /> }}
         />}
     >
-
-      <Card title="试剂配置照片归档" size="small" style={{ marginTop: 16 }}>
-        <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          流程外资料：站点试剂配置现场照片可在此就近归档，便于项目管理与检索（不参与审核链）。
-        </Text>
-        {canWrite ? (
-          <AttachmentUpload sourceType="reagent" category="试剂配置" buttonText="上传试剂配置照片" />
-        ) : (
-          <Text type="secondary">仅管理员可归档试剂配置照片</Text>
-        )}
-      </Card>
-
       <Modal
         title={editing ? `编辑试剂 · ${editing.name}` : '新增试剂'}
         open={modalOpen}
@@ -186,7 +207,7 @@ export default function ReagentMasterPage() {
         onCancel={() => setModalOpen(false)}
         okText="保存"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Form layout="vertical" style={{ marginTop: 12 }}>
           <Form.Item label="试剂名称" required>
@@ -213,7 +234,7 @@ export default function ReagentMasterPage() {
               maxLength={50}
             />
           </Form.Item>
-          <Form.Item label="单位">
+          <Form.Item label="单位" required>
             <Input
               value={form.unit}
               onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))}
@@ -221,7 +242,7 @@ export default function ReagentMasterPage() {
               maxLength={10}
             />
           </Form.Item>
-          <Form.Item label="保质期（天）">
+          <Form.Item label="保质期（天）" required>
             <InputNumber
               min={1}
               max={3650}

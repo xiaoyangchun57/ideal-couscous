@@ -7,6 +7,7 @@
 .login-card { margin-bottom: 48rpx; }
 .field { display: flex; align-items: center; padding: 22rpx 8rpx; }
 .label { width: 96rpx; font-size: 28rpx; color: var(--text-2); }
+.label-wide { width: 150rpx; }
 .input { flex: 1; font-size: 28rpx; color: var(--text); }
 .ph { color: var(--text-3); }
 .hairline { height: 1rpx; background: var(--line); margin: 0 8rpx; }

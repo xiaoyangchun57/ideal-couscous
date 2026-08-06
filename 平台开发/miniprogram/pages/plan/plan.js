@@ -14,6 +14,7 @@ Page({
     followUpRecommendations: [],
     creatingFollowUpKey: '',
     favorites: [],
+    canUseFavorites: false,
     favoriteSheet: { open: false, index: 0, periodStart: '', submitting: false }
   },
 
@@ -22,6 +23,9 @@ Page({
       wx.reLaunch({ url: '/pages/login/login' });
       return;
     }
+    const user = getUser() || {};
+    const roles = user.roles || [user.role || ''];
+    this.setData({ canUseFavorites: roles.includes('operator') });
     this.load();
   },
 
@@ -34,7 +38,7 @@ Page({
       api.planSchedules(),
       api.planScheduleDraftRecommendations().catch(() => ({ recommendations: [] })),
       api.planScheduleFollowUpRecommendations().catch(() => ({ recommendations: [] })),
-      api.planScheduleFavorites().catch(() => [])
+      this.data.canUseFavorites ? api.planScheduleFavorites().catch(() => []) : Promise.resolve([])
     ])
       .then(([res, recommendationResult, followUpResult, favoriteResult]) => {
         const list = (Array.isArray(res) ? res : []).map(item => {
@@ -93,6 +97,7 @@ Page({
   },
 
   onOpenFavorites() {
+    if (!this.data.canUseFavorites) return;
     const favorites = this.data.favorites || [];
     if (!favorites.length) {
       wx.showToast({ title: '暂无常用计划，可在计划详情中收藏', icon: 'none' });

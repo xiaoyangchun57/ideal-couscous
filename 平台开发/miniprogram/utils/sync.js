@@ -16,11 +16,14 @@ async function flushLocalOps() {
         // 离线照片：本地路径 → 上传取 URL → 并入 photo_urls
         if (Array.isArray(payload.localPhotos) && payload.localPhotos.length) {
           const urls = [];
+          const photoMeta = Array.isArray(payload.localPhotoMeta) ? payload.localPhotoMeta : [];
           for (let index = 0; index < payload.localPhotos.length; index += 1) {
             const p = payload.localPhotos[index];
             try {
               const b64 = await fileToBase64(p);
-              const r = await api.uploadSitePhoto(payload.siteId, b64, op.id + ':photo:' + index);
+              const r = await api.uploadSitePhoto(
+                payload.siteId, b64, op.id + ':photo:' + index, photoMeta[index] || {}
+              );
               const u = r && r.url;
               if (u) urls.push(u);
             } catch (e) { /* 单张失败，跳过，其余继续 */ }
@@ -32,6 +35,7 @@ async function flushLocalOps() {
           try { existing = JSON.parse(payload.photo_urls || '[]'); } catch (e) { existing = []; }
           payload.photo_urls = JSON.stringify(existing.concat(urls.filter(Boolean)));
           delete payload.localPhotos;
+          delete payload.localPhotoMeta;
         }
         await api.submitItem(payload);
         (op.data.localPhotos || []).forEach((filePath) => {

@@ -48,7 +48,10 @@ function linkedWorkorderCn(w) {
 // 巡检分类中文映射（严禁 wxml 直接写英文 category）
 const INSPECTION_CATEGORY = {
   equipment_ops: '设备运维', log_books: '登记本', qaqc_calibration: '质控校准',
-  reagent: '试剂管理', site_check: '站点检查'
+  reagent: '试剂管理', site_check: '站点检查',
+  设备: '设备检查', 环境: '站房与周边环境', 质控: '仪器质控与校准',
+  质控校准: '仪器质控与校准', 站房环境: '站房与周边环境',
+  台账登记: '日常记录与台账', 常规: '常规检查', 其他: '其他检查'
 };
 const ALERT_LEVEL = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' };
 // 告警等级→配色后缀（红橙黄蓝，对应 dot-/tag- 后缀；缺省灰）

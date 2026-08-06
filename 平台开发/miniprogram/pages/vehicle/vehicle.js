@@ -8,7 +8,7 @@ const APPLICATION_STATUS = {
 };
 
 function vehicleLabel(item) {
-  return (item.plate_no || '未指定车辆') + (item.model ? (' · ' + item.model) : '');
+  return (item.plate_no || '未指定车辆') + (item.model ? ('（车型：' + item.model + '）') : '');
 }
 
 function dateOnly(value) {

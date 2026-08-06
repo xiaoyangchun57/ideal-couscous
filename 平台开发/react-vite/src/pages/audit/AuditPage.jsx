@@ -1,25 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import {
-  Table, Card, Input, Button, Space, Tag, Typography, message,
+  Input, Button, Space, Tag, Typography, App as AntApp,
   Modal, Descriptions, Tooltip, Tabs, Divider,
-  Select, Image, Badge, Empty,
+  Select, Image, Badge, Alert, Checkbox,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, AuditOutlined, CloseOutlined, CheckOutlined,
+  ReloadOutlined, AuditOutlined, CloseOutlined, CheckOutlined,
   CameraOutlined, FileTextOutlined, EnvironmentOutlined,
-  ShoppingOutlined, QuestionCircleOutlined,
+  QuestionCircleOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
-import FilterBar from '../../components/FilterBar';
-import {
-  pageRootStyle, tableCardStyle, tableCardBody,
-  filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
-} from '../../services/pageStyles';
+import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
+import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import DataReviewTab from '../alerts/components/DataReviewTab';
 
 const { Title, Text } = Typography;
@@ -32,22 +28,9 @@ const { TextArea } = Input;
 // ===========================================================================
 
 // 轻量指标卡
-function MetricCard({ title, value, color }) {
-  const { tokens } = useTheme();
-  return (
-    <div style={{
-      background: tokens.colorFillSecondary,
-      borderRadius: 8,
-      padding: '10px 14px',
-      minWidth: 100,
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-    }}>
-      <div style={{ fontSize: 12, color: tokens.colorTextDescription, marginBottom: 2, lineHeight: '18px' }}>{title}</div>
-      <div style={{ fontSize: 22, fontWeight: 700, lineHeight: '28px', color: color || tokens.colorTextHeading }}>{value}</div>
-    </div>
-  );
+function AuditEmptyState({ title, onRefresh, error }) {
+  return <WorkspaceEmpty type={error ? 'error' : 'empty'} onRefresh={onRefresh}
+    description={error ? `${title}加载失败，当前不能判断是否没有待处理事项。` : `${title}当前没有待处理事项`} />;
 }
 
 // 通用工具栏：搜索 + 筛选 + 刷新 + 计数
@@ -55,46 +38,48 @@ function MetricCard({ title, value, color }) {
 function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, extraAction, total, filteredCount, refresh, helpText }) {
   const { tokens } = useTheme();
   return (
-    <FilterBar
-      style={{ marginBottom: 12 }}
-      extra={(
+    <WorkspaceToolbar
+      actions={(
         <Space size={8}>
           {extraAction}
           {helpText && (
             <Tooltip title={helpText}>
-              <QuestionCircleOutlined style={{ color: tokens.colorTextTertiary, fontSize: 14, cursor: 'help' }} />
+              <Button type="text" size="small" aria-label="查看当前审核口径说明"
+                icon={<QuestionCircleOutlined style={{ color: tokens.colorTextTertiary }} />} />
             </Tooltip>
           )}
           <Button icon={<ReloadOutlined />} onClick={refresh}>刷新</Button>
         </Space>
       )}
     >
-      <Input.Search
-        placeholder={placeholder}
-        allowClear
-        value={searchText}
-        onChange={e => onSearchChange(e.target.value)}
-        onSearch={onSearchChange}
-        style={{ width: filterInputWidth }}
-      />
+      <FilterField label="搜索">
+        <Input.Search
+          aria-label={placeholder}
+          placeholder={placeholder}
+          allowClear
+          enterButton="查询"
+          value={searchText}
+          onChange={e => onSearchChange(e.target.value)}
+          onSearch={onSearchChange}
+          style={{ width: filterInputWidth }}
+        />
+      </FilterField>
       {filterSlot}
-      <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+      <ToolbarMeta label="当前结果">
         {searchText ? `已筛选 ${filteredCount} 条` : `共 ${total} 项待审`}
-      </Text>
-    </FilterBar>
+      </ToolbarMeta>
+    </WorkspaceToolbar>
   );
 }
 
 // ---------------------------------------------------------------------------
 // 业务审核通用 Tab：按 sourceTypes 分组展示一类待办，含指标/筛选/列表
 // ---------------------------------------------------------------------------
-function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, onOpenReview, onRefresh, extraAction }) {
+function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, loadError, onOpenReview, onRefresh, extraAction, reviewerNames = [] }) {
   const { tokens, isDark } = useTheme();
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState(undefined);
-
-  const [listWrapRef, listH] = useTableAutoHeight({ headerOffset: 40, deps: [loading, allItems.length] });
 
   const filtered = allItems.filter(i => sourceTypes.includes(i.source_type));
   const typeFiltered = typeFilter
@@ -116,7 +101,6 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
       inspection: { label: '巡检质控' },
       workorder_review: { label: '工单办结' },
       photo_review: { label: '影像审核' },
-      spare_part_request: { label: '备件申请' },
       vehicle_application: { label: '用车审批' },
     };
     return { value: t, label: map[t]?.label || t };
@@ -132,6 +116,10 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
     const days = Math.ceil((Date.now() - oldest.getTime()) / 86400000);
     return days;
   })();
+
+  if (!loading && filtered.length === 0) {
+    return <AuditEmptyState title={title} onRefresh={onRefresh} error={loadError} />;
+  }
 
   let metrics = [];
   let helpText = '';
@@ -172,7 +160,6 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
           inspection: ['orange', <FileTextOutlined />],
           workorder_review: ['blue', <AuditOutlined />],
           photo_review: ['cyan', <CameraOutlined />],
-          spare_part_request: ['geekblue', <FileTextOutlined />],
           vehicle_application: ['purple', <FileTextOutlined />],
         };
         const [color, icon] = map[r.source_type] || ['default', <FileTextOutlined />];
@@ -184,7 +171,10 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
       render: (t, r) => (
         <div>
           <Text strong>{t}</Text>
-          {r.source_type === 'workorder_review' && r.source_title && (
+          {r.source_type === 'workorder_review' && reviewerNames.includes(r.assignee) && (
+            <Tag color="warning" style={{ marginLeft: 6 }}>本人处置 · 自审</Tag>
+          )}
+          {r.source_type === 'workorder_review' && r.source_title && r.source_title !== t && (
             <div><Text type="secondary" style={{ fontSize: 11 }}>{r.source_title}</Text></div>
           )}
           {r.source_type === 'photo_review' && r.remark && (
@@ -224,12 +214,13 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
     },
     {
       title: '提交时间', dataIndex: 'submit_time', width: 140,
-      render: t => t || '-',
+      render: t => t || <Text type="secondary">历史记录未保存</Text>,
     },
     {
       title: '操作', width: 100, fixed: 'right',
       render: (_, r) => (
         <Button type="link" size="small" icon={<AuditOutlined />}
+          aria-label={`审核 ${r.source_name || r.title}`}
           onClick={() => onOpenReview(r)}>
           审核
         </Button>
@@ -238,26 +229,24 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
   ];
 
   return (
-    <div style={{ height: '100%', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* 指标条 */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexShrink: 0, flexWrap: 'wrap' }}>
-        {metrics.map((m, idx) => <MetricCard key={idx} {...m} />)}
-      </div>
-
-      {/* 工具栏 */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
         onSearchChange={setSearchText}
         placeholder="搜索内容 / 站点 / 来源"
         filterSlot={showType ? (
-          <Select
-            placeholder="类型筛选"
-            allowClear
-            value={typeFilter}
-            onChange={setTypeFilter}
-            style={{ width: filterSmallSelectWidth }}
-            options={typeOptions}
-          />
+          <FilterField label="审核类型">
+            <Select
+              aria-label="审核类型"
+              placeholder="全部类型"
+              allowClear
+              value={typeFilter}
+              onChange={setTypeFilter}
+              style={{ width: filterSmallSelectWidth }}
+              options={typeOptions}
+            />
+          </FilterField>
         ) : null}
         extraAction={extraAction}
         total={filtered.length}
@@ -266,21 +255,9 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
         helpText={helpText}
       />
 
-      {/* 列表 */}
-      <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
-        <div ref={listWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <Table
-            dataSource={searched}
-            columns={columns}
-            rowKey="id"
-            loading={loading}
-            size="small"
-            pagination={false}
-            scroll={listH ? { y: listH } : undefined}
-            locale={{ emptyText: <Empty description="暂无待审核项" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          />
-        </div>
-      </Card>
+      {loadError && <Alert type="warning" showIcon message="待审列表刷新失败，当前显示的数量和内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
+      <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
+        emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -288,13 +265,11 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, on
 // ---------------------------------------------------------------------------
 // 备件预申报专用 Tab：按明细行展示，含指标/筛选/富列表
 // ---------------------------------------------------------------------------
-function PartsRequestAuditTab({ statValue, allItems, loading, onOpenReview, onRefresh }) {
+function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRefresh }) {
   const { tokens, isDark } = useTheme();
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [sourceFilter, setSourceFilter] = useState(undefined);
-
-  const [listWrapRef, listH] = useTableAutoHeight({ headerOffset: 40, deps: [loading, allItems.length] });
 
   const flattened = allItems
     .filter(i => i.source_type === 'parts_request')
@@ -346,6 +321,10 @@ function PartsRequestAuditTab({ statValue, allItems, loading, onOpenReview, onRe
   const totalQuantity = searched.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
   const distinctSources = new Set(searched.map(i => i.source_name).filter(Boolean)).size;
 
+  if (!loading && flattened.length === 0) {
+    return <AuditEmptyState title="备件需求" onRefresh={onRefresh} error={loadError} />;
+  }
+
   const metrics = [
     { title: '待审申请数', value: totalRequests, color: totalRequests > 0 ? statusColors.warning[mode] : statusColors.success[mode] },
     { title: '涉及种类', value: distinctParts, color: statusColors.info[mode] },
@@ -383,28 +362,26 @@ function PartsRequestAuditTab({ statValue, allItems, loading, onOpenReview, onRe
   ];
 
   return (
-    <div style={{ height: '100%', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* 指标条 */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexShrink: 0, flexWrap: 'wrap' }}>
-        {metrics.map((m, idx) => <MetricCard key={idx} {...m} />)}
-      </div>
-
-      {/* 工具栏 */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
         onSearchChange={setSearchText}
         placeholder="搜索备件名称 / 编号 / 厂家 / 型号 / 申请人 / 计划"
         filterSlot={(
-          <Select
-            placeholder="来源计划"
-            allowClear
-            showSearch
-            value={sourceFilter}
-            onChange={setSourceFilter}
-            style={{ width: filterSelectWidth }}
-            options={sourceOptions}
-            optionFilterProp="label"
-          />
+          <FilterField label="来源计划">
+            <Select
+              aria-label="来源计划"
+              placeholder="全部计划"
+              allowClear
+              showSearch
+              value={sourceFilter}
+              onChange={setSourceFilter}
+              style={{ width: filterSelectWidth }}
+              options={sourceOptions}
+              optionFilterProp="label"
+            />
+          </FilterField>
         )}
         total={flattened.length}
         filteredCount={searched.length}
@@ -412,21 +389,9 @@ function PartsRequestAuditTab({ statValue, allItems, loading, onOpenReview, onRe
         helpText="点击「审核」审批整条预申报；同一计划的多项备件将一并处理。"
       />
 
-      {/* 列表 */}
-      <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
-        <div ref={listWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <Table
-            dataSource={searched}
-            columns={columns}
-            rowKey="id"
-            loading={loading}
-            size="small"
-            pagination={false}
-            scroll={listH ? { y: listH } : undefined}
-            locale={{ emptyText: <Empty description="暂无备件预申报待审" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          />
-        </div>
-      </Card>
+      {loadError && <Alert type="warning" showIcon message="备件待审列表刷新失败，当前内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
+      <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
+        emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -435,19 +400,40 @@ function PartsRequestAuditTab({ statValue, allItems, loading, onOpenReview, onRe
 // 主页面
 // ---------------------------------------------------------------------------
 export default function AuditPage() {
+  const { message, modal } = AntApp.useApp();
   const { tokens, isDark } = useTheme();
-  const navigate = useNavigate();
   const { user } = useAuth();
-  const [searchParams] = useSearchParams();
-  const isAdmin = user?.role === 'admin';
+  const [searchParams, setSearchParams] = useSearchParams();
+  const userRoles = user?.roles || [user?.role];
+  const isAdmin = userRoles.includes('admin');
+  const isDualRole = isAdmin && userRoles.includes('operator');
+  const reviewerNames = [user?.real_name, user?.login_name, user?.username, user?.name].filter(Boolean);
   const reviewerId = user?.id || 1;
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [pendingLoaded, setPendingLoaded] = useState(false);
+  const [pendingError, setPendingError] = useState('');
+  const [statsError, setStatsError] = useState('');
+  const [dataStatsError, setDataStatsError] = useState('');
+  const allowedTabs = isAdmin
+    ? ['data', 'inspection', 'workorder', 'parts', 'vehicle', 'photo']
+    : ['inspection', 'workorder', 'photo'];
+  const defaultTab = isAdmin ? 'data' : 'inspection';
   const requestedTab = searchParams.get('tab');
-  const initialTab = requestedTab && (isAdmin || requestedTab !== 'data')
-    ? requestedTab
-    : (isAdmin ? 'data' : 'inspection');
+  const initialTab = allowedTabs.includes(requestedTab) ? requestedTab : defaultTab;
   const [activeKey, setActiveKey] = useState(initialTab);
+
+  useEffect(() => {
+    const nextTab = allowedTabs.includes(searchParams.get('tab')) ? searchParams.get('tab') : defaultTab;
+    setActiveKey(nextTab);
+  }, [searchParams, isAdmin]);
+
+  const handleTabChange = (key) => {
+    setActiveKey(key);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('tab', key);
+    setSearchParams(nextParams);
+  };
 
   // ---- 统计 ----
   const [stats, setStats] = useState({
@@ -460,22 +446,38 @@ export default function AuditPage() {
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
   const [reviewingItem, setReviewingItem] = useState(null);
   const reviewSessionRef = useRef(null);
+  const focusedOrderRef = useRef('');
   const [reviewComment, setReviewComment] = useState('');
   const [processing, setProcessing] = useState(false);
   const [autoPassing, setAutoPassing] = useState(false);
+  const [evidenceAcknowledged, setEvidenceAcknowledged] = useState(false);
 
   const loadPending = useCallback(async () => {
     setLoading(true);
-    try {
-      const [data, st, ds] = await Promise.all([
-        api.get('/audit/pending'),
-        api.get('/audit/stats'),
-        api.get('/data-reviews/stats'),
-      ]);
-      setItems(Array.isArray(data) ? data : []);
-      setStats(st || { total: 0, inspection_pending: 0, workorder_pending: 0, parts_pending: 0, vehicle_pending: 0, photo_pending: 0 });
-      setDataStats(ds || { total: 0 });
-    } catch { setItems([]); }
+    const [pendingResult, statsResult, dataStatsResult] = await Promise.allSettled([
+      api.getStrict('/audit/pending'),
+      api.getStrict('/audit/stats'),
+      api.getStrict('/data-reviews/stats'),
+    ]);
+    if (pendingResult.status === 'fulfilled') {
+      setItems(Array.isArray(pendingResult.value) ? pendingResult.value : []);
+      setPendingError('');
+    } else {
+      setPendingError(pendingResult.reason?.message || '审核待办加载失败');
+    }
+    if (statsResult.status === 'fulfilled') {
+      setStats(statsResult.value || { total: 0, inspection_pending: 0, workorder_pending: 0, parts_pending: 0, vehicle_pending: 0, photo_pending: 0 });
+      setStatsError('');
+    } else {
+      setStatsError(statsResult.reason?.message || '审核统计加载失败');
+    }
+    if (dataStatsResult.status === 'fulfilled') {
+      setDataStats(dataStatsResult.value || { total: 0 });
+      setDataStatsError('');
+    } else {
+      setDataStatsError(dataStatsResult.reason?.message || '数据审核统计加载失败');
+    }
+    setPendingLoaded(true);
     setLoading(false);
   }, []);
 
@@ -485,101 +487,54 @@ export default function AuditPage() {
   const handleReview = async (item, action) => {
     setProcessing(true);
     try {
+      let successMessage = '';
       if (item.source_type === 'inspection') {
         if (action === 'reject' && !reviewComment.trim()) {
-          message.error('驳回需填写现场需补充或整改的内容'); setProcessing(false); return;
+          message.error('驳回需填写现场需补充或整改的内容'); return;
         }
         const realId = item.id.replace('insp_', '');
-        const result = await api.put(`/inspection-v2/items/${realId}/review`, { action, comment: reviewComment });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? '审核通过' : '已驳回');
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
+        await api.putStrict(`/inspection-v2/items/${realId}/review`, { action, comment: reviewComment });
+        successMessage = action === 'approve' ? '巡检审核通过' : '巡检已退回现场整改';
       } else if (item.source_type === 'workorder_review') {
         if (action === 'reject' && !reviewComment.trim()) {
-          message.error('驳回需填写现场需补充或整改的内容'); setProcessing(false); return;
+          message.error('驳回需填写现场需补充或整改的内容'); return;
         }
-        const result = await api.post(`/workorders/${item.order_no}/${action === 'approve' ? 'approve' : 'reject'}`, {
+        await api.postStrict(`/workorders/${item.order_no}/${action === 'approve' ? 'approve' : 'reject'}`, {
           comment: reviewComment || '', reason: reviewComment || '', reviewer_id: reviewerId,
+          evidence_acknowledged: evidenceAcknowledged,
         });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? '工单已办结' : '工单已退回现场补充');
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
+        successMessage = action === 'approve' ? '工单已办结' : '工单已退回现场补充';
       } else if (item.source_type === 'parts_request') {
         if (action === 'reject' && !reviewComment.trim()) {
-          message.error('驳回需填写原因'); setProcessing(false); return;
+          message.error('驳回需填写原因'); return;
         }
         const realId = item.id.replace('pr_', '');
         const endpoint = `/parts/requests/${realId}/${action === 'approve' ? 'approve' : 'reject'}`;
-        const result = await api.put(endpoint, { comment: reviewComment, approver_id: reviewerId });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? '备件需求已批准，未锁定库存' : '已驳回');
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
-      } else if (item.source_type === 'spare_part_request') {
-        if (action === 'reject' && !reviewComment.trim()) {
-          message.error('驳回需填写原因'); setProcessing(false); return;
-        }
-        const realId = item.id.replace('spr_', '');
-        const result = await api.put(`/api/parts/requests/${realId}/approve`, {
-          action,
-          comment: reviewComment,
-          approver_id: reviewerId,
-        });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? '备件申请已批准' : '已驳回');
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
+        await api.putStrict(endpoint, { comment: reviewComment, approver_id: reviewerId });
+        successMessage = action === 'approve' ? '备件需求已批准，未锁定库存' : '备件需求已驳回';
       } else if (item.source_type === 'vehicle_application') {
         if (action === 'reject' && !reviewComment.trim()) {
-          message.error('驳回需填写原因'); setProcessing(false); return;
+          message.error('驳回需填写原因'); return;
         }
         const realId = item.id.replace('va_', '');
-        const result = await api.put(`/api/vehicle/applications/${realId}/approve`, {
+        await api.postStrict(`/vehicle/applications/${realId}/approve`, {
           action,
           reject_reason: action === 'reject' ? (reviewComment || '不符') : '',
           approver_id: reviewerId,
         });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? '用车申请已批准' : '已驳回');
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
+        successMessage = action === 'approve' ? '用车申请已批准' : '用车申请已驳回';
       } else if (item.source_type === 'photo_review') {
         const attachmentIds = item.attachment_ids || [];
-        if (attachmentIds.length === 0) { message.error('无待审核照片'); setProcessing(false); return; }
-        const result = await api.post(`/operation-attachments/review`, {
+        if (attachmentIds.length === 0) { message.error('无待审核照片'); return; }
+        await api.postStrict(`/operation-attachments/review`, {
           attachment_ids: attachmentIds,
           action: action,
           reject_reason: action === 'reject' ? (reviewComment || '未达标') : '',
           reviewer_id: reviewerId,
         });
-        if (result && !result.error) {
-          message.success(action === 'approve' ? `已确认${attachmentIds.length}张照片` : `已驳回，已通知重拍`);
-        } else {
-          message.error(result?.error || '操作失败');
-          setProcessing(false);
-          return;
-        }
+        successMessage = action === 'approve' ? `已确认 ${attachmentIds.length} 张照片` : '照片已驳回，已通知重拍';
       } else {
-        message.error('未知类型');
-        setProcessing(false);
-        return;
+        throw new Error('无法识别当前审核类型，请刷新待办后重试');
       }
       if (reviewSessionRef.current) {
         api.track('review.submitted', {
@@ -590,16 +545,18 @@ export default function AuditPage() {
         });
         reviewSessionRef.current = null;
       }
-      message.success(action === 'approve' ? '审核通过' : '已驳回');
+      message.success(successMessage);
       setReviewModalOpen(false);
       setReviewingItem(null);
       setReviewComment('');
+      setEvidenceAcknowledged(false);
       loadPending();
     } catch (err) {
       console.error('handleReview error:', err);
-      message.error('审核操作失败');
+      message.error(err.message || '审核操作失败，请重试');
+    } finally {
+      setProcessing(false);
     }
-    setProcessing(false);
   };
 
   const openReview = (item) => {
@@ -611,22 +568,29 @@ export default function AuditPage() {
     });
     setReviewingItem(item);
     setReviewComment('');
+    setEvidenceAcknowledged(false);
     setReviewModalOpen(true);
   };
+
+  useEffect(() => {
+    const orderNo = searchParams.get('order') || '';
+    if (!orderNo || loading || !pendingLoaded || pendingError || focusedOrderRef.current === orderNo) return;
+    const target = items.find((item) => item.source_type === 'workorder_review'
+      && (item.order_no === orderNo || item.source_name === orderNo));
+    focusedOrderRef.current = orderNo;
+    if (target) openReview(target);
+    else message.info(`工单 ${orderNo} 当前已不在待审核列表中`);
+  }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
 
   // 一键通过正常照片（影像抽样审核核心减负动作）
   const handleAutoPassNormal = async () => {
     try {
-      const preview = await api.post('/operation-attachments/auto-review', { dry_run: true });
-      if (!preview || preview.error) {
-        message.error(preview?.error || '无法获取批量审核范围');
-        return;
-      }
+      const preview = await api.postStrict('/operation-attachments/auto-review', { dry_run: true });
       if (!preview.approved) {
         message.info('当前权限范围内没有可自动通过的正常照片');
         return;
       }
-      Modal.confirm({
+      modal.confirm({
         title: '确认一键通过正常照片',
         content: `将在当前权限范围内通过 ${preview.approved} 张正常照片，保留 ${preview.remaining_flagged || 0} 张标红照片供人工审核。`,
         okText: '确认通过',
@@ -634,15 +598,13 @@ export default function AuditPage() {
         onOk: async () => {
           setAutoPassing(true);
           try {
-            const result = await api.post('/operation-attachments/auto-review', {});
-            if (result && !result.error) {
-              message.success(
-                `已自动通过 ${result.approved || 0} 张正常照片，剩余 ${result.remaining_flagged || 0} 张标红待查`
-              );
-              loadPending();
-            } else {
-              message.error(result?.error || '操作失败');
-            }
+            const result = await api.postStrict('/operation-attachments/auto-review', {});
+            message.success(
+              `已自动通过 ${result.approved || 0} 张正常照片，剩余 ${result.remaining_flagged || 0} 张标红待查`
+            );
+            loadPending();
+          } catch (error) {
+            message.error(error.message || '自动通过失败，请重试');
           } finally {
             setAutoPassing(false);
           }
@@ -650,7 +612,7 @@ export default function AuditPage() {
       });
     } catch (e) {
       console.error('auto-pass error:', e);
-      message.error('自动通过失败');
+      message.error(e.message || '自动通过失败');
     }
   };
 
@@ -659,9 +621,16 @@ export default function AuditPage() {
     if (!reviewModalOpen) return null;
     const item = reviewingItem;
     if (!item) return null;
+    const riskyEvidence = item.source_type === 'workorder_review'
+      ? (item.attachment_details || []).filter(photo => photo.is_flagged || photo.duplicate_of_id || !photo.taken_at)
+      : [];
+    const isSelfReview = item.source_type === 'workorder_review' && reviewerNames.includes(item.assignee);
+    const missingResolution = item.source_type === 'workorder_review' && !item.resolution_note;
+    const missingRequiredPhotos = item.source_type === 'workorder_review'
+      && Number(item.actual_photos || 0) < Number(item.required_photos || 0);
     return (
       <Modal
-        title={<Space><AuditOutlined />审核 - {item.title}</Space>}
+        title={<Space><AuditOutlined />{item.source_type === 'workorder_review' ? `工单审核 · ${item.source_name}` : `审核 · ${item.title}`}</Space>}
         open={reviewModalOpen}
         onCancel={() => { setReviewModalOpen(false); setReviewingItem(null); }}
         footer={[
@@ -670,11 +639,19 @@ export default function AuditPage() {
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>,
           <Button key="approve" type="primary" loading={processing}
+            disabled={missingResolution || missingRequiredPhotos || (riskyEvidence.length > 0 && !evidenceAcknowledged)}
             onClick={() => handleReview(item, 'approve')}
             icon={<CheckOutlined />}>审核通过</Button>,
         ]}
-        width={520}
+        width={680}
+        styles={{ body: { maxHeight: 'calc(100vh - 220px)', overflowY: 'auto' } }}
       >
+        {isSelfReview && <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+          message="当前为本人处置事项，审核结果将标记为自审"
+          description="请独立核对现场说明和全部影像；通过或退回都会记录当前审核人。" />}
+        {(missingResolution || missingRequiredPhotos) && <Alert type="error" showIcon style={{ marginBottom: 12 }}
+          message="当前证据不满足办结条件，只能退回现场补充"
+          description={[missingResolution ? '未记录现场处置说明' : '', missingRequiredPhotos ? '处置影像数量不足' : ''].filter(Boolean).join('；')} />}
         <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="类型">
             <Tag color={item.source_type === 'inspection' ? 'orange' : 'blue'} style={{ borderRadius: 4, fontSize: 11 }}>
@@ -683,7 +660,15 @@ export default function AuditPage() {
           </Descriptions.Item>
           <Descriptions.Item label="内容">{item.title}</Descriptions.Item>
           {item.source_type === 'workorder_review' && (
-            <Descriptions.Item label="工单编号">{item.source_name}</Descriptions.Item>
+            <>
+              <Descriptions.Item label="工单编号">{item.source_name}</Descriptions.Item>
+              <Descriptions.Item label="负责人">{item.assignee || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{item.created_at || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="到站签到">{item.check_in_time || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="提交审核">{item.submit_time || <Text type="secondary">历史记录未保存该时间</Text>}</Descriptions.Item>
+              <Descriptions.Item label="原始故障描述">{item.original_description || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="现场处置说明">{item.resolution_note || <Text type="danger">未记录，建议退回补充</Text>}</Descriptions.Item>
+            </>
           )}
           {item.source_type === 'inspection' && (
             <Descriptions.Item label="巡检计划">{item.source_name}</Descriptions.Item>
@@ -724,7 +709,7 @@ export default function AuditPage() {
           <Descriptions.Item label="照片进度">
             {item.actual_photos || 0} / {item.required_photos || 0} 张
           </Descriptions.Item>
-          {item.remark && (
+          {item.remark && item.source_type !== 'workorder_review' && (
             <Descriptions.Item label="检查标准">{item.remark}</Descriptions.Item>
           )}
         </Descriptions>
@@ -751,7 +736,7 @@ export default function AuditPage() {
                 </Image.PreviewGroup>
               </div>
             );
-          } catch (_) { return <Text type="secondary">现场照片数据格式异常</Text>; }
+          } catch { return <Text type="secondary">现场照片数据格式异常</Text>; }
         })()}
         {item.source_type === 'workorder_review' && item.attachment_details && (
           <div style={{ marginTop: 12 }}>
@@ -759,11 +744,21 @@ export default function AuditPage() {
             {(item.attachment_details || []).length ? <Image.PreviewGroup>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {item.attachment_details.map((photo) => (
-                  <Image key={photo.id} src={photo.stored_path} width={100} height={100}
-                    style={{ objectFit: 'cover', borderRadius: 6 }} preview={{ mask: '预览' }} />
+                  <div key={photo.id} style={{ width: 112 }}>
+                    <Image src={photo.stored_path} width={100} height={100}
+                      style={{ objectFit: 'cover', borderRadius: 6 }} preview={{ mask: '预览' }} />
+                    <Text type={photo.is_flagged || !photo.taken_at ? 'danger' : 'secondary'} style={{ display: 'block', fontSize: 11 }}>
+                      {photo.flag_reason || (photo.taken_at ? photo.taken_at : '拍摄时间未知')}
+                    </Text>
+                  </div>
                 ))}
               </div>
             </Image.PreviewGroup> : <Text type="secondary">未上传处置影像</Text>}
+            {riskyEvidence.length > 0 && <Alert type="warning" showIcon style={{ marginTop: 12 }}
+              message={`${riskyEvidence.length} 张影像需要人工核对`}
+              description={<Checkbox checked={evidenceAcknowledged} onChange={event => setEvidenceAcknowledged(event.target.checked)}>
+                我已核对重复风险、拍摄时间与现场上下文，确认可作为本工单办结证据
+              </Checkbox>} />}
           </div>
         )}
         </div>
@@ -792,7 +787,7 @@ export default function AuditPage() {
     isAdmin ? {
       key: 'data',
       label: tabLabel('数据审核', dataStats.total || 0),
-      children: <DataReviewTab tokens={tokens} isDark={isDark} />,
+      children: <DataReviewTab tokens={tokens} />,
     } : null,
     {
       key: 'inspection',
@@ -804,8 +799,10 @@ export default function AuditPage() {
           statValue={stats.inspection_pending}
           allItems={items}
           loading={loading}
+          loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          reviewerNames={reviewerNames}
         />
       ),
     },
@@ -819,8 +816,10 @@ export default function AuditPage() {
           statValue={stats.workorder_pending}
           allItems={items}
           loading={loading}
+          loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          reviewerNames={reviewerNames}
         />
       ),
     },
@@ -832,6 +831,7 @@ export default function AuditPage() {
           statValue={stats.parts_pending}
           allItems={items}
           loading={loading}
+          loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
         />
@@ -847,8 +847,10 @@ export default function AuditPage() {
           statValue={items.filter(i => i.source_type === 'vehicle_application').length}
           allItems={items}
           loading={loading}
+          loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          reviewerNames={reviewerNames}
         />
       ),
     } : null,
@@ -862,8 +864,10 @@ export default function AuditPage() {
           statValue={stats.photo_pending}
           allItems={items}
           loading={loading}
+          loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          reviewerNames={reviewerNames}
           extraAction={
             <Button
               type="primary"
@@ -893,17 +897,25 @@ export default function AuditPage() {
       `}</style>
       <div style={{ marginBottom: 16, flexShrink: 0 }}>
         <Title level={4} style={{ margin: 0, color: tokens.colorText }}>
-          <AuditOutlined style={{ marginRight: 8 }} />统一审核
+          统一审核
         </Title>
+        <Text type="secondary">按事项核验现场成果、影像和资源申请，处理后自动回写对应业务单据。</Text>
       </div>
+
+      {isDualRole && <Alert type="info" showIcon style={{ marginBottom: 12, flexShrink: 0 }}
+        message="当前使用管理员审核职责"
+        description="此账号同时具有运维人员身份；本人提交或处置的事项会明确标记为自审。" />}
+      {(statsError || dataStatsError) && <Alert type="warning" showIcon style={{ marginBottom: 12, flexShrink: 0 }}
+        message="部分待办数量加载失败，页签徽标可能不完整"
+        action={<Button size="small" onClick={loadPending}>重试</Button>} />}
 
       <Tabs
         className="audit-tabs"
         activeKey={activeKey}
-        onChange={setActiveKey}
+        onChange={handleTabChange}
         items={tabItems}
         size="small"
-        type="card"
+        type="line"
         animated={{ inkBar: true, tabPane: false }}
         style={{ flex: 1, minHeight: 0 }}
         tabBarStyle={{ marginBottom: 16 }}

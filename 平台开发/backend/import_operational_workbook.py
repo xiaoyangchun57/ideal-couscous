@@ -252,7 +252,8 @@ def sync_devices_and_reagents(db, payload, site_ids):
             manufacturer = device.get('manufacturer') or ''
             if re.fullmatch(r'\d+(?:\.\d+)?米', manufacturer):
                 manufacturer = ''
-            scope = 'external_data' if manufacturer == '外接设备' else 'managed'
+            # 厂商仅描述设备来源，不再影响设备的运维责任或可执行操作。
+            scope = 'managed'
             db.execute('''INSERT INTO device_shadows
                 (site_id, device_code, device_name, device_type, device_model, manufacturer,
                  install_date, status, management_scope, monitoring_enabled)

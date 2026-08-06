@@ -43,7 +43,7 @@ export default function AttachmentUpload({
     category: curCategory || '',
     description: description || '',
     uploader_id: user?.id || 1,
-    uploader_name: user?.name || user?.username || '运维人员',
+    uploader_name: user?.real_name || user?.name || user?.username || '运维人员',
   };
 
   const beforeUpload = () => {

@@ -5,6 +5,12 @@ const api = {
   // 登录（工号密码复用网页端）
   login: (username, password) =>
     request('/api/auth/login', 'POST', { username, password }, { retry: 1, queue: false }),
+  logout: () => request('/api/auth/logout', 'POST', {}, { retry: 0, queue: false }),
+  changePassword: (currentPassword, newPassword) =>
+    request('/api/auth/change-password', 'POST', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    }, { retry: 1, queue: false }),
 
   // 绑定微信 openid（wx.login 的 code → 服务端换取并落库，用于订阅消息）
   bindOpenId: (code) =>
@@ -57,9 +63,9 @@ const api = {
     request('/api/sites/' + siteId + '/calibrate', 'PUT', { lat, lng }),
 
   // 上传站点影像（base64）；弱网失败自动进入失败队列待重传
-  uploadSitePhoto: (siteId, image, idempotencyKey) =>
+  uploadSitePhoto: (siteId, image, idempotencyKey, metadata) =>
     request('/api/mobile/upload-site-photo', 'POST', {
-      site_id: siteId, image, _idempotency_key: idempotencyKey || ''
+      site_id: siteId, image, _idempotency_key: idempotencyKey || '', ...(metadata || {})
     }, { queue: false }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
   deletePendingSitePhoto: (url) => request('/api/mobile/site-photos/delete', 'POST', { url }),
@@ -108,8 +114,10 @@ const api = {
     request('/api/workorders/' + orderNo + '/status', 'PUT', Object.assign({ status }, extra || {})),
 
   // 提交核验（in_progress -> reviewing）；移动端携带 client 触发影像门禁
-  submitWorkorderReview: (orderNo) =>
-    request('/api/workorders/' + orderNo + '/submit-review', 'POST', { client: 'mobile' }),
+  submitWorkorderReview: (orderNo, resolutionNote) =>
+    request('/api/workorders/' + orderNo + '/submit-review', 'POST', {
+      client: 'mobile', resolution_note: resolutionNote
+    }),
 
   // 核验通过（reviewing -> closed，专用端点，后端已接审批结果推送）
   approveWorkorder: (orderNo) =>

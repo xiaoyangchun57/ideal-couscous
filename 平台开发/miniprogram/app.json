@@ -10,6 +10,7 @@
     "pages/message/message",
     "pages/reports/reports",
     "pages/review/view",
+    "pages/responsible-sites/responsible-sites",
     "pages/vehicle/vehicle",
     "pages/plan/plan",
     "pages/plan-edit/plan-edit",

@@ -23,7 +23,7 @@
     <view class="seg-item {{filter === 'done' ? 'seg-on' : ''}}" data-f="done" bindtap="onFilterTap">已完成</view>
   </view>
 
-  <view class="favorite-entry" bindtap="onOpenFavorites">
+  <view class="favorite-entry" wx:if="{{canUseFavorites}}" bindtap="onOpenFavorites">
     <view>
       <text class="favorite-entry-title">常用计划</text>
       <text class="favorite-entry-hint">复用固定站点、车辆和备件，直接生成草稿</text>
@@ -104,8 +104,8 @@
     <text class="empty-tx">暂无排程计划</text>
   </view>
 
-  <view class="sheet-mask" wx:if="{{favoriteSheet.open}}" bindtap="onCloseFavorites"></view>
-  <view class="sheet" wx:if="{{favoriteSheet.open}}">
+  <view class="sheet-mask" wx:if="{{canUseFavorites && favoriteSheet.open}}" bindtap="onCloseFavorites"></view>
+  <view class="sheet" wx:if="{{canUseFavorites && favoriteSheet.open}}">
     <view class="sheet-head"><text class="sheet-title">从常用计划生成草稿</text><text class="sheet-close" bindtap="onCloseFavorites">×</text></view>
     <view class="favorite-field-label">常用计划</view>
     <picker mode="selector" range="{{favorites}}" range-key="name" value="{{favoriteSheet.index}}" bindchange="onFavoritePick">

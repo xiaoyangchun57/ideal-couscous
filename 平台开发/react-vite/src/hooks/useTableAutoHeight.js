@@ -40,7 +40,6 @@ export function useTableAutoHeight({ headerOffset = 40, deps = [] } = {}) {
       ro.disconnect();
       window.removeEventListener('resize', measure);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
   return [wrapRef, bodyHeight];

@@ -7,6 +7,16 @@
 .filter { margin: 0; }
 .filter-on { font-weight:600; }
 .card { background:var(--card); border:1rpx solid var(--line); border-radius:16rpx; padding:24rpx; margin-bottom:16rpx; }
+.report:active { background:var(--fill-2); }
 .line { display:flex; justify-content:space-between; align-items:center; }
 .type { color:var(--amber); font-size:26rpx; font-weight:600; }.status { font-size:24rpx; padding:4rpx 12rpx; border-radius:999rpx; background:var(--fill); color:var(--text-2); }.status-dispatched { color:var(--blue); background:rgba(59,130,246,.08); }.status-verified { color:var(--brand); background:var(--brand-weak); }.status-resolved { color:var(--green); background:rgba(31,182,115,.10); }
 .site { display:block; color:var(--text); font-size:28rpx; margin-top:16rpx; }.description { display:block; margin-top:10rpx; font-size:26rpx; line-height:1.55; color:var(--text-2); }.meta { display:flex; justify-content:space-between; margin-top:16rpx; font-size:22rpx; color:var(--text-3); }.order { margin-top:18rpx; padding-top:16rpx; border-top:1rpx solid var(--line); color:var(--brand); font-size:25rpx; }.empty { padding:90rpx 20rpx; text-align:center; color:var(--text-3); font-size:27rpx; }
+.report-detail-sheet { max-height: 78vh; overflow-y: auto; }
+.detail-row { display:flex; align-items:center; padding:16rpx 0; border-bottom:1rpx solid var(--line); gap:20rpx; }
+.detail-key { flex:0 0 132rpx; color:var(--text-3); font-size:24rpx; }
+.detail-value { flex:1; min-width:0; color:var(--text); font-size:26rpx; }
+.detail-copy { padding:20rpx 0; border-bottom:1rpx solid var(--line); }
+.detail-description { display:block; margin-top:12rpx; color:var(--text); font-size:26rpx; line-height:1.6; white-space:pre-wrap; }
+.detail-photos { margin-top:14rpx; white-space:nowrap; }
+.detail-photo { width:152rpx; height:152rpx; margin-right:12rpx; border-radius:8rpx; background:var(--fill); }
+.detail-order { margin-bottom: 8rpx; }

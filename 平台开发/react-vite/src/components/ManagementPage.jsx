@@ -25,7 +25,7 @@ import { pageRootStyle, tableCardStyle, tableCardBody } from '../services/pageSt
  *   />
  */
 export default function ManagementPage({
-  pageTitle, pageSub, headerExtra, statSlots, filterSlot, tableSlot, children, tableMode = 'fill',
+  pageTitle, pageSub, headerExtra, statSlots, filterSlot, tableSlot, children, tableMode = 'content',
 }) {
   const { tokens, isDark } = useTheme();
   return (

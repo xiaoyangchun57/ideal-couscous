@@ -1,10 +1,10 @@
 <view class="login-wrap">
   <view class="login-brand">
-    <view class="login-logo">水质智慧运维</view>
-    <view class="login-sub">移动巡检 · 实地作业</view>
+    <view class="login-logo">{{mustChangePassword ? '设置新密码' : '水质智慧运维'}}</view>
+    <view class="login-sub">{{mustChangePassword ? '临时密码验证成功，修改后进入系统' : '移动巡检 · 实地作业'}}</view>
   </view>
 
-  <view class="card login-card">
+  <view class="card login-card" wx:if="{{!mustChangePassword}}">
     <view class="field">
       <text class="label">工号</text>
       <input class="input" placeholder="请输入工号" placeholder-class="ph"
@@ -18,7 +18,25 @@
     </view>
   </view>
 
-  <button class="btn-primary login-btn" loading="{{loading}}" disabled="{{loading}}" bindtap="onLogin">登 录</button>
+  <view class="card login-card" wx:else>
+    <view class="field">
+      <text class="label label-wide">新密码</text>
+      <input class="input" placeholder="至少8位" placeholder-class="ph"
+             password value="{{newPassword}}" bindinput="onNewPassword" confirm-type="next" />
+    </view>
+    <view class="hairline"></view>
+    <view class="field">
+      <text class="label label-wide">确认密码</text>
+      <input class="input" placeholder="再次输入新密码" placeholder-class="ph"
+             password value="{{confirmPassword}}" bindinput="onConfirmPassword"
+             confirm-type="done" bindconfirm="onChangePassword" />
+    </view>
+  </view>
+
+  <button class="btn-primary login-btn" wx:if="{{!mustChangePassword}}"
+          loading="{{loading}}" disabled="{{loading}}" bindtap="onLogin">登 录</button>
+  <button class="btn-primary login-btn" wx:else
+          loading="{{loading}}" disabled="{{loading}}" bindtap="onChangePassword">保存并进入系统</button>
 
   <view class="login-error" wx:if="{{error}}">{{error}}</view>
 </view>

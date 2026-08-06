@@ -135,7 +135,13 @@
         {{part.name}} · 库存{{part.quantity}}{{part.unit}}
       </view>
     </view>
-    <text class="resource-empty" wx:else>当前无可用备件库存</text>
+    <text class="resource-empty" wx:elif="{{partsInventoryState === 'loading'}}">正在读取可用备件库存…</text>
+    <view class="resource-empty" wx:elif="{{partsInventoryState === 'unavailable'}}" bindtap="loadPartsInventory">
+      <text>暂时无法读取备件库存</text><text class="resource-retry">点击重试</text>
+    </view>
+    <view class="resource-empty" wx:else>
+      <text>当前没有可用备件库存</text><text class="resource-next">可先保存计划，提交后按需发起备件申请</text>
+    </view>
     <text class="resource-auto">所选站点的未结工单将在提交时自动关联，无需重复填写</text>
   </view>
 

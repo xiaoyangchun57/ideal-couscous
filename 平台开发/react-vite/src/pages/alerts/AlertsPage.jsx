@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Table, Card, Input, Select, Button, Space, Tag, Badge,
-  Row, Col, Typography, message, Modal, Switch,
-  InputNumber, Tooltip, Divider, Form, Radio, Empty,
+  Alert, Table, Card, Input, Select, Button, Space, Tag, Badge, Dropdown,
+  Row, Col, Typography, App as AntApp, Modal, Switch,
+  InputNumber, Tooltip, Form, Radio, Empty, Tabs,
 } from 'antd';
 import {
   AlertOutlined,
@@ -15,11 +15,9 @@ import {
   ReloadOutlined,
   ExperimentOutlined,
   EditOutlined,
-  DeleteOutlined,
   UserOutlined,
-  FileTextOutlined,
   LinkOutlined,
-  AuditOutlined,
+  MoreOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import {
@@ -27,14 +25,15 @@ import {
   CONCLUSION_OPTIONS,
 } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
+import { useAuth } from '../../hooks/useAuth';
 import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import { statusColors } from '../../theme/tokens';
-import FilterBar from '../../components/FilterBar';
 import {
   pageRootStyle, cardStyleBase, tableCardStyle, tableCardBody,
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
+import { StatusStrip, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
 
@@ -47,16 +46,6 @@ const statusIconMap = {
   pending: <ExclamationCircleOutlined />,
   acknowledged: <ClockCircleOutlined />,
   resolved: <CheckCircleOutlined />,
-};
-
-// ---------------------------------------------------------------------------
-// Alert severity labels (tiered display)
-// ---------------------------------------------------------------------------
-const alertSeverityLabel = {
-  blue: '一般关注',
-  yellow: '一般告警',
-  orange: '较重告警',
-  red: '紧急告警',
 };
 
 const alertSeverityTag = {
@@ -115,131 +104,134 @@ function isInDateRange(dateStr, range) {
 }
 
 // ---------------------------------------------------------------------------
-// Default alert rules configuration
-// ---------------------------------------------------------------------------
-const defaultAlertRules = [
-  {
-    id: 'rule_data_gap',
-    metric: 'data_gap',
-    metricLabel: '数据缺失',
-    description: '监测数据连续缺失超过设定时间触发告警',
-    enabled: true,
-    flowType: 'auto',
-    thresholds: { blue: 30, yellow: 60, orange: 120, red: 240 },
-    unit: '分钟',
-  },
-  {
-    id: 'rule_data_freeze',
-    metric: 'data_freeze',
-    metricLabel: '数据冻结',
-    description: '监测数据长时间保持不变（疑似传感器故障）',
-    enabled: true,
-    flowType: 'manual',
-    thresholds: { blue: 60, yellow: 120, orange: 240, red: 480 },
-    unit: '分钟',
-  },
-  {
-    id: 'rule_data_spike',
-    metric: 'data_spike',
-    metricLabel: '数据突变',
-    description: '监测数据短时间内变化幅度超过阈值',
-    enabled: true,
-    flowType: 'manual',
-    thresholds: { blue: 15, yellow: 30, orange: 50, red: 80 },
-    unit: '%',
-  },
-  {
-    id: 'rule_device_status',
-    metric: 'device_status',
-    metricLabel: '设备离线',
-    description: '设备心跳超时判定为离线状态',
-    enabled: true,
-    flowType: 'auto',
-    thresholds: { blue: 10, yellow: 30, orange: 60, red: 120 },
-    unit: '分钟',
-  },
-  {
-    id: 'rule_arrival_rate',
-    metric: 'arrival_rate',
-    metricLabel: '到报率',
-    description: '站点数据到报率低于设定阈值',
-    enabled: true,
-    flowType: 'manual',
-    thresholds: { blue: 95, yellow: 90, orange: 80, red: 70 },
-    unit: '%',
-    isReversed: true,
-  },
-];
-
-// ---------------------------------------------------------------------------
 // Component: Alert Rule Engine Tab
 // ---------------------------------------------------------------------------
-function AlertRuleEngineTab({ tokens, isDark }) {
+function AlertRuleEngineTab({ tokens, isDark, canManage }) {
+  const { message, modal } = AntApp.useApp();
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState('');
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [simForm, setSimForm] = useState({ ruleId: null, siteId: null, value: 0 });
   const [sites, setSites] = useState([]);
+  const [sitesLoading, setSitesLoading] = useState(false);
+  const [sitesError, setSitesError] = useState('');
   const [simLoading, setSimLoading] = useState(false);
   const [escalationConfig, setEscalationConfig] = useState([]);
+  const [escalationError, setEscalationError] = useState('');
+  const [disableTarget, setDisableTarget] = useState(null);
+  const [disableReason, setDisableReason] = useState('');
+  const [toggleSaving, setToggleSaving] = useState('');
 
-  // Fetch sites for simulation dropdown
-  useEffect(() => {
-    api.get('/sites').then((data) => {
+  const loadSites = useCallback(async () => {
+    setSitesLoading(true);
+    try {
+      const data = await api.getStrict('/sites');
       if (Array.isArray(data)) setSites(data);
-    });
+      setSitesError('');
+    } catch (error) {
+      setSitesError(error.message || '站点选项加载失败');
+    } finally {
+      setSitesLoading(false);
+    }
   }, []);
 
-  // Fetch escalation config
-  useEffect(() => {
-    api.get('/alert-escalation-config').then(data => {
+  const loadEscalation = useCallback(async () => {
+    try {
+      const data = await api.getStrict('/alert-escalation-config');
       if (Array.isArray(data)) setEscalationConfig(data);
-    }).catch(() => {});
+      setEscalationError('');
+    } catch (error) {
+      setEscalationError(error.message || '升级配置加载失败');
+    }
   }, []);
 
-  // Fetch alert rules from backend (persisted config)
-  useEffect(() => {
+  const loadRules = useCallback(async () => {
     setRulesLoading(true);
-    api.get('/alert-rules').then(data => {
+    try {
+      const data = await api.getStrict('/alert-rules');
       if (Array.isArray(data)) setRules(data);
-    }).catch(() => {
-      // Fallback to defaults if backend not available
-      setRules(defaultAlertRules);
-    }).finally(() => setRulesLoading(false));
+      setRulesError('');
+    } catch (error) {
+      setRulesError(error.message || '告警规则加载失败');
+    } finally {
+      setRulesLoading(false);
+    }
   }, []);
+
+  useEffect(() => { loadSites(); }, [loadSites]);
+  useEffect(() => { loadEscalation(); }, [loadEscalation]);
+  useEffect(() => { loadRules(); }, [loadRules]);
 
   // Toggle rule enabled
-  const handleToggle = useCallback((ruleId, checked) => {
-    api.put(`/alert-rules/${ruleId}`, { enabled: checked }).then(() => {
-      setRules((prev) => prev.map((r) => r.id === ruleId ? { ...r, enabled: checked } : r));
-      message.success(checked ? '规则已启用' : '规则已停用');
-    }).catch(() => {
-      message.error('保存失败，请重试');
+  const saveToggle = useCallback(async (rule, checked, reason = '') => {
+    if (toggleSaving) return;
+    setToggleSaving(rule.id);
+    try {
+      await api.putStrict(`/alert-rules/${rule.id}`, {
+        enabled: checked,
+        ...(reason ? { disable_reason: reason } : {}),
+      });
+      setRules((prev) => prev.map((item) => item.id === rule.id ? { ...item, enabled: checked } : item));
+      message.success(checked ? `已启用“${rule.metricLabel}”规则` : `已停用“${rule.metricLabel}”规则`);
+      setDisableTarget(null);
+      setDisableReason('');
+    } catch (error) {
+      message.error(error.message || '保存失败，请重试');
+    } finally {
+      setToggleSaving('');
+    }
+  }, [message, toggleSaving]);
+
+  const handleToggle = useCallback((rule, checked) => {
+    if (!canManage) return;
+    if (!checked) {
+      setDisableTarget(rule);
+      setDisableReason('');
+      return;
+    }
+    modal.confirm({
+      title: `启用“${rule.metricLabel}”规则？`,
+      content: '启用后，新进入系统的数据将按该规则判断并可能产生告警。',
+      okText: '确认启用',
+      cancelText: '取消',
+      onOk: () => saveToggle(rule, true),
     });
-  }, []);
+  }, [canManage, modal, saveToggle]);
 
   // Edit rule thresholds
   const handleEdit = useCallback((rule) => {
+    if (!canManage) return;
     setEditingRule({ ...rule, thresholds: { ...rule.thresholds } });
     setEditModalOpen(true);
-  }, []);
+  }, [canManage]);
 
-  const handleSaveEdit = useCallback(() => {
-    if (!editingRule) return;
-    api.put(`/alert-rules/${editingRule.id}`, { thresholds: editingRule.thresholds }).then(() => {
+  const handleSaveEdit = useCallback(async () => {
+    if (!editingRule || editSaving) return;
+    setEditSaving(true);
+    try {
+      await api.putStrict(`/alert-rules/${editingRule.id}`, { thresholds: editingRule.thresholds });
       setRules((prev) => prev.map((r) => r.id === editingRule.id ? editingRule : r));
       setEditModalOpen(false);
       setEditingRule(null);
       message.success('规则阈值已保存');
-    }).catch(() => {
-      message.error('保存失败，请重试');
-    });
-  }, [editingRule]);
+    } catch (error) {
+      message.error(error.message || '保存失败，请重试');
+    } finally {
+      setEditSaving(false);
+    }
+  }, [editingRule, editSaving]);
 
   // Simulate trigger
   const handleSimulate = useCallback(() => {
+    if (!canManage) return;
+    if (sitesError) {
+      message.error('站点选项尚未加载，恢复后才能模拟触发');
+      return;
+    }
     if (!simForm.ruleId || !simForm.siteId) {
       message.warning('请选择规则和站点');
       return;
@@ -267,20 +259,14 @@ function AlertRuleEngineTab({ tokens, isDark }) {
       level,
       message: `[模拟] ${site?.name || '未知站点'} ${rule.metricLabel} ${val}${rule.unit}，触发${alertLevelLabel[level]}`,
     };
-    api.post('/alerts/simulate', payload).then((result) => {
-      if (result && !result.error) {
-        message.success(`模拟告警已触发：${alertLevelLabel[level]}`);
-        setSimModalOpen(false);
-        setSimForm({ ruleId: null, siteId: null, value: 0 });
-      } else {
-        message.info('模拟触发成功（演示模式）');
-        setSimModalOpen(false);
-      }
-    }).catch(() => {
-      message.info('模拟触发成功（演示模式）');
+    api.postStrict('/alerts/simulate', payload).then((result) => {
+      message.success(`模拟告警已触发：${alertLevelLabel[level]}（测试记录 #${result.id}）`);
       setSimModalOpen(false);
+      setSimForm({ ruleId: null, siteId: null, value: 0 });
+    }).catch((error) => {
+      message.error(error.message || '模拟告警触发失败，请检查规则和站点后重试');
     }).finally(() => setSimLoading(false));
-  }, [simForm, rules, sites]);
+  }, [canManage, message, rules, simForm, sites, sitesError]);
 
   // Rule table columns
   const ruleColumns = useMemo(() => [
@@ -360,7 +346,10 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         <Switch
           size="small"
           checked={r.enabled}
-          onChange={(checked) => handleToggle(r.id, checked)}
+          loading={toggleSaving === r.id}
+          disabled={!canManage}
+          aria-label={`${r.enabled ? '停用' : '启用'}${r.metricLabel}规则`}
+          onChange={(checked) => handleToggle(r, checked)}
         />
       ),
     },
@@ -370,15 +359,15 @@ function AlertRuleEngineTab({ tokens, isDark }) {
       width: 80,
       align: 'center',
       render: (_, r) => (
-        <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(r)}>
+        <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(r)} disabled={!canManage} aria-label={`编辑${r.metricLabel}规则`}>
           编辑
         </Button>
       ),
     },
-  ], [tokens, handleToggle, handleEdit]);
+  ], [tokens, handleToggle, handleEdit, toggleSaving, canManage]);
 
   return (
-    <div>
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: 2 }}>
       {/* Rule Engine Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div>
@@ -387,19 +376,34 @@ function AlertRuleEngineTab({ tokens, isDark }) {
           </Text>
         </div>
         <Space>
-          <Button
-            type="primary"
-            icon={<ExperimentOutlined />}
-            onClick={() => setSimModalOpen(true)}
-            style={{ borderRadius: 8 }}
-          >
-            模拟触发
-          </Button>
+          <Tooltip title={canManage ? '创建带测试标记的模拟告警' : '仅管理员可模拟触发'}>
+            <Button
+              type="primary"
+              icon={<ExperimentOutlined />}
+              onClick={() => setSimModalOpen(true)}
+              style={{ borderRadius: 8 }}
+              disabled={!canManage}
+            >
+              模拟触发
+            </Button>
+          </Tooltip>
         </Space>
       </div>
 
       {/* Rule Table */}
-      <Table
+      {rulesError && rules.length > 0 && <Alert
+        type="warning"
+        showIcon
+        message="规则列表未更新"
+        description={`${rulesError}。当前保留上次成功加载的配置。`}
+        action={<Button size="small" onClick={loadRules}>重新加载</Button>}
+        style={{ marginBottom: 8 }}
+      />}
+      {rulesError && !rulesLoading && rules.length === 0 ? <WorkspaceEmpty
+        type="error"
+        description="告警规则加载失败，当前不能确认服务器中的实际配置。"
+        onRefresh={loadRules}
+      /> : <Table
         rowKey="id"
         columns={ruleColumns}
         dataSource={rules}
@@ -408,7 +412,7 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         scroll={{ y: 'calc(100vh - 380px)' }}
         size="small"
         style={{ borderRadius: 12, overflow: 'hidden' }}
-      />
+      />}
 
       {/* Edit Threshold Modal */}
       <Modal
@@ -418,6 +422,7 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         onCancel={() => { setEditModalOpen(false); setEditingRule(null); }}
         okText="保存"
         cancelText="取消"
+        confirmLoading={editSaving}
         width={520}
       >
         {editingRule && (
@@ -488,6 +493,30 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         )}
       </Modal>
 
+      <Modal
+        title={`停用“${disableTarget?.metricLabel || ''}”规则`}
+        open={Boolean(disableTarget)}
+        onCancel={() => { if (!toggleSaving) { setDisableTarget(null); setDisableReason(''); } }}
+        onOk={() => saveToggle(disableTarget, false, disableReason.trim())}
+        okText="确认停用"
+        okButtonProps={{ danger: true, disabled: !disableReason.trim() }}
+        cancelText="取消"
+        confirmLoading={Boolean(toggleSaving)}
+        destroyOnHidden
+      >
+        <Text>停用后，该规则不再对新数据触发告警；已有告警和工单不会自动关闭。</Text>
+        <Form.Item label="停用原因" required style={{ marginTop: 16, marginBottom: 0 }}>
+          <Input.TextArea
+            value={disableReason}
+            onChange={(event) => setDisableReason(event.target.value)}
+            placeholder="请说明停用原因，便于后续追溯"
+            maxLength={200}
+            showCount
+            autoSize={{ minRows: 3, maxRows: 5 }}
+          />
+        </Form.Item>
+      </Modal>
+
       {/* Simulate Trigger Modal */}
       <Modal
         title="模拟触发告警"
@@ -499,6 +528,13 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         confirmLoading={simLoading}
         width={480}
       >
+        <Alert
+          type="warning"
+          showIcon
+          message="此操作会创建真实的测试告警记录"
+          description="记录带“模拟”标记并进入告警链路，可能影响当前列表和统计。仅用于受控验证，验证后应按测试记录编号完成清理。"
+          style={{ marginTop: 8, marginBottom: 16 }}
+        />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
           <div>
             <div style={{ marginBottom: 6 }}>
@@ -526,11 +562,21 @@ function AlertRuleEngineTab({ tokens, isDark }) {
               optionFilterProp="label"
               value={simForm.siteId}
               onChange={(val) => setSimForm({ ...simForm, siteId: val })}
+              loading={sitesLoading}
+              disabled={Boolean(sitesError)}
               options={sites.map((s) => ({
                 value: s.id,
                 label: `${s.name} (${s.code || '-'})`,
               }))}
             />
+            {sitesError && <Alert
+              type="error"
+              showIcon
+              message="站点选项加载失败"
+              description={sitesError}
+              action={<Button size="small" onClick={loadSites}>重试</Button>}
+              style={{ marginTop: 8 }}
+            />}
           </div>
           <div>
             <div style={{ marginBottom: 6 }}>
@@ -547,27 +593,7 @@ function AlertRuleEngineTab({ tokens, isDark }) {
           </div>
           {simForm.ruleId && (
             <div style={{ padding: '10px 14px', borderRadius: 8, background: isDark ? 'rgba(0,200,180,0.06)' : 'rgba(0,0,0,0.02)' }}>
-              <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
-                {(() => {
-                  const rule = rules.find((r) => r.id === simForm.ruleId);
-                  if (!rule) return '';
-                  const val = simForm.value;
-                  let level = '未触发';
-                  let color = tokens.colorTextTertiary;
-                  if (rule.isReversed) {
-                    if (val <= rule.thresholds.red) { level = '红色警报'; color = alertLevelColor.red; }
-                    else if (val <= rule.thresholds.orange) { level = '橙色预警'; color = alertLevelColor.orange; }
-                    else if (val <= rule.thresholds.yellow) { level = '黄色警示'; color = alertLevelColor.yellow; }
-                    else if (val <= rule.thresholds.blue) { level = '蓝色关注'; color = alertLevelColor.blue; }
-                  } else {
-                    if (val >= rule.thresholds.red) { level = '红色警报'; color = alertLevelColor.red; }
-                    else if (val >= rule.thresholds.orange) { level = '橙色预警'; color = alertLevelColor.orange; }
-                    else if (val >= rule.thresholds.yellow) { level = '黄色警示'; color = alertLevelColor.yellow; }
-                    else if (val >= rule.thresholds.blue) { level = '蓝色关注'; color = alertLevelColor.blue; }
-                  }
-                  return `当前触发级别：`;
-                })()}
-              </Text>
+              <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>当前触发级别：</Text>
               {(() => {
                 const rule = rules.find((r) => r.id === simForm.ruleId);
                 if (!rule) return null;
@@ -597,22 +623,29 @@ function AlertRuleEngineTab({ tokens, isDark }) {
         <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
           系统每 5 分钟扫描未处理告警，超过 SLA 时长自动升级至下一级并自动生成工单
         </Text>
-        <Table
+        {escalationError ? <WorkspaceEmpty
+          type="error"
+          description="告警升级配置加载失败，当前表格并非空配置。"
+          onRefresh={loadEscalation}
+        /> : <Table
           dataSource={escalationConfig}
           rowKey="level"
           pagination={false}
           size="small"
           columns={[
-            { title: '级别', dataIndex: 'level', width: 80, render: v => {
-              return <Tag color={alertLevelColor[v] || 'default'}>{v === 'blue' ? '蓝' : v === 'yellow' ? '黄' : v === 'orange' ? '橙' : '红'}</Tag>;
+            { title: '告警级别', dataIndex: 'level', width: 116, render: v => {
+              return <Tag color={alertLevelColor[v] || 'default'}>{alertLevelLabel[v] || v}</Tag>;
             }},
-            { title: 'SLA（分钟）', dataIndex: 'sla_minutes', width: 100 },
-            { title: '自动工单', dataIndex: 'auto_workorder', width: 80, render: v => v ? '✅' : '❌' },
-            { title: '通知方式', dataIndex: 'notify_type', width: 100 },
-            { title: '升级目标', dataIndex: 'escalate_to_level', width: 80, render: v => v && v !== 'None' ? v : '—' },
-            { title: '说明', dataIndex: 'description', ellipsis: true },
+            { title: '升级时限', dataIndex: 'sla_minutes', width: 100, render: v => `${v} 分钟` },
+            { title: '自动建单', dataIndex: 'auto_workorder', width: 124, render: v => v
+              ? <Tag color="success">自动建单</Tag>
+              : <Tooltip title="蓝色关注仅发送提醒；若超时未处理，升级至黄色预警后才自动建单，避免轻微波动产生无效工单。"><Tag>仅提醒</Tag></Tooltip> },
+            { title: '通知方式', dataIndex: 'notify_type', width: 108, render: v => ({ app: '应用内提醒', sms: '短信通知', phone: '电话通知' }[v] || v || '未设置') },
+            { title: '升级目标', dataIndex: 'escalate_to_level', width: 116, render: v => v && v !== 'None' ? <Tag color={alertLevelColor[v] || 'default'}>{alertLevelLabel[v] || v}</Tag> : '最高级别' },
+            { title: '说明', dataIndex: 'description', width: 300,
+              render: value => <TableLongText value={value} /> },
           ]}
-        />
+        />}
       </div>
     </div>
   );
@@ -644,61 +677,67 @@ const PRIMARY_TABS = [
   },
 ];
 
+const ALERT_TABS = PRIMARY_TABS.flatMap((primary) => primary.children.map((child) => ({
+  key: child.key,
+  label: child.label,
+})));
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 export default function AlertsPage() {
+  const { message } = AntApp.useApp();
+  const { user } = useAuth();
   const { tokens, isDark } = useTheme();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState('alerts');
-  const [primaryTab, setPrimaryTab] = useState('events');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const roles = user?.roles?.length ? user.roles : [user?.role];
+  const canManage = roles.includes('admin');
+  const requestedTab = searchParams.get('tab') || 'alerts';
+  const activeTab = ALERT_TABS.some((tab) => tab.key === requestedTab) ? requestedTab : 'alerts';
+  const searchText = searchParams.get('search') || '';
+  const statusFilter = searchParams.get('status') || null;
+  const levelFilter = searchParams.get('level') || null;
+  const requestedRange = searchParams.get('range') || 'today';
+  const dateRange = dateRangeOptions.some((option) => option.value === requestedRange) ? requestedRange : 'today';
 
-  // 切换一级 tab：同步把 activeTab 设为该一级下的默认叶子 key
-  const handlePrimaryTab = useCallback((key) => {
-    setPrimaryTab(key);
-    const pt = PRIMARY_TABS.find((p) => p.key === key);
-    if (pt) setActiveTab(pt.defaultLeaf);
-  }, []);
-  const currentPrimary = PRIMARY_TABS.find((p) => p.key === primaryTab);
-
-
+  const updateQuery = useCallback((patch) => {
+    const next = new URLSearchParams(searchParams);
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    });
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   // ---- State ---------------------------------------------------------------
   const [allAlerts, setAllAlerts] = useState([]);       // full list from backend
   const [counts, setCounts] = useState({ total: 0, pending: 0, acknowledged: 0, resolved: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sites, setSites] = useState([]);
   const [alertsWrapRef, alertsH] = useTableAutoHeight({ headerOffset: 54 });
   const [reagentWrapRef, reagentH] = useTableAutoHeight({ headerOffset: 48 });
 
   // 试剂预警（跨站剩余可用天数/低余量）
   const [reagentList, setReagentList] = useState([]);
   const [reagentLoading, setReagentLoading] = useState(false);
+  const [reagentError, setReagentError] = useState('');
   const loadReagentOverview = useCallback(async () => {
     setReagentLoading(true);
     try {
-      const d = await api.get('/reagent-overview');
+      const d = await api.getStrict('/reagent-overview');
       setReagentList(Array.isArray(d?.items) ? d.items : []);
+      setReagentError('');
     } catch (e) {
-      setReagentList([]);
+      setReagentError(e.message || '物资预警加载失败');
     } finally {
       setReagentLoading(false);
     }
   }, []);
   useEffect(() => { if (activeTab === 'reagent') loadReagentOverview(); }, [activeTab, loadReagentOverview]);
 
-  const [searchText, setSearchText] = useState(searchParams.get('search') || '');
-  const [statusFilter, setStatusFilter] = useState(null);   // null = all
-  const [dateRange, setDateRange] = useState('today');
-  const [levelFilter, setLevelFilter] = useState(null);     // null = all levels
-
   const resetFilters = useCallback(() => {
-    setSearchText('');
-    setStatusFilter(null);
-    setLevelFilter(null);
-    setDateRange('today');
-  }, []);
+    updateQuery({ search: '', status: '', level: '', range: '' });
+  }, [updateQuery]);
 
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
   const [actionLoading, setActionLoading] = useState({});    // { [alertId]: true }
@@ -723,35 +762,36 @@ export default function AlertsPage() {
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [batchAction, setBatchAction] = useState(null);
   const [batchLabel, setBatchLabel] = useState('');
+  const [batchReason, setBatchReason] = useState('');
+  const [batchRemark, setBatchRemark] = useState('');
 
   // ---- Fetching (backend returns a plain array) ----------------------------
   const fetchAlerts = useCallback(async () => {
     setLoading(true);
-    setError(null);
-
-    const data = await api.get('/alerts');
-
-    if (!data) {
-      setError('加载告警数据失败，请检查网络后重试');
-      setAllAlerts([]);
-    } else {
+    try {
+      const [data, statistics] = await Promise.all([
+        api.getStrict('/alerts?limit=500'),
+        api.getStrict('/alerts/statistics'),
+      ]);
       const list = Array.isArray(data) ? data : [];
       setAllAlerts(list);
+      setCounts({
+        total: Number(statistics?.total || 0),
+        pending: Number(statistics?.by_status?.pending || 0),
+        acknowledged: Number(statistics?.by_status?.acknowledged || 0),
+        resolved: Number(statistics?.by_status?.resolved || 0),
+      });
+      setError(null);
+    } catch (fetchError) {
+      setError(fetchError.message || '加载告警数据失败，请检查网络后重试');
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   }, []);
 
   useEffect(() => {
     fetchAlerts();
-    api.get('/sites').then(d => setSites(Array.isArray(d) ? d : [])).catch(() => {});
   }, [fetchAlerts]);
-
-  // Sync search from URL params when navigating from cockpit
-  useEffect(() => {
-    const urlSearch = searchParams.get('search') || '';
-    setSearchText(urlSearch);
-  }, [searchParams]);
 
   // 兼容旧入口：人工异常应从现场执行包发起，网页端仅提供证据审阅与闭环。
   useEffect(() => {
@@ -759,19 +799,6 @@ export default function AlertsPage() {
       navigate('/reports', { replace: true });
     }
   }, [searchParams, navigate]);
-
-  // ---- Compute counts from the full list -----------------------------------
-  useEffect(() => {
-    const pending = allAlerts.filter((a) => a.status === 'pending').length;
-    const acknowledged = allAlerts.filter((a) => a.status === 'acknowledged').length;
-    const resolved = allAlerts.filter((a) => a.status === 'resolved').length;
-    setCounts({
-      total: allAlerts.length,
-      pending,
-      acknowledged,
-      resolved,
-    });
-  }, [allAlerts]);
 
   // ---- Client-side filtering -----------------------------------------------
   const filteredAlerts = useMemo(() => {
@@ -845,6 +872,10 @@ export default function AlertsPage() {
     data_gap: '数据中断事件',
   }[metric] || '水质异常事件');
 
+  const alertObjectLabel = useCallback((record) => (
+    `${record.site_name || record.site_code || '未关联站点'}告警#${record.id}`
+  ), []);
+
   // ---- Single-row actions (all POST) ---------------------------------------
   const handleResolve = useCallback((record) => {
     setResolveTarget(record);
@@ -857,21 +888,17 @@ export default function AlertsPage() {
     try {
       const values = await resolveForm.validateFields();
       setActionLoading((prev) => ({ ...prev, [resolveTarget.id]: true }));
-      const result = await api.post(`/alerts/${resolveTarget.id}/resolve`, {
+      await api.postStrict(`/alerts/${resolveTarget.id}/resolve`, {
         reason: values.reason,
         remark: values.remark || '',
         conclusion: values.conclusion,
       });
-      if (result && !result.error) {
-        message.success(`告警「${resolveTarget.site_name || resolveTarget.id}」已办结`);
-        setResolveModalOpen(false);
-        setResolveTarget(null);
-        fetchAlerts();
-      } else {
-        message.error(result?.error || '操作失败，请重试');
-      }
-    } catch {
-      // validation error
+      message.success(`告警「${resolveTarget.site_name || resolveTarget.id}」已办结`);
+      setResolveModalOpen(false);
+      setResolveTarget(null);
+      fetchAlerts();
+    } catch (error) {
+      if (!error?.errorFields) message.error(error.message || '操作失败，请重试');
     } finally {
       setActionLoading((prev) => ({ ...prev, [resolveTarget?.id]: false }));
     }
@@ -879,14 +906,15 @@ export default function AlertsPage() {
 
   const handleAcknowledge = useCallback(async (record) => {
     setActionLoading((prev) => ({ ...prev, [record.id]: true }));
-    const result = await api.post(`/alerts/${record.id}/acknowledge`, {});
-    if (result && !result.error) {
+    try {
+      await api.postStrict(`/alerts/${record.id}/acknowledge`, {});
       message.success(`告警「${record.site_name || record.id}」已确认`);
       fetchAlerts();
-    } else {
-      message.error(result?.error || '确认失败，请重试');
+    } catch (error) {
+      message.error(error.message || '确认失败，请重试');
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [record.id]: false }));
     }
-    setActionLoading((prev) => ({ ...prev, [record.id]: false }));
   }, [fetchAlerts]);
 
   const handleUrge = useCallback((record) => {
@@ -900,21 +928,17 @@ export default function AlertsPage() {
     try {
       const values = await urgeForm.validateFields();
       setActionLoading((prev) => ({ ...prev, [urgeTarget.id]: true }));
-      const result = await api.post(`/alerts/${urgeTarget.id}/urge`, {
+      await api.postStrict(`/alerts/${urgeTarget.id}/urge`, {
         supervisor: values.supervisor,
         opinion: values.opinion || '',
         deadline: values.deadline || '',
       });
-      if (result && !result.error) {
-        message.success(`已对告警「${urgeTarget.site_name || urgeTarget.id}」发起督办`);
-        setUrgeModalOpen(false);
-        setUrgeTarget(null);
-        fetchAlerts();
-      } else {
-        message.error(result?.error || '督办失败，请重试');
-      }
-    } catch {
-      // validation error
+      message.success(`已对告警「${urgeTarget.site_name || urgeTarget.id}」发起督办`);
+      setUrgeModalOpen(false);
+      setUrgeTarget(null);
+      fetchAlerts();
+    } catch (error) {
+      if (!error?.errorFields) message.error(error.message || '督办失败，请重试');
     } finally {
       setActionLoading((prev) => ({ ...prev, [urgeTarget?.id]: false }));
     }
@@ -928,21 +952,22 @@ export default function AlertsPage() {
   const handleConvertConfirm = useCallback(async () => {
     if (!convertTarget) return;
     setConvertLoading(true);
-    const result = await api.post(`/alerts/${convertTarget.id}/confirm-convert`, {});
-    if (result && !result.error) {
+    try {
+      const result = await api.postStrict(`/alerts/${convertTarget.id}/confirm-convert`, {});
       const orderNo = result.order_no || '';
       message.success(orderNo ? `已成功转为工单 ${orderNo}` : '已成功转为工单');
+      setConvertModalOpen(false);
+      setConvertTarget(null);
       fetchAlerts();
       // Navigate to work orders page filtered by the new order
       if (orderNo) {
         setTimeout(() => navigate(`/workorders?search=${orderNo}`), 500);
       }
-    } else {
-      message.error(result?.error || '转工单失败，请重试');
+    } catch (error) {
+      message.error(error.message || '转工单失败，请重试');
+    } finally {
+      setConvertLoading(false);
     }
-    setConvertLoading(false);
-    setConvertModalOpen(false);
-    setConvertTarget(null);
   }, [convertTarget, fetchAlerts, navigate]);
 
   // ---- Batch actions (POST via batch endpoint) -----------------------------
@@ -950,27 +975,42 @@ export default function AlertsPage() {
     if (selectedRowKeys.length === 0) return;
     setBatchAction(action);
     setBatchLabel(label);
+    setBatchReason('');
+    setBatchRemark('');
     setBatchModalOpen(true);
   }, [selectedRowKeys]);
 
   const handleBatchConfirm = useCallback(async () => {
     if (!batchAction || selectedRowKeys.length === 0) return;
-    setBatchLoading(true);
-    const result = await api.post('/alerts/batch', {
-      ids: selectedRowKeys,
-      action: batchAction,
-    });
-    if (result && !result.error) {
-      message.success(`批量${batchLabel}成功，共 ${selectedRowKeys.length} 条`);
-    } else {
-      message.warning(result?.error || `批量${batchLabel}失败，请重试`);
+    if (batchAction === 'resolve' && !batchReason) {
+      message.warning('请选择批量办结原因');
+      return;
     }
-    setSelectedRowKeys([]);
-    setBatchLoading(false);
-    setBatchModalOpen(false);
-    setBatchAction(null);
-    fetchAlerts();
-  }, [batchAction, batchLabel, selectedRowKeys, fetchAlerts]);
+    if (batchAction === 'urge' && !batchRemark.trim()) {
+      message.warning('请填写批量督办要求');
+      return;
+    }
+    setBatchLoading(true);
+    try {
+      const result = await api.postStrict('/alerts/batch', {
+        ids: selectedRowKeys,
+        action: batchAction,
+        ...(batchReason ? { reason: batchReason } : {}),
+        ...(batchRemark.trim() ? { remark: batchRemark.trim() } : {}),
+      });
+      const completed = Number(result.count ?? selectedRowKeys.length);
+      const skipped = Number(result.skipped || 0);
+      message.success(`批量${batchLabel}完成 ${completed} 条${skipped ? `，跳过 ${skipped} 条状态不适用记录` : ''}`);
+      setSelectedRowKeys([]);
+      setBatchModalOpen(false);
+      setBatchAction(null);
+      fetchAlerts();
+    } catch (error) {
+      message.error(error.message || `批量${batchLabel}失败，请重试`);
+    } finally {
+      setBatchLoading(false);
+    }
+  }, [batchAction, batchLabel, batchReason, batchRemark, selectedRowKeys, fetchAlerts, message]);
 
   const handleBatchResolve = useCallback(() => {
     runBatch('resolve', '办结');
@@ -981,7 +1021,7 @@ export default function AlertsPage() {
   }, [runBatch]);
 
   const handleBatchConvert = useCallback(() => {
-    runBatch('confirm-convert', '转工单');
+    runBatch('convert', '转工单');
   }, [runBatch]);
 
   // ---- Table columns -------------------------------------------------------
@@ -989,7 +1029,7 @@ export default function AlertsPage() {
     {
       title: '站点 & 等级',
       key: 'site_level',
-      width: 220,
+      width: 168,
       render: (_, record) => {
         const severity = alertSeverityTag[record.level] || { color: tokens.colorTextTertiary, label: '?', desc: '未知' };
         return (
@@ -1016,12 +1056,8 @@ export default function AlertsPage() {
       title: '告警信息',
       dataIndex: 'message',
       key: 'message',
-      ellipsis: true,
-      render: (text) => (
-        <Text style={{ color: tokens.colorText }} title={text}>
-          {text || '-'}
-        </Text>
-      ),
+      width: 360,
+      render: (text) => <TableLongText value={text} />,
     },
     {
       title: '状态',
@@ -1062,19 +1098,15 @@ export default function AlertsPage() {
         // If converted to work order, show linked work order info
         if (isConverted) {
           return (
-            <div>
-              <Tag
-                icon={<LinkOutlined />}
-                color="blue"
-                style={{ borderRadius: 4, marginBottom: 4, cursor: 'pointer' }}
-                onClick={() => navigate(`/workorders?search=${record.related_order_no || ''}`)}
-              >
-                {record.related_order_no || '已转工单'}
-              </Tag>
-              <div style={{ fontSize: 11, color: tokens.colorTextTertiary }}>
-                点击查看工单详情
-              </div>
-            </div>
+            <Button
+              type="link"
+              size="small"
+              icon={<LinkOutlined />}
+              aria-label={`查看${record.site_name || '该告警'}的关联工单${record.related_order_no || ''}`}
+              onClick={() => navigate(`/workorders?search=${encodeURIComponent(record.related_order_no || '')}`)}
+            >
+              {record.related_order_no || '查看关联工单'}
+            </Button>
           );
         }
 
@@ -1087,45 +1119,56 @@ export default function AlertsPage() {
           );
         }
 
+        if (!canManage) return <Text type="secondary">只读</Text>;
+
+        const moreItems = [
+          ...(record.status === 'pending' ? [{ key: 'resolve', label: '办结' }] : []),
+          { key: 'urge', label: '督办' },
+          { key: 'convert', label: '转工单' },
+        ];
+
+        const onMoreAction = ({ key }) => {
+          if (key === 'resolve') handleResolve(record);
+          if (key === 'urge') handleUrge(record);
+          if (key === 'convert') handleConvert(record);
+        };
+
         return (
-          <Space size={4} wrap>
-            <Button
-              type="link"
-              size="small"
+          <Space.Compact size="small">
+            {record.status === 'pending' && (
+              <Button
+                type="primary"
+                loading={isLoading}
+                onClick={() => handleAcknowledge(record)}
+                aria-label={`受理${alertObjectLabel(record)}`}
+              >
+                受理
+              </Button>
+            )}
+            {record.status === 'acknowledged' && <Button
+              type="primary"
               loading={isLoading}
               onClick={() => handleResolve(record)}
-              style={{ color: tokens.colorSuccess }}
-            >
-              办结
-            </Button>
-            <Button
-              type="link"
-              size="small"
-              loading={isLoading}
-              onClick={() => handleUrge(record)}
-              style={{ color: tokens.colorWarning }}
-            >
-              督办
-            </Button>
-            <Button
-              type="link"
-              size="small"
-              loading={isLoading}
-              onClick={() => handleConvert(record)}
-            >
-              转工单
-            </Button>
-          </Space>
+              aria-label={`办结${alertObjectLabel(record)}`}
+            >办结</Button>}
+            <Dropdown menu={{ items: moreItems, onClick: onMoreAction }} trigger={['click']} disabled={isLoading}>
+              <Button icon={<MoreOutlined />} aria-label={`${alertObjectLabel(record)}的更多操作`} />
+            </Dropdown>
+          </Space.Compact>
         );
       },
     },
-  ], [tokens, actionLoading, handleResolve, handleUrge, handleConvert]);
+  ], [tokens, actionLoading, handleAcknowledge, handleResolve, handleUrge, handleConvert, canManage, navigate, alertObjectLabel]);
 
   // ---- Row selection -------------------------------------------------------
   const rowSelection = useMemo(() => ({
     selectedRowKeys,
     onChange: (keys) => setSelectedRowKeys(keys),
-  }), [selectedRowKeys]);
+    getCheckboxProps: (record) => ({
+      disabled: record.status === 'resolved' || Boolean(record.related_order_no),
+      'aria-label': `选择${alertObjectLabel(record)}`,
+    }),
+  }), [selectedRowKeys, alertObjectLabel]);
 
   // ---- Styles --------------------------------------------------------------
   const cardStyle = cardStyleBase(tokens, isDark);
@@ -1163,76 +1206,28 @@ export default function AlertsPage() {
   return (
     <div style={pageRootStyle}>
       {/* Page Header */}
-      <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, flexShrink: 0 }}>
+      <div style={{ marginBottom: 4, flexShrink: 0 }}>
         <Title level={4} style={{ margin: 0, color: tokens.colorText }}>告警与事件</Title>
 
-        {/* 一级 Tab Bar */}
-        <div style={{ display: 'flex', gap: 4, background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)', borderRadius: 8, padding: 3 }}>
-          {PRIMARY_TABS.map((tab) => (
-            <Button
-              key={tab.key}
-              type={primaryTab === tab.key ? 'primary' : 'text'}
-              size="small"
-              icon={tab.icon}
-              onClick={() => handlePrimaryTab(tab.key)}
-              style={{
-                borderRadius: 6,
-                fontWeight: primaryTab === tab.key ? 600 : 400,
-                background: primaryTab === tab.key ? tokens.colorPrimary : 'transparent',
-                color: primaryTab === tab.key ? tokens.colorTextLightSolid : tokens.colorTextSecondary,
-              }}
-            >
-              {tab.label}
-            </Button>
-          ))}
-        </div>
+        {/* Single line tab layer for mutually exclusive alert views. */}
+        <Tabs
+          type="line"
+          activeKey={activeTab}
+          items={ALERT_TABS}
+          onChange={(key) => updateQuery({ tab: key === 'alerts' ? '' : key })}
+          style={{ marginTop: 12 }}
+        />
       </div>
 
-      {/* 二级子 Tab Bar（数据审核无子 tab） */}
-      {currentPrimary?.children && (
-        <div style={{ marginBottom: 16, display: 'flex', gap: 4, alignSelf: 'flex-start', background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)', borderRadius: 8, padding: 3, flexShrink: 0 }}>
-          {currentPrimary.children.map((leaf) => (
-            <Button
-              key={leaf.key}
-              type={activeTab === leaf.key ? 'primary' : 'text'}
-              size="small"
-              onClick={() => setActiveTab(leaf.key)}
-              style={{
-                borderRadius: 6,
-                fontWeight: activeTab === leaf.key ? 600 : 400,
-                background: activeTab === leaf.key ? tokens.colorPrimary : 'transparent',
-                color: activeTab === leaf.key ? tokens.colorTextLightSolid : tokens.colorTextSecondary,
-              }}
-            >
-              {leaf.label}
-            </Button>
-          ))}
-        </div>
-      )}
-
       {/* Tab Content */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div className="workspace-embedded-page" style={{ overflow: 'hidden' }}>
         {activeTab === 'alerts' ? (
           <>
-            {/* Keep alert status visible without pushing the working list below the fold. */}
-            <div style={{
-              display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 1,
-              marginBottom: 12, border: `1px solid ${tokens.colorBorder}`, borderRadius: 6,
-              background: tokens.colorBorder, overflow: 'hidden', flexShrink: 0,
-            }}>
-              {statCards.map((item) => (
-                <div key={item.title} style={{ padding: '8px 12px', background: tokens.colorBgContainer, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: tokens.colorTextSecondary, fontSize: 12, whiteSpace: 'nowrap' }}>
-                    {item.icon}{item.title}
-                  </div>
-                  <div style={{ color: item.color, fontWeight: 650, fontSize: 20, lineHeight: 1.25, marginTop: 2 }}>{item.value}</div>
-                </div>
-              ))}
-            </div>
+            <StatusStrip items={statCards.map((item) => ({ key: item.title, label: item.title, value: item.value, color: item.color }))} />
 
             {/* Filter Bar */}
-            <FilterBar
-              extra={(
+            <WorkspaceToolbar
+              actions={(
                 <Space>
                   <Button icon={<ReloadOutlined />} onClick={resetFilters}>
                     重置
@@ -1248,16 +1243,18 @@ export default function AlertsPage() {
                 prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
                 allowClear
                 value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
+                onChange={(e) => updateQuery({ search: e.target.value })}
                 onPressEnter={fetchAlerts}
                 style={{ width: filterInputWidth, borderRadius: 8 }}
+                aria-label="搜索站点名称或告警内容"
               />
               <Select
                 placeholder="告警状态"
                 allowClear
                 value={statusFilter}
-                onChange={(val) => setStatusFilter(val ?? null)}
+                onChange={(val) => updateQuery({ status: val || '' })}
                 style={{ width: filterSelectWidth }}
+                aria-label="按告警状态筛选"
                       options={Object.entries(alertStatusMap).map(([value, label]) => ({
                         value,
                         label,
@@ -1267,8 +1264,9 @@ export default function AlertsPage() {
                 placeholder="告警等级"
                 allowClear
                 value={levelFilter}
-                onChange={(val) => setLevelFilter(val ?? null)}
+                onChange={(val) => updateQuery({ level: val || '' })}
                 style={{ width: filterSelectWidth }}
+                aria-label="按告警等级筛选"
                       options={[
                         { value: 'red', label: 'I级 紧急告警' },
                         { value: 'orange', label: 'II级 较重告警' },
@@ -1278,22 +1276,23 @@ export default function AlertsPage() {
                     />
               <Select
                 value={dateRange}
-                onChange={setDateRange}
+                onChange={(value) => updateQuery({ range: value === 'today' ? '' : value })}
                 style={{ width: filterSmallSelectWidth }}
+                aria-label="按告警时间范围筛选"
                       options={dateRangeOptions}
                     />
                     {(statusFilter || levelFilter || dateRange || searchText) && (
-                      <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-                        已筛选 {filteredAlerts.length} 条结果
-                      </Text>
+                      <ToolbarMeta label={statusFilter || levelFilter || searchText || dateRange !== 'today' ? '筛选结果' : '当前范围'}>
+                        {filteredAlerts.length} 条
+                      </ToolbarMeta>
                     )}
-            </FilterBar>
+            </WorkspaceToolbar>
 
             {/* Batch Operations Bar */}
             {selectedRowKeys.length > 0 && (
               <div
                 style={{
-                  marginTop: 8,
+                  marginTop: 0,
                   padding: '6px 10px',
                   borderRadius: 6,
                   background: `${infoColor}14`,
@@ -1348,7 +1347,7 @@ export default function AlertsPage() {
               <Card
                 title="事件聚合"
                 extra={<Text type="secondary" style={{ fontSize: 12 }}>同类型告警按 30 分钟窗口归并</Text>}
-                style={{ ...cardStyle, marginTop: 8 }}
+                style={{ ...cardStyle, marginTop: 0 }}
                 styles={{ body: { padding: '6px 12px' } }}
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1368,12 +1367,18 @@ export default function AlertsPage() {
             )}
 
             {/* Alerts Table */}
-            <Card
-              style={{ ...tableCardStyle(tokens, isDark), marginTop: 8 }}
-              styles={{ body: tableCardBody }}
-            >
+            {error && allAlerts.length > 0 && <Alert
+              type="warning"
+              showIcon
+              message="告警列表未更新"
+              description={`${error}。当前保留上次成功加载的 ${allAlerts.length} 条告警。`}
+              action={<Button size="small" onClick={fetchAlerts}>重新加载</Button>}
+              style={{ marginTop: 0 }}
+            />}
+
+            <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
               {/* Error State */}
-              {error && (
+              {error && allAlerts.length === 0 && (
                 <div
                   style={{
                     padding: '32px 24px',
@@ -1395,28 +1400,19 @@ export default function AlertsPage() {
               )}
 
               {/* Table (also handles loading + empty states natively) */}
-              {!error && (
+              {(!error || allAlerts.length > 0) && !loading && filteredAlerts.length === 0 && (
+                <WorkspaceEmpty type={searchText || statusFilter || levelFilter ? 'filtered' : 'empty'} onRefresh={fetchAlerts} />
+              )}
+              {(!error || allAlerts.length > 0) && (loading || filteredAlerts.length > 0) && (
                 <div ref={alertsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
                 <Table
                   rowKey="id"
                   columns={columns}
                   dataSource={filteredAlerts}
                   loading={loading}
-                  rowSelection={rowSelection}
-                  pagination={false}
+                  rowSelection={canManage ? rowSelection : undefined}
+                  pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
                   scroll={alertsH ? { y: alertsH } : undefined}
-                  locale={{
-                    emptyText: (
-                      <div style={{ padding: '40px 0' }}>
-                        <CheckCircleOutlined style={{ fontSize: 40, color: tokens.colorSuccess, marginBottom: 12 }} />
-                        <div>
-                          <Text style={{ color: tokens.colorTextTertiary }}>
-                            当前筛选条件下暂无告警记录
-                          </Text>
-                        </div>
-                      </div>
-                    ),
-                  }}
                   size="small"
                   style={{ borderRadius: 12, overflow: 'hidden' }}
                 />
@@ -1425,21 +1421,30 @@ export default function AlertsPage() {
             </Card>
           </>
         ) : activeTab === 'rules' ? (
-          <AlertRuleEngineTab tokens={tokens} isDark={isDark} />
+          <AlertRuleEngineTab tokens={tokens} isDark={isDark} canManage={canManage} />
         ) : activeTab === 'thresholds' ? (
           <ThresholdRulesTab tokens={tokens} isDark={isDark} />
         ) : activeTab === 'reagent' ? (
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <Card
-              style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }}
-              styles={{ body: tableCardBody }}
-            >
+          <div className="workspace-embedded-page">
+            <StatusStrip items={[
+              { key: 'expired', label: '已过期', value: reagentList.filter((item) => item.status === '已过期').length, color: tokens.colorError },
+              { key: 'near_expiry', label: '临期', value: reagentList.filter((item) => item.status === '临期').length, color: tokens.colorWarning },
+              { key: 'low_stock', label: '低余量', value: reagentList.filter((item) => item.status === '低余量').length, color: tokens.colorError },
+            ]} />
+            <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={loadReagentOverview} loading={reagentLoading}>刷新</Button>}>
+              <Text type="secondary">共 {reagentList.length} 条需要关注的站点试剂</Text>
+            </WorkspaceToolbar>
+            <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
               <div ref={reagentWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-                <Table
+                {reagentError && !reagentLoading ? <WorkspaceEmpty
+                  type="error"
+                  description="物资预警加载失败，当前不能判断是否暂无临期或低余量试剂。"
+                  onRefresh={loadReagentOverview}
+                /> : <Table
                   dataSource={reagentList}
                   rowKey={(r) => `${r.site_id}-${r.reagent_id}`}
                   loading={reagentLoading}
-                  pagination={false}
+                  pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
                   size="small"
                   scroll={reagentH ? { y: reagentH } : undefined}
                   style={{ borderRadius: 12, overflow: 'hidden' }}
@@ -1463,11 +1468,16 @@ export default function AlertsPage() {
                     {
                       title: '操作', key: 'op', width: 120,
                       render: (_, r) => (
-                        <Button size="small" type="link" onClick={() => navigate(`/sites?archive=${r.site_id}`)}>去站点详情</Button>
+                        <Button
+                          aria-label={`查看${r.site_name || '未命名站点'}的${r.reagent_name || '试剂'}详情`}
+                          size="small"
+                          type="link"
+                          onClick={() => navigate(`/sites?archive=${r.site_id}`)}
+                        >查看站点</Button>
                       ),
                     },
                   ]}
-                />
+                />}
               </div>
             </Card>
           </div>
@@ -1605,7 +1615,7 @@ export default function AlertsPage() {
         }
         open={batchModalOpen}
         onOk={handleBatchConfirm}
-        onCancel={() => { setBatchModalOpen(false); setBatchAction(null); }}
+        onCancel={() => { setBatchModalOpen(false); setBatchAction(null); setBatchReason(''); setBatchRemark(''); }}
         okText="确认"
         cancelText="取消"
         confirmLoading={batchLoading}
@@ -1613,6 +1623,37 @@ export default function AlertsPage() {
       >
         <div style={{ padding: '12px 0' }}>
           <Text>确认对选中的 <Text strong>{selectedRowKeys.length}</Text> 条告警执行「{batchLabel}」操作？</Text>
+          {batchAction === 'resolve' && <div style={{ marginTop: 16 }}>
+            <Text strong>办结原因</Text>
+            <Select
+              aria-label="选择批量办结原因"
+              placeholder="请选择办结原因"
+              value={batchReason || undefined}
+              onChange={setBatchReason}
+              options={resolveReasonOptions.map(({ value, label }) => ({ value, label }))}
+              style={{ width: '100%', marginTop: 8 }}
+            />
+          </div>}
+          {batchAction === 'urge' && <div style={{ marginTop: 16 }}>
+            <Text strong>督办要求</Text>
+            <Input.TextArea
+              aria-label="填写批量督办要求"
+              value={batchRemark}
+              onChange={(event) => setBatchRemark(event.target.value)}
+              placeholder="请说明本批告警的处理要求和时限"
+              maxLength={300}
+              showCount
+              rows={3}
+              style={{ marginTop: 8 }}
+            />
+          </div>}
+          {batchAction === 'convert' && <Alert
+            type="warning"
+            showIcon
+            message="每条告警将分别生成一张工单"
+            description="生成后不能在本页撤销，请确认所选告警均需要现场处置。"
+            style={{ marginTop: 16 }}
+          />}
         </div>
       </Modal>
 

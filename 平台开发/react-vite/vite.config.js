@@ -21,17 +21,7 @@ export default defineConfig({
   build: {
     outDir: '../frontend/v2',
     emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined
-          if (id.includes('echarts')) return 'vendor-echarts'
-          if (id.includes('leaflet')) return 'vendor-leaflet'
-          if (id.includes('antd') || id.includes('@ant-design')) return 'vendor-antd'
-          if (id.includes('react')) return 'vendor-react'
-          return 'vendor'
-        },
-      },
-    },
+    // ECharts is route-lazy and currently the largest intentional feature chunk.
+    chunkSizeWarningLimit: 650,
   },
 })

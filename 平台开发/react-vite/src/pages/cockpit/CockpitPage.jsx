@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Card,
   List,
@@ -18,7 +18,6 @@ import {
 import {
   EnvironmentOutlined,
   AlertOutlined,
-  ThunderboltOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   ExclamationCircleOutlined,
@@ -29,31 +28,34 @@ import {
   DashboardOutlined,
   ToolOutlined,
   CloudServerOutlined,
-  EyeOutlined,
   SoundOutlined,
   ClockCircleOutlined,
   ApiOutlined,
-  FilterOutlined,
   FileSearchOutlined,
   AimOutlined,
-  WarningOutlined,
   FullscreenOutlined,
   ShrinkOutlined,
-  BarChartOutlined,
   PushpinOutlined,
   PushpinFilled,
+  MinusCircleOutlined,
 } from '@ant-design/icons';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
 import { divIcon } from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import 'react-leaflet-cluster/dist/assets/MarkerCluster.css';
+import 'react-leaflet-cluster/dist/assets/MarkerCluster.Default.css';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { api } from '../../services/api';
 import ActionQueue from './ActionQueue';
 import { MapAutoFitter, MapFlyTo } from './components/MapViewportControls';
-import { stationTypeMap, metricMap, alertLevelColor, alertLevelLabel } from '../../services/constants';
-import { getThresholds, classifyMetric, THRESHOLD_COLORS } from '../../services/thresholds';
-import { stationTypeColors, statusColors } from '../../theme/tokens';
-import { formatDate, relativeTimeStr, truncate } from '../../utils/helpers';
+import { stationTypeMap, alertLevelColor, alertLevelLabel } from '../../services/constants';
+import { getThresholds, classifyMetric } from '../../services/thresholds';
+import { statusColors } from '../../theme/tokens';
+import { relativeTimeStr, truncate } from '../../utils/helpers';
+import OperationsTodayView from './OperationsTodayView';
+import './CockpitPage.css';
 
 const { Text, Title } = Typography;
 const { Search } = Input;
@@ -281,6 +283,41 @@ function injectStyles() {
   styleInjected = true;
 }
 
+export default function CockpitPage() {
+  const { tokens } = useTheme();
+  const [searchParams] = useSearchParams();
+  const requestedView = searchParams.get('view');
+  const activeView = requestedView === 'sites' ? 'sites' : 'operations';
+
+  return (
+    <div
+      className="cockpit-shell"
+      style={{
+        '--ant-color-bg-layout': tokens.colorBgLayout,
+        '--ant-color-bg-container': tokens.colorBgContainer,
+        '--ant-color-border-secondary': tokens.colorBorderSecondary,
+        '--ant-color-fill-quaternary': tokens.colorFillQuaternary,
+        '--ant-color-primary': tokens.colorPrimary,
+        '--ant-color-primary-bg': tokens.colorPrimaryBg,
+        '--ant-color-success': tokens.colorSuccess,
+        '--ant-color-success-bg': tokens.colorSuccessBg,
+        '--ant-color-warning': tokens.colorWarning,
+        '--ant-color-warning-bg': tokens.colorWarningBg,
+        '--ant-color-warning-bg-hover': tokens.colorWarningBgHover,
+        '--ant-color-warning-border': tokens.colorWarningBorder,
+        '--workspace-summary-border': tokens.summaryBorder,
+        '--ant-color-text': tokens.colorText,
+        '--ant-color-text-secondary': tokens.colorTextSecondary,
+        '--ant-color-text-tertiary': tokens.colorTextTertiary,
+      }}
+    >
+      <div className="cockpit-viewbody">
+        {activeView === 'operations' ? <OperationsTodayView /> : <SiteMonitoringView />}
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helper: create marker icon
 // Breathing light color indicates site status:
@@ -299,6 +336,18 @@ function createMarkerIcon(type, markerStatus) {
     offline: 'rgba(239,68,68,0.6)',
     pending: 'rgba(140,140,140,0.5)',
   };
+
+  if (markerStatus === 'no_data') {
+    return divIcon({
+      className: '',
+      iconSize: [iconSize, iconSize],
+      iconAnchor: [iconSize / 2, iconSize / 2],
+      popupAnchor: [0, -iconSize / 2 - 4],
+      html: `<div style="width:${iconSize}px;height:${iconSize}px;opacity:0.55;filter:grayscale(1);">
+        <img src="${svgUrl}" style="width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.25));" />
+      </div>`,
+    });
+  }
 
   if (markerStatus !== 'normal') {
     // Alert/offline/pending: prominent breathing ring
@@ -343,7 +392,7 @@ const FILTER_ALL = 'all';
 // ---------------------------------------------------------------------------
 // Main Component
 // ---------------------------------------------------------------------------
-export default function CockpitPage() {
+function SiteMonitoringView() {
   const { isDark, tokens } = useTheme();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
@@ -361,9 +410,8 @@ export default function CockpitPage() {
   const [thresholds, setThresholds] = useState([]);
 
   const [typeFilter, setTypeFilter] = useState(FILTER_ALL);
-  const [dataFilter, setDataFilter] = useState('all'); // 'all' | 'hasData' | 'noData'
+  const [dataFilter] = useState('all'); // 'all' | 'hasData' | 'noData'
   const [searchText, setSearchText] = useState('');
-  const [showSearch, setShowSearch] = useState(false);
   const [flyTarget, setFlyTarget] = useState(null);
 
   const [leftCollapsed, setLeftCollapsed] = useState(false);
@@ -532,9 +580,6 @@ export default function CockpitPage() {
   }, [fetchData]);
 
   // ---- Derived data ----
-  // 预警中心规定：30分钟无数据视为长时间无数据
-  const NO_DATA_TIMEOUT = 30 * 60 * 1000; // 30min
-
   const alertSiteIds = useMemo(() => {
     const ids = new Set();
     alerts
@@ -553,15 +598,15 @@ export default function CockpitPage() {
     return m;
   }, [sites, devices]);
 
-  // 站点标记状态：red(长时间无数据) > yellow(有告警) > green(正常)
+  // Real alerts and confirmed device-offline records are actionable. A site
+  // without telemetry is intentionally kept neutral until a real event exists.
   const getSiteMarkerStatus = useCallback((site) => {
-    const t = siteLastTimeMap[site.id] || 0;
-    const now = Date.now();
-    const noData = t === 0 || (now - t) > NO_DATA_TIMEOUT;
-    if (noData) return 'offline';      // 红灯 = 长时间无数据
-    if (alertSiteIds.has(site.id)) return 'anomaly';  // 黄灯 = 数据异常
-    return 'normal';                    // 绿灯 = 正常
-  }, [siteLastTimeMap, alertSiteIds, NO_DATA_TIMEOUT]);
+    const siteDevices = devices.filter((device) => device.site_id === site.id || device.site_code === site.code);
+    if (alertSiteIds.has(site.id)) return 'anomaly';
+    if (site.status === 'offline' || siteDevices.some((device) => device.status === 'offline')) return 'offline';
+    if (siteDevices.length === 0 || siteDevices.every((device) => !device.last_data_time)) return 'no_data';
+    return 'normal';
+  }, [devices, alertSiteIds]);
 
   const filteredSites = useMemo(() => {
     let result = sites;
@@ -586,8 +631,8 @@ export default function CockpitPage() {
     const sorted = [...result].sort((a, b) => {
       const getPriority = (site) => {
         const s = getSiteMarkerStatus(site);
-        if (s === 'offline') return 0;    // 长时间无数据
-        if (s === 'anomaly') return 1;    // 有告警
+        if (s === 'anomaly') return 0;
+        if (s === 'offline') return 1;
         return 2;                          // 正常
       };
       const pa = getPriority(a), pb = getPriority(b);
@@ -605,16 +650,23 @@ export default function CockpitPage() {
   }, [dataHealth]);
 
   const deviceStats = useMemo(() => {
-    const total = devices.length;
+    const monitoredDevices = devices.filter((device) => Number(device.monitoring_enabled) === 1);
+    const total = monitoredDevices.length;
     const now = Date.now();
     const DAY = 86400000; // 24h in ms
-    const withData = devices.filter((d) => {
+    const withData = monitoredDevices.filter((d) => {
       if (!d.last_data_time) return false;
       const t = new Date(d.last_data_time).getTime();
       return !isNaN(t) && (now - t) < DAY;
     }).length;
     const noData = total - withData;
-    return { total, withData, noData, rate: total > 0 ? Math.round(withData / total * 100) : 0 };
+    return {
+      assetTotal: devices.length,
+      total,
+      withData,
+      noData,
+      rate: total > 0 ? Math.round(withData / total * 100) : null,
+    };
   }, [devices]);
 
   const workOrderTotal = useMemo(() => {
@@ -692,18 +744,6 @@ export default function CockpitPage() {
     );
   };
 
-  // ---- Station type filter options ----
-  const typeFilterOptions = useMemo(() => {
-    const opts = [{ label: '全部', value: FILTER_ALL }];
-    Object.entries(stationTypeMap).forEach(([key, label]) => {
-      opts.push({
-        label: label,
-        value: key,
-      });
-    });
-    return opts;
-  }, [sites]);
-
   // ---- Event handlers ----
   const handleSiteClick = useCallback((site) => {
     if (site.lat && site.lng) {
@@ -737,8 +777,8 @@ export default function CockpitPage() {
 
   // ---- Panel background styles ----
   const panelBg = isDark
-    ? 'rgba(8, 22, 48, 0.78)'
-    : 'rgba(255, 255, 255, 0.82)';
+    ? 'rgba(8, 22, 48, 0.94)'
+    : 'rgba(255, 255, 255, 0.96)';
   const panelBorder = isDark
     ? '1px solid rgba(0, 200, 180, 0.12)'
     : '1px solid rgba(0, 0, 0, 0.06)';
@@ -756,8 +796,8 @@ export default function CockpitPage() {
   };
 
   // ---- Marker rendering ----
-  // Status priority for deduplication: offline > anomaly > pending > normal
-  const statusPriority = { offline: 4, anomaly: 3, pending: 2, normal: 1 };
+  // Status priority for deduplication: actionable states first, neutral last.
+  const statusPriority = { anomaly: 4, offline: 3, pending: 2, normal: 1, no_data: 0 };
 
   const markers = useMemo(() => {
     const sitesWithCoords = filteredSites.filter((s) => s.lat && s.lng);
@@ -799,6 +839,7 @@ export default function CockpitPage() {
   if (loading) {
     return (
       <div
+        className="cockpit-view-state"
         style={{
           width: '100%',
           height: '100%',
@@ -809,7 +850,7 @@ export default function CockpitPage() {
         }}
       >
         <div style={{ textAlign: 'center' }}>
-          <Spin size="large" tip="加载监测数据..." />
+          <Spin size="large" />
           <div style={{ marginTop: 16, color: tokens.colorTextSecondary, fontSize: 13 }}>
             正在连接监测网络...
           </div>
@@ -822,6 +863,7 @@ export default function CockpitPage() {
   if (error && sites.length === 0) {
     return (
       <div
+        className="cockpit-view-state"
         style={{
           width: '100%',
           height: '100%',
@@ -856,8 +898,6 @@ export default function CockpitPage() {
   // ---- Main render ----
   return (
     <div className="cockpit-map" style={{ position: 'relative', width: '100%', flex: 1, minHeight: 0, overflow: 'hidden' }}>
-      {/* 管理者首屏行动队列（仅管理员/主管）：把"接下来要决定的事"前置，地图作为空间背景 */}
-      <ActionQueue />
       {/* ===== Full-screen Leaflet Map ===== */}
       <MapContainer
         center={DEFAULT_CENTER}
@@ -875,22 +915,42 @@ export default function CockpitPage() {
         <MapAutoFitter sites={filteredSites} resetKey={mapResetKey} />
         {flyTarget && <MapFlyTo position={flyTarget} zoom={15} />}
 
-        {markers.map(({ site, icon, markerStatus, key }) => {
+        <MarkerClusterGroup
+          chunkedLoading
+          showCoverageOnHover={false}
+          spiderfyOnMaxZoom
+          removeOutsideVisibleBounds
+          maxClusterRadius={48}
+          iconCreateFunction={(cluster) => {
+            const count = cluster.getChildCount();
+            return divIcon({
+              html: `<span class="cockpit-cluster-count" aria-hidden="true">${count}</span><span class="cockpit-visually-hidden">${count} 个站点</span>`,
+              className: 'marker-cluster cockpit-cluster',
+              iconSize: [40, 40],
+            });
+          }}
+        >
+          {markers.map(({ site, icon, markerStatus, key }) => {
           const siteDevices = devices.filter((d) => d.site_id === site.id || d.site_code === site.code);
           const siteAlerts = alerts.filter((a) => a.site_id === site.id && a.status !== 'resolved');
           const dataTrend = siteDataTrends[site.id] || [];
 
           // Get latest data time from site's devices
           const maxDeviceTime = Math.max(...siteDevices.map(d => d.last_data_time ? new Date(d.last_data_time).getTime() : 0));
-          const hasData = maxDeviceTime > 0 && (Date.now() - maxDeviceTime) < 86400000; // 24h
 
           return (
             <Marker
               key={key}
               position={[site.lat, site.lng]}
               icon={icon}
-              whenCreated={(markerInstance) => {
-                markersRef.current.set(site.id, markerInstance);
+              title={site.name}
+              alt={`${site.name}站点`}
+              ref={(markerInstance) => {
+                if (markerInstance) {
+                  markersRef.current.set(site.id, markerInstance);
+                } else {
+                  markersRef.current.delete(site.id);
+                }
               }}
             >
               <Popup maxWidth={420} minWidth={400}>
@@ -915,7 +975,7 @@ export default function CockpitPage() {
                     <div>
                       <span style={{ color: isDark ? '#4a8aaa' : tokens.colorTextTertiary, fontSize: 11 }}>最后数据:</span>{' '}
                       <span style={{ color: isDark ? '#d0e8ff' : tokens.colorText, fontWeight: 600, fontSize: 14 }}>
-                        {maxDeviceTime > 0 ? new Date(maxDeviceTime).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-'}
+                        {maxDeviceTime > 0 ? new Date(maxDeviceTime).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '未接入采集'}
                       </span>
                     </div>
                     {site.latest_value != null && (
@@ -1043,53 +1103,52 @@ export default function CockpitPage() {
               </Popup>
             </Marker>
           );
-        })}
+          })}
+        </MarkerClusterGroup>
       </MapContainer>
 
       {/* ===== Top Toolbar ===== */}
       <div
+        className="cockpit-map-toolbar"
         style={{
           position: 'absolute',
           top: 12,
-          left: '50%',
-          transform: 'translateX(-50%)',
+          left: leftCollapsed ? 66 : 344,
+          right: rightCollapsed ? 66 : 344,
+          margin: '0 auto',
+          width: 'max-content',
+          maxWidth: 'calc(100% - 24px)',
           zIndex: 1000,
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
+          gap: 8,
           padding: '6px 12px',
-          borderRadius: 12,
+          borderRadius: 8,
           ...panelStyle,
         }}
       >
-        <FilterOutlined style={{ color: tokens.colorTextSecondary, fontSize: 14 }} />
-        <Segmented
-          value={typeFilter}
-          onChange={setTypeFilter}
-          options={typeFilterOptions}
-          size="small"
-          style={{
-            background: isDark ? 'rgba(0,200,180,0.06)' : 'rgba(0,0,0,0.04)',
-            borderRadius: 8,
-          }}
+        <Search
+          className="cockpit-map-search"
+          aria-label="搜索站点"
+          placeholder="搜索站点"
+          allowClear
+          value={searchText}
+          onSearch={handleSearch}
+          onChange={(event) => handleSearch(event.target.value)}
+          enterButton={(
+            <Button
+              type="primary"
+              icon={<SearchOutlined />}
+              aria-label="执行站点搜索"
+            />
+          )}
         />
-        <Tooltip title="搜索站点">
-          <Button
-            type="text"
-            size="small"
-            icon={<SearchOutlined />}
-            onClick={() => setShowSearch((v) => !v)}
-            style={{
-              color: showSearch ? tokens.colorPrimary : tokens.colorTextSecondary,
-              borderRadius: 6,
-            }}
-          />
-        </Tooltip>
         <Tooltip title="复位地图">
           <Button
             type="text"
             size="small"
             icon={<AimOutlined />}
+            aria-label="复位地图并显示全部站点"
             onClick={handleLocateAll}
             style={{ color: tokens.colorTextSecondary, borderRadius: 6 }}
           />
@@ -1099,97 +1158,13 @@ export default function CockpitPage() {
             type="text"
             size="small"
             icon={<ReloadOutlined spin={refreshing} />}
+            aria-label="刷新站点监测数据"
             onClick={fetchData}
             loading={refreshing}
             style={{ color: tokens.colorTextSecondary, borderRadius: 6 }}
           />
         </Tooltip>
-        {(typeFilter !== FILTER_ALL || searchText) && (
-          <Text style={{ fontSize: 12, color: tokens.colorTextSecondary, marginLeft: 8 }}>
-            已筛选 {filteredSites.length} 个站点
-          </Text>
-        )}
       </div>
-
-      {/* ===== Search Panel ===== */}
-      {showSearch && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 52,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 1000,
-            width: 380,
-            padding: 16,
-            borderRadius: 12,
-            ...panelStyle,
-          }}
-        >
-          <Search
-            placeholder="搜索站点名称、编号或区域..."
-            allowClear
-            onSearch={handleSearch}
-            onChange={(e) => handleSearch(e.target.value)}
-            value={searchText}
-            autoFocus
-            style={{ width: '100%' }}
-            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-          />
-          {searchText && (
-            <div
-              className="cockpit-scroll"
-              style={{
-                maxHeight: 200,
-                overflowY: 'auto',
-                marginTop: 10,
-              }}
-            >
-              {filteredSites.length === 0 ? (
-                <Text style={{ color: tokens.colorTextTertiary, fontSize: 12 }}>
-                  无匹配结果
-                </Text>
-              ) : (
-                filteredSites.slice(0, 10).map((site) => (
-                  <div
-                    key={site.id || site.code}
-                    onClick={() => {
-                      handleSiteClick(site);
-                      setShowSearch(false);
-                    }}
-                    style={{
-                      padding: '8px 10px',
-                      borderRadius: 6,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      transition: 'background 0.2s',
-                      background: 'transparent',
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = tokens.colorPrimaryBg;
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'transparent';
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontSize: 13, color: tokens.colorText, fontWeight: 500 }}>
-                        {site.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: tokens.colorTextTertiary }}>
-                        {site.code} · {stationTypeMap[site.type] || site.type} · {site.district || ''}
-                      </div>
-                    </div>
-                    <EnvironmentOutlined style={{ color: tokens.colorPrimary, fontSize: 14 }} />
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* ===== Left Panel Group ===== */}
       <div
@@ -1212,14 +1187,15 @@ export default function CockpitPage() {
           size="small"
           shape="circle"
           icon={leftCollapsed ? <RightOutlined /> : <LeftOutlined />}
+          aria-label={leftCollapsed ? '展开站点列表' : '收起站点列表'}
           onClick={() => setLeftCollapsed((v) => !v)}
           style={{
             position: 'absolute',
             top: 0,
             right: -14,
             zIndex: 10,
-            width: 28,
-            height: 28,
+            width: 36,
+            height: 36,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1282,129 +1258,58 @@ export default function CockpitPage() {
                         const markerStatus = getSiteMarkerStatus(site);
                         const maxDeviceTime = siteLastTimeMap[site.id] || 0;
                         return (
-                          <List.Item
-                            style={{ cursor: 'pointer' }}
-                            onClick={() => handleSiteClick(site)}
-                          >
-                            <div style={{ width: '100%' }}>
-                              <div
+                          <List.Item className="cockpit-site-list-item">
+                            <button
+                              type="button"
+                              className="cockpit-site-row-main"
+                              aria-label={`查看站点 ${site.name}`}
+                              onClick={() => handleSiteClick(site)}
+                            >
+                              <span
+                                className={markerStatus === 'anomaly' || markerStatus === 'offline' ? 'site-dot-alert' : ''}
                                 style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'space-between',
-                                  marginBottom: 2,
+                                  width: 8,
+                                  height: 8,
+                                  borderRadius: '50%',
+                                  background: markerStatus === 'offline' ? tokens.colorError
+                                    : markerStatus === 'anomaly' ? tokens.colorWarning
+                                    : markerStatus === 'pending' || markerStatus === 'no_data' ? tokens.colorTextTertiary
+                                    : tokens.colorSuccess,
+                                  flexShrink: 0,
                                 }}
-                              >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                  <div
-                                    className={markerStatus !== 'normal' ? 'site-dot-alert' : ''}
-                                    style={{
-                                      width: 8,
-                                      height: 8,
-                                      borderRadius: '50%',
-                                      background: markerStatus === 'offline' ? tokens.colorError
-                                        : markerStatus === 'anomaly' ? tokens.colorWarning
-                                        : markerStatus === 'pending' ? tokens.colorTextTertiary
-                                        : tokens.colorSuccess,
-                                      flexShrink: 0,
-                                      boxShadow: markerStatus !== 'normal'
-                                        ? `0 0 6px 2px ${markerStatus === 'offline' ? tokens.colorError : markerStatus === 'pending' ? 'rgba(140,140,140,0.5)' : tokens.colorWarning}`
-                                        : 'none',
-                                    }}
-                                  />
-                                  <Text
-                                    style={{
-                                      fontSize: 13,
-                                      fontWeight: 500,
-                                      color: tokens.colorText,
-                                      maxWidth: 140,
-                                    }}
-                                    ellipsis={{ tooltip: site.name }}
-                                  >
+                              />
+                              <span className="cockpit-site-row-copy">
+                                <span className="cockpit-site-row-title">
+                                  <Text ellipsis={{ tooltip: site.name }} style={{ color: tokens.colorText, fontSize: 13, fontWeight: 600 }}>
                                     {site.name}
                                   </Text>
-                                </div>
-                                <Space size={4}>
-                                  {markerStatus === 'offline' && (
-                                    <WarningOutlined
-                                      style={{ color: tokens.colorError, fontSize: 13 }}
-                                    />
-                                  )}
-                                  {markerStatus === 'anomaly' && (
-                                    <WarningOutlined
-                                      style={{ color: tokens.colorWarning, fontSize: 13 }}
-                                    />
-                                  )}
-                                  {markerStatus === 'pending' && (
-                                    <ClockCircleOutlined
-                                      style={{ color: tokens.colorTextTertiary, fontSize: 13 }}
-                                    />
-                                  )}
-                                  <Tooltip title={pinnedSites.has(site.id) ? '取消关注' : '重点关注'}>
-                                    <Button
-                                      type="text"
-                                      size="small"
-                                      icon={pinnedSites.has(site.id)
-                                        ? <PushpinFilled style={{ color: tokens.colorPrimary, fontSize: 13 }} />
-                                        : <PushpinOutlined style={{ color: tokens.colorTextQuaternary, fontSize: 13 }} />
-                                      }
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        togglePinSite(site.id);
-                                      }}
-                                      style={{ padding: 0, minWidth: 'auto', height: 'auto' }}
-                                    />
-                                  </Tooltip>
-                                  <span style={{ fontSize: 11, color: tokens.colorTextTertiary, fontFamily: 'monospace' }}>
-                                    {site.latest_time ? site.latest_time.slice(5, 16) : (maxDeviceTime > 0 ? new Date(maxDeviceTime).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '-')}
+                                  <span style={{ color: tokens.colorTextTertiary, fontSize: 11 }}>
+                                    {site.latest_time ? site.latest_time.slice(5, 16) : (maxDeviceTime > 0 ? new Date(maxDeviceTime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '暂无数据')}
                                   </span>
-                                </Space>
-                              </div>
-                              <div
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  alignItems: 'center',
-                                  paddingLeft: 14,
-                                }}
-                              >
-                                <Text style={{ fontSize: 11, color: tokens.colorTextTertiary }}>
-                                  {stationTypeMap[site.type] || site.type} · {site.code}
-                                </Text>
-                                {site.latest_value != null && (
-                                  <Text
-                                    style={{
-                                      fontSize: 13,
-                                      fontWeight: 600,
-                                      color: tokens.colorPrimary,
-                                      fontFamily: 'monospace',
-                                    }}
-                                  >
-                                    {site.latest_value}
-                                    <span
-                                      style={{
-                                        fontSize: 10,
-                                        color: tokens.colorTextTertiary,
-                                        fontWeight: 400,
-                                        marginLeft: 2,
-                                      }}
-                                    >
-                                      {site.latest_unit || site.unit || ''}
+                                </span>
+                                <span className="cockpit-site-row-meta" style={{ color: tokens.colorTextTertiary }}>
+                                  <span>{stationTypeMap[site.type] || site.type} · {site.code}</span>
+                                  {site.latest_value != null && (
+                                    <span style={{ color: tokens.colorPrimary, fontWeight: 600 }}>
+                                      {site.latest_value} {site.latest_unit || site.unit || ''}
                                     </span>
-                                    {(() => {
-                                      const cls = classifyMetric(site.latest_metric, site.latest_value, thresholds);
-                                      if (cls.status === 'unknown') return null;
-                                      return (
-                                        <span style={{ marginLeft: 5, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                                          <span style={{ width: 7, height: 7, borderRadius: '50%', background: cls.color, display: 'inline-block' }} />
-                                          <span style={{ fontSize: 10, color: cls.color }}>{cls.label}</span>
-                                        </span>
-                                      );
-                                    })()}
-                                  </Text>
-                                )}
-                              </div>
-                            </div>
+                                  )}
+                                </span>
+                              </span>
+                            </button>
+                            <Tooltip title={pinnedSites.has(site.id) ? '取消关注' : '重点关注'}>
+                              <Button
+                                className="cockpit-site-pin"
+                                type="text"
+                                size="small"
+                                icon={pinnedSites.has(site.id)
+                                  ? <PushpinFilled style={{ color: tokens.colorPrimary }} />
+                                  : <PushpinOutlined style={{ color: tokens.colorTextQuaternary }} />
+                                }
+                                aria-label={`${pinnedSites.has(site.id) ? '取消关注' : '重点关注'}站点 ${site.name}`}
+                                onClick={() => togglePinSite(site.id)}
+                              />
+                            </Tooltip>
                           </List.Item>
                         );
                       }}
@@ -1419,7 +1324,12 @@ export default function CockpitPage() {
               className="cockpit-panel"
               style={{
                 ...panelStyle,
-                flex: '0 0 auto',
+                flex: '0 1 42%',
+                minHeight: 180,
+                maxHeight: '42%',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
               }}
             >
               <Card
@@ -1460,9 +1370,9 @@ export default function CockpitPage() {
                           <div key={label}>
                             <div style={{
                               fontSize: 20, fontWeight: 700, fontFamily: 'monospace',
-                              color: value >= 95 ? tokens.colorSuccess : value >= 80 ? tokens.colorWarning : tokens.colorError,
+                              color: value == null ? tokens.colorTextTertiary : value >= 95 ? tokens.colorSuccess : value >= 80 ? tokens.colorWarning : tokens.colorError,
                             }}>
-                              {value}%
+                              {value == null ? '无样本' : `${value}%`}
                             </div>
                             <div style={{ fontSize: 10, color: tokens.colorTextTertiary }}>{label}</div>
                           </div>
@@ -1474,6 +1384,11 @@ export default function CockpitPage() {
                       <div style={{ fontSize: 10, color: tokens.colorTextQuaternary, marginTop: 4 }}>
                         缺报 {dataHealth.total.missing?.toLocaleString?.() || dataHealth.total.missing} · 超限 {dataHealth.total.over_limit?.toLocaleString?.() || dataHealth.total.over_limit}（考核周期：{dataHealth.period_label}）
                       </div>
+                      {Number(dataHealth.total.actual || 0) === 0 && (
+                        <div style={{ fontSize: 10, color: tokens.colorWarning, marginTop: 6, lineHeight: 1.45 }}>
+                          本考核周期尚无采集数据接入，因此完整性和及时性为 0%。请先核对设备接入与数据采集状态。
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1492,7 +1407,7 @@ export default function CockpitPage() {
                                 <Text style={{ fontSize: 11, color: tokens.colorTextSecondary }}>
                                   {m.manager}
                                   <span style={{ color: tokens.colorTextQuaternary, marginLeft: 4 }}>
-                                    {m.site_count} 站 · 有效 {m.validity_rate}% · 及时 {m.timeliness_rate}%
+                                    {m.site_count} 站 · 有效 {m.validity_rate == null ? '无样本' : `${m.validity_rate}%`} · 及时 {m.timeliness_rate == null ? '无样本' : `${m.timeliness_rate}%`}
                                   </span>
                                 </Text>
                                 <Space size={4}>
@@ -1580,10 +1495,11 @@ export default function CockpitPage() {
           size="small"
           shape="circle"
           icon={legendCollapsed ? <FullscreenOutlined /> : <ShrinkOutlined />}
+          aria-label={legendCollapsed ? '展开地图图例' : '收起地图图例'}
           onClick={() => setLegendCollapsed((v) => !v)}
           style={{
-            width: 24,
-            height: 24,
+            width: 32,
+            height: 32,
             fontSize: 11,
             boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
           }}
@@ -1611,13 +1527,14 @@ export default function CockpitPage() {
                   <Text style={{ fontSize: 10, color: tokens.colorText }}>{label}</Text>
                 </div>
               ))}
-              {/* 数据状态（与预警中心阈值一致：30分钟无数据即红） */}
+              {/* Data availability is neutral; only confirmed events are actionable. */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 2, paddingTop: 4, borderTop: `1px solid ${tokens.colorBorderSecondary}` }}>
                 <div style={{ fontSize: 9, color: tokens.colorTextQuaternary, marginBottom: 1 }}>数据状态</div>
                 {[
                   { color: tokens.colorSuccess, label: '正常' },
-                  { color: tokens.colorWarning, label: '数据异常' },
-                  { color: tokens.colorError, label: '长时间无数据' },
+                  { color: tokens.colorWarning, label: '真实告警' },
+                  { color: tokens.colorError, label: '设备离线' },
+                  { color: tokens.colorTextTertiary, label: '未接入数据' },
                 ].map(({ color, label }) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                     <div
@@ -1627,7 +1544,7 @@ export default function CockpitPage() {
                         borderRadius: '50%',
                         background: color,
                         boxShadow: `0 0 6px ${color}80`,
-                        animation: (label === '数据异常' || label === '长时间无数据') ? 'markerBreatheBig 2s ease-in-out infinite' : 'none',
+                        animation: (label === '真实告警' || label === '设备离线') ? 'markerBreatheBig 2s ease-in-out infinite' : 'none',
                       }}
                     />
                     <Text style={{ fontSize: 10, color: tokens.colorText }}>{label}</Text>
@@ -1660,14 +1577,15 @@ export default function CockpitPage() {
           size="small"
           shape="circle"
           icon={rightCollapsed ? <LeftOutlined /> : <RightOutlined />}
+          aria-label={rightCollapsed ? '展开告警与工单面板' : '收起告警与工单面板'}
           onClick={() => setRightCollapsed((v) => !v)}
           style={{
             position: 'absolute',
             top: 0,
             left: -14,
             zIndex: 10,
-            width: 28,
-            height: 28,
+            width: 36,
+            height: 36,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1677,12 +1595,13 @@ export default function CockpitPage() {
 
         {!rightCollapsed && (
           <>
+            <ActionQueue />
             {/* Real-time Alerts */}
             <div
               className="cockpit-panel"
               style={{
                 ...panelStyle,
-                flex: '1 1 35%',
+                flex: filteredAlerts.length > 0 ? '1 1 35%' : '0 0 auto',
                 minHeight: 0,
                 display: 'flex',
                 flexDirection: 'column',
@@ -1705,7 +1624,7 @@ export default function CockpitPage() {
                   </Space>
                 }
                 size="small"
-                style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+                style={{ flex: filteredAlerts.length > 0 ? 1 : '0 0 auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}
                 styles={{ body: { padding: 0, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}
               >
                 <div
@@ -1718,11 +1637,12 @@ export default function CockpitPage() {
                   }}
                 >
                   {filteredAlerts.length === 0 ? (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="暂无告警"
-                      style={{ padding: '16px 0' }}
-                    />
+                    <div className="cockpit-compact-state">
+                      <CheckCircleOutlined style={{ color: tokens.colorSuccess }} />
+                      <span>{Number(dataHealth?.total?.actual || 0) === 0
+                        ? '尚无采集数据，暂不能判断告警'
+                        : '当前未发现实时告警'}</span>
+                    </div>
                   ) : (
                     <List
                       dataSource={filteredAlerts}
@@ -1733,7 +1653,16 @@ export default function CockpitPage() {
                         return (
                           <List.Item
                             style={{ cursor: 'pointer', transition: 'background 0.2s', borderRadius: 6 }}
+                            role="link"
+                            tabIndex={0}
+                            aria-label={`查看 ${alert.site_name || '未知站点'} 的告警`}
                             onClick={() => navigate(`/alerts?search=${encodeURIComponent(alert.site_name || '')}`)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                navigate(`/alerts?search=${encodeURIComponent(alert.site_name || '')}`);
+                              }
+                            }}
                             onMouseEnter={(e) => { e.currentTarget.style.background = isDark ? 'rgba(0,200,180,0.06)' : 'rgba(0,0,0,0.03)'; }}
                             onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                           >
@@ -1855,6 +1784,8 @@ export default function CockpitPage() {
                   </Space>
                 }
                 size="small"
+                style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+                styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
               >
                 {devices.length === 0 ? (
                   <Empty
@@ -1871,20 +1802,22 @@ export default function CockpitPage() {
                         gap: '8px 12px',
                       }}
                     >
-                      <div
+                      <button
+                        type="button"
+                        aria-label={`查看设备台账，共 ${deviceStats.assetTotal} 台资产`}
                         onClick={() => navigate('/equipment')}
-                        style={{ cursor: 'pointer' }}
+                        style={{ cursor: 'pointer', border: 0, padding: 0, background: 'transparent', textAlign: 'left', color: 'inherit' }}
                       >
                         <Statistic
-                          title="设备总数"
-                          value={deviceStats.total}
+                          title="资产总数"
+                          value={deviceStats.assetTotal}
                           valueStyle={{ fontSize: 20, fontWeight: 700, color: tokens.colorText, fontFamily: 'monospace' }}
                           prefix={<ApiOutlined style={{ fontSize: 14 }} />}
                         />
-                      </div>
+                      </button>
                       <div style={{ cursor: 'pointer' }}>
                         <Statistic
-                          title="有数据设备"
+                          title="采集设备有数据"
                           value={deviceStats.withData}
                           valueStyle={{ fontSize: 20, fontWeight: 700, color: tokens.colorSuccess, fontFamily: 'monospace' }}
                           prefix={<CheckCircleOutlined style={{ fontSize: 14 }} />}
@@ -1892,14 +1825,14 @@ export default function CockpitPage() {
                       </div>
                       <div style={{ cursor: 'pointer' }}>
                         <Statistic
-                          title="无数据设备"
+                          title="采集设备未上报"
                           value={deviceStats.noData}
                           valueStyle={{
                             fontSize: 20, fontWeight: 700,
-                            color: deviceStats.noData > 0 ? tokens.colorError : tokens.colorTextTertiary,
+                            color: tokens.colorTextTertiary,
                             fontFamily: 'monospace',
                           }}
-                          prefix={<CloseCircleOutlined style={{ fontSize: 14 }} />}
+                          prefix={<MinusCircleOutlined style={{ fontSize: 14 }} />}
                         />
                       </div>
                     </div>
@@ -1907,13 +1840,13 @@ export default function CockpitPage() {
                     {/* 有数据率 bar */}
                     <div style={{ marginTop: 10 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                        <Text style={{ fontSize: 11, color: tokens.colorTextTertiary }}>有数据率</Text>
-                        <Text style={{ fontSize: 11, fontWeight: 600, color: deviceStats.rate >= 80 ? tokens.colorSuccess : tokens.colorWarning, fontFamily: 'monospace' }}>
-                          {deviceStats.rate}%
+                        <Text style={{ fontSize: 11, color: tokens.colorTextTertiary }}>采集设备有数据率</Text>
+                        <Text style={{ fontSize: 11, fontWeight: 600, color: deviceStats.rate == null ? tokens.colorTextTertiary : deviceStats.rate >= 80 ? tokens.colorSuccess : tokens.colorWarning, fontFamily: 'monospace' }}>
+                          {deviceStats.rate == null ? '无采集设备' : `${deviceStats.rate}%`}
                         </Text>
                       </div>
                       <div style={{ height: 6, borderRadius: 3, background: isDark ? 'rgba(0,200,180,0.08)' : 'rgba(0,0,0,0.06)', overflow: 'hidden', display: 'flex' }}>
-                        <div style={{ width: `${deviceStats.rate}%`, background: deviceStats.rate >= 80 ? tokens.colorSuccess : tokens.colorWarning, borderRadius: 3, transition: 'width 0.6s ease' }} />
+                        <div style={{ width: `${deviceStats.rate || 0}%`, background: deviceStats.rate >= 80 ? tokens.colorSuccess : tokens.colorWarning, borderRadius: 3, transition: 'width 0.6s ease' }} />
                       </div>
                     </div>
                   </div>
@@ -1934,14 +1867,8 @@ export default function CockpitPage() {
             >
               <Card
                 title={
-                  <Space
-                    size={6}
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => navigate('/workorders')}
-                  >
-                    <ToolOutlined style={{ color: tokens.colorWarning }} />
-                    <span>工单态势</span>
-                  </Space>
+                  <Button type="text" size="small" icon={<ToolOutlined style={{ color: tokens.colorWarning }} />}
+                    onClick={() => navigate('/workorders')} style={{ paddingInline: 0 }}>工单态势</Button>
                 }
                 size="small"
                 style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
@@ -2110,7 +2037,7 @@ export default function CockpitPage() {
                 boxShadow: `0 0 4px ${tokens.colorSuccess}`,
               }}
             />
-            <Text style={{ fontSize: 11, color: tokens.colorTextSecondary }}>系统正常</Text>
+            <Text style={{ fontSize: 11, color: tokens.colorTextSecondary }}>平台服务可用</Text>
           </div>
 
           <Text style={{ fontSize: 11, color: tokens.colorTextQuaternary }}>|</Text>

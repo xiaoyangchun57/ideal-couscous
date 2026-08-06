@@ -1,24 +1,34 @@
 import { useState } from 'react';
-import { Form, Input, Button, Typography, message } from 'antd';
+import { Alert, App, Form, Input, Button, Typography } from 'antd';
 import { UserOutlined, LockOutlined } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { useTheme } from '../../hooks/useTheme';
+import { getLoginReasonMessage, getSafeReturnTo } from '../../utils/authNavigation.js';
 
 const { Title, Text } = Typography;
 
 export default function LoginPage() {
+  const { message } = App.useApp();
   const navigate = useNavigate();
+  const location = useLocation();
   const { login, loading } = useAuth();
   const { tokens, isDark } = useTheme();
   const [error, setError] = useState('');
+  const returnTo = getSafeReturnTo(location.search);
+  const sessionMessage = getLoginReasonMessage(location.search);
 
   const onFinish = async (values) => {
     setError('');
     const result = await login(values.username, values.password);
     if (result.success) {
       message.success('登录成功');
-      navigate('/');
+      navigate(
+        result.mustChangePassword
+          ? `/change-password?returnTo=${encodeURIComponent(returnTo)}`
+          : returnTo,
+        { replace: true },
+      );
     } else {
       setError(result.error || '用户名或密码错误');
     }
@@ -72,12 +82,21 @@ export default function LoginPage() {
             </svg>
           </div>
           <Title level={4} style={{ color: tokens.colorText, margin: 0, letterSpacing: 2 }}>
-            水文智慧运维平台
+            水质智慧运维平台
           </Title>
           <Text style={{ color: tokens.colorTextTertiary, fontSize: 13 }}>
-            水文监测智慧运维管理系统
+            水质监测智慧运维管理系统
           </Text>
         </div>
+
+        {sessionMessage && (
+          <Alert
+            type="warning"
+            showIcon
+            message={sessionMessage}
+            style={{ marginBottom: 20 }}
+          />
+        )}
 
         {/* Login Form */}
         <Form onFinish={onFinish} size="large" autoComplete="off">

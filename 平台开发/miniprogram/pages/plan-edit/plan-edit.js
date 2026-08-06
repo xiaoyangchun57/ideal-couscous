@@ -69,6 +69,7 @@ Page({
     mySites: [],        // [{id, name}]
     vehicles: [],       // [{id, name/plate_number}]
     partsInventory: [], // 可用于本次出车的备件库存
+    partsInventoryState: 'loading', // loading | ready | empty | unavailable
     selectedParts: [],  // [{part_id, part_name, quantity}]
     linkedWorkOrderIds: [],
     suggestions: [],    // [{type, site_id, site_name, text, level}]
@@ -223,6 +224,7 @@ Page({
   },
 
   loadPartsInventory() {
+    this.setData({ partsInventoryState: 'loading' });
     api.partsInventory()
       .then(res => {
         const partsInventory = (Array.isArray(res) ? res : [])
@@ -233,9 +235,9 @@ Page({
             quantity: Number(p.quantity) || 0,
             unit: p.unit || '件'
           }));
-        this.setData({ partsInventory });
+        this.setData({ partsInventory, partsInventoryState: partsInventory.length ? 'ready' : 'empty' });
       })
-      .catch(() => {});
+      .catch(() => this.setData({ partsInventory: [], partsInventoryState: 'unavailable' }));
   },
 
   loadSuggestions(scheduleType) {

@@ -1,0 +1,10 @@
+.intro { padding: 32rpx 28rpx 20rpx; }
+.intro-title { display: block; color: var(--text); font-size: 38rpx; font-weight: 600; }
+.intro-copy { display: block; margin-top: 10rpx; color: var(--text-3); font-size: 24rpx; line-height: 1.55; }
+.site-list { padding: 0 24rpx; }
+.site-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; padding: 26rpx 28rpx; }
+.site-row:active { background: var(--fill); }
+.site-main { min-width: 0; flex: 1; }
+.site-name { display: block; overflow: hidden; color: var(--text); font-size: 29rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.site-meta { display: block; overflow: hidden; margin-top: 10rpx; color: var(--text-3); font-size: 23rpx; text-overflow: ellipsis; white-space: nowrap; }
+.site-action { flex: none; margin-left: 20rpx; color: var(--brand); font-size: 24rpx; }

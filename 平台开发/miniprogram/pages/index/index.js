@@ -1,5 +1,5 @@
 const api = require('../../services/api.js');
-const { getUser } = require('../../utils/auth.js');
+const { getUser, getSites } = require('../../utils/auth.js');
 const { todayStr } = require('../../utils/util.js');
 const maps = require('../../services/maps.js');
 
@@ -8,7 +8,7 @@ const app = getApp();
 Page({
   data: {
     realName: '', today: '', loaded: false,
-    summary: null, sites: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
+    summary: null, sites: [], responsibleSites: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
     workPackage: null
   },
 
@@ -19,6 +19,7 @@ Page({
     this.setData({
       realName: (u && u.real_name) || '运维人员',
       today: todayStr(),
+      responsibleSites: getSites(),
       canReview: reviewRoles.some(role => roles.includes(role)),
     });
   },
@@ -44,13 +45,18 @@ Page({
           workorders: res.summary.pending_workorders || 0,
           alerts: (res.summary.pending_alerts || 0) + (res.summary.abnormal_items || 0)
         } : null;
+        const workPackage = res.work_package || null;
+        const planEntrySummary = workPackage && workPackage.has_plan
+          ? `今日作业 ${workPackage.sites.length} 个站点${workPackage.readiness.departure_confirmed ? ' · 已准备' : ` · ${workPackage.readiness.departure_pending_count} 项待确认`}`
+          : '今日暂无作业包 · 查看全部计划';
         this.setData({
           loaded: true,
           summary4,
           sites: res.sites || [],
           workorders: (res.workorders || []).map(maps.workorderCn),
           alerts: (res.alerts || []).map(a => Object.assign({}, a, { level_cls: maps.alertLevelCls(a.level) })),
-          workPackage: res.work_package || null
+          workPackage,
+          planEntrySummary
         });
         if (this.data.canReview) {
           api.auditPending()

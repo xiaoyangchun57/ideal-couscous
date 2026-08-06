@@ -1,0 +1,167 @@
+.cockpit-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.cockpit-viewbody {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.cockpit-map-search {
+  width: 210px;
+}
+
+.cockpit-view-state {
+  position: relative;
+}
+
+.cockpit-map-toolbar {
+  justify-content: center;
+  transition: left 0.35s cubic-bezier(0.4, 0, 0.2, 1), right 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cockpit-site-list-item {
+  display: flex !important;
+  align-items: stretch !important;
+  gap: 4px;
+  padding: 2px 4px !important;
+}
+
+.cockpit-site-row-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 7px 6px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cockpit-site-row-main:hover,
+.cockpit-site-row-main:focus-visible {
+  background: rgba(22, 119, 255, 0.08);
+  outline: none;
+}
+
+.cockpit-site-row-main:focus-visible {
+  box-shadow: inset 0 0 0 2px #1677ff;
+}
+
+.cockpit-site-row-copy,
+.cockpit-site-row-title,
+.cockpit-site-row-meta {
+  display: flex;
+  min-width: 0;
+}
+
+.cockpit-site-row-copy {
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cockpit-site-row-title,
+.cockpit-site-row-meta {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cockpit-site-row-title > :first-child,
+.cockpit-site-row-meta > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cockpit-site-row-meta {
+  font-size: 11px;
+}
+
+.cockpit-site-pin {
+  align-self: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+}
+
+.cockpit-compact-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: inherit;
+}
+
+.action-queue-panel,
+.action-queue-collapsed {
+  box-sizing: border-box;
+}
+
+.cockpit-map .marker-cluster-small,
+.cockpit-map .marker-cluster-medium,
+.cockpit-map .marker-cluster-large {
+  background: rgba(22, 119, 255, 0.24);
+}
+
+.cockpit-map .marker-cluster-small div,
+.cockpit-map .marker-cluster-medium div,
+.cockpit-map .marker-cluster-large div {
+  background: #1677ff;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.cockpit-map .cockpit-cluster {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(22, 119, 255, 0.24);
+}
+
+.cockpit-map .cockpit-cluster-count {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.cockpit-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 760px) {
+  .cockpit-map-toolbar {
+    max-width: calc(100% - 20px);
+    overflow-x: auto;
+  }
+}

@@ -50,6 +50,7 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
                 );
                 CREATE TABLE insp_plan_items (
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    result TEXT,
                     execution_status TEXT DEFAULT 'active'
                 );
                 CREATE TABLE reagents (id INTEGER PRIMARY KEY, name TEXT, unit TEXT);
@@ -89,7 +90,9 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
             db.executemany('INSERT INTO user_sites VALUES (?,?)', [(9, 1), (10, 2)])
             db.execute("INSERT INTO plan_schedules VALUES (5, 'approved', 3)")
             db.execute('INSERT INTO insp_plans VALUES (42, 5, 9, ?, \'active\', 0)', (today,))
-            db.execute("INSERT INTO insp_plan_items VALUES (1, 42, 1, 'active')")
+            db.execute("""INSERT INTO insp_plan_items
+                (id, plan_id, site_id, result, execution_status)
+                VALUES (1, 42, 1, NULL, 'active')""")
             db.execute("INSERT INTO reagents VALUES (3, '氨氮试剂A', '瓶')")
             db.execute("INSERT INTO reagent_inventory VALUES (1, 1, 3, 2, 'pending', 30, '', '')")
             db.execute("INSERT INTO vehicles VALUES (1, 'available')")

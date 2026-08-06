@@ -132,6 +132,8 @@ view, text, button, input { box-sizing: border-box; }
 
 /* 通用标签 */
 .tag {
+  display: inline-flex; align-items: center; box-sizing: border-box;
+  min-height: 36rpx; white-space: nowrap; line-height: 28rpx;
   font-size: 22rpx; color: var(--text-2); background: var(--fill);
   border-radius: 8rpx; padding: 4rpx 14rpx; font-weight: 400;
 }

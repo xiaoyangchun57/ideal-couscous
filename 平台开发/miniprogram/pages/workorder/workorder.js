@@ -41,6 +41,7 @@ Page({
       { key: 'closed', label: '已完成' }
     ],
     sheet: { open: false, item: null }, isAdmin: false, canWrite: false, acting: false,
+    resolutionNote: '',
     online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
     vehicleOptions: [{ id: 0, label: '不指定（仅填事由）' }],
@@ -124,7 +125,7 @@ Page({
           app.globalData.selWorkorderNo = null;
           if (item) {
             const stepMap = { pending: 1, accepted: 2, dispatched: 2, in_progress: 3, reviewing: 4, closed: 5, resolved: 5 };
-            this.setData({ sheet: { open: true, item: Object.assign({}, item, { step: stepMap[item.status] || 0 }) } });
+            this.setData({ sheet: { open: true, item: Object.assign({}, item, { step: stepMap[item.status] || 0 }) }, resolutionNote: item.remark || '' });
           }
         }
         if (one) one();
@@ -144,12 +145,13 @@ Page({
     if (item) {
       const stepMap = { pending: 1, accepted: 2, in_progress: 3, reviewing: 4, closed: 5 };
       const step = stepMap[item.status] || 0;
-      this.setData({ sheet: { open: true, item: Object.assign({}, item, { step }) } });
+      this.setData({ sheet: { open: true, item: Object.assign({}, item, { step }) }, resolutionNote: item.remark || '' });
     }
   },
   onClose() { this.setData({ 'sheet.open': false }); },
   onCloseVehicle() { this.setData({ 'vehicleApply.open': false }); },
   onCloseParts() { this.setData({ 'partsApply.open': false }); },
+  onResolutionNote(e) { this.setData({ resolutionNote: e.detail.value }); },
 
   afterAction(tip) {
     this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0 }, partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } });
@@ -249,9 +251,11 @@ Page({
   doReview() {
     const item = this.data.sheet.item;
     if (!item.has_images) { wx.showToast({ title: '请先上传处置影像', icon: 'none' }); return; }
+    const resolutionNote = (this.data.resolutionNote || '').trim();
+    if (!resolutionNote) { wx.showToast({ title: '请填写现场处置说明', icon: 'none' }); return; }
     const no = item.order_no;
     this.setData({ acting: true });
-    api.submitWorkorderReview(no)
+    api.submitWorkorderReview(no, resolutionNote)
       .then(() => this.afterAction('已提交核验'))
       .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
@@ -288,7 +292,7 @@ Page({
       .then(([vs, ps]) => {
         const vehicleOptions = [{ id: 0, label: '不指定（仅填事由）' }].concat((vs || []).map(v => ({
           id: v.id,
-          label: (v.plate_no || '未上牌') + (v.model ? ' · ' + v.model : '')
+          label: (v.plate_no || '未上牌') + (v.model ? '（车型：' + v.model + '）' : '')
         })));
         const partsOptions = [{ id: 0, label: '手动输入（自定义名称）' }].concat((ps || []).map(p => ({
           id: p.id,

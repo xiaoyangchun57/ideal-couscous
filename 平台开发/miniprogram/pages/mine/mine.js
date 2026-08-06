@@ -25,7 +25,7 @@ Page({
       const routeLabels = { stock: '库存领用', local_purchase: '附近急购', vendor_order: '厂家订购' };
       const statusLabels = { pending: '待审批', approved: '已批准', ordered: '运输中', issued: '已领用', completed: '已完成', rejected: '已驳回' };
       const partsRequests = (rows || []).map(row => Object.assign({}, row, {
-        route_label: routeLabels[row.fulfillment_type] || '备件需求',
+        route_label: routeLabels[row.fulfillment_type] || '备件申请',
         status_label: statusLabels[row.status] || row.status,
         can_issue: row.fulfillment_type === 'stock' && row.status === 'approved' && (row.items || []).some(i => i.remaining_quantity > 0),
         can_order: row.fulfillment_type === 'vendor_order' && row.status === 'approved',
@@ -39,7 +39,7 @@ Page({
         const tripEnd = row.end_at ? String(row.end_at).slice(0, 10) : '';
         const isPlanTrip = String(row.reason || '').indexOf('巡检计划#') >= 0;
         return Object.assign({}, row, {
-          vehicle_label: (row.plate_no || '车辆') + (row.model ? (' · ' + row.model) : ''),
+          vehicle_label: (row.plate_no || '车辆') + (row.model ? ('（车型：' + row.model + '）') : ''),
           is_plan_trip: isPlanTrip,
           trip_end_date: tripEnd,
           plan_schedule_id: row.plan_schedule_id || null,
@@ -55,6 +55,7 @@ Page({
   goReports() { wx.navigateTo({ url: '/pages/reports/reports' }); },
   goReview() { wx.navigateTo({ url: '/pages/review/view' }); },
   goVehicle() { wx.navigateTo({ url: '/pages/vehicle/vehicle' }); },
+  goResponsibleSites() { wx.navigateTo({ url: '/pages/responsible-sites/responsible-sites' }); },
   goPlanChange() {
     const use = this.data.activeVehicleUse;
     if (!use || !use.plan_schedule_id) { wx.showToast({ title: '未找到关联巡检计划', icon: 'none' }); return; }
@@ -157,8 +158,11 @@ Page({
       confirmText: '退出',
       success(res) {
         if (res.confirm) {
-          clear();
-          wx.reLaunch({ url: '/pages/login/login' });
+          const done = () => {
+            clear();
+            wx.reLaunch({ url: '/pages/login/login' });
+          };
+          api.logout().then(done).catch(done);
         }
       }
     });

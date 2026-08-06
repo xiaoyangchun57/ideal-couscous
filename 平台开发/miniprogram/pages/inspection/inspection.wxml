@@ -9,12 +9,12 @@
   </view>
 
   <!-- 展示今日已批准执行包，以及此前仍有未完成项的结转执行包 -->
-  <view class="package-switch" wx:if="{{packages.length}}">
+  <scroll-view class="package-switch" wx:if="{{packages.length}}" scroll-x="true" enhanced="true" show-scrollbar="false">
     <view class="package-chip {{selectedPlanId === item.plan_id ? 'package-chip-on' : ''}}"
       wx:for="{{packages}}" wx:key="plan_id" bindtap="onSelectPackage" data-id="{{item.plan_id}}">
-      {{item.is_carryover ? '补做' : ''}}{{item.schedule_type === 'weekly' ? '周检' : (item.schedule_type === 'monthly' ? '月检' : (item.schedule_type === 'quarterly' ? '季检' : '年检'))}} · {{item.sites.length}}站
+      {{item.is_carryover ? '补做任务' : '本次任务'}} · {{item.schedule_type === 'weekly' ? '周检' : (item.schedule_type === 'monthly' ? '月检' : (item.schedule_type === 'quarterly' ? '季检' : '年检'))}} · {{item.sites.length}}站
     </view>
-  </view>
+  </scroll-view>
 
   <view class="journey" wx:if="{{currentPackage}}">
     <view class="journey-summary" bindtap="onToggleTrip">
@@ -102,8 +102,9 @@
   <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view>
   <view class="sheet" wx:if="{{reportSheet.open}}">
     <view class="sheet-head"><text class="sheet-title">现场异常上报</text><text class="sheet-close" bindtap="onCloseReport">×</text></view>
-    <picker range="{{['感官异常','设备异常','环境异常','违规操作','污染事件']}}" value="{{reportSheet.typeIndex}}" bindchange="onReportType"><view class="reagent-picker">异常类别 ›</view></picker>
-    <picker range="{{anomalyCodes}}" range-key="code" value="{{reportSheet.codeIndex}}" bindchange="onReportCode"><view class="reagent-picker">异常编码（可选） ›</view></picker>
+    <picker range="{{reportTypes}}" range-key="label" value="{{reportSheet.typeIndex}}" bindchange="onReportType">
+      <view class="reagent-picker report-picker"><text class="report-picker-label">异常类别</text><text class="report-picker-value">{{reportTypes[reportSheet.typeIndex].label}}</text><text class="report-picker-arrow">›</text></view>
+    </picker>
     <textarea class="ta" placeholder="说明现场异常及已采取措施" value="{{reportSheet.description}}" bindinput="onReportDescription"/>
     <view class="report-photo" bindtap="onAddReportPhoto">{{reportSheet.photos.length ? '继续添加现场照片' : '拍摄现场照片（至少 1 张）'}}</view>
     <view class="report-photo-count" wx:if="{{reportSheet.photos.length}}">已添加 {{reportSheet.photos.length}}/6 张</view>
@@ -162,9 +163,22 @@
       </view>
     </view>
   </block>
-  <view class="empty" wx:elif="{{loaded}}">
+  <view class="responsible-section" wx:if="{{loaded && !currentPackage && !executionError && responsibleSites.length}}">
+    <view class="responsible-head">
+      <text class="responsible-title">负责站点</text>
+      <text class="responsible-note">仅供查看，未生成巡检任务</text>
+    </view>
+    <view class="responsible-list">
+      <view class="responsible-card" wx:for="{{responsibleSites}}" wx:key="id">
+        <text class="responsible-name">{{item.name}}</text>
+        <text class="responsible-meta">{{item.code}} · {{item.type}}</text>
+      </view>
+    </view>
+  </view>
+  <view class="empty" wx:if="{{loaded && !currentPackage}}">
     <view class="empty-circle"></view>
-    <text class="empty-tx">今日暂无已批准的巡检任务</text>
+    <text class="empty-tx">{{executionError || '今日暂无已批准的巡检任务'}}</text>
+    <text class="empty-hint" wx:if="{{!executionError}}">请由管理员确认巡检计划已批准并分派至当前账号</text>
   </view>
 
   <view class="sheet-mask" wx:if="{{vehicleSheet.open}}" bindtap="onCloseVehicleCheckout"></view>
@@ -285,8 +299,12 @@
       <view class="photo-slot" wx:if="{{sheet.photoInfo.missing > 0}}" wx:for="{{sheet.photoInfo.missing}}" wx:key="*this">
         <text class="photo-slot-text">待拍</text>
       </view>
-      <view class="photo-add" bindtap="onAddPhoto">＋</view>
     </view>
+    <view class="photo-source-actions" wx:if="{{sheet.photos.length + sheet.localPhotos.length < 6}}">
+      <button class="photo-source-btn photo-source-primary" bindtap="onAddPhoto" data-source="camera">现场拍照</button>
+      <button class="photo-source-btn" bindtap="onAddPhoto" data-source="watermark_album">水印相册</button>
+    </view>
+    <text class="photo-source-hint">水印相册照片将核对原图拍摄时间、位置及历史重复记录</text>
 
     <button class="btn-primary submit-btn" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSubmitItem">提 交</button>
   </view>

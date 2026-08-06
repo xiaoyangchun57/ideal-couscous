@@ -78,7 +78,9 @@
 .resource-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; }
 .resource-title { font-size: 28rpx; font-weight: 500; color: var(--text); }
 .resource-hint { font-size: 22rpx; color: var(--text-3); }
-.resource-empty { display: block; font-size: 24rpx; color: var(--text-3); padding: 12rpx 0; }
+.resource-empty { display: flex; flex-direction: column; gap: 8rpx; font-size: 24rpx; color: var(--text-3); padding: 12rpx 0; }
+.resource-retry { color: var(--brand); }
+.resource-next { font-size: 23rpx; color: var(--text-3); }
 .resource-auto { display: block; margin-top: 16rpx; font-size: 23rpx; line-height: 1.5; color: var(--text-3); }
 
 /* 备注 */

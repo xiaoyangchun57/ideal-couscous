@@ -1,0 +1,46 @@
+.plan-attention-strip {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  border-left: 3px solid var(--ant-color-warning);
+  background: var(--ant-color-warning-bg);
+}
+
+.plan-attention-strip__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ant-color-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.plan-detail-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plan-list-section {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.plan-generated-tasks .ant-table-wrapper {
+  overflow-x: auto;
+}
+
+@media (max-width: 760px) {
+  .plan-attention-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

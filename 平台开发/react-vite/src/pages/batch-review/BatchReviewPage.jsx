@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Card, Button, Space, Tag, Typography, message, Modal, Input, Empty,
-  Image, Badge, Tooltip, Spin, Result,
+  Image, Tooltip, Spin, Result,
 } from 'antd';
 import {
-  ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
+  ReloadOutlined, CheckOutlined, ExclamationCircleOutlined,
   CameraOutlined, CheckCircleOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
@@ -147,7 +147,7 @@ export default function BatchReviewPage() {
                       background: isMarked ? '#fff1f0' : tokens.colorBgContainer,
                       transition: 'all 0.2s',
                     }}
-                    bodyStyle={{ padding: 12 }}
+                    styles={{ body: { padding: 12 } }}
                   >
                     {/* 检查项信息 */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>

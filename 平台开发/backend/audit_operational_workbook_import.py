@@ -59,15 +59,11 @@ def main():
         SELECT device_code FROM device_shadows GROUP BY device_code HAVING COUNT(*)>1)''').fetchone()[0]
     if duplicate_device_codes:
         errors.append(f'{duplicate_device_codes} duplicate device codes')
-    external_count = db.execute(
-        "SELECT COUNT(*) FROM device_shadows WHERE management_scope='external_data' AND manufacturer='外接设备'"
+    unmanaged_count = db.execute(
+        "SELECT COUNT(*) FROM device_shadows WHERE device_code LIKE 'WB-%' AND management_scope != 'managed'"
     ).fetchone()[0]
-    expected_external = sum(
-        1 for block in payload['equipment_blocks'] for device in block['devices']
-        if device.get('manufacturer') == '外接设备'
-    )
-    if external_count != expected_external:
-        errors.append(f'external device count is {external_count}, expected {expected_external}')
+    if unmanaged_count:
+        errors.append(f'{unmanaged_count} workbook devices do not use the unified managed lifecycle')
     monitoring_enabled = db.execute(
         "SELECT COUNT(*) FROM device_shadows WHERE device_code LIKE 'WB-%' AND monitoring_enabled=1"
     ).fetchone()[0]

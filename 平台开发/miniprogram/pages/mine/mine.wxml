@@ -48,16 +48,16 @@
       <view class="menu-right"><text class="arrow">›</text></view>
     </view>
     <view class="hairline"></view>
-    <view class="menu-item">
+    <view class="menu-item" bindtap="goResponsibleSites">
       <text class="menu-tx">负责站点</text>
-      <text class="menu-right menu-sub">{{sitesCount}} 个</text>
+      <view class="menu-right"><text class="menu-sub">{{sitesCount}} 个 · 查看</text><text class="arrow">›</text></view>
     </view>
   </view>
 
   <view class="sheet-mask" wx:if="{{partsSheet.open}}" bindtap="onCloseParts"></view>
   <view class="sheet" wx:if="{{partsSheet.open}}">
-    <view class="sheet-head"><text class="sheet-title">我的备件需求</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
-    <view wx:if="{{!partsRequests.length}}" class="parts-empty">暂无备件需求</view>
+    <view class="sheet-head"><text class="sheet-title">我的备件申请</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
+    <view wx:if="{{!partsRequests.length}}" class="parts-empty">暂无备件申请</view>
     <view class="parts-request-row" wx:for="{{partsRequests}}" wx:key="id">
       <view class="parts-request-head"><text class="parts-request-name">{{item.requested_part_name || item.items[0].part_name}}</text><text class="tag">{{item.status_label}}</text></view>
       <text class="parts-request-sub">{{item.route_label}} · {{item.site_name}} · {{item.request_no}}</text>

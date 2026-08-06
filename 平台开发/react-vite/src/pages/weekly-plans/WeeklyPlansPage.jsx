@@ -1,22 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Table, Card, Button, Space, Tag, Typography, message, Modal, Form, Select, Input, Empty, Statistic, Row, Col } from 'antd';
-import { PlusOutlined, ReloadOutlined, CalendarOutlined } from '@ant-design/icons';
+import { Table, Card, Button, Space, Tag, Typography, message, Modal, Form, Select, Input, Empty } from 'antd';
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
-import { useTheme } from '../../hooks/useTheme';
-import { useAuth } from '../../hooks/useAuth';
+import { TableLongText } from '../../components/WorkspacePage';
 
 const { Text, Title } = Typography;
 
 const STATUS_MAP = { draft: { label: '草稿', color: 'default' }, submitted: { label: '已提交', color: 'blue' }, approved: { label: '已批准', color: 'green' }, archived: { label: '已归档', color: 'default' } };
 
 export default function WeeklyPlansPage() {
-  const { themeConfig } = useTheme();
-  const { user } = useAuth();
-  const reviewerId = user?.id || 1;
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState([]);
-  const [sites, setSites] = useState([]);
   const [vehicles, setVehicles] = useState([]);
   const [form] = Form.useForm();
   const [createOpen, setCreateOpen] = useState(false);
@@ -24,13 +19,12 @@ export default function WeeklyPlansPage() {
   const load = async () => {
     setLoading(true);
     try { setList((await api.get('/weekly-plans')) || []); }
-    catch (e) { message.error('加载失败'); }
+    catch { message.error('加载失败'); }
     finally { setLoading(false); }
   };
   useEffect(() => {
     load();
     api.get('/users').then(u => setUsers(Array.isArray(u) ? u : [])).catch(() => {});
-    api.get('/sites').then(s => setSites(Array.isArray(s) ? s : [])).catch(() => {});
     api.get('/vehicles').then(v => setVehicles(Array.isArray(v) ? v : [])).catch(() => {});
   }, []);
 
@@ -45,7 +39,7 @@ export default function WeeklyPlansPage() {
     } catch (e) { message.error('失败：' + e.message); }
   };
   const onApprove = async (id, action) => {
-    try { await api.post(`/weekly-plans/${id}/approve`, { action, approver_id: reviewerId }); message.success('已' + (action==='approve'?'批准':'驳回')); load(); }
+    try { await api.post(`/weekly-plans/${id}/approve`, { action }); message.success('已' + (action==='approve'?'批准':'驳回')); load(); }
     catch (e) { message.error('失败：' + e.message); }
   };
 
@@ -58,7 +52,7 @@ export default function WeeklyPlansPage() {
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建周计划</Button>
         </Space>
       </div>
-      <Card bodyStyle={{ padding: 0, height: 'calc(100vh - 220px)' }} style={{ flex: 1 }}>
+      <Card styles={{ body: { padding: 0, height: 'calc(100vh - 220px)' } }} style={{ flex: 1 }}>
         <div style={{ height: '100%', overflow: 'auto', scrollbarWidth: 'none' }}>
           <Table rowKey="id" dataSource={list} loading={loading} size="small" pagination={false} scroll={{ y: 'calc(100vh - 280px)' }} className="review-scroll-table"
             columns={[
@@ -66,8 +60,8 @@ export default function WeeklyPlansPage() {
               { title: '周开始', dataIndex: 'week_start', width: 110, render: v => <Text code style={{fontSize:11}}>{v}</Text> },
               { title: '状态', dataIndex: 'status', width: 90, render: v => { const s = STATUS_MAP[v] || {label:v,color:'default'}; return <Tag color={s.color}>{s.label}</Tag>; } },
               { title: '提交时间', dataIndex: 'submitted_at', width: 160, render: v => <Text style={{fontSize:11}}>{v || '-'}</Text> },
-              { title: '审批人', dataIndex: 'approver_id', width: 80 },
-              { title: '备注', dataIndex: 'remarks', ellipsis: true },
+              { title: '审批人', dataIndex: 'approver_name', width: 100, render: value => value || '-' },
+              { title: '备注', dataIndex: 'remarks', width: 260, render: value => <TableLongText value={value} /> },
               { title: '操作', width: 160, render: (_, r) => r.status === 'submitted' ? (
                 <Space>
                   <Button size="small" type="primary" onClick={() => onApprove(r.id, 'approve')}>批准</Button>
@@ -78,7 +72,7 @@ export default function WeeklyPlansPage() {
             locale={{ emptyText: <Empty description="暂无周计划" /> }} />
         </div>
       </Card>
-      <Modal open={createOpen} onCancel={() => setCreateOpen(false)} onOk={onCreate} title="新建周计划" okText="保存草稿" cancelText="取消" width={520} destroyOnClose>
+      <Modal open={createOpen} onCancel={() => setCreateOpen(false)} onOk={onCreate} title="新建周计划" okText="保存草稿" cancelText="取消" width={520} destroyOnHidden>
         <Form form={form} layout="vertical">
           <Form.Item name="user_id" label="巡检人" rules={[{ required: true }]} initialValue={1}>
             <Select options={users.map(u => ({ value: u.id, label: u.real_name || u.username }))} />

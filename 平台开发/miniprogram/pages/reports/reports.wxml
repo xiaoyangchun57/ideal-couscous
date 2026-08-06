@@ -8,13 +8,25 @@
   </scroll-view>
   <view wx:if="{{loading}}" class="empty">加载中…</view>
   <block wx:else>
-    <view wx:for="{{reports}}" wx:key="id" wx:if="{{!filter || item.status === filter}}" class="card report">
+    <view wx:for="{{reports}}" wx:key="id" wx:if="{{!filter || item.status === filter}}" class="card report" bindtap="onOpenDetail" data-id="{{item.id}}">
       <view class="line"><text class="type">{{item.type_cn}}</text><text class="status status-{{item.status}}">{{item.status_cn}}</text></view>
       <text class="site">{{item.site_name || '未关联站点'}}</text>
       <text class="description">{{item.description}}</text>
       <view class="meta"><text>{{item.reported_at}}</text><text wx:if="{{item.photo_count}}">现场照片 {{item.photo_count}} 张</text></view>
-      <view wx:if="{{item.order_no}}" class="order" bindtap="goOrder" data-order="{{item.order_no}}">关联工单：{{item.order_no}} ›</view>
+      <view wx:if="{{item.order_no}}" class="order" catchtap="goOrder" data-order="{{item.order_no}}">关联工单：{{item.order_no}} ›</view>
     </view>
     <view wx:if="{{!reports.length}}" class="empty">暂无异常上报记录</view>
   </block>
+
+  <view wx:if="{{detail}}" class="sheet-mask" bindtap="onCloseDetail"></view>
+  <view wx:if="{{detail}}" class="sheet report-detail-sheet">
+    <view class="sheet-head"><text class="sheet-title">异常上报详情</text><text class="sheet-close" bindtap="onCloseDetail">×</text></view>
+    <view class="detail-row"><text class="detail-key">状态</text><text class="status status-{{detail.status}}">{{detail.status_cn}}</text></view>
+    <view class="detail-row"><text class="detail-key">异常类型</text><text class="detail-value">{{detail.type_cn}}</text></view>
+    <view class="detail-row"><text class="detail-key">站点</text><text class="detail-value">{{detail.site_name || '未关联站点'}}</text></view>
+    <view class="detail-row"><text class="detail-key">上报时间</text><text class="detail-value">{{detail.reported_at}}</text></view>
+    <view class="detail-copy"><text class="detail-key">现场说明</text><text class="detail-description">{{detail.description || '未填写说明'}}</text></view>
+    <view wx:if="{{detail.photos.length}}" class="detail-copy"><text class="detail-key">现场照片</text><scroll-view class="detail-photos" scroll-x="true"><image wx:for="{{detail.photos}}" wx:key="*this" class="detail-photo" src="{{item}}" mode="aspectFill" bindtap="onPreviewPhoto" data-src="{{item}}" /></scroll-view></view>
+    <view wx:if="{{detail.order_no}}" class="order detail-order" bindtap="goOrder" data-order="{{detail.order_no}}">查看关联工单：{{detail.order_no}} ›</view>
+  </view>
 </view>

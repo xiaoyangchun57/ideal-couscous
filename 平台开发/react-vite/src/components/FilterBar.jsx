@@ -1,10 +1,10 @@
-import { Card } from 'antd';
-import { filterCardBody } from '../services/pageStyles';
+import './WorkspacePage.css';
+import { WorkspaceToolbar } from './WorkspacePage';
 
 /**
  * 统一筛选工具栏（结构一致性规范 #2 / B 类跳动源治理）
  *
- * 全站管理页的筛选区唯一形态：Card 容器 + 左对齐 + 标准控件宽度。
+ * 全站管理页复用 WorkspaceToolbar 的筛选区、动作区和换行规则。
  * - 输入框宽度用 pageStyles.filterInputWidth（280）
  * - 下拉框宽度用 pageStyles.filterSelectWidth（140）/ filterSmallSelectWidth（120）
  * - 右侧动作按钮通过 extra 传入（如「新增」）
@@ -17,20 +17,8 @@ import { filterCardBody } from '../services/pageStyles';
  */
 export default function FilterBar({ children, extra, style }) {
   return (
-    <Card
-      style={{ flexShrink: 0, ...style }}
-      styles={{
-        body: {
-          ...filterCardBody,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          flexWrap: 'wrap',
-        },
-      }}
-    >
+    <WorkspaceToolbar actions={extra} style={{ flexShrink: 0, ...style }}>
       {children}
-      {extra ? <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>{extra}</div> : null}
-    </Card>
+    </WorkspaceToolbar>
   );
 }

@@ -1,20 +1,21 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Card, Typography, message, Spin, Empty, Row, Col,
-  Tag, Table,
+  Alert, Button, Card, Typography, Spin, Row, Col,
+  Table,
 } from 'antd';
 import EChart from '../../components/EChart';
 import {
   ArrowUpOutlined, ArrowDownOutlined, DashboardOutlined,
   CheckCircleOutlined, FieldTimeOutlined, WarningOutlined,
-  TrophyOutlined, MinusOutlined,
+  MinusOutlined, ReloadOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
-import { stationTypeMap } from '../../services/constants';
 import { pageRootStyle } from '../../services/pageStyles';
+import WorkspacePage, { WorkspaceEmpty } from '../../components/WorkspacePage';
 
 const { Title, Text } = Typography;
+const ANALYSIS_CHART_HEIGHT = 'clamp(260px, calc(100vh - 520px), 560px)';
 
 function KpiCard({ title, value, suffix, prefix, trend, trendValue, icon, color, tokens }) {
   const isUp = trend === 'up';
@@ -24,8 +25,8 @@ function KpiCard({ title, value, suffix, prefix, trend, trendValue, icon, color,
 
   return (
     <Card
-      style={{ borderRadius: 12, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }}
-      bodyStyle={{ padding: '20px 24px' }}
+      style={{ borderRadius: 8, height: '100%', border: `1px solid ${tokens.summaryBorder}`, boxShadow: tokens.summaryShadow }}
+      styles={{ body: { padding: '20px 24px' } }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div style={{ flex: 1 }}>
@@ -50,8 +51,9 @@ function KpiCard({ title, value, suffix, prefix, trend, trendValue, icon, color,
           )}
         </div>
         <div style={{
-          width: 44, height: 44, borderRadius: 12,
-          background: `${color}18`,
+          width: 44, height: 44, borderRadius: 8,
+          background: color === tokens.colorWarning ? tokens.colorWarningBg : `${color}18`,
+          border: `1px solid ${color === tokens.colorWarning ? tokens.colorWarningBorder : `${color}24`}`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 20, color,
         }}>
@@ -84,15 +86,15 @@ function ArrivalTrendChart({ tokens, arrival }) {
     }],
   };
   return (
-    <Card title="数据到报趋势（近7日）" style={{ borderRadius: 12, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} bodyStyle={{ padding: '12px 16px 8px' }}>
-      <EChart option={option} style={{ height: 260 }} />
+    <Card title="数据到报趋势（近7日）" style={{ borderRadius: 8, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} styles={{ body: { padding: '12px 16px 8px' } }}>
+      <EChart option={option} style={{ height: ANALYSIS_CHART_HEIGHT }} />
     </Card>
   );
 }
 
 function WorkOrderAnalysisChart({ tokens, woStats }) {
-  const statuses = ['待受理', '已受理', '处置中', '审核中', '已完成'];
-  const keys = ['pending', 'accepted', 'in_progress', 'reviewing', 'closed'];
+  const statuses = ['待处理', '已受理', '已派发', '处理中', '待审核', '已完成'];
+  const keys = ['pending', 'accepted', 'dispatched', 'in_progress', 'reviewing', 'closed'];
   const data = keys.map(k => woStats?.by_status?.[k] || 0);
   const colors = [tokens.colorWarning, tokens.colorInfo, tokens.colorPrimary, tokens.colorInfo, tokens.colorSuccess];
   const option = {
@@ -105,8 +107,8 @@ function WorkOrderAnalysisChart({ tokens, woStats }) {
     }],
   };
   return (
-    <Card title="工单处理分析" style={{ borderRadius: 12, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} bodyStyle={{ padding: '12px 16px 8px' }}>
-      <EChart option={option} style={{ height: 260 }} />
+    <Card title="工单处理分析" style={{ borderRadius: 8, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} styles={{ body: { padding: '12px 16px 8px' } }}>
+      <EChart option={option} style={{ height: ANALYSIS_CHART_HEIGHT }} />
     </Card>
   );
 }
@@ -115,12 +117,12 @@ function DeviceStatusChart({ tokens, devices }) {
   const total = devices?.total || 0;
   const online = devices?.online || 0;
   const offline = devices?.offline || 0;
-  const fault = devices?.fault || 0;
+  const maintenance = devices?.maintenance ?? devices?.fault ?? 0;
   const data = [
     { value: online, name: '在线', itemStyle: { color: tokens.colorSuccess } },
     { value: offline, name: '离线', itemStyle: { color: tokens.colorError } },
-    { value: fault, name: '告警', itemStyle: { color: tokens.colorWarning } },
-    { value: Math.max(0, total - online - offline - fault), name: '维护中', itemStyle: { color: tokens.colorInfo } },
+    { value: maintenance, name: '维护中', itemStyle: { color: tokens.colorWarning } },
+    { value: Math.max(0, total - online - offline - maintenance), name: '其他状态', itemStyle: { color: tokens.colorInfo } },
   ];
   const option = {
     tooltip: { trigger: 'item', backgroundColor: tokens.colorBgElevated, borderColor: tokens.colorBorder, textStyle: { color: tokens.colorText, fontSize: 12 }, formatter: '{b}: {c} ({d}%)' },
@@ -132,8 +134,8 @@ function DeviceStatusChart({ tokens, devices }) {
     }],
   };
   return (
-    <Card title="设备状态分布" style={{ borderRadius: 12, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} bodyStyle={{ padding: '12px 16px 8px' }}>
-      <EChart option={option} style={{ height: 260 }} />
+    <Card title="设备状态分布" style={{ borderRadius: 8, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} styles={{ body: { padding: '12px 16px 8px' } }}>
+      <EChart option={option} style={{ height: ANALYSIS_CHART_HEIGHT }} />
     </Card>
   );
 }
@@ -159,8 +161,8 @@ function InspectionTrendChart({ tokens, inspection }) {
     }],
   };
   return (
-    <Card title="巡检完成率趋势（近12月）" style={{ borderRadius: 12, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} bodyStyle={{ padding: '12px 16px 8px' }}>
-      <EChart option={option} style={{ height: 260 }} />
+    <Card title="巡检完成率趋势（近12月）" style={{ borderRadius: 8, height: '100%', border: `1px solid ${tokens.colorBorderSecondary}` }} styles={{ body: { padding: '12px 16px 8px' } }}>
+      <EChart option={option} style={{ height: ANALYSIS_CHART_HEIGHT }} />
     </Card>
   );
 }
@@ -168,123 +170,61 @@ function InspectionTrendChart({ tokens, inspection }) {
 export default function AnalysisPage() {
   const { tokens } = useTheme();
   const [dashboard, setDashboard] = useState(null);
-  const [dataQuality, setDataQuality] = useState(null);
   const [inspStats, setInspStats] = useState(null);
   const [woStats, setWoStats] = useState(null);
   const [arrivalSummary, setArrivalSummary] = useState(null);
   const [trends, setTrends] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [benchLoading, setBenchLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState([]);
 
   // ---------- Data fetching ----------
 
-  const fetchDashboardSummary = useCallback(async () => {
-    try {
-      const data = await api.get('/dashboard/summary');
-      setDashboard(data || {});
-    } catch {
-      message.error('加载概览数据失败');
-      setDashboard({});
-    }
-  }, []);
-
-  const fetchDataQuality = useCallback(async () => {
-    try {
-      const data = await api.get('/data-quality');
-      setDataQuality(data || {});
-    } catch {
-      setDataQuality({});
-    }
-  }, []);
-
-  const fetchInspStats = useCallback(async () => {
-    try {
-      const data = await api.get('/inspections/statistics');
-      setInspStats(data || {});
-    } catch {
-      setInspStats({});
-    }
-  }, []);
-
-  const fetchWoStats = useCallback(async () => {
-    try {
-      const data = await api.get('/workorders/statistics');
-      setWoStats(data || {});
-    } catch {
-      setWoStats({});
-    }
-  }, []);
-
-  const fetchArrivalSummary = useCallback(async () => {
-    setBenchLoading(true);
-    try {
-      const data = await api.get('/data/arrival/summary');
-      setArrivalSummary(data || {});
-    } catch {
-      setArrivalSummary({});
-    } finally {
-      setBenchLoading(false);
-    }
-  }, []);
-
-  const fetchTrends = useCallback(async () => {
-    try {
-      const data = await api.get('/analysis/trends');
-      setTrends(data || {});
-    } catch {
-      setTrends({});
-    }
+  const loadAnalysis = useCallback(async () => {
+    setLoading(true);
+    const requests = [
+      ['运营概览', api.getStrict('/dashboard/summary'), setDashboard],
+      ['巡检统计', api.getStrict('/inspections/statistics'), setInspStats],
+      ['工单统计', api.getStrict('/workorders/statistics'), setWoStats],
+      ['到报汇总', api.getStrict('/data/arrival/summary'), setArrivalSummary],
+      ['趋势数据', api.getStrict('/analysis/trends'), setTrends],
+    ];
+    const results = await Promise.allSettled(requests.map(([, promise]) => promise));
+    const errors = [];
+    results.forEach((result, index) => {
+      const [label, , setter] = requests[index];
+      if (result.status === 'fulfilled') setter(result.value || {});
+      else errors.push(`${label}：${result.reason?.message || '加载失败'}`);
+    });
+    setLoadErrors(errors);
+    setLoading(false);
   }, []);
 
   useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      fetchDashboardSummary(),
-      fetchDataQuality(),
-      fetchInspStats(),
-      fetchWoStats(),
-      fetchTrends(),
-    ]).finally(() => setLoading(false));
-    fetchArrivalSummary();
-  }, [fetchDashboardSummary, fetchDataQuality, fetchInspStats, fetchWoStats, fetchTrends, fetchArrivalSummary]);
+    loadAnalysis();
+  }, [loadAnalysis]);
 
   // ---------- KPI derivation ----------
 
-  const arrivalRate = arrivalSummary?.total_avg != null ? arrivalSummary.total_avg : (dashboard?.arrival_rate ?? '-');
+  const hasArrivalSample = (arrivalSummary?.by_metric || []).length > 0;
+  const arrivalRate = hasArrivalSample ? arrivalSummary.total_avg : null;
 
-  // SLA: closed work orders as a percentage of total
-  let slaRate = '-';
+  let closureRate = null;
   if (woStats?.total && woStats.total > 0) {
-    slaRate = Math.round((woStats.by_status?.closed || 0) / woStats.total * 1000) / 10;
+    closureRate = Math.round((woStats.by_status?.closed || 0) / woStats.total * 1000) / 10;
   }
 
   // Inspection completion rate
-  let inspectionRate = '-';
+  let inspectionRate = null;
   if (inspStats?.total_tasks && inspStats.total_tasks > 0) {
     inspectionRate = Math.round(inspStats.completed_tasks / inspStats.total_tasks * 1000) / 10;
   } else if (dashboard?.inspections?.total && dashboard.inspections.total > 0) {
     inspectionRate = Math.round(dashboard.inspections.completed / dashboard.inspections.total * 1000) / 10;
   }
 
-  // Device failure rate: offline sites as a percentage of total sites
-  let failureRate = '-';
-  if (dashboard?.sites?.total && dashboard.sites.total > 0) {
-    failureRate = Math.round(dashboard.sites.offline / dashboard.sites.total * 1000) / 10;
-  }
-
-  // Composite assessment score (weighted average of available metrics)
-  let assessmentScore = '-';
-  {
-    const vals = [];
-    if (typeof arrivalRate === 'number') vals.push({ v: arrivalRate, w: 0.3 });
-    if (typeof slaRate === 'number') vals.push({ v: slaRate, w: 0.25 });
-    if (typeof inspectionRate === 'number') vals.push({ v: inspectionRate, w: 0.25 });
-    if (typeof failureRate === 'number') vals.push({ v: Math.max(0, 100 - failureRate * 5), w: 0.2 });
-    if (vals.length > 0) {
-      const totalW = vals.reduce((s, x) => s + x.w, 0);
-      assessmentScore = Math.round(vals.reduce((s, x) => s + x.v * x.w, 0) / totalW * 10) / 10;
-    }
-  }
+  const deviceTotal = Number(trends?.devices?.total) || 0;
+  const deviceOfflineRate = deviceTotal > 0
+    ? Math.round(((Number(trends?.devices?.offline) || 0) / deviceTotal) * 1000) / 10
+    : null;
 
   // ---------- Benchmark table ----------
 
@@ -293,17 +233,7 @@ export default function AnalysisPage() {
     name: m.metric || '-',
     site_count: m.site_count || 0,
     throughput_rate: m.avg_rate ?? null,
-    inspection_rate: inspectionRate,
-    abnormal_count: inspStats?.abnormal_count ?? null,
     below_threshold: m.below_threshold ?? 0,
-    score: m.avg_rate != null
-      ? Math.round(
-          (Math.min(m.avg_rate, 100) * 0.4 +
-            (typeof inspectionRate === 'number' ? inspectionRate : 50) * 0.3 +
-            (typeof slaRate === 'number' ? slaRate : 50) * 0.3
-          ) * 10
-        ) / 10
-      : null,
   }));
 
   const benchmarkColumns = [
@@ -337,110 +267,86 @@ export default function AnalysisPage() {
       ) : '-',
     },
     {
-      title: '巡检完成率',
-      dataIndex: 'inspection_rate',
-      key: 'inspection_rate',
+      title: '低于阈值站点',
+      dataIndex: 'below_threshold',
+      key: 'below_threshold',
       width: 120,
       align: 'center',
-      render: (val) => typeof val === 'number' ? (
-        <Text style={{ color: val >= 95 ? tokens.colorSuccess : val >= 85 ? tokens.colorWarning : tokens.colorError }}>
-          {val}%
-        </Text>
-      ) : '-',
-    },
-    {
-      title: '异常数',
-      dataIndex: 'abnormal_count',
-      key: 'abnormal_count',
-      width: 90,
-      align: 'center',
-      render: (val) => val != null ? (
-        <Text style={{ color: val > 0 ? tokens.colorError : tokens.colorSuccess }}>
-          {val}
-        </Text>
-      ) : '-',
-    },
-    {
-      title: '综合评分',
-      dataIndex: 'score',
-      key: 'score',
-      width: 100,
-      align: 'center',
-      sorter: (a, b) => (a.score || 0) - (b.score || 0),
-      defaultSortOrder: 'descend',
-      render: (val) => {
-        if (val == null) return '-';
-        let color = tokens.colorSuccess;
-        if (val < 80) color = tokens.colorWarning;
-        if (val < 60) color = tokens.colorError;
-        return (
-          <Tag color={color} style={{ fontWeight: 600, minWidth: 48, textAlign: 'center' }}>
-            {val}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: '排名',
-      dataIndex: 'rank',
-      key: 'rank',
-      width: 80,
-      align: 'center',
-      render: (val, _, idx) => {
-        const r = val || idx + 1;
-        if (r <= 3) {
-          const colors = [tokens.colorWarning, tokens.colorTextTertiary, tokens.colorError];
-          return <Tag color={colors[r - 1]} style={{ fontWeight: 700, borderRadius: '50%', minWidth: 32, textAlign: 'center' }}>{r}</Tag>;
-        }
-        return <Text>{r}</Text>;
-      },
+      render: (value) => value || 0,
     },
   ];
+
+  const hasArrivalTrend = (trends?.arrival || []).some((item) => item?.rate != null);
+  const hasInspectionTrend = (trends?.inspection || []).some((item) => Number(item?.total) > 0);
+  const hasWorkOrders = Number(woStats?.total) > 0;
+  const hasDevices = deviceTotal > 0;
+  const hasAnySample = hasArrivalTrend || hasInspectionTrend || hasWorkOrders || hasDevices;
+  const unavailableSources = useMemo(() => loadErrors.join('；'), [loadErrors]);
+
+  if (!loading && loadErrors.length > 0 && !hasAnySample) {
+    return (
+      <WorkspacePage title="数据分析" subtitle="基于已采集的运维和监测样本进行趋势复盘。">
+        <WorkspaceEmpty
+          type="error"
+          description={`${unavailableSources}。当前不能判断是否无样本。`}
+          onRefresh={loadAnalysis}
+        />
+      </WorkspacePage>
+    );
+  }
+
+  if (!loading && !hasAnySample) {
+    return (
+      <WorkspacePage title="数据分析" subtitle="基于已采集的运维和监测样本进行趋势复盘。">
+        <WorkspaceEmpty type="sample" description="尚无监测到报、巡检、工单或设备统计样本。" onRefresh={loadAnalysis} />
+      </WorkspacePage>
+    );
+  }
 
   // ---------- Render ----------
 
   return (
     <div style={{ ...pageRootStyle, overflowY: 'auto' }}>
       {/* Header */}
-      <div style={{ marginBottom: 20 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>数据分析</Title>
+      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <Title level={4} style={{ margin: 0, color: tokens.colorText }}>数据分析</Title>
+          <Text type="secondary">到报趋势近 7 日，巡检趋势近 12 月；工单和设备为当前授权范围累计状态。</Text>
+        </div>
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={loadAnalysis}>刷新</Button>
       </div>
+
+      {loadErrors.length > 0 && <Alert type="warning" showIcon message="部分统计未更新" description={unavailableSources} style={{ marginBottom: 12 }} />}
+      {!hasArrivalSample && <Alert type="info" showIcon message="监测到报数据尚无样本" description="本页仍展示已有的工单、巡检和设备事实；到报率及参数对比不据此给出 0 分或推测结论。" style={{ marginBottom: 12, padding: '8px 12px' }} />}
 
       {/* KPI Cards */}
       <Spin spinning={loading}>
         <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
-          <Col xs={24} sm={12} lg={8} xl={5} flex="1">
+          <Col xs={24} sm={12} lg={6} flex="1">
             <KpiCard
-              title="数据到报率" value={arrivalRate} suffix="%"
+              title="今日数据到报率" value={arrivalRate ?? '无样本'} suffix={arrivalRate == null ? '' : '%'}
               icon={<DashboardOutlined />} color={tokens.colorPrimary}
               tokens={tokens}
             />
           </Col>
-          <Col xs={24} sm={12} lg={8} xl={5} flex="1">
+          <Col xs={24} sm={12} lg={6} flex="1">
             <KpiCard
-              title="SLA达标率" value={slaRate} suffix="%"
+              title="工单闭环率" value={closureRate ?? '无样本'} suffix={closureRate == null ? '' : '%'}
               icon={<CheckCircleOutlined />} color={tokens.colorSuccess}
               tokens={tokens}
             />
           </Col>
-          <Col xs={24} sm={12} lg={8} xl={5} flex="1">
+          <Col xs={24} sm={12} lg={6} flex="1">
             <KpiCard
-              title="巡检完成率" value={inspectionRate} suffix="%"
+              title="巡检完成率" value={inspectionRate ?? '无样本'} suffix={inspectionRate == null ? '' : '%'}
               icon={<FieldTimeOutlined />} color={tokens.colorInfo}
               tokens={tokens}
             />
           </Col>
-          <Col xs={24} sm={12} lg={8} xl={5} flex="1">
+          <Col xs={24} sm={12} lg={6} flex="1">
             <KpiCard
-              title="设备故障率" value={failureRate} suffix="%"
+              title="设备离线率" value={deviceOfflineRate ?? '无样本'} suffix={deviceOfflineRate == null ? '' : '%'}
               icon={<WarningOutlined />} color={tokens.colorWarning}
-              tokens={tokens}
-            />
-          </Col>
-          <Col xs={24} sm={12} lg={8} xl={4} flex="1">
-            <KpiCard
-              title="考核评分" value={assessmentScore} suffix="分"
-              icon={<TrophyOutlined />} color={tokens.colorWarning}
               tokens={tokens}
             />
           </Col>
@@ -449,25 +355,25 @@ export default function AnalysisPage() {
 
       {/* Charts */}
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
-        <Col xs={24} lg={12}>
+        {hasArrivalTrend && <Col xs={24} lg={12}>
           <ArrivalTrendChart tokens={tokens} arrival={trends?.arrival} />
-        </Col>
-        <Col xs={24} lg={12}>
+        </Col>}
+        {hasWorkOrders && <Col xs={24} lg={12}>
           <WorkOrderAnalysisChart tokens={tokens} woStats={woStats} />
-        </Col>
-        <Col xs={24} lg={12}>
+        </Col>}
+        {hasDevices && <Col xs={24} lg={12}>
           <DeviceStatusChart tokens={tokens} devices={trends?.devices} />
-        </Col>
-        <Col xs={24} lg={12}>
+        </Col>}
+        {hasInspectionTrend && <Col xs={24} lg={12}>
           <InspectionTrendChart tokens={tokens} inspection={trends?.inspection} />
-        </Col>
+        </Col>}
       </Row>
 
       {/* Benchmark Table */}
-      <Card
-        title="考核对标"
-        style={{ borderRadius: 12, border: `1px solid ${tokens.colorBorderSecondary}` }}
-        bodyStyle={{ padding: 0 }}
+      {benchmark.length > 0 && <Card
+        title="监测参数到报情况"
+        style={{ borderRadius: 8, border: `1px solid ${tokens.colorBorderSecondary}` }}
+        styles={{ body: { padding: 0 } }}
       >
         <div style={{ maxHeight: 480, overflow: 'auto' }}>
           <style>{`.hide-scrollbar::-webkit-scrollbar{display:none}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none}`}</style>
@@ -476,14 +382,14 @@ export default function AnalysisPage() {
               columns={benchmarkColumns}
               dataSource={benchmark}
               rowKey={(r) => r.id || r.name}
-              loading={benchLoading}
+              loading={loading}
               pagination={false}
-              locale={{ emptyText: <Empty description="暂无考核数据" /> }}
+              locale={{ emptyText: <WorkspaceEmpty type="sample" description="今日没有可比较的参数到报样本" /> }}
               size="middle"
             />
           </div>
         </div>
-      </Card>
+      </Card>}
     </div>
   );
 }

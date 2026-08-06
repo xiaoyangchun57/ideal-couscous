@@ -16,7 +16,13 @@ function decorate(a) {
 }
 
 Page({
-  data: { tab: 'pending', list: [], loaded: false, sheet: { open: false, item: null }, acting: false, online: true, syncCount: 0 },
+  data: { tab: 'pending', list: [], loaded: false, sheet: { open: false, item: null }, acting: false, online: true, syncCount: 0, canManage: false },
+
+  onLoad() {
+    const user = getUser() || {};
+    const roles = user.roles || [user.role || ''];
+    this.setData({ canManage: roles.includes('admin') });
+  },
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
@@ -76,6 +82,10 @@ Page({
   onClose() { this.setData({ 'sheet.open': false }); },
 
   doAck() {
+    if (!this.data.canManage) {
+      wx.showToast({ title: '仅管理员可确认告警', icon: 'none' });
+      return;
+    }
     const id = this.data.sheet.item.id;
     this.setData({ acting: true });
     api.acknowledgeAlert(id)

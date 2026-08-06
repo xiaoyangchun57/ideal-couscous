@@ -1,4 +1,4 @@
-import { Card, Table, Tag } from 'antd';
+import { Card, Empty, Table, Tag } from 'antd';
 
 export const waterQualityParams = [
   { key: 'ph', label: 'pH', unit: '', color: '#1677ff', range: [6.0, 9.0] },
@@ -10,23 +10,6 @@ export const waterQualityParams = [
   { key: 'total_nitrogen', label: '总氮', unit: 'mg/L', color: '#f5222d', range: [0.5, 2.0] },
   { key: 'water_temp', label: '水温', unit: '°C', color: '#faad14', range: [15, 30] },
 ];
-
-export function generateArchiveTrend(code, parameterKey = 'ph') {
-  const seed = (code || 'DEFAULT').split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  const parameter = waterQualityParams.find((item) => item.key === parameterKey) || waterQualityParams[0];
-  const [min, max] = parameter.range;
-  const middle = (min + max) / 2;
-  const amplitude = (max - min) / 3;
-
-  return Array.from({ length: 24 }, (_, index) => {
-    const base = middle + amplitude * Math.sin((seed + index * 15) * Math.PI / 180);
-    const noise = amplitude * 0.3 * Math.sin((seed * 3 + index * 37) * Math.PI / 180);
-    return {
-      hour: `${String(index).padStart(2, '0')}:00`,
-      value: Math.round((base + noise) * 100) / 100,
-    };
-  });
-}
 
 function TrendChart({ data, color, textColor, gridColor }) {
   const width = 640;
@@ -71,9 +54,19 @@ function TrendChart({ data, color, textColor, gridColor }) {
   );
 }
 
-export default function ArchiveTrendPanel({ code, selectedKey, onSelectedKeyChange, tokens, thresholds, classifyMetric, tagStyle }) {
+export default function ArchiveTrendPanel({ hasSensorData, trendData = {}, selectedKey, onSelectedKeyChange, tokens, thresholds, classifyMetric, tagStyle }) {
+  if (!hasSensorData) {
+    return (
+      <Card size="small" title="近24小时水质趋势" style={{ marginTop: 16 }}>
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="该站点尚未接入真实采集数据，暂不展示趋势"
+        />
+      </Card>
+    );
+  }
   const parameter = waterQualityParams.find((item) => item.key === selectedKey) || waterQualityParams[0];
-  const data = generateArchiveTrend(code, parameter.key);
+  const data = trendData[parameter.key] || [];
 
   return (
     <Card size="small" title="近24小时水质趋势" style={{ marginTop: 16 }}>
@@ -84,26 +77,30 @@ export default function ArchiveTrendPanel({ code, selectedKey, onSelectedKeyChan
           </Tag.CheckableTag>
         ))}
       </div>
-      <TrendChart data={data} color={parameter.color || tokens.colorPrimary} textColor={tokens.colorTextTertiary} gridColor={tokens.colorBorderSecondary} />
-      <Table
-        size="small"
-        rowKey="hour"
-        pagination={false}
-        dataSource={data}
-        scroll={{ y: 220 }}
-        columns={[
-          { title: '时间', dataIndex: 'hour', width: 88 },
-          { title: '采集值', dataIndex: 'value', width: 100, render: (value) => <strong style={{ color: parameter.color || tokens.colorPrimary }}>{value}</strong> },
-          {
-            title: '状态', width: 80,
-            render: (_, row) => {
-              const result = classifyMetric(selectedKey, row.value, thresholds);
-              const color = result.status === 'normal' ? 'success' : result.status === 'warning' ? 'warning' : result.status === 'critical' ? 'error' : 'default';
-              return <Tag color={color} style={tagStyle}>{result.label}</Tag>;
-            },
-          },
-        ]}
-      />
+      {data.length ? (
+        <>
+          <TrendChart data={data} color={parameter.color || tokens.colorPrimary} textColor={tokens.colorTextTertiary} gridColor={tokens.colorBorderSecondary} />
+          <Table
+            size="small"
+            rowKey="hour"
+            pagination={false}
+            dataSource={data}
+            scroll={{ y: 220 }}
+            columns={[
+              { title: '时间', dataIndex: 'hour', width: 88 },
+              { title: '采集值', dataIndex: 'value', width: 100, render: (value) => <strong style={{ color: parameter.color || tokens.colorPrimary }}>{value}</strong> },
+              {
+                title: '状态', width: 80,
+                render: (_, row) => {
+                  const result = classifyMetric(selectedKey, row.value, thresholds);
+                  const color = result.status === 'normal' ? 'success' : result.status === 'warning' ? 'warning' : result.status === 'critical' ? 'error' : 'default';
+                  return <Tag color={color} style={tagStyle}>{result.label}</Tag>;
+                },
+              },
+            ]}
+          />
+        </>
+      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="近24小时没有该指标的真实采集数据" />}
     </Card>
   );
 }

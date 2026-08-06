@@ -69,7 +69,8 @@ class PartsRequestIssueTest(unittest.TestCase):
                 );
                 CREATE TABLE inventory_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, part_id INTEGER, type TEXT, quantity INTEGER,
-                    ref_type TEXT, ref_id INTEGER, operator TEXT, remark TEXT, created_at TEXT
+                    ref_type TEXT, ref_id INTEGER, operator TEXT, operator_id INTEGER,
+                    remark TEXT, created_at TEXT
                 );
                 CREATE TABLE parts_request_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, event_type TEXT,
@@ -79,6 +80,10 @@ class PartsRequestIssueTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, request_no TEXT, site_id INTEGER, applicant TEXT,
                     part_name TEXT, quantity INTEGER, reason TEXT, work_order_no TEXT,
                     status TEXT, created_at TEXT
+                );
+                CREATE TABLE device_recycle (
+                    id INTEGER PRIMARY KEY, device_id INTEGER, device_code TEXT, device_name TEXT,
+                    work_order_no TEXT, created_at TEXT
                 );
             ''')
             db.executemany('INSERT INTO users VALUES (?,?,?,?)', [
@@ -172,6 +177,28 @@ class PartsRequestIssueTest(unittest.TestCase):
         self.assertEqual(ledger.status_code, 200)
         self.assertEqual(ledger.json['generated_records']['purchase_application']['site'], '测试站点')
         self.assertEqual(len(ledger.json['generated_records']['issue_record']), 1)
+
+    def test_workorder_related_returns_current_parts_and_recycle_records(self):
+        created = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'spare_part_id': 1, 'quantity': 2, 'reason': '工单处置',
+            'work_order_no': 'WO-RELATED-001',
+        })
+        self.assertEqual(created.status_code, 200)
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("""INSERT INTO device_recycle
+                (id,device_id,device_code,device_name,work_order_no,created_at)
+                VALUES (1,7,'DEV-007','测试设备','WO-RELATED-001','2026-08-05 10:00:00')""")
+            db.commit()
+        finally:
+            db.close()
+
+        related = self.client.get('/api/workorders/WO-RELATED-001/related', headers=self.headers('operator-token'))
+        self.assertEqual(related.status_code, 200)
+        self.assertEqual(len(related.json['parts']), 1)
+        self.assertEqual(related.json['parts'][0]['part_name'], '采样泵')
+        self.assertEqual(related.json['parts'][0]['quantity'], 2)
+        self.assertEqual(related.json['recycles'][0]['device_code'], 'DEV-007')
 
     def test_legacy_pending_requests_are_migrated_or_preserved_readonly(self):
         db = sqlite3.connect(self.db_path)

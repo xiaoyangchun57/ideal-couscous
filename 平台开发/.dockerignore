@@ -1,0 +1,16 @@
+.git
+.github
+.playwright-cli
+.workbuddy
+**/__pycache__
+**/*.pyc
+**/*.log
+backend/data/*-wal
+backend/data/*-shm
+backend/test_*.py
+react-vite/node_modules
+frontend/v2
+docs
+素材
+*.png
+*.xlsx

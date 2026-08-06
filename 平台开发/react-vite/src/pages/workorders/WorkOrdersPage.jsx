@@ -1,36 +1,37 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useSearchParams, useLocation } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Table, Card, Input, Select, Button, Space, Tag, Badge, Modal, Upload, Spin,
-  Typography, Form, DatePicker, Empty, Tooltip,
+  Input, Select, Button, Space, Tag, Badge, Modal, Upload, Spin,
+  Typography, Form, Tooltip, Alert,
   Row, Col, Descriptions, Timeline, Drawer, Image, App,
 } from 'antd';
 import {
   PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined,
   EditOutlined, DeleteOutlined, ExclamationCircleOutlined,
-  SendOutlined, FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
-  InboxOutlined, SwapOutlined, CheckOutlined, CloseOutlined, AuditOutlined,
-  CameraOutlined, UploadOutlined, DownloadOutlined,
+  FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
+  InboxOutlined, SwapOutlined, CheckOutlined, AuditOutlined,
+  UploadOutlined, DownloadOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
-import { useAuth } from '../../hooks/useAuth';
-import { useTableAutoHeight } from '../../hooks/useTableAutoHeight';
 import {
   orderStatusMap, orderLevelMap, orderSourceMap, orderStatusBadge, orderLevelBadge,
-  CONCLUSION_OPTIONS,
 } from '../../services/constants';
 import { statusColors } from '../../theme/tokens';
-import FilterBar from '../../components/FilterBar';
-import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
+import { filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
+import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 
-const { Title, Text } = Typography;
-const { RangePicker } = DatePicker;
+const { Text } = Typography;
+
+const manualSourceOptions = [
+  { value: 'manual', label: '管理新建' },
+  { value: 'patrol', label: '现场巡查发现' },
+  { value: 'superior', label: '上级交办' },
+  { value: 'hotline', label: '热线反馈' },
+];
 
 export default function WorkOrdersPage() {
   const { tokens, isDark } = useTheme();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
   const { modal, message } = App.useApp();  // 使用实例方法，避免Tracking Prevention阻断
   // 语义状态色统一走 statusColors（禁硬编码 hex），半透明背景用 alpha 后缀派生
   const purpleColor = statusColors.purple[isDark ? 'dark' : 'light'];
@@ -38,6 +39,7 @@ export default function WorkOrdersPage() {
   const [form] = Form.useForm();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
+  const navigate = useNavigate();
 
   // xlsx 导出辅助
   const downloadExport = async (url, filename) => {
@@ -61,10 +63,12 @@ export default function WorkOrdersPage() {
   // Data state
   const [allOrders, setAllOrders] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   // Filter state - initialize from URL params
   const [search, setSearch] = useState(searchParams.get('search') || '');
-  const [levelFilter, setLevelFilter] = useState(undefined);
+  const [assigneeFilter, setAssigneeFilter] = useState(searchParams.get('assignee') || '');
+  const [levelFilter, setLevelFilter] = useState(searchParams.get('level') || undefined);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
 
   // Modal state
@@ -75,6 +79,8 @@ export default function WorkOrdersPage() {
   // View drawer state
   const [viewOpen, setViewOpen] = useState(false);
   const [viewingOrder, setViewingOrder] = useState(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState('');
   const [relatedData, setRelatedData] = useState({ parts: [], recycles: [] });
   const [operationPhotos, setOperationPhotos] = useState([]);
 
@@ -91,74 +97,44 @@ export default function WorkOrdersPage() {
   const [recycleForm] = Form.useForm();
   const [devices, setDevices] = useState([]);
 
-  // 关单（核验通过）弹窗 state
-  const [closeModalOpen, setCloseModalOpen] = useState(false);
-  const [closeTarget, setCloseTarget] = useState(null);
-  const [closePhotos, setClosePhotos] = useState([]);
-  const [closePhotoUploading, setClosePhotoUploading] = useState(false);
-  const [closeForm] = Form.useForm();
-
-  // 拉取工单列表（提前声明，供关单回调引用，避免 TDZ）
+  // 拉取工单列表
   const fetchOrders = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      const data = await api.get('/workorders');
+      const data = await api.getStrict('/workorders');
       const list = Array.isArray(data) ? data : [];
       setAllOrders(list);
-      const computedCounts = { total: list.length, pending: 0, dispatched: 0, in_progress: 0, reviewing: 0, closed: 0 };
+      const computedCounts = {
+        total: list.length,
+        pending: 0,
+        accepted: 0,
+        generated: 0,
+        dispatched: 0,
+        in_progress: 0,
+        reviewing: 0,
+        closed: 0,
+      };
       list.forEach(o => { if (computedCounts[o.status] !== undefined) computedCounts[o.status]++; });
       setCounts(computedCounts);
-    } catch (err) {
-      message.error('加载工单失败');
-      setAllOrders([]);
+    } catch (error) {
+      setLoadError(error.message || '工单列表加载失败');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 打开关单弹窗
-  const handleCloseOpen = useCallback((record) => {
-    setCloseTarget(record);
-    setClosePhotos([]);
-    setClosePhotoUploading(false);
-    closeForm.resetFields();
-    setCloseModalOpen(true);
-  }, [closeForm]);
-
-  // 提交关单：PUT /workorders/<no>/status，带 conclusion 联动告警/审核
-  const handleCloseSubmit = useCallback(async () => {
-    if (!closeTarget) return;
-    try {
-      const values = await closeForm.validateFields();
-      const existing = (() => {
-        try {
-          const raw = closeTarget.images;
-          return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-        } catch { return []; }
-      })();
-      const allImages = [...new Set([...existing, ...closePhotos])];
-      const result = await api.put(`/workorders/${closeTarget.order_no}/status`, {
-        status: 'closed',
-        conclusion: values.conclusion,
-        remark: values.remark || '',
-        images: allImages.length > 0 ? JSON.stringify(allImages) : undefined,
-      });
-      if (result && !result.error) {
-        message.success(`工单 ${closeTarget.order_no} 已关单`);
-        setCloseModalOpen(false);
-        setCloseTarget(null);
-        setClosePhotos([]);
-        fetchOrders();
-      } else {
-        message.error(result?.error || '关单失败');
-      }
-    } catch {
-      // 校验错误
-    }
-  }, [closeTarget, closeForm, fetchOrders, closePhotos]);
-
   // Counts state
-  const [counts, setCounts] = useState({ total: 0, pending: 0, dispatched: 0, in_progress: 0, reviewing: 0, closed: 0 });
+  const [counts, setCounts] = useState({
+    total: 0,
+    pending: 0,
+    accepted: 0,
+    generated: 0,
+    dispatched: 0,
+    in_progress: 0,
+    reviewing: 0,
+    closed: 0,
+  });
   const [sites, setSites] = useState([]);
 
   // Fetch sites for dropdown
@@ -241,15 +217,15 @@ export default function WorkOrdersPage() {
     setRecycleLoading(false);
   }, [recycleForm, viewingOrder, relatedData.parts]);
 
-  useEffect(() => {
-    fetchOrders();
-  }, [fetchOrders]);
-
   // Sync filters from URL params when navigating with ?search= or ?status=
   useEffect(() => {
     const urlSearch = searchParams.get('search') || '';
+    const urlAssignee = searchParams.get('assignee') || '';
+    const urlLevel = searchParams.get('level') || undefined;
     const urlStatus = searchParams.get('status') || undefined;
     setSearch(urlSearch);
+    setAssigneeFilter(urlAssignee);
+    setLevelFilter(urlLevel);
     setStatusFilter(urlStatus);
     // Refetch data when navigating from other pages with URL params
     fetchOrders();
@@ -269,32 +245,54 @@ export default function WorkOrdersPage() {
     if (levelFilter) {
       list = list.filter((o) => o.level === levelFilter);
     }
+    if (assigneeFilter) {
+      list = list.filter((o) => o.assignee === assigneeFilter);
+    }
     if (statusFilter) {
       list = list.filter((o) => o.status === statusFilter);
     }
     return list;
-  }, [allOrders, search, levelFilter, statusFilter]);
-
-  const [tableWrapRef, tableBodyHeight] = useTableAutoHeight({
-    deps: [filteredOrders.length, loading],
-  });
+  }, [allOrders, search, levelFilter, statusFilter, assigneeFilter]);
 
   const handleSearch = (value) => {
     setSearch(value);
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('search', value);
+    else next.delete('search');
+    setSearchParams(next, { replace: true });
   };
 
   const handleLevelChange = (value) => {
     setLevelFilter(value);
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('level', value);
+    else next.delete('level');
+    setSearchParams(next, { replace: true });
   };
 
   const handleStatusChange = (value) => {
     setStatusFilter(value);
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('status', value);
+    else next.delete('status');
+    setSearchParams(next, { replace: true });
+  };
+
+  const handleAssigneeClear = () => {
+    setAssigneeFilter('');
+    const next = new URLSearchParams(searchParams);
+    next.delete('assignee');
+    setSearchParams(next, { replace: true });
   };
 
   const handleReset = () => {
     setSearch('');
+    setAssigneeFilter('');
     setLevelFilter(undefined);
     setStatusFilter(undefined);
+    const next = new URLSearchParams(searchParams);
+    ['search', 'assignee', 'level', 'status'].forEach((key) => next.delete(key));
+    setSearchParams(next, { replace: true });
   };
 
   const handleCreate = () => {
@@ -305,27 +303,31 @@ export default function WorkOrdersPage() {
 
   const handleView = async (record) => {
     setViewOpen(true);
+    setViewingOrder(record);
+    setViewLoading(true);
+    setViewError('');
     setRelatedData({ parts: [], recycles: [] });
     setOperationPhotos([]);
-    // 重新获取最新工单数据（包括images字段，可能被移动端更新的）
-    try {
-      const freshList = await api.get('/workorders');
-      const fresh = (Array.isArray(freshList) ? freshList : []).find(o => o.order_no === record.order_no);
-      setViewingOrder(fresh || record);
-    } catch {
-      setViewingOrder(record);
-    }
     const orderNo = record.order_no;
     if (orderNo) {
-      try {
-        const [relData, photoData] = await Promise.all([
-          api.get(`/workorders/${orderNo}/related`),
-          api.get(`/workorders/${orderNo}/photos`),
-        ]);
+      const [freshResult, relatedResult, photoResult] = await Promise.allSettled([
+        api.getStrict('/workorders'),
+        api.getStrict(`/workorders/${orderNo}/related`),
+        api.getStrict(`/workorders/${orderNo}/photos`),
+      ]);
+      const errors = [];
+      if (freshResult.status === 'fulfilled') {
+        const fresh = (Array.isArray(freshResult.value) ? freshResult.value : []).find(o => o.order_no === orderNo);
+        setViewingOrder(fresh || record);
+      } else errors.push('最新工单信息');
+      if (relatedResult.status === 'fulfilled') {
+        const relData = relatedResult.value;
         if (relData) {
           setRelatedData({ parts: relData.parts || [], recycles: relData.recycles || [] });
         }
-        // 提取操作附件中的照片
+      } else errors.push('关联业务');
+      if (photoResult.status === 'fulfilled') {
+        const photoData = photoResult.value;
         if (photoData) {
           const allPhotos = [];
           if (photoData.item_progress && Array.isArray(photoData.item_progress)) {
@@ -344,8 +346,10 @@ export default function WorkOrdersPage() {
           }
           setOperationPhotos(allPhotos);
         }
-      } catch { /* ignore */ }
+      } else errors.push('处置影像');
+      if (errors.length) setViewError(`${errors.join('、')}加载失败，当前详情可能不完整。`);
     }
+    setViewLoading(false);
   };
 
   // 构建动态Timeline（基于实际timeline_events + 状态回退）
@@ -482,15 +486,27 @@ export default function WorkOrdersPage() {
 
   // Generic status transition handler (uses PUT /status)
   const handleStatusTransition = useCallback(async (record, newStatus, label) => {
+    let resolutionNote = '';
     try {
     modal.confirm({
       title: label,
       icon: <ExclamationCircleOutlined />,
-      content: `确认将工单 ${record.order_no} ${label}？`,
+      content: newStatus === 'reviewing' ? <div>
+        <Text>提交后审核员将根据现场处置说明和影像判断是否办结。</Text>
+        <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} maxLength={500} showCount
+          placeholder="请填写做了什么、现场结果和仍需关注的事项"
+          onChange={(event) => { resolutionNote = event.target.value; }} style={{ marginTop: 12 }} />
+      </div> : `确认将工单 ${record.order_no} ${label}？`,
       okText: '确认',
       cancelText: '取消',
       onOk: async () => {
-        const result = await api.put(`/workorders/${record.order_no}/status`, { status: newStatus });
+        if (newStatus === 'reviewing' && !resolutionNote.trim()) {
+          message.error('请填写现场处置说明');
+          return Promise.reject(new Error('resolution note required'));
+        }
+        const result = newStatus === 'reviewing'
+          ? await api.postStrict(`/workorders/${record.order_no}/submit-review`, { client: 'web', resolution_note: resolutionNote.trim() })
+          : await api.put(`/workorders/${record.order_no}/status`, { status: newStatus });
         if (result && !result.error) {
           message.success(`工单已${label}`);
           fetchOrders();
@@ -499,8 +515,8 @@ export default function WorkOrdersPage() {
         }
       },
     });
-  } catch(e) { /* 状态流转异常 */ }
-}, [fetchOrders]);
+  } catch { /* 状态流转异常 */ }
+}, [fetchOrders, message, modal]);
 
   const columns = [
     {
@@ -572,13 +588,30 @@ export default function WorkOrdersPage() {
       dataIndex: 'sla_deadline',
       key: 'sla_deadline',
       width: 100,
-      render: (val) => {
+      render: (val, record) => {
         if (!val) return '-';
+        const hours = { normal: 72, urgent: 24, critical: 2 };
+        if (record.status === 'closed') {
+          const completedAt = record.resolved_at || record.closed_at;
+          if (!completedAt) {
+            return <Text type="secondary">已完成 · 完成时间未记录</Text>;
+          }
+          const completedLate = new Date(completedAt) > new Date(val);
+          return (
+            <Tooltip title={`SLA 截止：${val}；完成时间：${completedAt}`}>
+              <Text style={{ color: completedLate ? tokens.colorError : tokens.colorSuccess, fontSize: 13 }}>
+                {completedLate ? '超时完成' : '按时完成'}
+              </Text>
+            </Tooltip>
+          );
+        }
         const isOverdue = new Date(val) < new Date();
         return (
-          <Text style={{ color: isOverdue ? tokens.colorError : tokens.colorTextSecondary, fontSize: 13 }}>
-            {isOverdue ? '已超时' : val}
-          </Text>
+          <Tooltip title={`按工单级别自动计算：一般 72 小时、紧急 24 小时、重大 2 小时。当前截止时间：${val}`}>
+            <Text style={{ color: isOverdue ? tokens.colorError : tokens.colorTextSecondary, fontSize: 13 }}>
+              {isOverdue ? '已超时' : `${val}（${hours[record.level] || 72}小时）`}
+            </Text>
+          </Tooltip>
         );
       },
     },
@@ -590,7 +623,7 @@ export default function WorkOrdersPage() {
         const s = record.status;
         let primaryAction = null;
         let returnAction = null;
-        
+
         // Status transition actions
         if (s === 'pending') {
           primaryAction = {
@@ -631,43 +664,42 @@ export default function WorkOrdersPage() {
           };
         }
         if (s === 'reviewing') {
-          // 审核中状态：关单/核验通过在「核验通过」按钮进行
+          primaryAction = {
+            key: 'review',
+            label: '前往审核',
+            icon: <AuditOutlined />,
+            onClick: () => navigate(`/audit?tab=workorder&order=${encodeURIComponent(record.order_no)}`),
+          };
         }
-        
+
         return (
           <Space size={4}>
             <Tooltip title="查看工单详情">
-              <Button type="text" size="small" icon={<EyeOutlined />} aria-label="查看工单详情"
+              <Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看工单 ${record.order_no} 详情`}
                 onClick={() => handleView(record)} />
             </Tooltip>
             {primaryAction && (
               <Button size="small" type="primary" icon={primaryAction.icon}
+                aria-label={`${record.order_no} ${primaryAction.label}`}
                 onClick={primaryAction.onClick}>
                 {primaryAction.label}
               </Button>
             )}
-            {s === 'reviewing' && isAdmin && (
-              <Button type="link" size="small" icon={<CheckCircleOutlined />}
-                style={{ color: tokens.colorSuccess }}
-                onClick={() => handleCloseOpen(record)}>
-                核验通过
-              </Button>
-            )}
             {returnAction && (
               <Tooltip title={returnAction.label}>
-                <Button type="text" size="small" icon={returnAction.icon} aria-label={returnAction.label}
+                <Button type="text" size="small" icon={returnAction.icon} aria-label={`${record.order_no} ${returnAction.label}`}
                   onClick={returnAction.onClick} />
               </Tooltip>
             )}
             {s !== 'closed' && s !== 'reviewing' && (
               <Tooltip title="编辑工单">
-                <Button type="text" size="small" icon={<EditOutlined />} aria-label="编辑工单"
+                <Button type="text" size="small" icon={<EditOutlined />} aria-label={`编辑工单 ${record.order_no}`}
                   onClick={() => handleEdit(record)} />
               </Tooltip>
             )}
             {s !== 'closed' && s !== 'reviewing' && (
               <Tooltip title="删除工单">
-                <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label="删除工单"
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`删除工单 ${record.order_no}`}
                   onClick={() => handleDelete(record)} />
               </Tooltip>
             )}
@@ -683,104 +715,37 @@ export default function WorkOrdersPage() {
     { value: 'urgent', label: '紧急' },
     { value: 'critical', label: '重大' },
   ];
-
   return (
-    <div style={pageRootStyle}>
-      {/* Page Header */}
-      <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, flexShrink: 0 }}>
-        <Title level={4} style={{ margin: 0, color: tokens.colorText }}>工单</Title>
-        <Space>
-          <Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/work-orders?period=month', '工单明细_本月.xlsx')}>
-            导出工单
-          </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}
-            style={{ background: `linear-gradient(135deg, ${tokens.colorPrimary}, ${tokens.colorPrimaryHover})`, border: 'none' }}>
-            新建工单
-          </Button>
-        </Space>
-      </div>
-
-      {/* Compact status summary keeps the list as the primary work surface. */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 1,
-        marginBottom: 12, border: `1px solid ${tokens.colorBorder}`, borderRadius: 6,
-        background: tokens.colorBorder, overflow: 'hidden', flexShrink: 0,
-      }}>
-        {[
-          { title: '工单总数', value: counts.total, color: tokens.colorPrimary, icon: <FileTextOutlined /> },
-          { title: '待受理', value: counts.pending, color: tokens.colorWarning, icon: <ClockCircleOutlined /> },
-          { title: '已派发', value: counts.dispatched, color: tokens.colorInfo, icon: <SendOutlined /> },
-          { title: '处置中', value: counts.in_progress, color: tokens.colorPrimary, icon: <ToolOutlined /> },
-          { title: '待审核', value: counts.reviewing, color: purpleColor, icon: <AuditOutlined /> },
-          { title: '已完成', value: counts.closed, color: tokens.colorSuccess, icon: <CheckCircleOutlined /> },
-        ].map(item => (
-          <div key={item.title} style={{ padding: '8px 12px', background: tokens.colorBgContainer, minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: tokens.colorTextSecondary, fontSize: 12, whiteSpace: 'nowrap' }}>
-              {React.cloneElement(item.icon, { style: { fontSize: 13 } })}{item.title}
-            </div>
-            <div style={{ color: item.color, fontSize: 20, fontWeight: 650, lineHeight: 1.25, marginTop: 2 }}>{item.value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Filters */}
-      <FilterBar
-        style={{ marginBottom: 12 }}
-        extra={(
-          <Space>
-            <Button icon={<SearchOutlined />} onClick={() => handleSearch(search)}>查询</Button>
-            <Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button>
-          </Space>
-        )}
-      >
-        <Input
-          placeholder="搜索工单号、标题、站点..."
-          prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-          allowClear
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          onPressEnter={(e) => handleSearch(e.target.value)}
-          style={{ width: filterInputWidth, borderRadius: 8 }}
-        />
-        <Select
-          placeholder="级别"
-          allowClear
-          value={levelFilter}
-          onChange={handleLevelChange}
-          style={{ width: filterSmallSelectWidth }}
-          options={levelOptions}
-        />
-        <Select
-          placeholder="状态"
-          allowClear
-          value={statusFilter}
-          onChange={handleStatusChange}
-          style={{ width: filterSelectWidth }}
-          options={statusOptions}
-        />
-        {(search || levelFilter || statusFilter) && (
-          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-            已筛选 {filteredOrders.length} 条结果
-          </Text>
-        )}
-      </FilterBar>
-
+    <WorkspacePage
+      title="工单"
+      subtitle="查看并推进当前运维事项；待审核工单统一进入审核工作台核验。"
+      secondaryAction={<Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/work-orders?period=month', '工单明细_本月.xlsx')}>导出</Button>}
+      primaryAction={<Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新建工单</Button>}
+      statusItems={[
+        { label: '待受理', value: counts.pending, color: tokens.colorWarning },
+        { label: '已受理', value: counts.accepted, color: tokens.colorPrimary },
+        { label: '已生成', value: counts.generated, color: tokens.colorTextSecondary },
+        { label: '已派发', value: counts.dispatched, color: tokens.colorPrimary },
+        { label: '处置中', value: counts.in_progress, color: tokens.colorPrimary },
+        { label: '待审核', value: counts.reviewing, color: purpleColor },
+        { label: '已完成', value: counts.closed, color: tokens.colorSuccess },
+      ]}
+      toolbar={(
+        <WorkspaceToolbar actions={<><Button icon={<SearchOutlined />} onClick={() => handleSearch(search)}>查询</Button><Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button></>}>
+          <FilterField label="工单搜索"><Input aria-label="工单搜索" placeholder="搜索工单号、标题、站点..." prefix={<SearchOutlined />} allowClear value={search}
+            onChange={(e) => setSearch(e.target.value)} onPressEnter={(e) => handleSearch(e.target.value)} style={{ width: filterInputWidth }} /></FilterField>
+          <FilterField label="级别"><Select aria-label="级别" placeholder="级别" allowClear value={levelFilter} onChange={handleLevelChange} style={{ width: filterSmallSelectWidth }} options={levelOptions} /></FilterField>
+          <FilterField label="状态"><Select aria-label="状态" placeholder="状态" allowClear value={statusFilter} onChange={handleStatusChange} style={{ width: filterSelectWidth }} options={statusOptions} /></FilterField>
+          {assigneeFilter && <ToolbarMeta label="负责人"><Tag closable onClose={handleAssigneeClear}>{assigneeFilter}</Tag></ToolbarMeta>}
+          {(search || assigneeFilter || levelFilter || statusFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredOrders.length} 条</ToolbarMeta>}
+        </WorkspaceToolbar>
+      )}
+    >
       {/* Table */}
-      <Card size="small" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }} styles={{ body: { padding: 0, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } }}>
-        <div ref={tableWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        <Table
-          className="workorders-table"
-          columns={columns}
-          dataSource={filteredOrders}
-          rowKey={(r) => r.order_no || r.id}
-          loading={loading}
-          pagination={false}
-          scroll={tableBodyHeight ? { y: tableBodyHeight } : undefined}
-          locale={{ emptyText: <Empty description="暂无工单数据" /> }}
-          size="small"
-        />
-        </div>
-      </Card>
+      {loadError && !loading
+        ? <WorkspaceEmpty type="error" description="工单列表加载失败，当前不能判断是否没有工单。" onRefresh={fetchOrders} />
+        : <WorkspaceTable columns={columns} dataSource={filteredOrders} rowKey={(r) => r.order_no || r.id}
+            loading={loading} emptyType={(search || assigneeFilter || levelFilter || statusFilter) ? 'filtered' : 'empty'} onRefresh={fetchOrders} />}
 
       {/* Create/Edit Modal */}
       <Modal
@@ -792,7 +757,7 @@ export default function WorkOrdersPage() {
         okText={editingOrder ? '保存' : '创建'}
         cancelText="取消"
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="title" label="标题" rules={[{ required: true, message: '请输入工单标题' }]}>
@@ -808,7 +773,7 @@ export default function WorkOrdersPage() {
               <Form.Item name="source" label="来源" rules={[{ required: true, message: '请选择来源' }]}>
                 <Select
                   placeholder="请选择来源"
-                  options={Object.entries(orderSourceMap).map(([value, label]) => ({ value, label }))}
+                  options={manualSourceOptions}
                 />
               </Form.Item>
             </Col>
@@ -845,7 +810,9 @@ export default function WorkOrdersPage() {
         width={520}
       >
         {viewingOrder && (
+          <Spin spinning={viewLoading} tip="正在加载最新工单信息">
           <div>
+            {viewError && <Alert type="warning" showIcon message={viewError} style={{ marginBottom: 12 }} />}
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="工单号">
                 <Text strong style={{ color: tokens.colorPrimary }}>{viewingOrder.order_no || `#${viewingOrder.id}`}</Text>
@@ -860,8 +827,15 @@ export default function WorkOrdersPage() {
                 {viewingOrder.status ? <Badge status={orderStatusBadge[viewingOrder.status] || 'default'} text={orderStatusMap[viewingOrder.status] || viewingOrder.status} /> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="负责人">{viewingOrder.assignee || '-'}</Descriptions.Item>
-              <Descriptions.Item label="SLA截止">
-                {viewingOrder.sla_deadline ? (
+              <Descriptions.Item label={viewingOrder.status === 'closed' ? 'SLA结果' : 'SLA截止'}>
+                {viewingOrder.sla_deadline ? viewingOrder.status === 'closed' ? (() => {
+                  const completedAt = viewingOrder.resolved_at || viewingOrder.closed_at;
+                  if (!completedAt) return <Text type="secondary">已完成 · 完成时间未记录</Text>;
+                  const completedLate = new Date(completedAt) > new Date(viewingOrder.sla_deadline);
+                  return <Text style={{ color: completedLate ? tokens.colorError : tokens.colorSuccess }}>
+                    {completedLate ? '超时完成' : '按时完成'} · 截止 {viewingOrder.sla_deadline} · 完成 {completedAt}
+                  </Text>;
+                })() : (
                   <Text style={{ color: new Date(viewingOrder.sla_deadline) < new Date() ? tokens.colorError : tokens.colorText }}>
                     {new Date(viewingOrder.sla_deadline) < new Date() ? '已超时 · ' : ''}{viewingOrder.sla_deadline}
                   </Text>
@@ -888,25 +862,27 @@ export default function WorkOrdersPage() {
                                 style={{ objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border-color)' }}
                                 preview={{ mask: '预览' }}
                               />
-                              <span
+                              {!['reviewing', 'closed'].includes(viewingOrder.status) && <button
+                                type="button"
+                                aria-label={`删除照片 ${i + 1}`}
                                 onClick={() => handleDeletePhoto(url)}
                                 style={{
                                   position: 'absolute', top: -6, right: -6,
-                                  width: 18, height: 18, borderRadius: '50%',
+                                  width: 32, height: 32, borderRadius: '50%', border: 0, padding: 0,
                                   background: tokens.colorError, color: '#fff',
                                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                                   cursor: 'pointer', fontSize: 11, lineHeight: '18px',
                                   boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
                                 }}
                                 title="删除照片"
-                              >✕</span>
+                              >✕</button>}
                             </div>
                           ))}
                         </div>
                       </Image.PreviewGroup>
                     </Descriptions.Item>
                   );
-                } catch (_) { return null; }
+                } catch { return null; }
               })()}
               {/* 备件使用 - 融合在现有区块中 */}
               {relatedData.parts.length > 0 && (
@@ -996,7 +972,7 @@ export default function WorkOrdersPage() {
             )}
 
             {/* 独立上传处置照片 */}
-            {viewingOrder && ['pending', 'accepted', 'dispatched', 'in_progress', 'reviewing'].includes(viewingOrder.status) && (
+            {viewingOrder && ['pending', 'accepted', 'dispatched', 'in_progress'].includes(viewingOrder.status) && (
               <div style={{ marginTop: 20, padding: '12px', borderRadius: 8, background: tokens.colorFillSecondary }}>
                 <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>
                   <UploadOutlined /> 上传处置照片
@@ -1065,6 +1041,7 @@ export default function WorkOrdersPage() {
             )}
           </div>
           </div>
+          </Spin>
         )}
       </Drawer>
 
@@ -1077,7 +1054,7 @@ export default function WorkOrdersPage() {
         confirmLoading={partReqLoading}
         okText="提交需求"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${infoColor}0F`, border: `1px solid ${infoColor}26` }}>
           <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
@@ -1144,7 +1121,7 @@ export default function WorkOrdersPage() {
         confirmLoading={recycleLoading}
         okText="确认登记"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <div style={{ marginBottom: 12, padding: '8px 12px', borderRadius: 8, background: `${infoColor}0F`, border: `1px solid ${infoColor}26` }}>
           <Text style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
@@ -1171,94 +1148,12 @@ export default function WorkOrdersPage() {
               { value: 'return', label: '退回' },
             ]} />
           </Form.Item>
-          <Form.Item name="operator" label="操作人">
-            <Input placeholder="操作人姓名" />
-          </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} placeholder="可选备注" />
           </Form.Item>
         </Form>
       </Modal>
 
-      {/* ===== 工单关单（核验通过）Modal ===== */}
-      <Modal
-        title="工单关单"
-        open={closeModalOpen}
-        onOk={handleCloseSubmit}
-        onCancel={() => { setCloseModalOpen(false); setCloseTarget(null); }}
-        okText="确认关单"
-        cancelText="取消"
-        width={520}
-      >
-        {closeTarget && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ padding: '10px 14px', borderRadius: 8, background: tokens.colorPrimaryBg, marginBottom: 16 }}>
-              <Text style={{ fontSize: 13, color: tokens.colorTextSecondary }}>
-                工单号：<Text strong>{closeTarget.order_no}</Text>
-              </Text>
-            </div>
-            <Form form={closeForm} layout="vertical">
-              <Form.Item
-                name="conclusion"
-                label="现场结论"
-                rules={[{ required: true, message: '请选择现场结论' }]}
-              >
-                <Select placeholder="选择处置结论" options={CONCLUSION_OPTIONS} allowClear />
-              </Form.Item>
-              <Form.Item name="remark" label="备注说明">
-                <Input.TextArea rows={3} placeholder="可选：补充说明..." />
-              </Form.Item>
-            </Form>
-            {/* 关单附件照片：与结论一起提交 */}
-            <div style={{ marginTop: 16 }}>
-              <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>
-                <CameraOutlined /> 关单照片
-              </Text>
-              <Upload
-                listType="picture-card"
-                fileList={closePhotos.map((url, i) => ({ uid: `-${i}`, name: `照片${i + 1}`, status: 'done', url }))}
-                onRemove={file => {
-                  const url = file.url || file.response?.url;
-                  setClosePhotos(prev => prev.filter(u => u !== url));
-                }}
-                customRequest={async ({ file, onSuccess, onError }) => {
-                  if (!closeTarget) return;
-                  setClosePhotoUploading(true);
-                  try {
-                    const fd = new FormData();
-                    fd.append('file', file);
-                    const res = await fetch(`/api/workorders/${closeTarget.order_no}/photos`, {
-                      method: 'POST',
-                      headers: { Authorization: `Bearer ${localStorage.getItem('water_ops_token') || ''}` },
-                      body: fd,
-                    });
-                    const data = await res.json();
-                    if (data && data.success) {
-                      // 后端返回的是整体结果，没有单文件 url；需要从 images 或 photo 返回中取
-                      const url = data.url || data.stored_path || (data.images && data.images[data.images.length - 1]);
-                      if (url) {
-                        setClosePhotos(prev => [...prev, url]);
-                        onSuccess && onSuccess(data);
-                      } else {
-                        onError && onError(new Error('未返回照片地址'));
-                      }
-                    } else {
-                      onError && onError(new Error(data?.error || '上传失败'));
-                    }
-                  } catch (e) {
-                    onError && onError(e);
-                  } finally {
-                    setClosePhotoUploading(false);
-                  }
-                }}
-                disabled={closePhotoUploading}
-              >
-                {closePhotoUploading ? <Spin /> : <div><UploadOutlined /><div style={{ marginTop: 4 }}>上传照片</div></div>}
-              </Upload>
-            </div>
-          </div>
-        )}
-      </Modal>
-    </div>
+    </WorkspacePage>
   );
 }

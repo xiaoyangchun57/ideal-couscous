@@ -56,7 +56,7 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                 CREATE TABLE insp_plan_items (
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, item_name TEXT,
                     category TEXT, frequency TEXT, result TEXT, calibrator TEXT,
-                    calibration_values TEXT, photo_urls TEXT, remark TEXT, execution_status TEXT
+                    calibration_values TEXT, photo_urls TEXT, remark TEXT, check_time TEXT, execution_status TEXT
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER, title TEXT, status TEXT,
@@ -114,10 +114,10 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                 (102, '其他人今日计划', 3, 12, today, 'active', 0),
                 (103, '昨日遗留计划', 2, 13, yesterday, 'active', 0),
             ])
-            db.executemany('INSERT INTO insp_plan_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [
-                (1001, 101, 1, '甲的检查项', '设备', 'weekly', None, '', '', '[]', '', 'active'),
-                (1002, 102, 1, '乙的检查项', '设备', 'weekly', None, '', '', '[]', '', 'active'),
-                (1003, 103, 2, '昨日未完成检查项', '设备', 'weekly', None, '', '', '[]', '', 'active'),
+            db.executemany('INSERT INTO insp_plan_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+                (1001, 101, 1, '甲的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
+                (1002, 102, 1, '乙的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
+                (1003, 103, 2, '昨日未完成检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
             ])
             db.execute('INSERT INTO vehicles VALUES (1, ?, ?, ?, ?, ?)', ('赣A00001', '巡检车', 'idle', 12000, 'gasoline'))
             db.execute('''INSERT INTO vehicle_applications
@@ -171,6 +171,14 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(today_package['vehicle_application_id'], 1)
         self.assertEqual(today_package['vehicle_use']['id'], 1)
         self.assertFalse(today_package['vehicle_can_return'])
+
+    def test_execution_site_returns_readable_category_names(self):
+        response = self.client.get('/api/mobile/execution-plans/101/sites/1',
+                                   headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        category = response.json['categories'][0]
+        self.assertEqual(category['category'], '设备')
+        self.assertEqual(category['category_cn'], '设备检查')
 
     def test_plan_vehicle_cannot_return_before_trip_end(self):
         records = self.client.get('/api/vehicle/use-records', headers={'Authorization': 'Bearer operator-token'})

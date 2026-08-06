@@ -12,7 +12,7 @@
  */
 // ---- 卡片样式 ----
 export const cardStyleBase = (tokens) => ({
-  borderRadius: 12,
+  borderRadius: 8,
   background: tokens.colorBgContainer,
   border: `1px solid ${tokens.colorBorder}`,
   boxShadow: tokens.shadowCard,
@@ -24,7 +24,7 @@ export const pageRootStyle = {
   minHeight: 0,
   display: 'flex',
   flexDirection: 'column',
-  padding: 24,
+  padding: 20,
 };
 
 // ---- 统计卡片 ----
@@ -47,15 +47,15 @@ export const statTitleStyle = (tokens) => ({
 });
 
 // ---- 筛选工具栏 ----
-export const filterCardBody = { padding: '16px 24px' };
-export const filterInputWidth = 280;
+export const filterCardBody = { padding: '10px 16px' };
+export const filterInputWidth = 260;
 export const filterSelectWidth = 140;
 export const filterSmallSelectWidth = 120;
 
 // ---- 表格容器 ----
 export const tableCardStyle = (tokens) => ({
   ...cardStyleBase(tokens),
-  marginTop: 16,
+  marginTop: 12,
   flex: 1,
   display: 'flex',
   flexDirection: 'column',

@@ -19,6 +19,9 @@ function buildAntdTheme(tokens) {
       colorBorderSecondary: tokens.colorBorderSecondary,
       colorSuccess: tokens.colorSuccess,
       colorWarning: tokens.colorWarning,
+      colorWarningBg: tokens.colorWarningBg,
+      colorWarningBgHover: tokens.colorWarningBgHover,
+      colorWarningBorder: tokens.colorWarningBorder,
       colorError: tokens.colorError,
       colorInfo: tokens.colorInfo,
       borderRadius: tokens.borderRadius,
@@ -59,6 +62,7 @@ function buildAntdTheme(tokens) {
         primaryShadow: 'none',
         defaultShadow: 'none',
         dangerShadow: 'none',
+        primaryColor: tokens === darkTokens ? '#052e2b' : '#ffffff',
       },
       Modal: {
         headerBg: 'transparent',

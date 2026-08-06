@@ -13,6 +13,7 @@
 .application-row:last-child, .history-row:last-child { border-bottom: none; }
 .application-main, .history-main { flex: 1; min-width: 0; }
 .application-head { display: flex; align-items: center; gap: 12rpx; }
+.application-status { flex: 0 0 auto; }
 .application-title, .history-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 28rpx; font-weight: 500; }
 .application-sub, .history-sub { display: block; margin-top: 7rpx; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 22rpx; }
 .application-reject { display: block; margin-top: 8rpx; color: var(--red); font-size: 22rpx; }

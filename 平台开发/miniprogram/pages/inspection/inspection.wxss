@@ -2,8 +2,8 @@
 .sync-bar { display: flex; align-items: center; justify-content: center; gap: 18rpx; min-height: 54rpx; padding: 10rpx 24rpx; }
 .sync-action { color: var(--amber); font-weight: 600; }
 
-.package-switch { display: flex; gap: 14rpx; padding: 16rpx 24rpx 0; overflow-x: auto; white-space: nowrap; }
-.package-chip { flex: 0 0 auto; padding: 10rpx 24rpx; color: var(--text-2); background: var(--card); border: 1rpx solid var(--line); border-radius: 999rpx; font-size: 24rpx; }
+.package-switch { box-sizing: border-box; padding: 16rpx 24rpx 0; overflow-x: auto; white-space: nowrap; }
+.package-chip { display: inline-flex; box-sizing: border-box; margin-right: 14rpx; padding: 10rpx 24rpx; color: var(--text-2); background: var(--card); border: 1rpx solid var(--line); border-radius: 999rpx; font-size: 24rpx; white-space: nowrap; vertical-align: top; }
 .package-chip-on { color: var(--on-brand); background: var(--brand); border-color: var(--brand); }
 
 .journey { margin: 16rpx 24rpx 0; background: var(--card); border: 1rpx solid var(--line); border-radius: 16rpx; overflow: hidden; }
@@ -103,6 +103,10 @@
 .reagent-meta { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
 .reagent-action { color: var(--brand); font-size: 24rpx; }
 .reagent-picker { margin: 18rpx 0; padding: 18rpx; border-radius: 12rpx; color: var(--text); background: var(--fill-2); font-size: 26rpx; }
+.report-picker { display: flex; align-items: center; margin-bottom: 0; }
+.report-picker-label { flex-shrink: 0; color: var(--text-2); }
+.report-picker-value { flex: 1; min-width: 0; margin-left: 20rpx; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.report-picker-arrow { flex-shrink: 0; margin-left: 12rpx; color: var(--text-3); font-size: 34rpx; line-height: 1; }
 .fail-action { margin-top: 16rpx; }
 
 .work-summary { margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; background: var(--card); border: 1rpx solid var(--line); border-radius: 16rpx; }
@@ -118,6 +122,16 @@
 .progress-bar { height: 10rpx; background: var(--fill-2); border-radius: 999rpx; overflow: hidden; }
 .progress-fill { height: 100%; background: var(--brand); border-radius: 999rpx; }
 .work-locked { margin: 12rpx 24rpx 0; padding: 14rpx 20rpx; color: var(--text-2); background: var(--fill); border-radius: 10rpx; text-align: center; font-size: 22rpx; }
+.empty-hint { display: block; margin-top: 10rpx; color: var(--text-3); font-size: 23rpx; text-align: center; }
+
+.responsible-section { margin: 20rpx 24rpx 0; }
+.responsible-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12rpx; }
+.responsible-title { color: var(--text); font-size: 28rpx; font-weight: 600; }
+.responsible-note { max-width: 430rpx; color: var(--text-3); font-size: 21rpx; text-align: right; line-height: 1.4; }
+.responsible-list { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.responsible-card { box-sizing: border-box; width: calc(50% - 6rpx); min-height: 112rpx; padding: 18rpx 20rpx; background: var(--fill); border: 1rpx solid var(--line); border-radius: 10rpx; }
+.responsible-name { display: block; overflow: hidden; color: var(--text); font-size: 25rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.responsible-meta { display: block; margin-top: 8rpx; overflow: hidden; color: var(--text-3); font-size: 21rpx; text-overflow: ellipsis; white-space: nowrap; }
 
 .cat { margin: 20rpx 24rpx 0; }
 .cat-locked { opacity: .64; }
@@ -155,7 +169,11 @@
 .photo { width: 150rpx; height: 150rpx; margin: 0 16rpx 16rpx 0; position: relative; border-radius: 12rpx; overflow: hidden; }
 .photo-img { width: 100%; height: 100%; }
 .photo-del { position: absolute; top: 4rpx; right: 4rpx; width: 36rpx; height: 36rpx; line-height: 36rpx; text-align: center; background: rgba(0,0,0,0.5); color: var(--card); border-radius: 50%; font-size: 28rpx; }
-.photo-add { width: 150rpx; height: 150rpx; margin-bottom: 16rpx; border: 1rpx dashed var(--line); border-radius: 12rpx; text-align: center; line-height: 150rpx; color: var(--text-3); font-size: 56rpx; }
+.photo-source-actions { display: flex; gap: 16rpx; margin-top: 2rpx; }
+.photo-source-btn { flex: 1; height: 76rpx; line-height: 74rpx; margin: 0; padding: 0 16rpx; border: 1rpx solid var(--line); border-radius: 12rpx; color: var(--text-2); background: var(--card); font-size: 25rpx; }
+.photo-source-btn::after { border: 0; }
+.photo-source-primary { border-color: var(--brand); color: var(--brand); background: var(--brand-weak); }
+.photo-source-hint { display: block; margin-top: 10rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.45; }
 
 .submit-btn { margin-top: 28rpx; }
 .btn-danger { color: var(--card); background: var(--red); }

@@ -10,7 +10,7 @@ const TYPE = {
 };
 
 Page({
-  data: { loading: true, reports: [], filter: '', filters: ['全部', '待处理', '已核实', '已解决', '已归档'] },
+  data: { loading: true, reports: [], filter: '', detail: null, filters: ['全部', '待处理', '已核实', '已解决', '已归档'] },
 
   onShow() { this.load(); },
 
@@ -34,6 +34,22 @@ Page({
   },
 
   onGoReport() { wx.switchTab({ url: '/pages/inspection/inspection' }); },
+
+  onOpenDetail(e) {
+    const report = this.data.reports.find(item => item.id === Number(e.currentTarget.dataset.id));
+    if (!report) return;
+    let photos = [];
+    try { photos = JSON.parse(report.photo_urls || '[]'); } catch (_) {}
+    this.setData({ detail: Object.assign({}, report, { photos }) });
+  },
+
+  onCloseDetail() { this.setData({ detail: null }); },
+
+  onPreviewPhoto(e) {
+    const current = e.currentTarget.dataset.src;
+    const photos = (this.data.detail && this.data.detail.photos) || [];
+    if (current && photos.length) wx.previewImage({ current, urls: photos });
+  },
 
   goOrder(e) {
     const orderNo = e.currentTarget.dataset.order;

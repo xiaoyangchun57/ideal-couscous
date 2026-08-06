@@ -34,7 +34,9 @@ class ManualReportEvidenceTest(unittest.TestCase):
         app_module._tokens['operator-token'] = {'id': 9, 'role': 'operator', 'real_name': 'Operator'}
         with temporary_db() as db:
             db.executescript('''
+                CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT, real_name TEXT, status TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE manual_reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, report_type TEXT, description TEXT,
                     photo_urls TEXT, gps_lat REAL, gps_lng REAL, reporter_id INTEGER, reported_at TEXT,
@@ -42,7 +44,7 @@ class ManualReportEvidenceTest(unittest.TestCase):
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, order_no TEXT, site_id INTEGER, source TEXT,
-                    event_type TEXT, level TEXT, title TEXT, description TEXT, status TEXT
+                    event_type TEXT, level TEXT, title TEXT, description TEXT, assignee TEXT, status TEXT
                 );
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, metric TEXT, value REAL, level TEXT,
@@ -53,7 +55,9 @@ class ManualReportEvidenceTest(unittest.TestCase):
                     source_type TEXT, source_id INTEGER, description TEXT
                 );
             ''')
+            db.execute("INSERT INTO users VALUES (9, 'operator', 'Operator', 'active')")
             db.execute('INSERT INTO user_sites VALUES (9, 7)')
+            db.execute("INSERT INTO user_roles VALUES (9, 'operator')")
             db.execute("""INSERT INTO operation_attachments
                 (stored_path, site_id, uploader_id, source_type, source_id, description)
                 VALUES ('/uploads/site_photos/a.jpg', 7, 9, 'site_photo', 0, 'pending')""")
@@ -78,6 +82,8 @@ class ManualReportEvidenceTest(unittest.TestCase):
         try:
             attachment = db.execute('SELECT source_type, source_id FROM operation_attachments').fetchone()
             self.assertEqual(tuple(attachment), ('manual_report', report_id))
+            assignee = db.execute('SELECT assignee FROM work_orders').fetchone()[0]
+            self.assertEqual(assignee, 'Operator')
         finally:
             db.close()
 
@@ -86,6 +92,24 @@ class ManualReportEvidenceTest(unittest.TestCase):
             'site_id': 7, 'report_type': 'equipment', 'description': 'Pump failure', 'photo_urls': [],
         })
         self.assertEqual(response.status_code, 400)
+
+    def test_repeat_submission_returns_existing_report_and_order(self):
+        payload = {
+            'site_id': 7, 'report_type': 'equipment', 'description': 'Pump failure',
+            'photo_urls': ['/uploads/site_photos/a.jpg'],
+        }
+        first = self.client.post('/api/manual-reports', headers={'Authorization': 'Bearer operator-token'}, json=payload)
+        second = self.client.post('/api/manual-reports', headers={'Authorization': 'Bearer operator-token'}, json=payload)
+        self.assertEqual(first.status_code, 201, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertTrue(second.json['deduplicated'])
+        self.assertEqual(second.json['id'], first.json['id'])
+        db = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM manual_reports').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM work_orders').fetchone()[0], 1)
+        finally:
+            db.close()
 
 
 if __name__ == '__main__':

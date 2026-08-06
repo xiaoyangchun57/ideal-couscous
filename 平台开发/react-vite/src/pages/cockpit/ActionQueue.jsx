@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Badge, Spin, Empty } from 'antd';
+import { Alert, Badge, Button, Spin } from 'antd';
 import {
   AuditOutlined,
   WarningOutlined,
   FileTextOutlined,
   CloseOutlined,
   RightOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
@@ -22,6 +23,7 @@ export default function ActionQueue() {
 
   const [open, setOpen] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [items, setItems] = useState({
     businessApprovals: 0,
     planApprovals: 0,
@@ -34,21 +36,21 @@ export default function ActionQueue() {
     setLoading(true);
     try {
       const [audit, submittedPlans, changedPlans, photoItems, alerts, wos] = await Promise.all([
-        api.get('/audit/pending').catch(() => []),
-        api.get('/plan-schedules?status=submitted').catch(() => []),
-        api.get('/plan-schedules?status=change_submitted').catch(() => []),
-        api.get('/inspection-v2/items/pending').catch(() => []),
-        api.get('/alerts?status=pending').catch(() => []),
-        api.get('/workorders?status=pending').catch(() => []),
+        api.getStrict('/audit/pending'),
+        api.getStrict('/plan-schedules?status=submitted'),
+        api.getStrict('/plan-schedules?status=change_submitted'),
+        api.getStrict('/inspection-v2/items/pending'),
+        api.getStrict('/alerts?status=pending'),
+        api.getStrict('/workorders?status=pending'),
       ]);
       const auditList = Array.isArray(audit) ? audit : [];
       const alertList = Array.isArray(alerts) ? alerts : [];
       const woList = Array.isArray(wos) ? wos : [];
-      // 相同类型且在 30 分钟窗口内发生的告警视为一个事件，避免系统性离线淹没待决队列。
+      // 同一站点、同一类型且在 30 分钟窗口内发生的告警视为一个事件。
       const incidentKeys = new Set(alertList.map((a) => {
         const timestamp = new Date(String(a.created_at || '').replace(' ', 'T')).getTime();
         const bucket = Number.isFinite(timestamp) ? Math.floor(timestamp / 1800000) : a.id;
-        return `${a.metric || a.event_type || 'unknown'}:${bucket}`;
+        return `${a.site_id || 'unknown-site'}:${a.metric || a.event_type || 'unknown'}:${bucket}`;
       }));
       setItems({
         businessApprovals: auditList.length,
@@ -59,8 +61,9 @@ export default function ActionQueue() {
         incidents: incidentKeys.size,
         workorders: woList.length,
       });
-    } catch {
-      /* 静默：行动队列加载失败不应阻塞首页地图 */
+      setLoadError('');
+    } catch (error) {
+      setLoadError(error.message || '待办加载失败');
     } finally {
       setLoading(false);
     }
@@ -89,62 +92,73 @@ export default function ActionQueue() {
     { key: 'workorders', icon: <FileTextOutlined />, label: '工单待处理', count: items.workorders, to: '/workorders', color: tokens.colorInfo },
   ].filter((row) => row.count > 0);
 
-  // 折叠态：仅一个悬浮计数按钮
+  // 折叠态保留在右栏文档流中，避免覆盖地图与图例。
   if (!open) {
     return (
-      <div
+      <button
+        className="action-queue-collapsed"
+        type="button"
+        aria-label={`展开待决事项，共 ${total} 项`}
         onClick={() => setOpen(true)}
         style={{
-          position: 'absolute', bottom: 56, left: '50%', transform: 'translateX(-50%)', zIndex: 1500,
-          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
+          width: '100%', minHeight: 40,
           background: tokens.colorBgElevated, border: `1px solid ${tokens.colorBorder}`,
-          borderRadius: 24, padding: '8px 14px', boxShadow: tokens.shadowNav,
+          borderRadius: 8, padding: '8px 12px', boxShadow: tokens.shadowNav,
           color: tokens.colorText,
         }}
       >
-        <AuditOutlined style={{ color: tokens.colorPrimary }} />
-        <span style={{ fontSize: 13, fontWeight: 600 }}>待决 {total}</span>
-      </div>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <AuditOutlined style={{ color: tokens.colorPrimary }} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>待决事项</span>
+        </span>
+        <Badge count={total} showZero overflowCount={999} />
+      </button>
     );
   }
 
   return (
     <div
+      className="action-queue-panel"
       style={{
-        position: 'absolute', bottom: 56, left: '50%', transform: 'translateX(-50%)', zIndex: 1500,
-        width: 320, maxHeight: '45vh', display: 'flex', flexDirection: 'column',
+        width: '100%', maxHeight: 220, display: 'flex', flexDirection: 'column', flexShrink: 0,
         background: tokens.colorBgElevated, border: `1px solid ${tokens.colorBorder}`,
-        borderRadius: 12, boxShadow: tokens.shadowNav, overflow: 'hidden',
+        borderRadius: 8, boxShadow: tokens.shadowNav, overflow: 'hidden',
       }}
     >
       <div
+        className="action-queue-header"
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '8px 12px', borderBottom: `1px solid ${tokens.colorBorder}`,
+          padding: '8px 12px 8px 28px', borderBottom: `1px solid ${tokens.colorBorder}`,
           background: tokens.colorPrimaryBg,
         }}
       >
         <span style={{ fontSize: 14, fontWeight: 600, color: tokens.colorText }}>
           接下来要我决定的事（{total}）
         </span>
-        <CloseOutlined
-          onClick={() => setOpen(false)}
-          style={{ cursor: 'pointer', color: tokens.colorTextSecondary, fontSize: 12 }}
-        />
+        <Button type="text" size="small" icon={<CloseOutlined />} aria-label="收起待决事项" onClick={() => setOpen(false)} />
       </div>
 
       <div style={{ padding: 8, overflowY: 'auto' }}>
         {loading ? (
           <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>
-        ) : total === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="暂无可决事项"
-            style={{ padding: 16 }}
+        ) : loadError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="待办加载失败，当前数量不完整"
+            action={<Button size="small" icon={<ReloadOutlined />} onClick={load}>重试</Button>}
           />
+        ) : total === 0 ? (
+          <div style={{ padding: '8px 10px', color: tokens.colorTextSecondary, fontSize: 13 }}>
+            当前没有待决事项
+          </div>
         ) : (
           rows.map((r) => (
-            <div
+            <button
+              type="button"
+              aria-label={`${r.label}，${r.count} 项`}
               key={r.key}
               onClick={() => {
                 api.track('action_queue.entered', { queue_key: r.key, site_id: undefined });
@@ -152,6 +166,7 @@ export default function ActionQueue() {
               }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
+              width: '100%', border: 0, background: 'transparent', textAlign: 'left',
               padding: '8px 10px', borderRadius: 6, cursor: 'pointer',
                 marginBottom: 4,
               }}
@@ -162,7 +177,7 @@ export default function ActionQueue() {
               <span style={{ flex: 1, fontSize: 13, color: tokens.colorText }}>{r.label}</span>
               <Badge count={r.count} showZero={false} overflowCount={999} style={{ marginRight: 4 }} />
               <RightOutlined style={{ color: tokens.colorTextTertiary, fontSize: 11 }} />
-            </div>
+            </button>
           ))
         )}
       </div>

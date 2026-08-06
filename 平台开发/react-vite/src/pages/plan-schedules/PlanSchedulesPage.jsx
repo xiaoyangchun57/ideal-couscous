@@ -1,26 +1,25 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
   Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty,
-  Drawer, Descriptions, Alert, Input, Row, Col, Statistic, Tooltip, Badge, DatePicker,
+  Drawer, Descriptions, Alert, Input, Tooltip, Badge, DatePicker,
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
   CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
   MobileOutlined,
   StarOutlined, FolderOpenOutlined, DeleteOutlined,
+  ClearOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
-import FilterBar from '../../components/FilterBar';
-import {
-  pageRootStyle, tableCardStyle, tableCardBody,
-  filterSelectWidth, filterSmallSelectWidth,
-} from '../../services/pageStyles';
+import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
+import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import './PlanSchedulesPage.css';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 // 计划状态映射（调度层状态机）
 const SCHEDULE_STATUS_MAP = {
@@ -54,18 +53,22 @@ function scoreLevel(score, tokens) {
 }
 
 export default function PlanSchedulesPage() {
-  const { tokens, isDark } = useTheme();
+  const { tokens } = useTheme();
   const { user } = useAuth();
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const canApprove = user?.role === 'admin' || user?.role === 'manager';
+  const [searchParams, setSearchParams] = useSearchParams();
+  const userRoles = user?.roles || [user?.role];
+  const canApprove = userRoles.some(role => role === 'admin' || role === 'manager');
+  const canUseFavorites = userRoles.includes('operator');
 
   const [list, setList] = useState([]);
   const [teamOverview, setTeamOverview] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [teamOverviewError, setTeamOverviewError] = useState('');
+  const [recommendationsError, setRecommendationsError] = useState('');
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
   const [attentionFilter, setAttentionFilter] = useState(searchParams.get('attention') || undefined);
-  const [typeFilter, setTypeFilter] = useState(undefined);
+  const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || undefined);
 
   // 详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -84,11 +87,15 @@ export default function PlanSchedulesPage() {
   const [recommendationsExpanded, setRecommendationsExpanded] = useState(false);
   const [teamOverviewExpanded, setTeamOverviewExpanded] = useState(false);
   const [executionGuide, setExecutionGuide] = useState(null);
+  const [closingExecution, setClosingExecution] = useState(null);
+  const [overdueCloseReason, setOverdueCloseReason] = useState('');
+  const [overdueClosing, setOverdueClosing] = useState(false);
   const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [favorites, setFavorites] = useState([]);
   const [favoriteId, setFavoriteId] = useState(undefined);
   const [favoriteStart, setFavoriteStart] = useState(null);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
+  const [favoritesError, setFavoritesError] = useState('');
 
 
   const load = useCallback(async () => {
@@ -98,18 +105,33 @@ export default function PlanSchedulesPage() {
       if (statusFilter) params.push(`status=${statusFilter}`);
       if (typeFilter) params.push(`schedule_type=${typeFilter}`);
       if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const [rows, overview, recommendationData, followUpData] = await Promise.all([
-        api.get('/plan-schedules' + (params.length ? '?' + params.join('&') : '')),
-        canApprove ? api.get('/plan-schedules/overview').catch(() => null) : Promise.resolve(null),
-        api.get('/plan-schedules/draft-recommendations').catch(() => ({ recommendations: [] })),
-        api.get('/plan-schedules/follow-up-recommendations').catch(() => ({ recommendations: [] })),
+      const [rowsResult, overviewResult, recommendationResult, followUpResult] = await Promise.allSettled([
+        api.getStrict('/plan-schedules' + (params.length ? '?' + params.join('&') : '')),
+        canApprove ? api.getStrict('/plan-schedules/overview') : Promise.resolve(null),
+        api.getStrict('/plan-schedules/draft-recommendations'),
+        api.getStrict('/plan-schedules/follow-up-recommendations'),
       ]);
-      setList(Array.isArray(rows) ? rows : []);
-      setTeamOverview(overview);
-      setDraftRecommendations(recommendationData?.recommendations || []);
-      setFollowUpRecommendations(followUpData?.recommendations || []);
-    } catch {
-      message.error('计划列表加载失败');
+      if (rowsResult.status === 'fulfilled') {
+        setList(Array.isArray(rowsResult.value) ? rowsResult.value : []);
+        setLoadError('');
+      } else {
+        setLoadError(rowsResult.reason?.message || '计划列表加载失败');
+      }
+      if (overviewResult.status === 'fulfilled') {
+        setTeamOverview(overviewResult.value);
+        setTeamOverviewError('');
+      } else {
+        setTeamOverviewError(overviewResult.reason?.message || '团队概览加载失败');
+      }
+      if (recommendationResult.status === 'fulfilled' && followUpResult.status === 'fulfilled') {
+        setDraftRecommendations(recommendationResult.value?.recommendations || []);
+        setFollowUpRecommendations(followUpResult.value?.recommendations || []);
+        setRecommendationsError('');
+      } else {
+        setRecommendationsError('排程建议加载失败，当前建议数量不完整');
+      }
+    } catch (error) {
+      setLoadError(error.message || '计划列表加载失败');
     } finally {
       setLoading(false);
     }
@@ -118,16 +140,15 @@ export default function PlanSchedulesPage() {
   const createRecommendedDraft = async (item) => {
     setRecommendationLoading(true);
     try {
-      const result = await api.post('/plan-schedules/draft-recommendations', {
+      await api.postStrict('/plan-schedules/draft-recommendations', {
         user_id: item.user_id,
         schedule_type: item.schedule_type,
         period_start: item.period_start,
       });
-      if (result?.error) { message.error(result.error); return; }
       message.success('已生成待确认草稿；尚未派发执行任务或占用资源');
       load();
     } catch (error) {
-      message.error(error?.error || '生成草稿失败，请刷新后重试');
+      message.error(error?.message || '生成草稿失败，请刷新后重试');
     } finally {
       setRecommendationLoading(false);
     }
@@ -136,16 +157,15 @@ export default function PlanSchedulesPage() {
   const createFollowUpDraft = async (item) => {
     setFollowUpLoading(true);
     try {
-      const result = await api.post('/plan-schedules/follow-up-recommendations', {
+      await api.postStrict('/plan-schedules/follow-up-recommendations', {
         user_id: item.user_id,
         site_id: item.site_id,
         anomaly_type: item.anomaly_type,
       });
-      if (result?.error) { message.error(result.error); return; }
       message.success('已生成复查草稿；仍需确认资源并提交审批');
       load();
     } catch (error) {
-      message.error(error?.error || '生成复查草稿失败，请刷新后重试');
+      message.error(error?.message || '生成复查草稿失败，请刷新后重试');
     } finally {
       setFollowUpLoading(false);
     }
@@ -154,13 +174,19 @@ export default function PlanSchedulesPage() {
   const openFavorites = async () => {
     setFavoritesOpen(true);
     setFavoriteLoading(true);
-    const rows = await api.get('/plan-schedule-favorites');
-    const items = Array.isArray(rows) ? rows : [];
-    setFavorites(items);
-    const first = items[0];
-    setFavoriteId(first?.id);
-    setFavoriteStart(first?.suggested_period_start ? dayjs(first.suggested_period_start) : null);
-    setFavoriteLoading(false);
+    setFavoritesError('');
+    try {
+      const rows = await api.getStrict('/plan-schedule-favorites');
+      const items = Array.isArray(rows) ? rows : [];
+      setFavorites(items);
+      const first = items[0];
+      setFavoriteId(first?.id);
+      setFavoriteStart(first?.suggested_period_start ? dayjs(first.suggested_period_start) : null);
+    } catch (error) {
+      setFavoritesError(error.message || '常用计划加载失败');
+    } finally {
+      setFavoriteLoading(false);
+    }
   };
 
   const selectFavorite = (id) => {
@@ -171,30 +197,30 @@ export default function PlanSchedulesPage() {
 
   const addFavorite = async (schedule, event) => {
     event?.stopPropagation();
-    const result = await api.post('/plan-schedule-favorites', { schedule_id: schedule.id });
-    if (result?.error) { message.warning(result.error); return; }
-    message.success('已加入常用计划');
+    try {
+      await api.postStrict('/plan-schedule-favorites', { schedule_id: schedule.id });
+      message.success('已加入常用计划');
+    } catch (error) { message.error(error.message || '收藏失败'); }
   };
 
   const createFavoriteDraft = async () => {
     if (!favoriteId || !favoriteStart) { message.warning('请选择常用计划和新周期开始日期'); return; }
     setFavoriteLoading(true);
-    const result = await api.post(`/plan-schedule-favorites/${favoriteId}/draft`, {
-      period_start: favoriteStart.format('YYYY-MM-DD'),
-    });
-    setFavoriteLoading(false);
-    if (result?.error) { message.error(result.error); return; }
-    message.success('已从常用计划生成可编辑草稿');
-    setFavoritesOpen(false);
-    load();
+    try {
+      await api.postStrict(`/plan-schedule-favorites/${favoriteId}/draft`, { period_start: favoriteStart.format('YYYY-MM-DD') });
+      message.success('已从常用计划生成可编辑草稿');
+      setFavoritesOpen(false);
+      load();
+    } catch (error) { message.error(error.message || '生成草稿失败'); }
+    finally { setFavoriteLoading(false); }
   };
 
   const deleteFavorite = async () => {
     if (!favoriteId) return;
     setFavoriteLoading(true);
-    const result = await api.delete(`/plan-schedule-favorites/${favoriteId}`);
-    if (result?.error) { setFavoriteLoading(false); message.error(result.error); return; }
-    const rows = await api.get('/plan-schedule-favorites');
+    try {
+    await api.deleteStrict(`/plan-schedule-favorites/${favoriteId}`);
+    const rows = await api.getStrict('/plan-schedule-favorites');
     const items = Array.isArray(rows) ? rows : [];
     setFavorites(items);
     const first = items[0];
@@ -202,6 +228,7 @@ export default function PlanSchedulesPage() {
     setFavoriteStart(first?.suggested_period_start ? dayjs(first.suggested_period_start) : null);
     setFavoriteLoading(false);
     message.success('已删除收藏模板，不影响原计划');
+    } catch (error) { message.error(error.message || '删除收藏失败'); setFavoriteLoading(false); }
   };
 
   useEffect(() => { load(); }, [load]);
@@ -209,7 +236,21 @@ export default function PlanSchedulesPage() {
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
     setAttentionFilter(searchParams.get('attention') || undefined);
+    setTypeFilter(searchParams.get('type') || undefined);
   }, [searchParams]);
+
+  const updateFilter = useCallback((key, value) => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const resetFilters = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    ['status', 'type', 'attention'].forEach((key) => next.delete(key));
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // 打开详情：计划详情 + 智能建议 + 校验结果（审批决策支撑三件套）
   const openDetail = useCallback(async (id) => {
@@ -220,14 +261,14 @@ export default function PlanSchedulesPage() {
     setValidation(null);
     setRouteDay(null);
     try {
-      const det = await api.get(`/plan-schedules/${id}`);
+      const det = await api.getStrict(`/plan-schedules/${id}`);
       setDetail(det);
       const siteIds = Object.keys(det?.site_map || {});
       if (siteIds.length > 0) {
-        const sug = await api.get(`/plan-schedules/suggestions?site_ids=${siteIds.join(',')}`);
+        const sug = await api.getStrict(`/plan-schedules/suggestions?site_ids=${siteIds.join(',')}`);
         setSuggestions(sug);
       }
-      const val = await api.post('/plan-schedules/validate', {
+      const val = await api.postStrict('/plan-schedules/validate', {
         user_id: det?.user_id,
         schedule_type: det?.schedule_type,
         period_start: det?.period_start,
@@ -237,22 +278,60 @@ export default function PlanSchedulesPage() {
         exclude_schedule_id: det?.id,
       });
       setValidation(val);
-    } catch {
-      message.error('计划详情加载失败');
+    } catch (error) {
+      message.error(error.message || '计划详情加载失败');
     } finally {
       setDetailLoading(false);
     }
   }, []);
 
+  useEffect(() => {
+    const scheduleId = Number(searchParams.get('schedule'));
+    if (Number.isInteger(scheduleId) && scheduleId > 0) openDetail(scheduleId);
+  }, [searchParams, openDetail]);
+
   const showExecutionGuide = (task) => {
     setExecutionGuide(task);
+  };
+
+  const handleOverdueAction = async (task, action, reason = '') => {
+    try {
+      const result = await api.postStrict(`/insp-plans/${task.id}/overdue-action`, { action, reason });
+      message.success(action === 'remind' ? '已发送逾期催办' : `已异常关闭，取消 ${result.cancelled_items || 0} 个未完成检查项`);
+      setExecutionGuide(null);
+      load();
+      if (detail?.id) openDetail(detail.id);
+      return true;
+    } catch (error) {
+      message.error(error.message || '逾期任务处置失败');
+      return false;
+    }
+  };
+
+  const closeOverdueExecution = (task) => {
+    setClosingExecution(task);
+    setOverdueCloseReason('');
+  };
+
+  const submitOverdueClose = async () => {
+    const reason = overdueCloseReason.trim();
+    if (!reason) {
+      message.error('请填写未执行原因');
+      return;
+    }
+    setOverdueClosing(true);
+    const succeeded = await handleOverdueAction(closingExecution, 'close', reason);
+    setOverdueClosing(false);
+    if (succeeded) {
+      setClosingExecution(null);
+      setOverdueCloseReason('');
+    }
   };
 
   const onApprove = async (id) => {
     setActing(true);
     try {
-      const res = await api.post(`/plan-schedules/${id}/approve`);
-      if (res?.error) { message.error(res.error); return; }
+      const res = await api.postStrict(`/plan-schedules/${id}/approve`);
       if (res.is_change) {
         message.success(`变更已通过：保留${res.kept || 0}个已执行任务、重建${res.plans_created || 0}个`);
       } else {
@@ -260,7 +339,7 @@ export default function PlanSchedulesPage() {
       }
       load();
       openDetail(id);
-    } finally {
+    } catch (error) { message.error(error.message || '审批失败'); } finally {
       setActing(false);
     }
   };
@@ -269,23 +348,26 @@ export default function PlanSchedulesPage() {
     if (!rejectReason.trim()) { message.warning('请填写退回原因'); return; }
     setActing(true);
     try {
-      const res = await api.post(`/plan-schedules/${detail.id}/reject`, { reason: rejectReason.trim() });
-      if (res?.error) { message.error(res.error); return; }
+      const res = await api.postStrict(`/plan-schedules/${detail.id}/reject`, { reason: rejectReason.trim() });
       message.success(res.rolled_back ? '已驳回变更，恢复原计划' : '已退回，排程人将收到通知');
       setRejectOpen(false);
       setRejectReason('');
       load();
       openDetail(detail.id);
-    } finally {
+    } catch (error) { message.error(error.message || '退回失败'); } finally {
       setActing(false);
     }
   };
 
   // 顶部指标
   const stats = useMemo(() => ({
-    pending: list.filter(r => r.status === 'submitted' || r.status === 'change_submitted').length,
-    draft: list.filter(r => r.status === 'draft' || r.status === 'rejected').length,
+    draft: list.filter(r => r.status === 'draft').length,
+    submitted: list.filter(r => r.status === 'submitted').length,
     approved: list.filter(r => r.status === 'approved').length,
+    rejected: list.filter(r => r.status === 'rejected').length,
+    modifying: list.filter(r => r.status === 'modifying').length,
+    changeSubmitted: list.filter(r => r.status === 'change_submitted').length,
+    archived: list.filter(r => r.status === 'archived').length,
     total: list.length,
   }), [list]);
 
@@ -305,6 +387,10 @@ export default function PlanSchedulesPage() {
       .filter(([, v]) => v && Array.isArray(v.sites) && v.sites.length > 0)
       .sort(([a], [b]) => a.localeCompare(b));
   }, [detail]);
+
+  const hasScheduledSites = Number(detail?.site_count || 0) > 0 || dayRows.length > 0;
+  const generatedPlanCount = (detail?.generated_plans || []).length;
+  const isApprovedSchedule = ['approved', 'archived'].includes(detail?.status);
 
   // 详情内：风险预警汇总（校验警告 + 高危排序提示）
   const riskWarnings = useMemo(() => {
@@ -360,20 +446,21 @@ export default function PlanSchedulesPage() {
       },
     },
     {
-      title: '操作', width: 230,
+      title: '操作', width: 130,
       render: (_, r) => (
         <Space size={4}>
-          <Button size="small" icon={<FileSearchOutlined />} onClick={() => openDetail(r.id)}>详情</Button>
-          {Number(r.user_id) === Number(user?.id) && Number(r.site_count || 0) > 0 && (
+          <Button
+            size="small"
+            icon={<FileSearchOutlined />}
+            aria-label={`${r.status === 'submitted' || r.status === 'change_submitted' ? '审阅' : '查看'}${r.user_name}的${TYPE_MAP[r.schedule_type] || '巡检'}计划`}
+            onClick={() => openDetail(r.id)}
+          >
+            {r.status === 'submitted' || r.status === 'change_submitted' ? '审阅' : '详情'}
+          </Button>
+          {canUseFavorites && Number(r.user_id) === Number(user?.id) && Number(r.site_count || 0) > 0 && (
             <Tooltip title="收藏站点、相对日期、车辆与备件">
               <Button size="small" icon={<StarOutlined />} onClick={event => addFavorite(r, event)}>收藏</Button>
             </Tooltip>
-          )}
-          {canApprove && (r.status === 'submitted' || r.status === 'change_submitted') && (
-            <>
-              <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => onApprove(r.id)}>通过</Button>
-              <Button size="small" danger icon={<CloseOutlined />} onClick={() => { openDetail(r.id); setRejectOpen(true); }}>退回</Button>
-            </>
           )}
         </Space>
       ),
@@ -393,41 +480,78 @@ export default function PlanSchedulesPage() {
     );
   };
 
-  return (
-    <div style={{ ...pageRootStyle, gap: 12 }}>
-      <div style={{ flexShrink: 0 }}>
-        <Title level={4} style={{ margin: 0 }}>巡检计划</Title>
+  const hasTeamAttention = canApprove && teamOverview && [
+    teamOverview.summary?.overdue_executions,
+    teamOverview.summary?.coverage_exceptions,
+    teamOverview.summary?.resource_blocks,
+  ].some(Boolean);
+  const attentionActions = [
+    { key: 'overdue', label: '逾期执行', count: teamOverview?.summary?.overdue_executions || 0, danger: true },
+    { key: 'coverage', label: '漏站例外', count: teamOverview?.summary?.coverage_exceptions || 0 },
+    { key: 'resource', label: '资源阻塞', count: teamOverview?.summary?.resource_blocks || 0, danger: true },
+  ].filter(item => item.count > 0);
+
+  const generatedTasksSection = (detail?.generated_plans || []).length > 0 ? (
+    <div className="plan-generated-tasks">
+      <div className="plan-detail-section-heading">
+        <Text strong style={{ fontSize: 13 }}>已生成执行任务</Text>
+        {(detail.generated_plans || []).some(task => task.status === 'active') && (
+          <Text type="secondary" style={{ fontSize: 12 }}>现场记录请在小程序“今日执行”完成</Text>
+        )}
       </div>
+      <Table size="small" rowKey="id" pagination={false} style={{ marginTop: 8 }}
+        tableLayout="fixed"
+        dataSource={detail.generated_plans}
+        columns={[
+          { title: '任务', dataIndex: 'plan_name', width: 130, ellipsis: true },
+          { title: '日期', dataIndex: 'generate_date', width: 92 },
+          {
+            title: '状态', dataIndex: 'status', width: 68,
+            render: v => <Tag color={v === 'active' ? 'blue' : v === 'completed' ? 'green' : 'default'}>{v === 'active' ? '待执行' : v === 'completed' ? '已完成' : v}</Tag>,
+          },
+          {
+            title: '完成率', dataIndex: 'completion_rate', width: 62,
+            render: v => <Text style={{ fontSize: 11 }}>{Math.round(v || 0)}%</Text>,
+          },
+          {
+            title: '现场执行', width: 220,
+            render: (_, task) => task.status === 'active' ? (
+              <Space size={0}>
+                <Button size="small" type="link" icon={<MobileOutlined />}
+                  aria-label={`查看${task.plan_name}执行说明`} onClick={() => showExecutionGuide(task)}>执行说明</Button>
+                {canApprove && dayjs(task.generate_date).isBefore(dayjs(), 'day') && <>
+                  <Button size="small" type="link" aria-label={`催办${task.plan_name}`}
+                    onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>
+                  <Button size="small" type="link" danger aria-label={`登记${task.plan_name}未执行原因并关闭`}
+                    onClick={() => closeOverdueExecution(task)}>登记并关闭</Button>
+                </>}
+              </Space>
+            ) : <Text type="secondary">-</Text>,
+          },
+        ]} />
+    </div>
+  ) : null;
 
-      <FilterBar
-        style={{ marginBottom: 0 }}
-        extra={<Space size={8}>
-          <Button icon={<FolderOpenOutlined />} onClick={openFavorites}>常用计划</Button>
-          <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
-        </Space>}
-      >
-        <Select allowClear placeholder="状态" style={{ width: filterSmallSelectWidth }} value={statusFilter} onChange={setStatusFilter}
-          options={Object.entries(SCHEDULE_STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label }))} />
-        <Select allowClear placeholder="类型" style={{ width: filterSelectWidth }} value={typeFilter} onChange={setTypeFilter}
-          options={Object.entries(TYPE_MAP).map(([k, v]) => ({ value: k, label: v }))} />
-        {attentionFilter && <Tag closable onClose={() => navigate('/plan-schedules')}>关注：{ATTENTION_MAP[attentionFilter]}</Tag>}
-      </FilterBar>
-
-      {/* 指标条 */}
-      <Row gutter={12}>
-        {[
-          { title: '待我审批', value: stats.pending, color: stats.pending > 0 ? tokens.colorWarning : undefined },
-          { title: '草稿/退回', value: stats.draft },
-          { title: '已通过', value: stats.approved },
-          { title: '计划总数', value: stats.total },
-        ].map(s => (
-          <Col xs={12} md={6} key={s.title}>
-            <Card size="small" bodyStyle={{ padding: '8px 16px' }}>
-              <Statistic title={s.title} value={s.value} valueStyle={{ fontSize: 20, color: s.color }} />
-            </Card>
-          </Col>
-        ))}
-      </Row>
+  return (
+    <WorkspacePage
+      title="巡检计划"
+      subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
+      primaryAction={canUseFavorites
+        ? <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>
+        : null}
+      statusItems={[
+        { key: 'total', label: '当前结果', value: stats.total, color: tokens.colorText, always: true },
+        { key: 'draft', label: '草稿', value: stats.draft, color: tokens.colorTextSecondary },
+        { key: 'submitted', label: '待审批', value: stats.submitted, color: tokens.colorWarning },
+        { key: 'modifying', label: '变更中', value: stats.modifying, color: tokens.colorWarning },
+        { key: 'change-submitted', label: '变更待审', value: stats.changeSubmitted, color: tokens.colorWarning },
+        { key: 'approved', label: '已通过', value: stats.approved, color: tokens.colorSuccess },
+        { key: 'rejected', label: '已退回', value: stats.rejected, color: tokens.colorError },
+        { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
+      ]}
+    >
+      {recommendationsError && <Alert type="warning" showIcon message={recommendationsError} action={<Button size="small" onClick={load}>重试</Button>} />}
+      {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={load}>重试</Button>} />}
 
       {(draftRecommendations.length > 0 || followUpRecommendations.length > 0) && (
         <Alert
@@ -467,32 +591,20 @@ export default function PlanSchedulesPage() {
         />
       )}
 
-      {canApprove && teamOverview && (
+      {hasTeamAttention && (
         <>
-          <Card size="small" bodyStyle={{ padding: '8px 12px' }}>
-            <Row gutter={[8, 8]} align="middle">
-              <Col span={24}><Text type="secondary" style={{ fontSize: 12 }}>需要处理</Text></Col>
-              <Col xs={12} md={6}>
-                <Button block size="small" danger={Boolean(teamOverview.summary?.overdue_executions)} onClick={() => navigate('/plan-schedules?attention=overdue')}>
-                  逾期执行 {teamOverview.summary?.overdue_executions || 0}
+          <section className="plan-attention-strip" aria-label="需要处理的巡检事项">
+            <span className="plan-attention-strip__label"><ExclamationCircleOutlined /> 需要处理</span>
+            <Space size={8} wrap>
+              {attentionActions.map(item => (
+                <Button key={item.key} size="small" danger={item.danger}
+                  onClick={() => updateFilter('attention', item.key)}>
+                  {item.label} {item.count}
                 </Button>
-              </Col>
-              <Col xs={12} md={6}>
-                <Button block size="small" type={teamOverview.summary?.coverage_exceptions ? 'primary' : 'default'} onClick={() => navigate('/plan-schedules?attention=coverage')}>
-                  漏站例外 {teamOverview.summary?.coverage_exceptions || 0}
-                </Button>
-              </Col>
-              <Col xs={12} md={6}>
-                <Button block size="small" danger={Boolean(teamOverview.summary?.resource_blocks)} onClick={() => navigate('/plan-schedules?attention=resource')}>
-                  资源阻塞 {teamOverview.summary?.resource_blocks || 0}
-                </Button>
-              </Col>
-              <Col xs={12} md={6}>
-                <Button block size="small" onClick={() => navigate('/workorders?search=巡检异常')}>巡检异常工单</Button>
-              </Col>
-            </Row>
-          </Card>
-          <Card size="small" title={`团队执行概览 · ${teamOverview.date}`} bodyStyle={{ padding: teamOverviewExpanded ? 0 : '0 12px' }}
+              ))}
+            </Space>
+          </section>
+          <Card size="small" title={`团队执行概览 · ${teamOverview.date}`} styles={{ body: { padding: teamOverviewExpanded ? 0 : '0 12px' } }}
             extra={<Button size="small" type="link" onClick={() => setTeamOverviewExpanded(value => !value)}>{teamOverviewExpanded ? '收起' : '展开人员明细'}</Button>}>
             {teamOverviewExpanded
               ? <Table rowKey="user_id" size="small" pagination={false} columns={teamColumns}
@@ -503,22 +615,39 @@ export default function PlanSchedulesPage() {
         </>
       )}
 
-      {/* 列表 */}
-      <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0, flex: '0 0 auto', minHeight: 0 }} styles={{ body: { ...tableCardBody, flex: '0 0 auto' } }}>
-        <div style={{ overflow: 'hidden' }}>
-          <Table
-            rowKey="id" dataSource={list} loading={loading} size="small" pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
-            columns={columns}
-            locale={{ emptyText: loading ? null : <Empty description="暂无巡检计划" /> }}
-            onRow={r => ({ onClick: () => openDetail(r.id), style: { cursor: 'pointer' } })}
-          />
-        </div>
-      </Card>
+      <section className="plan-list-section" aria-label="巡检计划列表">
+        <WorkspaceToolbar actions={<Space size={8}>
+          {(statusFilter || typeFilter || attentionFilter) && (
+            <Button icon={<ClearOutlined />} onClick={resetFilters}>重置筛选</Button>
+          )}
+          <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+        </Space>}>
+          <FilterField label="计划状态">
+            <Select allowClear placeholder="全部状态" style={{ width: filterSmallSelectWidth }} value={statusFilter} onChange={(value) => updateFilter('status', value)}
+              options={Object.entries(SCHEDULE_STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label }))} />
+          </FilterField>
+          <FilterField label="计划类型">
+            <Select allowClear placeholder="全部类型" style={{ width: filterSelectWidth }} value={typeFilter} onChange={(value) => updateFilter('type', value)}
+              options={Object.entries(TYPE_MAP).map(([k, v]) => ({ value: k, label: v }))} />
+          </FilterField>
+          {attentionFilter && <ToolbarMeta label="关注条件"><Tag closable onClose={() => updateFilter('attention', undefined)}>{ATTENTION_MAP[attentionFilter]}</Tag></ToolbarMeta>}
+        </WorkspaceToolbar>
+
+        {loadError && !loading ? <WorkspaceEmpty type="error" description="巡检计划加载失败，当前不能判断是否暂无计划。" onRefresh={load} /> : <WorkspaceTable
+          rowKey="id"
+          dataSource={list}
+          loading={loading}
+          columns={columns}
+          emptyType={statusFilter || typeFilter || attentionFilter ? 'filtered' : 'empty'}
+          onRefresh={load}
+          onRow={r => ({ onClick: () => openDetail(r.id), style: { cursor: 'pointer' } })}
+        />}
+      </section>
 
       {/* 详情抽屉：审批决策支撑（风险预警 + 站点情况 + 行程 + 资源 + 任务） */}
       <Drawer
         title={detail ? `${detail.user_name || ''}的${TYPE_MAP[detail.schedule_type] || '巡检'}计划（${detail.period_start} ~ ${detail.period_end}）` : '计划详情'}
-        open={drawerOpen} onClose={() => setDrawerOpen(false)} width={680} destroyOnClose
+        open={drawerOpen} onClose={() => setDrawerOpen(false)} width={680} destroyOnHidden
         footer={detail && canApprove && (detail.status === 'submitted' || detail.status === 'change_submitted') ? (
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <Button danger icon={<CloseOutlined />} onClick={() => setRejectOpen(true)} loading={acting}>退回</Button>
@@ -529,8 +658,10 @@ export default function PlanSchedulesPage() {
         {detailLoading && <div style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!detailLoading && detail && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {Number(detail.day_count || 0) === 0 || Number(detail.site_count || 0) === 0 ? (
-              <Alert type="warning" showIcon message="该排程未安排站点，未生成现场执行任务。请核对历史记录后归档或补充站点并重新提交。" />
+            {!hasScheduledSites ? (
+              <Alert type="warning" showIcon message="该排程尚未安排站点，无法生成现场执行任务。请补充站点后重新提交。" />
+            ) : isApprovedSchedule && generatedPlanCount === 0 ? (
+              <Alert type="error" showIcon message={`该排程已安排 ${detail.site_count} 个站点，但尚未生成现场执行任务。请联系管理员核对审批流转。`} />
             ) : null}
             {/* 基本信息 */}
             <Descriptions size="small" column={2} bordered>
@@ -574,6 +705,8 @@ export default function PlanSchedulesPage() {
               </div>
             )}
 
+            {generatedTasksSection}
+
             {/* 每日行程 + 站点情况 */}
             <div>
               <Text strong style={{ fontSize: 13 }}>每日行程与站点情况</Text>
@@ -581,7 +714,7 @@ export default function PlanSchedulesPage() {
                 {dayRows.length === 0 && <Empty description="未安排站点" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
                 {dayRows.map(([date, dayData]) => (
                   <Card key={date} size="small"
-                    bodyStyle={{ padding: '8px 12px', borderLeft: `3px solid ${tokens.colorPrimary}` }}>
+                    styles={{ body: { padding: '8px 12px', borderLeft: `3px solid ${tokens.colorPrimary}` } }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                       <Space size={8}>
                         <Text strong style={{ fontSize: 13 }}>{date}</Text>
@@ -701,7 +834,7 @@ export default function PlanSchedulesPage() {
                       const reasons = suggestions.site_reasons?.[sid] || [];
                       const lv = scoreLevel(score, tokens);
                       return (
-                        <Card key={sid} size="small" bodyStyle={{ padding: '6px 12px' }}>
+                        <Card key={sid} size="small" styles={{ body: { padding: '6px 12px' } }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <Space size={8}>
                               <Text strong style={{ fontSize: 12 }}>{s?.name || `站点${sid}`}</Text>
@@ -736,39 +869,6 @@ export default function PlanSchedulesPage() {
               </div>
             )}
 
-            {/* 已生成的执行任务 */}
-            {(detail.generated_plans || []).length > 0 && (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text strong style={{ fontSize: 13 }}>已生成执行任务</Text>
-                  {(detail.generated_plans || []).some(task => task.status === 'active') && (
-                    <Text type="secondary" style={{ fontSize: 12 }}>现场记录请在小程序“今日执行”完成</Text>
-                  )}
-                </div>
-                <Table size="small" rowKey="id" pagination={false} style={{ marginTop: 8 }}
-                  dataSource={detail.generated_plans}
-                  columns={[
-                    { title: '任务', dataIndex: 'plan_name', ellipsis: true },
-                    { title: '日期', dataIndex: 'generate_date', width: 100 },
-                    {
-                      title: '状态', dataIndex: 'status', width: 80,
-                      render: v => <Tag color={v === 'active' ? 'blue' : v === 'completed' ? 'green' : 'default'}>{v === 'active' ? '待执行' : v === 'completed' ? '已完成' : v}</Tag>,
-                    },
-                    {
-                      title: '完成率', dataIndex: 'completion_rate', width: 80,
-                      render: v => <Text style={{ fontSize: 11 }}>{Math.round(v || 0)}%</Text>,
-                    },
-                    ...[{
-                      title: '现场执行', width: 112,
-                      render: (_, task) => task.status === 'active' ? (
-                        <Button size="small" type="primary" ghost icon={<MobileOutlined />} onClick={() => showExecutionGuide(task)}>
-                          执行说明
-                        </Button>
-                      ) : <Text type="secondary">-</Text>,
-                    }],
-                  ]} />
-              </div>
-            )}
           </div>
         )}
       </Drawer>
@@ -776,15 +876,39 @@ export default function PlanSchedulesPage() {
       {/* 退回原因弹窗 */}
       <Modal open={rejectOpen} title="退回计划" okText="确认退回" cancelText="取消"
         onOk={onReject} onCancel={() => { setRejectOpen(false); setRejectReason(''); }}
-        confirmLoading={acting} okButtonProps={{ danger: true }} destroyOnClose>
+        confirmLoading={acting} okButtonProps={{ danger: true }} destroyOnHidden>
         <div style={{ marginBottom: 8 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>退回后系统将通知排程人，计划回到草稿状态可修改后重新提交。</Text>
         </div>
         <Input.TextArea rows={3} placeholder="请填写退回原因（必填）" value={rejectReason} onChange={e => setRejectReason(e.target.value)} />
       </Modal>
 
+      <Modal
+        open={Boolean(closingExecution)}
+        title={`异常关闭“${closingExecution?.plan_name || '巡检任务'}”`}
+        okText="登记并关闭"
+        cancelText="取消"
+        onOk={submitOverdueClose}
+        onCancel={() => { setClosingExecution(null); setOverdueCloseReason(''); }}
+        confirmLoading={overdueClosing}
+        okButtonProps={{ danger: true }}
+        destroyOnHidden
+      >
+        <Text>仅取消尚未完成的检查项，已有现场记录保留。请登记未执行原因，后续如仍需巡检应重新排程。</Text>
+        <Input.TextArea
+          rows={3}
+          maxLength={300}
+          showCount
+          aria-label="未执行原因"
+          placeholder="例如：道路封闭，已与站点确认改期"
+          value={overdueCloseReason}
+          onChange={(event) => setOverdueCloseReason(event.target.value)}
+          style={{ marginTop: 12 }}
+        />
+      </Modal>
+
       <Modal open={Boolean(executionGuide)} title="现场执行请在小程序完成" footer={null}
-        onCancel={() => setExecutionGuide(null)} destroyOnClose>
+        onCancel={() => setExecutionGuide(null)} destroyOnHidden>
         <div style={{ lineHeight: 1.8 }}>
           <div><Text strong>{executionGuide?.plan_name || '巡检任务'}</Text></div>
           <div><Text type="secondary">执行日期：{executionGuide?.generate_date || '-'}</Text></div>
@@ -798,10 +922,12 @@ export default function PlanSchedulesPage() {
         </div>
       </Modal>
 
-      <Modal open={favoritesOpen} title="从常用计划生成草稿" okText="生成草稿" cancelText="取消"
+      {canUseFavorites && <Modal open={favoritesOpen} title="从常用计划生成草稿" okText="生成草稿" cancelText="取消"
         onOk={createFavoriteDraft} onCancel={() => setFavoritesOpen(false)} confirmLoading={favoriteLoading}
-        okButtonProps={{ disabled: !favoriteId || !favoriteStart }} destroyOnClose>
-        {favorites.length === 0 ? (
+        okButtonProps={{ disabled: !favoriteId || !favoriteStart }} destroyOnHidden>
+        {favoritesError ? (
+          <WorkspaceEmpty type="error" description="常用计划加载失败，当前不能判断是否暂无收藏。" onRefresh={openFavorites} />
+        ) : favorites.length === 0 ? (
           <Empty description="暂无常用计划，可在计划列表中点击“收藏”保存" />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -826,7 +952,7 @@ export default function PlanSchedulesPage() {
             </div>
           </div>
         )}
-      </Modal>
-    </div>
+      </Modal>}
+    </WorkspacePage>
   );
 }

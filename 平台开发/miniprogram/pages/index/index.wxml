@@ -42,9 +42,9 @@
       <text class="package-label">车辆</text>
       <text class="package-value {{workPackage.readiness.vehicle_assigned ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.vehicle_assigned ? '已安排 · 查看' : '未安排 · 申请'}}</text>
     </view>
-    <view class="package-line">
+    <view class="package-line package-line-action" bindtap="goInspection">
       <text class="package-label">出发资源</text>
-      <text class="package-value {{workPackage.readiness.departure_confirmed ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.departure_confirmed ? '已确认' : ('待确认 ' + workPackage.readiness.departure_pending_count + ' 个执行包')}}</text>
+      <text class="package-value {{workPackage.readiness.departure_confirmed ? 'package-ready' : 'package-warn'}}">{{workPackage.readiness.departure_confirmed ? '已确认 · 查看' : ('待确认 ' + workPackage.readiness.departure_pending_count + ' 项 · 去确认')}}</text>
     </view>
     <view class="package-line">
       <text class="package-label">备件</text>
@@ -59,8 +59,11 @@
 
   <!-- 我的计划（快捷入口） -->
   <view class="card plan-entry" bindtap="goPlan">
-    <text class="plan-entry-label">我的计划</text>
-    <text class="plan-entry-r">排程 · 审批进度 ›</text>
+    <view class="plan-entry-copy">
+      <text class="plan-entry-label">我的计划</text>
+      <text class="plan-entry-summary">{{planEntrySummary}}</text>
+    </view>
+    <text class="plan-entry-r">查看 ›</text>
   </view>
 
   <!-- 待我审核（管理者/审批者） -->
@@ -85,7 +88,7 @@
       <view class="site-card-main">
         <text class="site-card-name">{{item.site_name}}</text>
         <text class="site-card-type">{{item.site_type_cn}}</text>
-        <text class="site-carryover" wx:if="{{item.has_carryover}}">补做 · 昨日遗留 {{item.carryover_items}} 项</text>
+        <text class="site-carryover" wx:if="{{item.has_carryover}}">昨日未完成 · 需补检 {{item.carryover_items}} 项</text>
       </view>
       <view class="site-card-foot">
         <text class="site-card-num">{{item.pending_items}}</text>
@@ -96,6 +99,19 @@
   <view class="empty" wx:elif="{{loaded}}">
     <view class="empty-circle"></view>
     <text class="empty-tx">今日无待检站点</text>
+  </view>
+
+  <view class="responsible-section" wx:if="{{loaded && !sites.length && responsibleSites.length}}">
+    <view class="responsible-head">
+      <text class="responsible-title">负责站点</text>
+      <text class="responsible-note">今日暂无已批准巡检任务，仅供查看</text>
+    </view>
+    <view class="responsible-list">
+      <view class="responsible-card" wx:for="{{responsibleSites}}" wx:key="id">
+        <text class="responsible-name">{{item.name}}</text>
+        <text class="responsible-meta">{{item.code}} · {{item.type}}</text>
+      </view>
+    </view>
   </view>
 
   <!-- 待办工单 -->

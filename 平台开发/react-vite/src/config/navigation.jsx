@@ -32,6 +32,7 @@ export const routeMeta = {
   '/archive': { title: '影像与记录', group: '查询与分析', icon: <FolderOpenOutlined /> },
   '/evaluation': { title: '运营绩效', group: '查询与分析', icon: <BarChartOutlined /> },
   '/users': { title: '人员与权限', group: '系统设置', icon: <TeamOutlined /> },
+  '/reagents': { title: '试剂主数据', group: '系统设置', icon: <ToolOutlined /> },
 };
 
 const allowed = (requiredRoles, userRoles) => {
@@ -41,7 +42,7 @@ const allowed = (requiredRoles, userRoles) => {
 };
 
 // 导航按职责裁剪；接口权限仍由后端校验，避免把审核员带进资源调度等非本职流程。
-const pageRoles = {
+export const pageRoles = {
   '/alerts': ['admin', 'reviewer'],
   '/analysis': ['admin', 'reviewer'],
   '/workorders': ['admin', 'operator'],
@@ -54,6 +55,7 @@ const pageRoles = {
   '/sites': ['admin', 'reviewer'],
   '/archive': ['admin', 'reviewer'],
   '/users': ['admin'],
+  '/reagents': ['admin'],
 };
 
 export function getNavigation(roles) {
@@ -82,7 +84,7 @@ export function getNavigation(roles) {
       key: 'system',
       label: '系统管理',
       roles: ['admin'],
-      children: ['/users'],
+      children: ['/users', '/reagents'],
     },
   ];
 

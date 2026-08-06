@@ -14,6 +14,8 @@
 .work-package { margin: 12rpx 24rpx 0; padding: 12rpx 28rpx; }
 .package-line { display: flex; align-items: center; justify-content: space-between; min-height: 68rpx; border-bottom: 1rpx solid var(--line); }
 .package-line:last-child { border-bottom: none; }
+.package-line-action { padding: 0 8rpx; margin: 0 -8rpx; border-radius: 8rpx; }
+.package-line-action:active { background: var(--surface); }
 .package-label { font-size: 25rpx; color: var(--text-2); }
 .package-value { font-size: 25rpx; color: var(--text); font-weight: 500; }
 .package-ready { color: var(--brand); }
@@ -31,7 +33,9 @@
 }
 
 .plan-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 24rpx 28rpx; }
+.plan-entry-copy { min-width: 0; display: flex; flex-direction: column; gap: 6rpx; }
 .plan-entry-label { font-size: 28rpx; font-weight: 500; color: var(--text); }
+.plan-entry-summary { font-size: 23rpx; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-entry-r { font-size: 23rpx; color: var(--text-3); }
 
 .review-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 24rpx 28rpx; }
@@ -53,5 +57,14 @@
 .site-card-foot { margin-top: 24rpx; padding-left: 14rpx; display: flex; align-items: baseline; }
 .site-card-num { font-size: 40rpx; font-weight: 500; color: var(--brand); }
 .site-card-unit { font-size: 22rpx; color: var(--text-3); margin-left: 8rpx; }
+
+.responsible-section { margin: 16rpx 24rpx 0; }
+.responsible-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12rpx; }
+.responsible-title { color: var(--text); font-size: 28rpx; font-weight: 600; }
+.responsible-note { max-width: 430rpx; color: var(--text-3); font-size: 21rpx; text-align: right; line-height: 1.4; }
+.responsible-list { display: flex; flex-wrap: wrap; gap: 12rpx; }
+.responsible-card { box-sizing: border-box; width: calc(50% - 6rpx); min-height: 112rpx; padding: 18rpx 20rpx; background: var(--fill); border: 1rpx solid var(--line); border-radius: 10rpx; }
+.responsible-name { display: block; overflow: hidden; color: var(--text); font-size: 25rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.responsible-meta { display: block; margin-top: 8rpx; overflow: hidden; color: var(--text-3); font-size: 21rpx; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 列表行样式（.list-card/.row 族）已提升至 app.wxss 全局定义 */

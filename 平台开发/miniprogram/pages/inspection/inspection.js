@@ -2,7 +2,7 @@ const api = require('../../services/api.js');
 const { RESULT, INSPECTION_CATEGORY, linkedWorkorderCn, map } = require('../../services/maps.js');
 const { getSites, getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
-const { chooseAndCompress, fileToBase64, persistFile, captureFlushedPhoto } = require('../../utils/photos.js');
+const { chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto } = require('../../utils/photos.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const localStore = require('../../utils/localStore.js');
@@ -11,6 +11,14 @@ const { selectExecutionSite, photoRequirement } = require('../../utils/execution
 const { hasInspectionFieldRecord } = require('../../utils/inspectionSubmissionState.js');
 
 const app = getApp();
+
+const REPORT_TYPES = [
+  { value: 'sensory', label: '感官异常' },
+  { value: 'equipment', label: '设备异常' },
+  { value: 'environment', label: '环境异常' },
+  { value: 'violation', label: '违规操作' },
+  { value: 'pollution', label: '污染事件' },
+];
 
 const PARTS_FULFILLMENT_OPTIONS = [
   { key: 'stock', label: '库存领用' },
@@ -53,6 +61,7 @@ function getGps() {
 Page({
   data: {
     packages: [],
+    responsibleSites: getSites(),
     currentPackage: null,
     selectedPlanId: null,
     sites: [],
@@ -60,7 +69,7 @@ Page({
     selSiteId: null,
     site: null,
     categories: [],
-    total: 0, completed: 0, completionPercent: 0, loaded: false,
+    total: 0, completed: 0, completionPercent: 0, loaded: false, executionError: '',
     abnormalCount: 0,
     tripExpanded: false,
     tripReady: false,
@@ -69,10 +78,10 @@ Page({
     reagents: [],
     reagentAction: '暂无记录',
     photoProgress: { req: 0, taken: 0, missing: 0 },
-    anomalyCodes: [],
-    reportSheet: { open: false, typeIndex: 0, codeIndex: 0, description: '', photos: [], submitting: false },
+    reportTypes: REPORT_TYPES,
+    reportSheet: { open: false, typeIndex: 0, description: '', photos: [], submitting: false },
     reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
-    sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [] },
+    sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [], localPhotoMeta: [] },
     submitting: false,
     confirmingDeparture: false,
     partsIssueSheet: { open: false, items: [], submitting: false },
@@ -120,8 +129,8 @@ Page({
       app.globalData.selSiteId = null;
       app.globalData.selPlanId = null;
       const tripReady = this.isTripReady(currentPackage);
-      this.setData({ packages, currentPackage, selectedPlanId: currentPackage ? currentPackage.plan_id : null,
-        sites: sites.map(s => Object.assign({}, s, { id: s.site_id })), selSiteId, loaded: !!currentPackage,
+      this.setData({ packages, currentPackage, selectedPlanId: currentPackage ? currentPackage.plan_id : null, executionError: '',
+        sites: sites.map(s => Object.assign({}, s, { id: s.site_id })), selSiteId, loaded: true,
         tripReady, tripExpanded: currentPackage ? !tripReady : false,
         selSite: currentPackage ? this.data.selSite : null, site: currentPackage ? this.data.site : null,
         categories: currentPackage ? this.data.categories : [], total: currentPackage ? this.data.total : 0,
@@ -129,7 +138,11 @@ Page({
         abnormalCount: currentPackage ? this.data.abnormalCount : 0,
         photoProgress: currentPackage ? this.data.photoProgress : { req: 0, taken: 0, missing: 0 } });
       if (selSiteId) this.loadTasks(selSiteId, done); else if (done) done();
-    }).catch(() => { this.setData({ loaded: true, packages: [], currentPackage: null, sites: [], selSite: null, site: null, selSiteId: null, categories: [], total: 0, completed: 0, completionPercent: 0, abnormalCount: 0, photoProgress: { req: 0, taken: 0, missing: 0 }, tripReady: false, tripExpanded: false }); if (done) done(); });
+    }).catch(err => {
+      const executionError = (err && err.error) || '巡检任务加载失败，请检查网络后重试';
+      this.setData({ loaded: true, executionError, packages: [], currentPackage: null, sites: [], selSite: null, site: null, selSiteId: null, categories: [], total: 0, completed: 0, completionPercent: 0, abnormalCount: 0, photoProgress: { req: 0, taken: 0, missing: 0 }, tripReady: false, tripExpanded: false });
+      if (done) done();
+    });
   },
 
   isTripReady(pkg) {
@@ -408,7 +421,8 @@ Page({
         // 巡检结果枚举集中映射（§6.8：禁止 wxml 硬编码中文枚举）
         const decorated = (res.categories || []).map(cat => ({
           ...cat,
-          category_cn: map(INSPECTION_CATEGORY, cat.category, '未分类'),
+          // 接口给出的业务展示名优先；旧接口或新增分类则保留原有名称，不能笼统显示“未分类”。
+          category_cn: cat.category_cn || map(INSPECTION_CATEGORY, cat.category, cat.category || '其他检查'),
           items: (cat.items || []).map(it => {
             const pendingSubmit = localStore.getPendingSubmit(it.item_id, it.plan_id);
             return pendingSubmit ? {
@@ -531,12 +545,10 @@ Page({
 
   onOpenReport() {
     if (!this.data.selSiteId) return;
-    api.anomalyCodes().then(codes => this.setData({ anomalyCodes: codes || [] })).catch(() => {});
-    this.setData({ reportSheet: { open: true, typeIndex: 0, codeIndex: 0, description: '', photos: [], submitting: false } });
+    this.setData({ reportSheet: { open: true, typeIndex: 0, description: '', photos: [], submitting: false } });
   },
   onCloseReport() { this.setData({ 'reportSheet.open': false }); },
   onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
-  onReportCode(e) { this.setData({ 'reportSheet.codeIndex': Number(e.detail.value) || 0 }); },
   onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value }); },
   onAddReportPhoto() {
     const current = this.data.reportSheet.photos || [];
@@ -569,10 +581,29 @@ Page({
     }).catch(err => wx.showToast({ title: (err && err.error) || '照片删除失败', icon: 'none' }));
   },
   onSubmitReport() {
-    const rs = this.data.reportSheet; const types = ['sensory', 'equipment', 'environment', 'violation', 'pollution']; const code = (this.data.anomalyCodes || [])[rs.codeIndex];
+    const rs = this.data.reportSheet;
+    const reportType = (REPORT_TYPES[rs.typeIndex] || REPORT_TYPES[0]).value;
     if (!rs.description.trim() || !rs.photos.length) { wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' }); return; }
+    if (rs.submitting) return;
     this.setData({ 'reportSheet.submitting': true });
-    getGps().then(gps => api.submitManualReport({ site_id: this.data.selSiteId, report_type: types[rs.typeIndex], description: (code ? '[' + code.code + '] ' : '') + rs.description.trim(), photo_urls: rs.photos, gps_lat: gps && gps.lat, gps_lng: gps && gps.lng })).then(res => { this.setData({ 'reportSheet.open': false, 'reportSheet.submitting': false }); wx.showModal({ title: '异常已上报', content: '已生成工单：' + (res.order_no || '待分派'), showCancel: false }); }).catch(() => this.setData({ 'reportSheet.submitting': false }));
+    getGps()
+      .then(gps => api.submitManualReport({
+        site_id: this.data.selSiteId,
+        report_type: reportType,
+        description: rs.description.trim(),
+        photo_urls: rs.photos,
+        gps_lat: gps && gps.lat,
+        gps_lng: gps && gps.lng,
+      }))
+      .then(res => {
+        this.setData({ 'reportSheet.open': false, 'reportSheet.submitting': false });
+        wx.showModal({ title: '异常已上报', content: `已生成工单：${res.order_no || '待分派'}`, showCancel: false });
+        this.loadTasks(this.data.selSiteId);
+      })
+      .catch(err => {
+        this.setData({ 'reportSheet.submitting': false });
+        wx.showModal({ title: '上报失败', content: (err && err.error) || '提交未完成，请检查网络后重试', showCancel: false });
+      });
   },
 
   hasSiteCheckIn(siteId) {
@@ -633,7 +664,12 @@ Page({
 
   onOpenItem(e) {
     if (!this.hasSiteCheckIn(this.data.selSiteId)) {
-      wx.showToast({ title: '请先完成到站打卡', icon: 'none' });
+      wx.showModal({
+        title: '请先到站打卡',
+        content: '完成到站打卡后才能填写检查项。现在去打卡？',
+        confirmText: '去打卡',
+        success: result => { if (result.confirm) this.onCheckIn(); },
+      });
       return;
     }
     const id = e.currentTarget.dataset.id;
@@ -648,7 +684,7 @@ Page({
     try { photos = target.photo_urls ? JSON.parse(target.photo_urls) : []; } catch (e) { photos = []; }
     const requiredPhotos = target.required_photos || 0;
     this.setData({
-      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: [], requiredPhotos, photoInfo: photoRequirement(requiredPhotos, photos.length, 0) }
+      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: [], localPhotoMeta: [], requiredPhotos, photoInfo: photoRequirement(requiredPhotos, photos.length, 0) }
     });
   },
 
@@ -658,45 +694,63 @@ Page({
   onCalibrator(e) { this.setData({ 'sheet.calibrator': e.detail.value }); },
   onCalValues(e) { this.setData({ 'sheet.calValues': e.detail.value }); },
 
-  onAddPhoto() {
+  onAddPhoto(e) {
     const sheet = this.data.sheet;
     if (sheet.photos.length + sheet.localPhotos.length >= 6) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
-    chooseAndCompress(6 - sheet.photos.length - sheet.localPhotos.length)
+    const captureSource = e && e.currentTarget.dataset.source === 'camera'
+      ? 'camera' : 'watermark_album';
+    chooseInspectionPhotos(6 - sheet.photos.length - sheet.localPhotos.length, captureSource)
       .then(paths => {
         if (!paths || !paths.length) return;
         wx.showLoading({ title: '上传中' });
         const siteId = this.data.selSiteId;
-        // 成功取回 URL；失败（弱网/离线）保留本地路径，待联网由同步引擎上传
-        const tasks = paths.map(p => fileToBase64(p)
-          .then(b64 => api.uploadSitePhoto(siteId, b64).then(r => ({ url: resolveUploadUrl(r.url) })))
-          .catch(() => persistFile(p).then(saved => ({ localPath: saved }))));
-        Promise.allSettled(tasks)
-          .then(results => {
-            wx.hideLoading();
-            const urls = [];
-            const locals = [];
-            results.forEach(r => {
-              if (r.status === 'fulfilled') {
-                const v = r.value;
-                if (v && v.url) urls.push(v.url);
-                else if (v && v.localPath) locals.push(v.localPath);
-              }
-            });
-            const allRemote = sheet.photos.concat(urls);
-            const allLocal = sheet.localPhotos.concat(locals);
-            this.setData({
-              'sheet.photos': allRemote,
-              'sheet.localPhotos': allLocal,
-              'sheet.photoInfo': photoRequirement(sheet.requiredPhotos, allRemote.length, allLocal.length)
-            });
-            api.trackEvent('inspection.photo.captured', { site_id: siteId, item_id: sheet.item.item_id, offline: locals.length > 0 });
-            this.setData({ syncCount: pendingSyncCount() });
-            if (locals.length && !urls.length) wx.showToast({ title: '照片已本地保存，联网同步', icon: 'none' });
-            else if (locals.length) wx.showToast({ title: '部分已本地保存', icon: 'none' });
-          })
-          .catch(() => { wx.hideLoading(); });
+        const locationTask = captureSource === 'camera' ? getGps() : Promise.resolve(null);
+        return locationTask.then(gps => {
+          const metadata = { capture_source: captureSource };
+          if (captureSource === 'camera') {
+            metadata.taken_at = nowStr();
+            if (gps) { metadata.gps_lat = gps.lat; metadata.gps_lng = gps.lng; }
+          }
+          // 成功取回 URL；失败（弱网/离线）保留原图与来源，待联网由同步引擎上传。
+          const tasks = paths.map(p => fileToBase64(p)
+            .then(b64 => api.uploadSitePhoto(siteId, b64, '', metadata)
+              .then(r => ({ url: resolveUploadUrl(r.url), reviewRequired: !!r.review_required })))
+            .catch(() => persistFile(p).then(saved => ({ localPath: saved, metadata }))));
+          return Promise.allSettled(tasks);
+        });
       })
-      .catch(() => {});
+      .then(results => {
+        if (!Array.isArray(results)) return;
+        wx.hideLoading();
+        const urls = [];
+        const locals = [];
+        const localMeta = [];
+        let reviewCount = 0;
+        results.forEach(r => {
+          if (r.status === 'fulfilled') {
+            const v = r.value;
+            if (v && v.url) { urls.push(v.url); reviewCount += v.reviewRequired ? 1 : 0; }
+            else if (v && v.localPath) { locals.push(v.localPath); localMeta.push(v.metadata || {}); }
+          }
+        });
+        const allRemote = sheet.photos.concat(urls);
+        const allLocal = sheet.localPhotos.concat(locals);
+        const allLocalMeta = (sheet.localPhotoMeta || []).concat(localMeta);
+        this.setData({
+          'sheet.photos': allRemote,
+          'sheet.localPhotos': allLocal,
+          'sheet.localPhotoMeta': allLocalMeta,
+          'sheet.photoInfo': photoRequirement(sheet.requiredPhotos, allRemote.length, allLocal.length)
+        });
+        api.trackEvent('inspection.photo.captured', { site_id: this.data.selSiteId, item_id: sheet.item.item_id, source: captureSource, offline: locals.length > 0 });
+        this.setData({ syncCount: pendingSyncCount() });
+        if (reviewCount) wx.showToast({ title: '照片已上传，系统已标记复核', icon: 'none', duration: 2600 });
+        else if (locals.length && !urls.length) wx.showToast({ title: '照片已本地保存，联网同步', icon: 'none' });
+        else if (locals.length) wx.showToast({ title: '部分已本地保存', icon: 'none' });
+      })
+      .catch(() => {
+        wx.hideLoading();
+      });
   },
 
   onDelPhoto(e) {
@@ -711,8 +765,10 @@ Page({
   onDelLocalPhoto(e) {
     const idx = e.currentTarget.dataset.idx;
     const localPhotos = this.data.sheet.localPhotos.slice();
+    const localPhotoMeta = (this.data.sheet.localPhotoMeta || []).slice();
     localPhotos.splice(idx, 1);
-    this.setData({ 'sheet.localPhotos': localPhotos, 'sheet.photoInfo': photoRequirement(this.data.sheet.requiredPhotos, this.data.sheet.photos.length, localPhotos.length) });
+    localPhotoMeta.splice(idx, 1);
+    this.setData({ 'sheet.localPhotos': localPhotos, 'sheet.localPhotoMeta': localPhotoMeta, 'sheet.photoInfo': photoRequirement(this.data.sheet.requiredPhotos, this.data.sheet.photos.length, localPhotos.length) });
   },
 
   onPreview(e) {
@@ -772,6 +828,7 @@ Page({
     this.setData({ submitting: true });
     const photoUrls = JSON.stringify(s.photos);
     const localPhotos = s.localPhotos.slice();
+    const localPhotoMeta = (s.localPhotoMeta || []).slice();
     getGps().then(gps => {
       const payload = {
         item_id: s.item.item_id,
@@ -783,7 +840,8 @@ Page({
         calibration_values: s.calValues,
         // 离线闭环关键：携带站点与本地照片路径，联网后同步引擎先传图再提交
         siteId: this.data.selSiteId,
-        localPhotos: localPhotos
+        localPhotos: localPhotos,
+        localPhotoMeta: localPhotoMeta
       };
       if (gps) { payload.gps_lat = gps.lat; payload.gps_lng = gps.lng; }
       // 本地先落库：无论网络成败都先存实体，断网可走完闭环

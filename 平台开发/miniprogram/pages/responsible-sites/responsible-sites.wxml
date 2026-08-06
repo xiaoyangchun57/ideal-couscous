@@ -1,0 +1,21 @@
+<view class="page">
+  <view class="intro">
+    <text class="intro-title">负责站点</text>
+    <text class="intro-copy">以下站点由你负责。进入站点后可查看信息、打卡或申请备件。</text>
+  </view>
+
+  <view wx:if="{{sites.length}}" class="site-list">
+    <view class="card site-row" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}">
+      <view class="site-main">
+        <text class="site-name">{{item.name}}</text>
+        <text class="site-meta">{{item.code || '未录入编码'}} · {{item.type || '未录入类型'}}</text>
+      </view>
+      <text class="site-action">查看站点 ›</text>
+    </view>
+  </view>
+
+  <view wx:else class="empty">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">暂未分配负责站点</text>
+  </view>
+</view>

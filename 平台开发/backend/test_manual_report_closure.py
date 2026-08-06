@@ -38,7 +38,7 @@ class ManualReportClosureTest(unittest.TestCase):
         })
         with temporary_db() as db:
             db.executescript('''
-                CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT, real_name TEXT);
+                CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT, real_name TEXT, openid TEXT DEFAULT '');
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, status TEXT, related_alert_id INTEGER,
@@ -49,6 +49,12 @@ class ManualReportClosureTest(unittest.TestCase):
                     verification_note TEXT DEFAULT '', verified_by INTEGER, verified_at TEXT,
                     resolved_at TEXT, archived_by INTEGER, archived_at TEXT
                 );
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY, source_type TEXT, source_id INTEGER, file_type TEXT,
+                    is_deleted INTEGER DEFAULT 0, review_status TEXT, reviewer_id INTEGER,
+                    reviewed_at TEXT, reject_reason TEXT, is_flagged INTEGER DEFAULT 0,
+                    flag_reason TEXT DEFAULT '', taken_at TEXT, duplicate_of_id INTEGER
+                );
                 CREATE TABLE alerts (id INTEGER PRIMARY KEY, status TEXT, resolved_at TEXT,
                     resolve_reason TEXT, site_id INTEGER, metric TEXT);
                 CREATE TABLE hotline_events (id INTEGER PRIMARY KEY, related_order_no TEXT, status TEXT);
@@ -57,12 +63,13 @@ class ManualReportClosureTest(unittest.TestCase):
                     event_type TEXT, operator TEXT, remark TEXT
                 );
             ''')
-            db.executemany('INSERT INTO users VALUES (?,?,?)', [
+            db.executemany('INSERT INTO users (id, role, real_name) VALUES (?,?,?)', [
                 (1, 'admin', '管理员'), (2, 'manager', '主管'), (9, 'operator', '现场人员'),
             ])
             db.execute('INSERT INTO user_sites VALUES (9, 1)')
             db.execute("INSERT INTO work_orders VALUES (1, 'MR202607250001', 'reviewing', NULL, '', 1, NULL, NULL, '现场人员')")
             db.execute("INSERT INTO manual_reports (id, site_id, status, order_no) VALUES (7, 1, 'dispatched', 'MR202607250001')")
+            db.execute("INSERT INTO operation_attachments (id, source_type, source_id, file_type, taken_at) VALUES (1, 'workorder', 1, 'image', '2026-07-25 10:00:00')")
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -80,6 +87,9 @@ class ManualReportClosureTest(unittest.TestCase):
         denied = self.client.post('/api/manual-reports/7/verify', headers=self.headers('operator-token'))
         self.assertEqual(denied.status_code, 403)
 
+        missing_note = self.client.post('/api/manual-reports/7/verify', headers=self.headers('manager-token'), json={})
+        self.assertEqual(missing_note.status_code, 400)
+
         verified = self.client.post('/api/manual-reports/7/verify', headers=self.headers('manager-token'), json={'note': '现场描述已核实'})
         self.assertEqual(verified.status_code, 200)
         self.assertEqual(verified.json['status'], 'verified')
@@ -91,7 +101,7 @@ class ManualReportClosureTest(unittest.TestCase):
             db.close()
 
     def test_close_resolves_report_then_manager_can_archive(self):
-        closed = self.client.put('/api/workorders/MR202607250001/status', headers=self.headers('admin-token'), json={'status': 'closed'})
+        closed = self.client.post('/api/workorders/MR202607250001/approve', headers=self.headers('admin-token'), json={})
         self.assertEqual(closed.status_code, 200)
         self.assertEqual(closed.json['status'], 'closed')
         db = sqlite3.connect(self.db_path)

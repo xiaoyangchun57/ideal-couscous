@@ -1,19 +1,20 @@
 import { useState, useEffect } from 'react';
 import {
-  Table, Card, Button, Space, Tag, Typography, Row, Col, Statistic,
-  message, Modal, Select, Input, Empty, Tooltip, Form, Radio, Popconfirm,
+  Table, Card, Button, Space, Tag, Typography,
+  App as AntApp, Modal, Select, Input, Tooltip, Form, Popconfirm,
   Drawer, Descriptions,
 } from 'antd';
 import {
-  ReloadOutlined, ThunderboltOutlined, ExperimentOutlined,
-  CheckOutlined, CloseOutlined, AuditOutlined, FundProjectionScreenOutlined,
+  ReloadOutlined, ExperimentOutlined,
+  CheckOutlined, CloseOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
 import { api } from '../../../services/api';
-import { metricMap, CONCLUSION_OPTIONS } from '../../../services/constants';
+import { metricMap } from '../../../services/constants';
 import EChart from '../../../components/EChart';
+import { StatusStrip, WorkspaceTable, WorkspaceToolbar } from '../../../components/WorkspacePage';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 // 状态映射
 const STATUS_MAP = {
@@ -77,13 +78,14 @@ const LEVEL_OPTIONS = [
   { value: '3', label: 'L2→L3 人工复核' },
 ];
 
-export default function DataReviewTab({ tokens, isDark }) {
+export default function DataReviewTab({ tokens }) {
+  const { message } = AntApp.useApp();
   const [reviews, setReviews] = useState([]);
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState({ by_status: {}, by_metric: [], by_site: [], total: 0, pass_rate: 0 });
   const [loading, setLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
-  const [filters, setFilters] = useState({ level: '', status: '', metric: '', page: 1, per_page: 50 });
+  const [filters, setFilters] = useState({ level: '', status: '', metric: '', page: 1, per_page: 10 });
   const [reviewModal, setReviewModal] = useState({ open: false, mode: 'batch', items: [], action: 'approve', reason: '', conclusion: '' });
   const [codeModal, setCodeModal] = useState(false);
   const [anomalyCodes, setAnomalyCodes] = useState([]);
@@ -118,12 +120,12 @@ export default function DataReviewTab({ tokens, isDark }) {
     try {
       const data = await api.get('/data-reviews/stats');
       setStats(data);
-    } catch (e) { /* 静默 */ }
+    } catch { /* 静默 */ }
   };
 
   const loadCodes = async () => {
     try { setAnomalyCodes(await api.get('/anomaly-codes') || []); }
-    catch (e) { /* 静默 */ }
+    catch { /* 静默 */ }
   };
 
   // 打开编码参考时加载
@@ -137,7 +139,7 @@ export default function DataReviewTab({ tokens, isDark }) {
     try {
       const data = await api.get(`/anomaly-traceability/chain?review_id=${review.id}`);
       setTraceDrawer({ open: true, chain: data, loading: false });
-    } catch (e) {
+    } catch {
       message.error('加载溯源链失败');
       setTraceDrawer({ open: false, chain: null, loading: false });
     }
@@ -154,7 +156,7 @@ export default function DataReviewTab({ tokens, isDark }) {
       const sname = topSite?.site_name || `站点${sid}`;
       setTrendSel({ site_id: sid, metric: topMetric });
       await fetchTrend(sid, topMetric, sname);
-    } catch (e) {
+    } catch {
       message.error('加载趋势数据失败');
       setTrendDrawer({ open: false, data: null, loading: false, metric: '', site_id: null, site_name: '' });
     }
@@ -165,7 +167,7 @@ export default function DataReviewTab({ tokens, isDark }) {
     try {
       const data = await api.get(`/prediction/trend?site_id=${sid}&metric=${m}&hours=48&forecast_steps=12`);
       setTrendDrawer({ open: true, data, loading: false, metric: m, site_id: sid, site_name: sname || `站点${sid}` });
-    } catch (e) {
+    } catch {
       message.error('加载趋势数据失败');
       setTrendDrawer(d => ({ ...d, loading: false, data: null }));
     }
@@ -189,9 +191,9 @@ export default function DataReviewTab({ tokens, isDark }) {
     const { mode, items, action, reason, conclusion } = reviewModal;
     try {
       if (mode === 'single' && items.length === 1) {
-        await api.post(`/data-reviews/${items[0].id}/manual-review`, { action, reviewer_id: reviewer, reason, conclusion });
+        await api.postStrict(`/data-reviews/${items[0].id}/manual-review`, { action, reviewer_id: reviewer, reason, conclusion });
       } else {
-        await api.post('/data-reviews/batch-manual-review', {
+        await api.postStrict('/data-reviews/batch-manual-review', {
           ids: items.map(i => i.id), action, reviewer_id: reviewer, reason, conclusion,
         });
       }
@@ -214,7 +216,7 @@ export default function DataReviewTab({ tokens, isDark }) {
       const s = STATUS_MAP[v] || { label: v, color: 'default' };
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: 'L1', dataIndex: 'auto_result', width: 60, render: (v, r) => {
+    { title: 'L1', dataIndex: 'auto_result', width: 60, render: (v) => {
       if (!v) return <Text type="secondary" style={{ fontSize: 11 }}>-</Text>;
       const s = AUTO_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
@@ -229,7 +231,7 @@ export default function DataReviewTab({ tokens, isDark }) {
       const s = SMART_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: 'L3', dataIndex: 'manual_result', width: 60, render: (v, r) => {
+    { title: 'L3', dataIndex: 'manual_result', width: 60, render: (v) => {
       if (!v) return <Text style={{ fontSize: 11 }}>-</Text>;
       const s = MANUAL_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
@@ -258,73 +260,12 @@ export default function DataReviewTab({ tokens, isDark }) {
   ];
 
   return (
-    <>
-    <style>{`
-      .review-scroll-table .ant-table-body { scrollbar-width: none; -ms-overflow-style: none; }
-      .review-scroll-table .ant-table-body::-webkit-scrollbar { display: none; }
-    `}</style>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, height: '100%', overflow: 'hidden' }}>
-      {/* 统计卡片 */}
-      <Row gutter={[12, 12]}>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic title="待处理总数" value={stats.total || 0} prefix={<AuditOutlined />} valueStyle={{ color: tokens.colorPrimary }} />
-          </Card>
-        </Col>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic
-              title="L1 待审"
-              value={stats.by_status?.pending || 0}
-              valueStyle={{ color: '#8c8c8c' }}
-            />
-          </Card>
-        </Col>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic
-              title="L2 待审"
-              value={stats.by_status?.auto_reviewed || 0}
-              valueStyle={{ color: '#1890ff' }}
-            />
-          </Card>
-        </Col>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic
-              title="L3 待审"
-              value={(stats.by_status?.smart_reviewed || 0) + (stats.by_status?.manual_reviewed || 0)}
-              valueStyle={{ color: '#fa8c16' }}
-            />
-          </Card>
-        </Col>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic
-              title="已归档"
-              value={stats.by_status?.archived || 0}
-              valueStyle={{ color: '#52c41a' }}
-            />
-          </Card>
-        </Col>
-        <Col flex="1">
-          <Card bodyStyle={{ padding: '12px 16px' }}>
-            <Statistic
-              title="归档通过率"
-              value={stats.pass_rate || 0}
-              suffix="%"
-              valueStyle={{ color: '#52c41a' }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      {/* 操作工具栏 */}
-      <Card bodyStyle={{ padding: 12 }}>
-        <Space wrap>
-          <Button icon={<ReloadOutlined />} onClick={() => { load(); loadStats(); }}>刷新</Button>
-          <Text type="secondary">后台每 10 分钟自动完成 L1 仪器审核 + L2 智能审核（统计过程控制 Z 分数）</Text>
-          <div style={{ flex: 1 }} />
+    <div className="workspace-embedded-page">
+      <StatusStrip items={[
+        { label: '待复核', value: stats.total || 0, color: tokens.colorPrimary },
+        { label: 'L3 人工复核', value: (stats.by_status?.smart_reviewed || 0) + (stats.by_status?.manual_reviewed || 0), color: tokens.colorWarning },
+      ]} />
+      <WorkspaceToolbar actions={<>
           <Popconfirm
             title={`确认批量核准 ${selectedRowKeys.length} 条？`}
             disabled={selectedRowKeys.length === 0}
@@ -355,13 +296,8 @@ export default function DataReviewTab({ tokens, isDark }) {
           </Popconfirm>
           <Button icon={<FileTextOutlined />} onClick={() => setCodeModal(true)}>编码参考</Button>
           <Button icon={<ExperimentOutlined />} onClick={openTrend}>趋势预测</Button>
-        </Space>
-      </Card>
-
-      {/* 筛选 */}
-      <Card bodyStyle={{ padding: 12 }}>
-        <Space wrap>
-          <span>审核级别：</span>
+          <Button icon={<ReloadOutlined />} onClick={() => { load(); loadStats(); }}>刷新</Button>
+        </>}>
           <Select
             value={filters.level || undefined}
             onChange={v => setFilters(f => ({ ...f, level: v || '', page: 1 }))}
@@ -370,7 +306,6 @@ export default function DataReviewTab({ tokens, isDark }) {
             placeholder="全部"
             allowClear
           />
-          <span>状态：</span>
           <Select
             value={filters.status || undefined}
             onChange={v => setFilters(f => ({ ...f, status: v || '', page: 1 }))}
@@ -379,7 +314,6 @@ export default function DataReviewTab({ tokens, isDark }) {
             placeholder="全部"
             allowClear
           />
-          <span>指标：</span>
           <Input
             value={filters.metric}
             onChange={e => setFilters(f => ({ ...f, metric: e.target.value, page: 1 }))}
@@ -387,18 +321,12 @@ export default function DataReviewTab({ tokens, isDark }) {
             style={{ width: 150 }}
             allowClear
           />
-        </Space>
-      </Card>
-
-      {/* 审核列表 */}
-      <Card bodyStyle={{ padding: 0 }} style={{ flex: 1, overflow: 'hidden' }}>
-        <div style={{ height: '100%', overflow: 'hidden', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
-        <Table
+      </WorkspaceToolbar>
+      <WorkspaceTable
           rowKey="id"
           columns={columns}
           dataSource={reviews}
           loading={loading}
-          className="review-scroll-table"
           rowSelection={{
             selectedRowKeys,
             onChange: setSelectedRowKeys,
@@ -407,16 +335,12 @@ export default function DataReviewTab({ tokens, isDark }) {
             current: filters.page,
             pageSize: filters.per_page,
             total,
-            showSizeChanger: true,
-            pageSizeOptions: ['20', '50', '100'],
+            showSizeChanger: false,
             onChange: (page, pageSize) => setFilters(f => ({ ...f, page, per_page: pageSize })),
           }}
-          scroll={{ y: 'calc(100vh - 460px)' }}
-          size="small"
-          locale={{ emptyText: <Empty description="暂无审核数据" /> }}
+          emptyType={(filters.level || filters.status || filters.metric) ? 'filtered' : 'empty'}
+          onRefresh={() => { load(); loadStats(); }}
         />
-        </div>
-      </Card>
 
       {/* 人工复核弹窗 */}
       <Modal
@@ -607,7 +531,6 @@ export default function DataReviewTab({ tokens, isDark }) {
           </Card>
         )}
       </Drawer>
-      </div>
-    </>
+    </div>
   );
 }

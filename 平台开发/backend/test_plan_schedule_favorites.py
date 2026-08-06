@@ -35,6 +35,8 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
         app_module._tokens.update({
             'owner-token': {'id': 2, 'role': 'operator', 'real_name': '固定运维', 'username': 'owner'},
             'other-token': {'id': 3, 'role': 'operator', 'real_name': '其他运维', 'username': 'other'},
+            'admin-token': {'id': 4, 'role': 'admin', 'roles': ['admin'], 'real_name': '纯管理员', 'username': 'admin'},
+            'dual-token': {'id': 2, 'role': 'admin', 'roles': ['admin', 'operator'], 'real_name': '双角色', 'username': 'dual'},
         })
         with temporary_db() as db:
             db.executescript('''
@@ -146,6 +148,23 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 409, duplicate.json)
         self.assertEqual(second.status_code, 201, second.json)
         self.assertEqual(other.status_code, 403, other.json)
+
+    def test_pure_admin_cannot_use_operator_favorites_but_dual_role_can(self):
+        created = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),
+                                   json={'schedule_id': 1})
+        favorite_id = created.json['id']
+
+        responses = [
+            self.client.get('/api/plan-schedule-favorites', headers=self.headers('admin-token')),
+            self.client.post('/api/plan-schedule-favorites', headers=self.headers('admin-token'),
+                             json={'schedule_id': 1}),
+            self.client.delete(f'/api/plan-schedule-favorites/{favorite_id}', headers=self.headers('admin-token')),
+            self.client.post(f'/api/plan-schedule-favorites/{favorite_id}/draft',
+                             headers=self.headers('admin-token'), json={'period_start': '2026-08-03'}),
+        ]
+        self.assertTrue(all(response.status_code == 403 for response in responses))
+        self.assertEqual(self.client.get('/api/plan-schedule-favorites',
+                                         headers=self.headers('dual-token')).status_code, 200)
 
 
 if __name__ == '__main__':

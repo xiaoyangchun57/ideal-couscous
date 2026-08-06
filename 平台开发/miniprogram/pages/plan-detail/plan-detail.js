@@ -103,6 +103,8 @@ Page({
             status_cn: '待审批'
           })) : []);
 
+        const user = getUser() || {};
+        const roles = user.roles || [user.role || ''];
         this.setData({
           loaded: true,
           detail: res,
@@ -117,7 +119,7 @@ Page({
           canEdit: res.status === 'draft' || res.status === 'rejected',
           canChange: res.status === 'approved',
           canExecute: res.status === 'approved' && days.some(day => day.date === todayString() && day.sites.length > 0),
-          canFavorite: Number(res.user_id) === Number((getUser() || {}).id) && days.some(day => day.sites.length > 0)
+          canFavorite: roles.includes('operator') && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0)
         });
         if (done) done();
       })
