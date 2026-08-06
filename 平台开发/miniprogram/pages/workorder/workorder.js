@@ -5,18 +5,9 @@ const { nowStr } = require('../../utils/util.js');
 const { chooseAndCompress, fileToBase64, captureFlushedPhoto } = require('../../utils/photos.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
+const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 
 const app = getApp();
-
-function getGps() {
-  return new Promise((resolve) => {
-    wx.getLocation({
-      type: 'gcj02',
-      success(res) { resolve({ lat: res.latitude, lng: res.longitude }); },
-      fail() { resolve(null); }
-    });
-  });
-}
 
 // 状态分组的筛选映射（覆盖后端全部 7 种状态，避免漏显）
 const TAB_GROUPS = {
@@ -172,16 +163,25 @@ Page({
     const item = this.data.sheet.item;
     if (!item) return;
     wx.showLoading({ title: '定位中' });
-    getGps().then(gps => {
+    requestLocation().then(gps => {
       wx.hideLoading();
       const payload = { order_no: item.order_no, site_id: item.site_id, site_name: item.site_name, check_time: nowStr() };
-      if (gps) { payload.lat = gps.lat; payload.lng = gps.lng; }
+      payload.lat = gps.lat;
+      payload.lng = gps.lng;
       api.checkIn(payload)
         .then(() => {
           wx.showToast({ title: '已到场签到', icon: 'success' });
           this.setData({ 'sheet.item.check_in_time': nowStr(), 'sheet.item.checked_in': true });
         })
         .catch((err) => this.handleWriteFailure(err, '签到失败'));
+    }).catch(error => {
+      wx.hideLoading();
+      const openSettings = shouldOpenLocationSettings(error);
+      wx.showModal({
+        title: '无法获取位置', content: locationErrorMessage(error), showCancel: false,
+        confirmText: openSettings ? '去设置' : '知道了',
+        success: () => { if (openSettings) wx.openSetting({}); }
+      });
     });
   },
 

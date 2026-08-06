@@ -35,5 +35,11 @@
     ]
   },
   "sitemapLocation": "sitemap.json",
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于到站打卡、巡检取证和工单现场处置，确认人员在对应站点作业。"
+    }
+  },
+  "requiredPrivateInfos": ["getLocation"],
   "style": "v2"
 }

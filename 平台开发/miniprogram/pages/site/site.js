@@ -2,18 +2,9 @@ const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
+const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 
 const app = getApp();
-
-function getGps() {
-  return new Promise((resolve) => {
-    wx.getLocation({
-      type: 'gcj02',
-      success(res) { resolve({ lat: res.latitude, lng: res.longitude }); },
-      fail() { resolve(null); }
-    });
-  });
-}
 
 const PARTS_FULFILLMENT_OPTIONS = [
   { key: 'stock', label: '库存领用' },
@@ -96,10 +87,11 @@ Page({
     if (!s || this.data.checkingIn) return;
     this.setData({ checkingIn: true });
     wx.showLoading({ title: '定位中' });
-    getGps().then(gps => {
+    requestLocation().then(gps => {
       wx.hideLoading();
       const payload = { site_id: s.id, site_name: s.name, check_time: nowStr() };
-      if (gps) { payload.lat = gps.lat; payload.lng = gps.lng; }
+      payload.lat = gps.lat;
+      payload.lng = gps.lng;
       api.checkIn(payload)
         .then(() => wx.showToast({ title: '打卡成功', icon: 'success' }))
         .catch((err) => {
@@ -107,6 +99,15 @@ Page({
           wx.showToast({ title: err && err.queued ? '已离线保存，联网后自动同步' : '打卡失败', icon: 'none' });
         })
         .finally(() => this.setData({ checkingIn: false }));
+    }).catch(error => {
+      wx.hideLoading();
+      const openSettings = shouldOpenLocationSettings(error);
+      wx.showModal({
+        title: '无法获取位置', content: locationErrorMessage(error), showCancel: false,
+        confirmText: openSettings ? '去设置' : '知道了',
+        success: () => { if (openSettings) wx.openSetting({}); }
+      });
+      this.setData({ checkingIn: false });
     });
   },
 
@@ -114,9 +115,8 @@ Page({
     const s = this.data.site;
     if (!s) return;
     wx.showLoading({ title: '定位中' });
-    getGps().then(gps => {
+    requestLocation().then(gps => {
       wx.hideLoading();
-      if (!gps) { wx.showToast({ title: '定位失败', icon: 'none' }); return; }
       api.calibrate(s.id, gps.lat, gps.lng)
         .then(res => {
           const d = (res && res.distance_m != null) ? res.distance_m : 0;
@@ -124,6 +124,9 @@ Page({
           this.loadSite(s.id);
         })
       .catch(() => wx.showToast({ title: '校准失败', icon: 'none' }));
+    }).catch(error => {
+      wx.hideLoading();
+      wx.showToast({ title: locationErrorMessage(error), icon: 'none' });
     });
   },
 

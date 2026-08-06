@@ -9,6 +9,7 @@ const localStore = require('../../utils/localStore.js');
 const { flushLocalOps } = require('../../utils/sync.js');
 const { selectExecutionSite, photoRequirement } = require('../../utils/executionState.js');
 const { hasInspectionFieldRecord } = require('../../utils/inspectionSubmissionState.js');
+const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 
 const app = getApp();
 
@@ -46,16 +47,6 @@ function decoratePackageResources(pkg) {
     return summary;
   }, { planned: 0, issued: 0, remaining: 0, totalKinds: 0, remainingKinds: 0 });
   return Object.assign({}, pkg, { resource_parts: resourceParts, resource_summary: resourceSummary });
-}
-
-function getGps() {
-  return new Promise((resolve) => {
-    wx.getLocation({
-      type: 'gcj02',
-      success(res) { resolve({ lat: res.latitude, lng: res.longitude }); },
-      fail() { resolve(null); }
-    });
-  });
 }
 
 Page({
@@ -586,7 +577,7 @@ Page({
     if (!rs.description.trim() || !rs.photos.length) { wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' }); return; }
     if (rs.submitting) return;
     this.setData({ 'reportSheet.submitting': true });
-    getGps()
+    requestLocation().catch(() => null)
       .then(gps => api.submitManualReport({
         site_id: this.data.selSiteId,
         report_type: reportType,
@@ -625,12 +616,8 @@ Page({
     const site = this.data.site;
     if (!site) return;
     wx.showLoading({ title: '定位中' });
-    getGps().then(gps => {
+    requestLocation().then(gps => {
       wx.hideLoading();
-      if (!gps) {
-        wx.showModal({ title: '无法获取位置', content: '到站打卡必须获取定位。请打开位置权限并重试。', confirmText: '去设置', success: r => { if (r.confirm) wx.openSetting({}); } });
-        return;
-      }
       const payload = { site_id: site.id, site_name: site.name, check_time: nowStr() };
       payload.lat = gps.lat; payload.lng = gps.lng;
       // 本地先落库：断网/弱网也留存打卡态，联网后静默同步
@@ -648,6 +635,14 @@ Page({
           this.setData({ syncCount: pendingSyncCount() });
           wx.showToast({ title: '打卡已本地保存，联网同步', icon: 'none' });
         });
+    }).catch(error => {
+      wx.hideLoading();
+      const openSettings = shouldOpenLocationSettings(error);
+      wx.showModal({
+        title: '无法获取位置', content: locationErrorMessage(error), showCancel: false,
+        confirmText: openSettings ? '去设置' : '知道了',
+        success: () => { if (openSettings) wx.openSetting({}); }
+      });
     });
   },
 
@@ -704,7 +699,7 @@ Page({
         if (!paths || !paths.length) return;
         wx.showLoading({ title: '上传中' });
         const siteId = this.data.selSiteId;
-        const locationTask = captureSource === 'camera' ? getGps() : Promise.resolve(null);
+        const locationTask = captureSource === 'camera' ? requestLocation().catch(() => null) : Promise.resolve(null);
         return locationTask.then(gps => {
           const metadata = { capture_source: captureSource };
           if (captureSource === 'camera') {
@@ -829,7 +824,7 @@ Page({
     const photoUrls = JSON.stringify(s.photos);
     const localPhotos = s.localPhotos.slice();
     const localPhotoMeta = (s.localPhotoMeta || []).slice();
-    getGps().then(gps => {
+    requestLocation().catch(() => null).then(gps => {
       const payload = {
         item_id: s.item.item_id,
         plan_id: s.item.plan_id,
