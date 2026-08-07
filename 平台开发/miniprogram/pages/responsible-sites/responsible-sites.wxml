@@ -8,7 +8,7 @@
     <view class="card site-row" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}">
       <view class="site-main">
         <text class="site-name">{{item.name}}</text>
-        <text class="site-meta">{{item.code || '未录入编码'}} · {{item.type || '未录入类型'}}</text>
+        <text class="site-meta">{{item.code || '未录入编码'}} · {{item.type_cn || '其他站点'}}</text>
       </view>
       <text class="site-action">查看站点 ›</text>
     </view>
