@@ -111,9 +111,14 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.json)
         self.assertIn('坐标', response.json['error'])
 
-    def test_calibration_requires_admin_and_explicit_confirmation(self):
-        denied = self.client.put('/api/sites/1/calibrate', headers=self.headers('operator-token'), json={
+    def test_calibration_requires_assigned_task_and_explicit_confirmation(self):
+        operator_confirmed = self.client.put('/api/sites/1/calibrate', headers=self.headers('operator-token'), json={
             'lat': 28.6801, 'lng': 115.7301, 'confirm': True, 'site_name': '测试站一',
+        })
+        self.assertEqual(operator_confirmed.status_code, 200, operator_confirmed.json)
+
+        denied = self.client.put('/api/sites/3/calibrate', headers=self.headers('operator-token'), json={
+            'lat': 28.7001, 'lng': 115.7501, 'confirm': True, 'site_name': '测试站三',
         })
         self.assertEqual(denied.status_code, 403, denied.json)
 

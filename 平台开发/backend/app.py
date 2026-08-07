@@ -14874,7 +14874,7 @@ def mobile_site_tasks(site_id):
             '站点尚未配置有效坐标，请联系管理员' if site['gps_lat'] is None or site['gps_lng'] is None
             else ('该站点不在本人当前可执行巡检任务中，请从“今日任务”进入' if not assigned_today else '')
         )
-        site_payload['can_calibrate'] = _has_any_role(user, 'admin')
+        site_payload['can_calibrate'] = _has_any_role(user, 'admin') or bool(assigned_today and _has_any_role(user, 'operator'))
 
         # 获取该站点的所有检查项（来自活跃计划）
         plans = db.execute("""SELECT DISTINCT ip.id FROM insp_plans ip
@@ -15385,10 +15385,10 @@ def _parse_gps_pair(lat, lng):
 @app.route('/api/sites/<int:site_id>/calibrate', methods=['PUT'])
 @login_required
 def calibrate_site_location(site_id):
-    """高风险站点位置校准：仅管理员可操作，且必须显式确认目标站点。"""
+    """现场位置校准：管理员可处理任意站点，运维员仅可处理本人当前任务站点。"""
     data = request.get_json(silent=True) or {}
-    if not _has_any_role(g.current_user, 'admin'):
-        return jsonify({'error': '只有管理员可以校准站点位置'}), 403
+    if not _has_any_role(g.current_user, 'admin', 'operator'):
+        return jsonify({'error': '只有管理员或负责该站点的运维人员可以校准位置'}), 403
     if data.get('confirm') is not True:
         return jsonify({'error': '位置校准需要二次确认', 'requires_confirmation': True}), 409
     coords = _parse_gps_pair(data.get('lat'), data.get('lng'))
@@ -15402,6 +15402,22 @@ def calibrate_site_location(site_id):
             return jsonify({'error': '站点不存在'}), 404
         if data.get('site_name') and data.get('site_name') != site['name']:
             return jsonify({'error': '校准目标已变化，请返回站点详情后重试'}), 409
+        if not _has_any_role(g.current_user, 'admin'):
+            today = datetime.now().strftime('%Y-%m-%d')
+            assigned = db.execute("""SELECT 1 FROM insp_plans ip
+                JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+                JOIN insp_plan_items pi ON pi.plan_id=ip.id
+                WHERE ip.assignee_id=? AND date(ip.generate_date)<=?
+                  AND ip.status IN ('active','completed') AND ps.status='approved'
+                  AND pi.site_id=? AND COALESCE(pi.execution_status, 'active')='active'
+                  AND (date(ip.generate_date)=? OR EXISTS (
+                        SELECT 1 FROM insp_plan_items pending
+                        WHERE pending.plan_id=ip.id AND pending.site_id=pi.site_id
+                          AND COALESCE(pending.execution_status, 'active')='active'
+                          AND pending.result IS NULL
+                  )) LIMIT 1""", (g.current_user['id'], today, site_id, today)).fetchone()
+            if not assigned:
+                return jsonify({'error': '只能校准本人当前巡检任务中的站点'}), 403
 
         old_lat = site['gps_lat']
         old_lng = site['gps_lng']
