@@ -4,7 +4,7 @@
 //
 // 开发者工具用于本地回归，真机预览和正式版始终访问线上后端。
 // 这样本地模拟数据不会与线上数据混淆，也不会把 127.0.0.1 带入真机版本。
-const USE_LOCAL_API_IN_DEVTOOLS = false;
+const USE_LOCAL_API_IN_DEVTOOLS = true;
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:5000';
 
 let isDevtools = false;
