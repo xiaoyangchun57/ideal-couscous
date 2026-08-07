@@ -19,7 +19,9 @@ Page({
     this.setData({
       realName: (u && u.real_name) || '运维人员',
       today: todayStr(),
-      responsibleSites: getSites(),
+      responsibleSites: (getSites() || []).map(site => Object.assign({}, site, {
+        type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点')
+      })),
       canReview: reviewRoles.some(role => roles.includes(role)),
     });
   },

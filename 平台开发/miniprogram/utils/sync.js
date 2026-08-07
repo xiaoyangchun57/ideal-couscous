@@ -3,10 +3,12 @@
 const localStore = require('./localStore.js');
 const { fileToBase64 } = require('./photos.js');
 const api = require('../services/api.js');
+let localFlushPromise = null;
 
-async function flushLocalOps() {
+async function flushLocalOpsInternal() {
   const pending = localStore.getPending();
-  if (!pending.length) return;
+  const summary = { synced: 0, remaining: 0, rejected: [] };
+  if (!pending.length) return summary;
   // 按创建时间顺序回放，保证闭环完整（先打卡/照片，后提交）
   const ordered = pending.slice().sort((a, b) => a.createdAt - b.createdAt);
   for (const op of ordered) {
@@ -26,7 +28,11 @@ async function flushLocalOps() {
               );
               const u = r && r.url;
               if (u) urls.push(u);
-            } catch (e) { /* 单张失败，跳过，其余继续 */ }
+            } catch (e) {
+              // Keep transient failures retryable, but reject permanently invalid photos.
+              if (e && (e.status >= 400 || e.code === -1)) throw e;
+              throw Object.assign(new Error('照片文件不可读，请重新选择或拍摄'), { status: 422 });
+            }
           }
           if (urls.length !== payload.localPhotos.length) {
             throw new Error('仍有照片未上传，保留作业等待下次同步');
@@ -42,18 +48,33 @@ async function flushLocalOps() {
           wx.removeSavedFile({ filePath, fail() {} });
         });
         localStore.markSynced(op.id);
+        summary.synced += 1;
         api.trackEvent('inspection.item.synced', { site_id: op.data.siteId, item_id: op.data.item_id, operation_id: op.id, offline: true });
       } else if (op.type === 'checkin') {
         await api.checkIn(op.data, true);
         localStore.markSynced(op.id);
+        summary.synced += 1;
         api.trackEvent('inspection.checkin.synced', { site_id: op.data.site_id, operation_id: op.id, offline: true });
       }
       // 兼容：若未来有独立 photo op，此处可扩展
     } catch (e) {
       api.trackEvent('inspection.sync.failed', { site_id: op.data.siteId || op.data.site_id, item_id: op.data.item_id, operation_id: op.id, error_code: (e && e.code) || 'sync_error' });
-      // 失败留待下次同步；不中断其余实体回放
+      if (e && e.status >= 400 && e.status < 500) {
+        // 业务拒绝不会因重试而改变（例如超出 500m），移出队列并把原因交给页面展示。
+        localStore.removeOp(op.id);
+        summary.rejected.push({ id: op.id, type: op.type, error: e.error || '服务器拒绝了该操作' });
+      }
+      // 网络/服务端错误留待下次同步；不中断其余实体回放
     }
   }
+  summary.remaining = localStore.getPending().length;
+  return summary;
+}
+
+function flushLocalOps() {
+  if (localFlushPromise) return localFlushPromise;
+  localFlushPromise = flushLocalOpsInternal().finally(() => { localFlushPromise = null; });
+  return localFlushPromise;
 }
 
 module.exports = { flushLocalOps };

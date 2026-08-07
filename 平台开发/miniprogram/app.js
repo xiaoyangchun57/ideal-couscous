@@ -4,6 +4,12 @@ const { captureFlushedPhoto } = require('./utils/photos.js');
 const { flushLocalOps } = require('./utils/sync.js');
 const api = require('./services/api.js');
 
+function flushPendingOperations() {
+  if (!getToken()) return;
+  flushQueue(captureFlushedPhoto);
+  flushLocalOps().catch(() => {});
+}
+
 App({
   globalData: {
     token: '',
@@ -27,9 +33,15 @@ App({
     // 网络恢复时自动重传失败队列 + 本地巡检闭环实体（弱网/离线策略，仅注册一次）
     wx.onNetworkStatusChange((res) => {
       if (res.isConnected && getToken()) {
-        flushQueue(captureFlushedPhoto);
-        flushLocalOps().catch(() => {});
+        flushPendingOperations();
       }
     });
+    // 网络在小程序启动前已经恢复时不会触发 onNetworkStatusChange，启动时也要回放一次。
+    flushPendingOperations();
+  },
+
+  onShow() {
+    // 从后台返回或登录后 reLaunch 时重试，避免弱网队列只等网络事件而长期不动。
+    flushPendingOperations();
   }
 });

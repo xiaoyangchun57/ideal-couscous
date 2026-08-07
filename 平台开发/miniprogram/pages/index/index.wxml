@@ -109,7 +109,7 @@
     <view class="responsible-list">
       <view class="responsible-card" wx:for="{{responsibleSites}}" wx:key="id">
         <text class="responsible-name">{{item.name}}</text>
-        <text class="responsible-meta">{{item.code}} · {{item.type}}</text>
+        <text class="responsible-meta">{{item.code}} · {{item.type_cn}}</text>
       </view>
     </view>
   </view>

@@ -14850,17 +14850,50 @@ def mobile_site_tasks(site_id):
         if not site:
             return jsonify({'error': '站点不存在'}), 404
 
+        site_payload = {
+            'id': site['id'], 'name': site['name'], 'code': site['code'],
+            'lat': site['gps_lat'], 'lng': site['gps_lng'], 'type': site['type'],
+            'type_cn': {'water_quality':'水质自动站','manual_station':'水质手动站','drinking_source':'饮用水源站','cross_boundary':'跨界断面站','groundwater':'地下水站'}.get(site['type'], site['type']),
+        }
+        today = datetime.now().strftime('%Y-%m-%d')
+        assigned_today = db.execute("""SELECT 1 FROM insp_plans ip
+            JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+            JOIN insp_plan_items pi ON pi.plan_id=ip.id
+            WHERE ip.assignee_id=? AND date(ip.generate_date)<=? AND ip.status IN ('active','completed')
+              AND ps.status='approved' AND pi.site_id=?
+              AND COALESCE(pi.execution_status, 'active')='active'
+              AND (date(ip.generate_date)=? OR EXISTS (
+                    SELECT 1 FROM insp_plan_items pending
+                    WHERE pending.plan_id=ip.id AND pending.site_id=pi.site_id
+                      AND COALESCE(pending.execution_status, 'active')='active'
+                      AND pending.result IS NULL
+              )) LIMIT 1""",
+            (user['id'], today, site_id, today)).fetchone()
+        site_payload['can_check_in'] = bool(assigned_today and site['gps_lat'] is not None and site['gps_lng'] is not None)
+        site_payload['checkin_block_reason'] = (
+            '站点尚未配置有效坐标，请联系管理员' if site['gps_lat'] is None or site['gps_lng'] is None
+            else ('该站点不在本人当前可执行巡检任务中，请从“今日任务”进入' if not assigned_today else '')
+        )
+        site_payload['can_calibrate'] = _has_any_role(user, 'admin')
+
         # 获取该站点的所有检查项（来自活跃计划）
-        plans = db.execute(
-            "SELECT id FROM insp_plans WHERE status IN ('active','draft')"
-        ).fetchall()
+        plans = db.execute("""SELECT DISTINCT ip.id FROM insp_plans ip
+            JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+            JOIN insp_plan_items pi ON pi.plan_id=ip.id
+            WHERE ip.assignee_id=? AND date(ip.generate_date)<=?
+              AND ip.status IN ('active','completed') AND ps.status='approved'
+              AND pi.site_id=? AND COALESCE(pi.execution_status, 'active')='active'
+              AND (date(ip.generate_date)=? OR EXISTS (
+                    SELECT 1 FROM insp_plan_items pending
+                    WHERE pending.plan_id=ip.id AND pending.site_id=pi.site_id
+                      AND COALESCE(pending.execution_status, 'active')='active'
+                      AND pending.result IS NULL
+              ))""", (user['id'], today, site_id, today)).fetchall()
         plan_ids = [p['id'] for p in plans]
 
         if not plan_ids:
             return jsonify({
-                'site': {'id': site['id'], 'name': site['name'], 'code': site['code'],
-                         'lat': site['gps_lat'], 'lng': site['gps_lng'], 'type': site['type'],
-                         'type_cn': {'water_quality':'水质自动站','manual_station':'水质手动站','drinking_source':'饮用水源站','cross_boundary':'跨界断面站','groundwater':'地下水站'}.get(site['type'], site['type'])},
+                'site': site_payload,
                 'categories': [],
                 'total': 0, 'completed': 0,
             })
@@ -14906,9 +14939,7 @@ def mobile_site_tasks(site_id):
 
         _TM_CN = {'water_quality':'水质自动站','manual_station':'水质手动站','drinking_source':'饮用水源站','cross_boundary':'跨界断面站','groundwater':'地下水站'}
         return jsonify({
-            'site': {'id': site['id'], 'name': site['name'], 'code': site['code'],
-                     'lat': site['gps_lat'], 'lng': site['gps_lng'], 'type': site['type'],
-                     'type_cn': _TM_CN.get(site['type'], site['type'])},
+            'site': dict(site_payload, type_cn=_TM_CN.get(site['type'], site['type'])),
             'categories': list(categories.values()),
             'total': total,
             'completed': completed,
@@ -15337,20 +15368,40 @@ def mobile_execution_reagent_qc(plan_id, site_id):
     return jsonify({'ok': True, 'qc_status': status, 'deviation': deviation})
 
 
+def _parse_gps_pair(lat, lng):
+    """Validate and normalize client-provided WGS/GCJ coordinates."""
+    try:
+        lat = float(lat)
+        lng = float(lng)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lng)):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return None
+    return lat, lng
+
+
 @app.route('/api/sites/<int:site_id>/calibrate', methods=['PUT'])
 @login_required
 def calibrate_site_location(site_id):
-    """站点位置校准：一线人员到场后校准站点经纬度。"""
+    """高风险站点位置校准：仅管理员可操作，且必须显式确认目标站点。"""
     data = request.get_json(silent=True) or {}
-    new_lat = data.get('lat')
-    new_lng = data.get('lng')
-    if new_lat is None or new_lng is None:
-        return jsonify({'error': '请提供经纬度'}), 400
+    if not _has_any_role(g.current_user, 'admin'):
+        return jsonify({'error': '只有管理员可以校准站点位置'}), 403
+    if data.get('confirm') is not True:
+        return jsonify({'error': '位置校准需要二次确认', 'requires_confirmation': True}), 409
+    coords = _parse_gps_pair(data.get('lat'), data.get('lng'))
+    if not coords:
+        return jsonify({'error': '经纬度格式无效，请重新获取当前位置'}), 400
+    new_lat, new_lng = coords
 
     with get_db() as db:
         site = db.execute("SELECT * FROM sites WHERE id=?", (site_id,)).fetchone()
         if not site:
             return jsonify({'error': '站点不存在'}), 404
+        if data.get('site_name') and data.get('site_name') != site['name']:
+            return jsonify({'error': '校准目标已变化，请返回站点详情后重试'}), 409
 
         old_lat = site['gps_lat']
         old_lng = site['gps_lng']
@@ -15574,8 +15625,10 @@ def mobile_check_in():
     lng = data.get('lng')
     user = g.current_user
     idempotency_key = data.get('_idempotency_key')
-    if lat is None or lng is None:
+    coords = _parse_gps_pair(lat, lng)
+    if not coords:
         return jsonify({'error': '到站打卡必须获取当前位置，请开启定位权限后重试'}), 400
+    lat, lng = coords
     with get_db() as db:
         cached = _mobile_idempotency_get(db, idempotency_key, 'check-in')
         if cached is not None:
@@ -15591,15 +15644,17 @@ def mobile_check_in():
                 return jsonify({'error': '已关闭工单不能再签到'}), 400
             site = db.execute("SELECT gps_lat, gps_lng FROM sites WHERE id=?", (wo['site_id'],)).fetchone()
             distance_m = _checkin_distance_to_site(site, lat, lng)
-            if distance_m is not None and distance_m > 500:
+            if distance_m is None:
+                return jsonify({'error': '该站点尚未配置有效坐标，无法进行现场签到，请联系管理员'}), 409
+            if distance_m > 500:
                 return jsonify({'error': f'距站点约 {distance_m:.0f}m，超出 500m 到场范围，无法签到',
                                 'distance_m': round(distance_m)}), 400
             db.execute(
                 "UPDATE work_orders SET check_in_lat=?, check_in_lng=?, check_in_time=datetime('now','localtime'), check_in_user=? WHERE order_no=?",
                 (lat, lng, user.get('real_name') or user.get('username'), order_no))
             response = {'success': True, 'message': f'工单 {order_no} 已到场签到',
-                        'distance_m': round(distance_m) if distance_m is not None else None,
-                        'location_verified': distance_m is not None}
+                        'distance_m': round(distance_m),
+                        'location_verified': True}
             _mobile_idempotency_store(db, idempotency_key, 'check-in', response)
             db.commit()
             return jsonify(response)
@@ -15613,14 +15668,22 @@ def mobile_check_in():
         assigned = db.execute("""SELECT 1 FROM insp_plans ip
             JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
             JOIN insp_plan_items pi ON pi.plan_id=ip.id
-            WHERE ip.assignee_id=? AND ip.generate_date=? AND ip.status IN ('active','completed')
+            WHERE ip.assignee_id=? AND date(ip.generate_date)<=? AND ip.status IN ('active','completed')
               AND ps.status='approved' AND pi.site_id=?
-              AND COALESCE(pi.execution_status, 'active')='active' LIMIT 1""",
-            (user['id'], today, site_id)).fetchone()
+              AND COALESCE(pi.execution_status, 'active')='active'
+              AND (date(ip.generate_date)=? OR EXISTS (
+                    SELECT 1 FROM insp_plan_items pending
+                    WHERE pending.plan_id=ip.id AND pending.site_id=pi.site_id
+                      AND COALESCE(pending.execution_status, 'active')='active'
+                      AND pending.result IS NULL
+              )) LIMIT 1""",
+            (user['id'], today, site_id, today)).fetchone()
         if not assigned:
             return jsonify({'error': '该站点不在本人当天已批准的巡检执行包中'}), 403
         distance_m = _checkin_distance_to_site(site, lat, lng)
-        if distance_m is not None and distance_m > 500:
+        if distance_m is None:
+            return jsonify({'error': '该站点尚未配置有效坐标，无法进行现场打卡，请联系管理员'}), 409
+        if distance_m > 500:
             return jsonify({'error': f'距站点约 {distance_m:.0f}m，超出 500m 到场范围，无法打卡',
                             'distance_m': round(distance_m)}), 400
         server_check_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -15630,8 +15693,8 @@ def mobile_check_in():
         """, (site_id, data.get('site_name'), user['id'], user['real_name'],
               server_check_time, lat, lng))
         response = {'success': True, 'message': f'已打卡站点 #{site_id}',
-                    'distance_m': round(distance_m) if distance_m is not None else None,
-                    'location_verified': distance_m is not None}
+                    'distance_m': round(distance_m),
+                    'location_verified': True}
         _mobile_idempotency_store(db, idempotency_key, 'check-in', response)
         db.commit()
         return jsonify(response)

@@ -15,6 +15,15 @@ function write(list) {
 // data: 业务载荷（submit 内置 localPhotos 本地路径数组、siteId）
 function addOp(type, data) {
   const list = read();
+  if (type === 'checkin') {
+    const existing = list.find((operation) => operation.type === 'checkin'
+      && operation.syncStatus === 'pending'
+      && operation.data.site_id === data.site_id);
+    if (existing) {
+      data._idempotency_key = existing.id;
+      return existing.id;
+    }
+  }
   if (type === 'submit') {
     const existing = list.find((operation) => isPendingInspectionSubmit([operation], data.item_id, data.plan_id));
     if (existing) {

@@ -10,10 +10,11 @@
   </view>
 
   <view class="ops">
-    <button class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn}}" bindtap="onCheckIn">到站打卡</button>
+    <button class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.can_check_in ? '到站打卡' : '今日任务未批准'}}</button>
+    <view class="ops-hint" wx:if="{{!site.can_check_in}}">{{site.checkin_block_reason}}</view>
     <view class="secondary-ops">
       <button class="btn-ghost op-btn" bindtap="onNavigate">导航到站</button>
-      <button class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
+      <button wx:if="{{site.can_calibrate}}" class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
     </view>
     <button class="btn-ghost parts-apply-btn" bindtap="onOpenPartsApply">申请备品备件</button>
   </view>

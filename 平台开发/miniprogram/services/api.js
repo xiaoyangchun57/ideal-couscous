@@ -59,8 +59,8 @@ const api = {
     request('/api/mobile/check-in', 'POST', payload, { queue: !managedByOutbox }),
 
   // 位置校准
-  calibrate: (siteId, lat, lng) =>
-    request('/api/sites/' + siteId + '/calibrate', 'PUT', { lat, lng }),
+  calibrate: (siteId, lat, lng, extra) =>
+    request('/api/sites/' + siteId + '/calibrate', 'PUT', Object.assign({ lat, lng }, extra || {})),
 
   // 上传站点影像（base64）；弱网失败自动进入失败队列待重传
   uploadSitePhoto: (siteId, image, idempotencyKey, metadata) =>

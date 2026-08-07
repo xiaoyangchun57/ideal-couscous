@@ -149,6 +149,9 @@ view, text, button, input { box-sizing: border-box; }
 .empty-circle { width: 120rpx; height: 120rpx; border-radius: 50%; background: var(--fill); color: var(--disabled); font-size: 40rpx; text-align: center; line-height: 120rpx; }
 .empty-tx { font-size: 24rpx; color: var(--text-3); margin-top: 16rpx; }
 
+/* 列表尾部留出呼吸空间，避免“没有更多了”贴住卡片或屏幕边缘。 */
+.list-foot { padding: 24rpx 24rpx 40rpx; text-align: center; color: var(--text-3); font-size: 23rpx; line-height: 1.5; }
+
 /* 底部弹层（行动/详情）*/
 .sheet-mask {
   position: fixed; left: 0; right: 0; top: 0; bottom: 0;

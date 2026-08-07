@@ -31,6 +31,10 @@ function pendingSyncCount() {
   return queueCount() + localStore.queueCount();
 }
 
+function isTransientSyncError(error) {
+  return !error || error.code === -1 || error.status >= 500;
+}
+
 function decoratePackageResources(pkg) {
   if (!pkg) return pkg;
   const resourceParts = (pkg.resource_parts || []).map(part => Object.assign({}, part, {
@@ -631,7 +635,14 @@ Page({
           this.setData({ syncCount: pendingSyncCount() });
           wx.showToast({ title: '打卡成功', icon: 'success' });
         })
-        .catch(() => {
+        .catch((error) => {
+          if (!isTransientSyncError(error)) {
+            localStore.removeOp(opId);
+            this.refreshStationStage(site.id);
+            this.setData({ syncCount: pendingSyncCount() });
+            wx.showModal({ title: '打卡未完成', content: error.error || '服务器拒绝了本次打卡，请按提示处理', showCancel: false });
+            return;
+          }
           this.setData({ syncCount: pendingSyncCount() });
           wx.showToast({ title: '打卡已本地保存，联网同步', icon: 'none' });
         });
@@ -872,14 +883,20 @@ Page({
 
   onSyncNow() {
     wx.showLoading({ title: '同步中' });
-    flushQueue(captureFlushedPhoto);
-    Promise.resolve(flushLocalOps()).catch(() => {}).then(() => {
-      setTimeout(() => {
-        wx.hideLoading();
-        this.refreshSyncState();
-        if (this.data.selSiteId) this.loadTasks(this.data.selSiteId);
-        if (this.data.syncCount === 0) wx.showToast({ title: '同步完成', icon: 'success' });
-      }, 1000);
+    Promise.all([
+      flushQueue(captureFlushedPhoto),
+      flushLocalOps().catch(() => ({ synced: 0, remaining: localStore.queueCount(), rejected: [] }))
+    ]).then(([requestSummary, localSummary]) => {
+      wx.hideLoading();
+      this.refreshSyncState();
+      if (this.data.selSiteId) this.loadTasks(this.data.selSiteId);
+      const rejected = (requestSummary.rejected || []).length + (localSummary.rejected || []).length;
+      if (rejected) wx.showModal({ title: '部分操作未同步', content: `${rejected} 项被服务器拒绝，请按提示重新操作。`, showCancel: false });
+      else if (this.data.syncCount === 0) wx.showToast({ title: '同步完成', icon: 'success' });
+    }).catch(() => {
+      wx.hideLoading();
+      this.refreshSyncState();
+      wx.showToast({ title: '同步失败，请保持网络后重试', icon: 'none' });
     });
   }
 });

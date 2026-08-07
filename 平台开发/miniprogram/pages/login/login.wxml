@@ -11,10 +11,11 @@
              value="{{username}}" bindinput="onUser" confirm-type="next" />
     </view>
     <view class="hairline"></view>
-    <view class="field">
+    <view class="field password-field" bindtap="focusPassword">
       <text class="label">密码</text>
       <input class="input" placeholder="请输入密码" placeholder-class="ph"
-             password value="{{password}}" bindinput="onPass" confirm-type="done" bindconfirm="onLogin" />
+             password focus="{{passwordFocused}}" value="{{password}}" bindinput="onPass"
+             bindfocus="onPassFocus" bindblur="onPassBlur" confirm-type="done" bindconfirm="onLogin" />
     </view>
   </view>
 

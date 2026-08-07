@@ -3,12 +3,15 @@ const { setAuth } = require('../../utils/auth.js');
 
 Page({
   data: {
-    username: '', password: '', loading: false, error: '',
+    username: '', password: '', passwordFocused: false, loading: false, error: '',
     mustChangePassword: false, newPassword: '', confirmPassword: '', pendingSites: [],
   },
 
   onUser(e) { this.setData({ username: e.detail.value, error: '' }); },
   onPass(e) { this.setData({ password: e.detail.value, error: '' }); },
+  focusPassword() { this.setData({ passwordFocused: true }); },
+  onPassFocus() { this.setData({ passwordFocused: true }); },
+  onPassBlur() { this.setData({ passwordFocused: false }); },
   onNewPassword(e) { this.setData({ newPassword: e.detail.value, error: '' }); },
   onConfirmPassword(e) { this.setData({ confirmPassword: e.detail.value, error: '' }); },
 
@@ -27,7 +30,7 @@ Page({
       this.setData({ error: '请输入工号和密码' });
       return;
     }
-    this.setData({ loading: true, error: '' });
+    this.setData({ loading: true, passwordFocused: false, error: '' });
     api.login(username, password)
       .then(res => {
         if (res && res.success && res.token) {

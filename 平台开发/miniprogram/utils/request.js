@@ -3,7 +3,7 @@ const { getToken, clear } = require('./auth.js');
 const CONFIG = require('./config.js');
 
 const FAIL_QUEUE_KEY = 'fail_queue';
-let flushing = false; // 失败队列重传锁（防网络恢复与手动同步并发重入）
+let flushing = null; // 失败队列重传 Promise（防网络恢复与手动同步并发重入）
 
 function buildUrl(path) {
   return CONFIG.BASE_URL + path;
@@ -19,32 +19,47 @@ function queueCount() {
   return getQueue().length;
 }
 
+function taskSignature(task) {
+  return (task.method || '') + ':' + (task.url || '') + ':' + JSON.stringify(task.data || null);
+}
+
 // 恢复网络后重传失败队列（写类请求）
 // 复用主请求的鉴权/重试/401 跳转逻辑；成功即丢弃，失败按状态码决定保留与否
 function flushQueue(onResolve) {
-  if (flushing) return;
+  if (flushing) return flushing;
   const q = getQueue();
-  if (!q.length) return;
-  flushing = true;
+  if (!q.length) return Promise.resolve({ synced: 0, remaining: 0, rejected: [] });
   const remain = [];
-  let pending = q.length;
-  q.forEach((task) => {
-    request(task.url, task.method, task.data, { retry: 2, queue: false })
-      .then((resp) => { if (onResolve) onResolve(task, resp); })
-      .catch((err) => {
-        const st = (err && err.status) || 0;
-        const code = (err && err.code) || 0;
-        // 5xx 或网络错误（-1）保留待下次重传；4xx（含 401 已由 request 跳登录）丢弃
-        if (st >= 500 || code === -1) remain.push(task);
-      })
-      .finally(() => {
-        pending -= 1;
-        if (pending === 0) {
-          flushing = false;
-          saveQueue(remain);
-        }
-      });
-  });
+  const rejected = [];
+  const jobs = q.map((task) => request(task.url, task.method, task.data, { retry: 2, queue: false })
+    .then((resp) => {
+      if (onResolve) onResolve(task, resp);
+      return { synced: true };
+    })
+    .catch((err) => {
+      const st = (err && err.status) || 0;
+      const code = (err && err.code) || 0;
+      // 5xx 或网络错误保留；业务 4xx 记录原因并移出队列，避免永远显示“待同步”。
+      if (st >= 500 || code === -1) {
+        remain.push(task);
+        return { pending: true };
+      }
+      rejected.push({ task, error: err || { error: '请求被服务器拒绝' } });
+      return { rejected: true };
+    }));
+  flushing = Promise.all(jobs).then((results) => {
+    // Keep requests added while this snapshot was replaying; otherwise a weak-network
+    // operation created during the flush would be overwritten by the old snapshot.
+    const original = new Set(q.map(taskSignature));
+    const additions = getQueue().filter(task => !original.has(taskSignature(task)));
+    saveQueue(remain.concat(additions));
+    return {
+      synced: results.filter(item => item.synced).length,
+      remaining: remain.length + additions.length,
+      rejected,
+    };
+  }).finally(() => { flushing = null; });
+  return flushing;
 }
 
 // 主请求
@@ -71,12 +86,14 @@ function request(path, method, data, options) {
             // 令牌失效：清理并跳登录
             clear();
             wx.reLaunch({ url: '/pages/login/login' });
-            reject(res.data || { error: '登录已失效' });
+            reject(Object.assign({}, res.data || { error: '登录已失效' }, { status: 401 }));
           } else {
-            reject(res.data || { error: '请求失败', status: res.statusCode });
+            const body = (res.data && typeof res.data === 'object') ? res.data : { error: '请求失败' };
+            reject(Object.assign({}, body, { status: res.statusCode }));
           }
         },
         fail(err) {
+          err = Object.assign({}, err || {}, { code: -1, status: 0, network: true });
           if (n < maxRetry) {
             setTimeout(() => attempt(n + 1), Math.min(1000 * Math.pow(2, n), 8000));
           } else {

@@ -50,14 +50,17 @@ Page({
   onSyncNow() {
     if (!this.data.syncCount) return;
     wx.showLoading({ title: '同步中' });
-    flushQueue();
-    setTimeout(() => {
+    flushQueue().then((summary) => {
       wx.hideLoading();
       this.refreshSyncState(() => wx.showToast({
-        title: this.data.syncCount ? '仍有操作待同步' : '同步完成',
-        icon: this.data.syncCount ? 'none' : 'success'
+        title: summary && summary.rejected && summary.rejected.length ? '有操作被服务器拒绝' : (this.data.syncCount ? '仍有操作待同步' : '同步完成'),
+        icon: summary && summary.rejected && summary.rejected.length ? 'none' : (this.data.syncCount ? 'none' : 'success')
       }));
-    }, 1000);
+    }).catch(() => {
+      wx.hideLoading();
+      this.refreshSyncState();
+      wx.showToast({ title: '同步失败，请保持网络后重试', icon: 'none' });
+    });
   },
 
   loadSite(id) {
@@ -85,6 +88,10 @@ Page({
   onCheckIn() {
     const s = this.data.site;
     if (!s || this.data.checkingIn) return;
+    if (s.can_check_in === false) {
+      wx.showToast({ title: s.checkin_block_reason || '当前没有可执行的巡检任务', icon: 'none' });
+      return;
+    }
     this.setData({ checkingIn: true });
     wx.showLoading({ title: '定位中' });
     requestLocation().then(gps => {
@@ -96,7 +103,7 @@ Page({
         .then(() => wx.showToast({ title: '打卡成功', icon: 'success' }))
         .catch((err) => {
           this.setData({ syncCount: queueCount() });
-          wx.showToast({ title: err && err.queued ? '已离线保存，联网后自动同步' : '打卡失败', icon: 'none' });
+          wx.showToast({ title: err && err.queued ? '已离线保存，联网后自动同步' : ((err && err.error) || '打卡失败'), icon: 'none' });
         })
         .finally(() => this.setData({ checkingIn: false }));
     }).catch(error => {
@@ -113,17 +120,28 @@ Page({
 
   onCalibrate() {
     const s = this.data.site;
-    if (!s) return;
+    if (!s || !s.can_calibrate) return;
     wx.showLoading({ title: '定位中' });
     requestLocation().then(gps => {
       wx.hideLoading();
-      api.calibrate(s.id, gps.lat, gps.lng)
-        .then(res => {
-          const d = (res && res.distance_m != null) ? res.distance_m : 0;
-          wx.showToast({ title: '已校准 偏移' + d + 'm', icon: 'none' });
-          this.loadSite(s.id);
-        })
-      .catch(() => wx.showToast({ title: '校准失败', icon: 'none' }));
+      const oldCoords = (s.lat != null && s.lng != null) ? `${Number(s.lat).toFixed(6)}, ${Number(s.lng).toFixed(6)}` : '未配置';
+      const newCoords = `${Number(gps.lat).toFixed(6)}, ${Number(gps.lng).toFixed(6)}`;
+      wx.showModal({
+        title: '确认校准站点位置',
+        content: `站点：${s.name}\n原坐标：${oldCoords}\n当前位置：${newCoords}\n校准会改变 500 米打卡范围，仅在确认站点无误且确实位于现场时操作。`,
+        confirmText: '确认更新',
+        cancelText: '取消',
+        success: (modal) => {
+          if (!modal.confirm) return;
+          api.calibrate(s.id, gps.lat, gps.lng, { confirm: true, site_name: s.name })
+            .then(res => {
+              const d = (res && res.distance_m != null) ? res.distance_m : 0;
+              wx.showToast({ title: '已校准 偏移' + d + 'm', icon: 'none' });
+              this.loadSite(s.id);
+            })
+            .catch(error => wx.showModal({ title: '校准失败', content: (error && error.error) || '位置未修改，请重试', showCancel: false }));
+        }
+      });
     }).catch(error => {
       wx.hideLoading();
       wx.showToast({ title: locationErrorMessage(error), icon: 'none' });
