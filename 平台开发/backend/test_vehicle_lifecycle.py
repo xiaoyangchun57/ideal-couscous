@@ -378,6 +378,33 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             energy = db.execute('SELECT energy_quantity, energy_unit, liters FROM vehicle_refueling_records WHERE vehicle_id=3').fetchone()
         self.assertEqual((energy['energy_quantity'], energy['energy_unit'], energy['liters']), (32.5, 'kWh', 32.5))
 
+    def test_unreturned_vehicle_is_not_dispatchable_or_rebookable(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, reason, status) VALUES (1,2,'2026-08-01 08:00:00','2026-08-01 18:00:00','巡检计划#99用车','approved')")
+            app_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            db.execute("INSERT INTO vehicle_use_records (application_id, start_mileage, checked_out_at, status) VALUES (?,1000,'2026-08-01 08:00:00','checked_out')", (app_id,))
+            db.execute("UPDATE vehicles SET status='idle' WHERE id=1")
+        vehicles = self.client.get('/api/vehicles', headers=self.headers('operator-token'))
+        self.assertEqual(vehicles.status_code, 200, vehicles.json)
+        self.assertFalse(vehicles.json[0]['dispatchable'])
+        self.assertTrue(vehicles.json[0]['active_use_needs_extension'])
+        application = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-08-07 08:00:00', 'end_at': '2026-08-07 18:00:00', 'reason': '巡检',
+        })
+        self.assertEqual(application.status_code, 409, application.json)
+
+    def test_overdue_plan_use_is_reported_and_cannot_return_before_plan_completion(self):
+        with app_module.get_db() as db:
+            db.execute("CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, plan_schedule_id INTEGER, status TEXT)")
+            db.execute("INSERT INTO insp_plans VALUES (99,99,'active')")
+            db.execute("INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, reason, status) VALUES (1,2,'2026-08-01 08:00:00','2026-08-01 18:00:00','巡检计划#99用车','approved')")
+            app_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            db.execute("INSERT INTO vehicle_use_records (application_id, start_mileage, checked_out_at, status) VALUES (?,1000,'2026-08-01 08:00:00','checked_out')", (app_id,))
+        rows = self.client.get('/api/vehicle/use-records', headers=self.headers('operator-token'))
+        self.assertEqual(rows.status_code, 200, rows.json)
+        self.assertTrue(rows.json[0]['needs_extension'])
+        self.assertFalse(rows.json[0]['can_return'])
+
 
 if __name__ == '__main__':
     unittest.main()

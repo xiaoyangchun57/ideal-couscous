@@ -47,11 +47,11 @@
 .site-scroll { white-space: nowrap; padding: 12rpx 24rpx 0; }
 .site-card {
   display: inline-flex; flex-direction: column; justify-content: space-between;
-  width: 260rpx; margin-right: 20rpx; background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line); padding: 24rpx; vertical-align: top; position: relative; overflow: hidden;
+  width: calc(100vw - 48rpx); min-height: 188rpx; margin-right: 20rpx; background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line); padding: 24rpx; vertical-align: top; position: relative; overflow: hidden; white-space: normal;
 }
 .site-card-strip { position: absolute; left: 0; top: 24rpx; bottom: 24rpx; width: 6rpx; background: var(--brand); border-radius: 0 4rpx 4rpx 0; }
-.site-card-main { padding-left: 14rpx; }
-.site-card-name { font-size: 28rpx; font-weight: 500; color: var(--text); display: block; }
+.site-card-main { padding-left: 14rpx; min-width: 0; }
+.site-card-name { font-size: 28rpx; font-weight: 500; color: var(--text); display: block; white-space: normal; word-break: break-all; line-height: 1.35; }
 .site-card-type { font-size: 22rpx; color: var(--text-3); margin-top: 8rpx; display: block; }
 .site-carryover { display: block; margin-top: 10rpx; color: var(--red); font-size: 21rpx; }
 .site-card-foot { margin-top: 24rpx; padding-left: 14rpx; display: flex; align-items: baseline; }

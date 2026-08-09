@@ -232,6 +232,47 @@ export default function UsersPage() {
     });
   };
 
+  const handleSetPassword = (record) => {
+    let password = '';
+    let confirmPassword = '';
+    modal.confirm({
+      title: `设置“${record.real_name}”的自定义密码`,
+      icon: <LockOutlined />,
+      content: (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Input.Password placeholder="新密码（至少8位）" onChange={(event) => { password = event.target.value; }} />
+          <Input.Password placeholder="再次输入新密码" onChange={(event) => { confirmPassword = event.target.value; }} />
+          <Text type="secondary">设置后立即生效，不要求首次登录再次修改。</Text>
+        </Space>
+      ),
+      okText: '保存密码',
+      cancelText: '取消',
+      onOk: async () => {
+        if (password.length < 8) {
+          message.error('密码至少8位');
+          throw new Error('password required');
+        }
+        if (password !== confirmPassword) {
+          message.error('两次输入的密码不一致');
+          throw new Error('password mismatch');
+        }
+        try {
+          const result = await api.putStrict(`/users/${record.id}/password`, { password });
+          if (result?.token) {
+            localStorage.setItem('water_ops_token', result.token);
+            window.location.reload();
+          } else {
+            message.success(`“${record.real_name}”的密码已更新`);
+          }
+          await fetchUsers();
+        } catch (error) {
+          message.error(error.message || '密码设置失败');
+          throw error;
+        }
+      },
+    });
+  };
+
   const columns = [
     {
       title: '登录名',
@@ -317,6 +358,7 @@ export default function UsersPage() {
         if (record.deleted_at) return <Text type="secondary">已注销</Text>;
         const isCurrent = Number(record.id) === Number(currentUser?.id);
         const menuItems = [
+          { key: 'set-password', icon: <LockOutlined />, label: '设置自定义密码' },
           { key: 'reset', icon: <LockOutlined />, label: '重置密码' },
           {
             key: 'status',
@@ -328,6 +370,7 @@ export default function UsersPage() {
           { key: 'delete', icon: <DeleteOutlined />, label: isCurrent ? '注销（当前账号）' : '注销账号', danger: true, disabled: isCurrent },
         ];
         const handleMenu = ({ key }) => {
+          if (key === 'set-password') handleSetPassword(record);
           if (key === 'reset') handleResetPassword(record);
           if (key === 'status') handleToggleStatus(record);
           if (key === 'delete') handleDelete(record);

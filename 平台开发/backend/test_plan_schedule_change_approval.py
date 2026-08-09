@@ -56,6 +56,9 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
                     previous_work_order_ids TEXT, previous_remarks TEXT,
                     approver_id INTEGER, reject_reason TEXT
                 );
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, plan_schedule_id INTEGER, status TEXT
+                );
             ''')
             db.executemany('INSERT INTO users VALUES (?,?,?,?)', [
                 (9, 'operator', '执行人员', 'active'), (1, 'manager', '审批人员', 'active'),
@@ -112,6 +115,19 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM plan_schedule_events WHERE event_type='change_requested'").fetchone()[0], 1)
         finally:
             db.close()
+
+    def test_completed_execution_cannot_request_a_change(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO insp_plans VALUES (88, 5, 'completed')")
+            db.commit()
+        response = self.client.post('/api/plan-schedules/5/request-change',
+                                    headers={'Authorization': 'Bearer operator-token'},
+                                    json={'change_reason': '任务已完成后尝试变更'})
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'PLAN_EXECUTION_COMPLETED')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM plan_schedules WHERE id=5').fetchone()['status'],
+                             'approved')
 
 
 if __name__ == '__main__':

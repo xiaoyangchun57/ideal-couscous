@@ -7,12 +7,18 @@
 const USE_LOCAL_API_IN_DEVTOOLS = true;
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:5000';
 
-let isDevtools = false;
+// 微信开发者工具在不同版本中可能报告 devtools、windows 或 mac。
+// 真机只会报告 ios/android，因此桌面平台可以安全地视为本地开发工具。
+const DEVTOOLS_PLATFORMS = ['devtools', 'windows', 'mac'];
+let runtimePlatform = '';
 try {
-  isDevtools = typeof wx !== 'undefined' && wx.getSystemInfoSync().platform === 'devtools';
+  if (typeof wx !== 'undefined' && wx.getSystemInfoSync) {
+    runtimePlatform = wx.getSystemInfoSync().platform || '';
+  }
 } catch (_) {
   // Runtime information may be unavailable during static checks.
 }
+const isDevtools = DEVTOOLS_PLATFORMS.indexOf(runtimePlatform) !== -1;
 
 const CONFIG = {
   BASE_URL: USE_LOCAL_API_IN_DEVTOOLS && isDevtools

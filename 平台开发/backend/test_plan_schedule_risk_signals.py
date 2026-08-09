@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -88,11 +89,13 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
     def test_systemic_inspection_anomaly_can_only_create_a_follow_up_draft(self):
         db = sqlite3.connect(self.db_path)
         try:
+            recent = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d %H:%M:%S')
+            earlier = (datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d %H:%M:%S')
             db.executemany("""INSERT INTO work_orders
                 (id, site_id, title, level, created_at, status, source, event_type)
                 VALUES (?,?,?,?,?,?,?,?)""", [
-                (10, 1, '巡检异常', 'normal', '2026-07-10 08:00:00', 'closed', 'inspection', '设备异常'),
-                (11, 1, '巡检异常', 'normal', '2026-07-24 08:00:00', 'closed', 'inspection', '设备异常'),
+                (10, 1, '巡检异常', 'normal', earlier, 'closed', 'inspection', '设备异常'),
+                (11, 1, '巡检异常', 'normal', recent, 'closed', 'inspection', '设备异常'),
             ])
             db.commit()
         finally:

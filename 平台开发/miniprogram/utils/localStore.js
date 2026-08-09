@@ -56,6 +56,17 @@ function markSynced(id) {
   if (o) { o.syncStatus = 'synced'; write(list); }
 }
 
+function markRejected(id, error) {
+  const list = read();
+  const o = list.find((x) => x.id === id);
+  if (o) {
+    o.syncStatus = 'rejected';
+    o.syncError = error || '服务器拒绝了该操作';
+    o.rejectedAt = Date.now();
+    write(list);
+  }
+}
+
 function removeOp(id) {
   write(read().filter((x) => x.id !== id));
 }
@@ -71,7 +82,7 @@ function getLocalCheckIn(siteId) {
 
 function getSiteCheckIn(siteId) {
   return read()
-    .filter((o) => o.type === 'checkin' && o.data.site_id === siteId)
+    .filter((o) => o.type === 'checkin' && o.data.site_id === siteId && o.syncStatus !== 'rejected')
     .sort((a, b) => b.createdAt - a.createdAt)[0] || null;
 }
 
@@ -80,7 +91,24 @@ function getPendingSubmit(itemId, planId) {
   return getPending().find((op) => isPendingInspectionSubmit([op], itemId, planId)) || null;
 }
 
+function getRejectedSubmit(itemId, planId) {
+  return read().find((operation) => operation.type === 'submit'
+    && operation.syncStatus === 'rejected'
+    && String(operation.data.item_id) === String(itemId)
+    && String(operation.data.plan_id) === String(planId)) || null;
+}
+
+function clearRejectedSubmit(itemId, planId) {
+  const list = read();
+  const removed = list.filter((operation) => operation.type === 'submit'
+    && operation.syncStatus === 'rejected'
+    && String(operation.data.item_id) === String(itemId)
+    && String(operation.data.plan_id) === String(planId));
+  if (removed.length) write(list.filter(operation => !removed.includes(operation)));
+  return removed;
+}
+
 module.exports = {
-  addOp, getPending, markSynced, removeOp, queueCount,
-  getLocalCheckIn, getSiteCheckIn, getPendingSubmit, read, write, KEY
+  addOp, getPending, markSynced, markRejected, removeOp, queueCount,
+  getLocalCheckIn, getSiteCheckIn, getPendingSubmit, getRejectedSubmit, clearRejectedSubmit, read, write, KEY
 };

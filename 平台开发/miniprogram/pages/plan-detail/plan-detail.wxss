@@ -25,9 +25,9 @@
 
 /* 信息卡 */
 .info-card { margin: 20rpx 24rpx 0; }
-.info-row { display: flex; align-items: center; justify-content: space-between; padding: 12rpx 0; }
-.info-label { font-size: 25rpx; color: var(--text-3); }
-.info-val { font-size: 25rpx; color: var(--text); }
+.info-row { display: flex; align-items: flex-start; gap: 20rpx; padding: 12rpx 0; }
+.info-label { flex: 0 0 120rpx; white-space: nowrap; font-size: 25rpx; line-height: 1.5; color: var(--text-3); }
+.info-val { flex: 1; min-width: 0; text-align: right; overflow-wrap: anywhere; font-size: 25rpx; line-height: 1.5; color: var(--text); }
 .reuse-entry { display: flex; align-items: center; justify-content: space-between; gap: 18rpx; margin: 16rpx 24rpx 0; padding: 18rpx 20rpx; border: 1rpx solid var(--brand-line); border-radius: 12rpx; background: var(--card); }
 .reuse-title { display: block; color: var(--text); font-size: 25rpx; font-weight: 600; }
 .reuse-hint { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 21rpx; }
@@ -57,6 +57,13 @@
 .task-item { display: flex; align-items: center; justify-content: space-between; padding: 16rpx 0; border-bottom: 1rpx solid var(--line); }
 .task-item:last-child { border-bottom: none; }
 .task-name { font-size: 26rpx; color: var(--text); }
+.task-status { flex: none; font-size: 23rpx; }
+
+.favorite-sheet { padding-bottom: calc(28rpx + env(safe-area-inset-bottom)); }
+.favorite-label { display: block; margin: 24rpx 0 10rpx; color: var(--text-2); font-size: 24rpx; }
+.favorite-picker { padding: 18rpx; border-radius: 10rpx; background: var(--fill-2); color: var(--text); font-size: 26rpx; }
+.favorite-hint { display: block; margin-top: 18rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.6; }
+.favorite-submit { margin-top: 24rpx; }
 
 /* 底部操作栏 */
 .bottom-bar {

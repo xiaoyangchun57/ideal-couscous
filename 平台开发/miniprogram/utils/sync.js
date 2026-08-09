@@ -24,7 +24,9 @@ async function flushLocalOpsInternal() {
             try {
               const b64 = await fileToBase64(p);
               const r = await api.uploadSitePhoto(
-                payload.siteId, b64, op.id + ':photo:' + index, photoMeta[index] || {}
+                payload.siteId, b64,
+                (photoMeta[index] && photoMeta[index]._idempotency_key) || (op.id + ':photo:' + index),
+                photoMeta[index] || {}
               );
               const u = r && r.url;
               if (u) urls.push(u);
@@ -61,7 +63,9 @@ async function flushLocalOpsInternal() {
       api.trackEvent('inspection.sync.failed', { site_id: op.data.siteId || op.data.site_id, item_id: op.data.item_id, operation_id: op.id, error_code: (e && e.code) || 'sync_error' });
       if (e && e.status >= 400 && e.status < 500) {
         // 业务拒绝不会因重试而改变（例如超出 500m），移出队列并把原因交给页面展示。
-        localStore.removeOp(op.id);
+        // Keep rejected entities and local photos for retry after the operator
+        // fixes a prerequisite such as a required re-check-in.
+        localStore.markRejected(op.id, e.error || '服务器拒绝了该操作');
         summary.rejected.push({ id: op.id, type: op.type, error: e.error || '服务器拒绝了该操作' });
       }
       // 网络/服务端错误留待下次同步；不中断其余实体回放

@@ -35,7 +35,10 @@ function handle401(code = '') {
   try { localStorage.removeItem('water_ops_token'); } catch { /* ignore */ }
   if (!hadSession || window.location.pathname === '/login') return;
   const returnTo = `${window.location.pathname}${window.location.search || ''}${window.location.hash || ''}`;
-  window.location.assign(buildLoginUrl(returnTo, sessionReasonFromCode(code)));
+  const loginUrl = buildLoginUrl(returnTo, sessionReasonFromCode(code));
+  // Replace the expired page so browser Back cannot restore the stale warning page.
+  if (typeof window.location.replace === 'function') window.location.replace(loginUrl);
+  else window.location.assign(loginUrl);
 }
 
 async function request(url, options = {}) {

@@ -26,6 +26,8 @@ const api = {
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
   executionSiteTasks: (planId, siteId) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId, 'GET'),
+  checkOutExecutionSite: (planId, siteId, payload) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}),
   executionSiteReagents: (planId, siteId) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagents', 'GET'),
   replaceExecutionReagent: (planId, siteId, payload) =>
@@ -65,8 +67,9 @@ const api = {
   // 上传站点影像（base64）；弱网失败自动进入失败队列待重传
   uploadSitePhoto: (siteId, image, idempotencyKey, metadata) =>
     request('/api/mobile/upload-site-photo', 'POST', {
-      site_id: siteId, image, _idempotency_key: idempotencyKey || '', ...(metadata || {})
-    }, { queue: false }),
+      ...(metadata || {}), site_id: siteId, image,
+      _idempotency_key: idempotencyKey || (metadata && metadata._idempotency_key) || ''
+    }, { queue: false, timeout: 30000, retry: 1 }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
   deletePendingSitePhoto: (url) => request('/api/mobile/site-photos/delete', 'POST', { url }),
 
@@ -120,8 +123,8 @@ const api = {
     }),
 
   // 核验通过（reviewing -> closed，专用端点，后端已接审批结果推送）
-  approveWorkorder: (orderNo) =>
-    request('/api/workorders/' + orderNo + '/approve', 'POST', {}),
+  approveWorkorder: (orderNo, payload) =>
+    request('/api/workorders/' + orderNo + '/approve', 'POST', payload || {}),
 
   // 核验退回（reviewing -> in_progress，仅管理员，后端已接审批结果推送）
   rejectWorkorder: (orderNo, reason) =>
@@ -147,7 +150,18 @@ const api = {
 
   // 巡检检查项审核（source_type=inspaction）
   reviewInspectionItem: (id, status, comment) =>
-    request('/api/inspection-v2/items/' + id + '/review', 'PUT', { status, review_comment: comment || '' }),
+    request('/api/inspection-v2/items/' + id + '/review', 'PUT', {
+      action: status === 'rejected' ? 'reject' : 'approve',
+      comment: comment || '',
+      status,
+      review_comment: comment || ''
+    }),
+  reviewInspectionBatch: (itemIds, action, reason) => {
+    const ids = Array.isArray(itemIds) ? itemIds : [];
+    return request('/api/inspection-v2/items/batch-review', 'POST', action === 'approve'
+      ? { approve_ids: ids, reject_items: [] }
+      : { approve_ids: [], reject_items: ids.map(id => ({ id, reason: reason || '' })) });
+  },
 
   // 照片审核（workorder_photo / photo_review）
   reviewPhoto: (ids, action, reason) =>
@@ -162,11 +176,14 @@ const api = {
   rejectSparePart: (id) => request('/api/parts/requests/' + id + '/reject', 'PUT'),
 
   // 用车申请审核（source_type=vehicle_application，仅通过）
-  approveVehicle: (id) => request('/api/vehicle/applications/' + id + '/approve', 'POST', {}),
+  approveVehicle: (id, action, reason) => request('/api/vehicle/applications/' + id + '/approve', 'POST', {
+    action: action || 'approve', reject_reason: reason || ''
+  }),
 
   // ===== 计划调度（排程） =====
   // 我的排程列表（运维只看自己的）
-  planSchedules: () => request('/api/plan-schedules', 'GET'),
+  // 小程序“我的计划”只展示当前登录人的排程；管理员在 PC 端仍可查看团队计划。
+  planSchedules: () => request('/api/plan-schedules?mine=1', 'GET'),
 
   // 到期检查项形成的排程草稿建议；只读，不会自动派发任务
   planScheduleDraftRecommendations: () =>
@@ -203,6 +220,8 @@ const api = {
 
   // 提交排程审批
   submitPlanSchedule: (id) => request('/api/plan-schedules/' + id + '/submit', 'POST', {}),
+  approvePlanSchedule: (id) => request('/api/plan-schedules/' + id + '/approve', 'POST', {}),
+  rejectPlanSchedule: (id, reason) => request('/api/plan-schedules/' + id + '/reject', 'POST', { reason: reason || '' }),
 
   // 发起变更（已通过的计划，approved → modifying）
   requestPlanScheduleChange: (id, changeReason) =>

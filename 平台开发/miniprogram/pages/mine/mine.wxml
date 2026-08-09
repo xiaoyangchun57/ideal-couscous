@@ -45,7 +45,7 @@
     <view class="hairline"></view>
     <view class="menu-item" bindtap="goReview">
       <text class="menu-tx">待我审核</text>
-      <view class="menu-right"><text class="arrow">›</text></view>
+      <view class="menu-right"><text wx:if="{{reviewTodo > 0}}" class="badge">{{reviewTodo}}</text><text class="arrow">›</text></view>
     </view>
     <view class="hairline"></view>
     <view class="menu-item" bindtap="goResponsibleSites">
@@ -77,7 +77,7 @@
   <view class="sheet" wx:if="{{partsOrderSheet.open}}"><view class="sheet-head"><text class="sheet-title">登记厂家下单</text><text class="sheet-close" bindtap="onClosePartsOrder">×</text></view><text class="return-label">供应商</text><input class="parts-input" value="{{partsOrderSheet.supplier}}" bindinput="onPartsOrderSupplier" placeholder="厂家或供应商名称"/><text class="return-label">订单或快递号（可后补）</text><input class="parts-input" value="{{partsOrderSheet.tracking_no}}" bindinput="onPartsTracking" placeholder="订单号 / 快递单号"/><button class="btn-primary" loading="{{partsOrderSheet.submitting}}" bindtap="onSubmitPartsOrder">确认已下单</button></view>
 
   <view class="sheet-mask" wx:if="{{partsFulfillSheet.open}}" bindtap="onClosePartsFulfill"></view>
-  <view class="sheet" wx:if="{{partsFulfillSheet.open}}">
+  <view class="sheet parts-fulfill-sheet" wx:if="{{partsFulfillSheet.open}}">
     <view class="sheet-head"><text class="sheet-title">确认购买与到货</text><text class="sheet-close" bindtap="onClosePartsFulfill">×</text></view>
     <text class="return-label">供应商</text><input class="parts-input" value="{{partsFulfillSheet.supplier}}" bindinput="onPartsFulfillSupplier" placeholder="商家或厂家"/>
     <text class="return-label">实际金额（元）</text><input class="parts-input" type="digit" value="{{partsFulfillSheet.actual_amount}}" bindinput="onPartsActualAmount" placeholder="0.00"/>

@@ -15,7 +15,7 @@
 .logout { margin: 48rpx 24rpx 0; }
 .ver { text-align: center; color: var(--text-3); font-size: 22rpx; margin-top: 60rpx; }
 .parts-picker, .parts-input { margin: 18rpx 0; padding: 18rpx; background: var(--fill-2); border-radius: 12rpx; font-size: 26rpx; color: var(--text); }
-.parts-input { width: auto; }
+.parts-input { width: auto; min-height: 76rpx; }
 .parts-hint { display: block; margin-bottom: 20rpx; color: var(--text-3); font-size: 22rpx; }
 .parts-empty { padding: 48rpx 0; text-align: center; color: var(--text-3); font-size: 25rpx; }
 .parts-request-row { padding: 22rpx 0; border-bottom: 1rpx solid var(--line); }
@@ -25,7 +25,8 @@
 .parts-request-sub { display: block; margin-top: 8rpx; color: var(--text-3); font-size: 23rpx; }
 .parts-request-actions { display: flex; margin-top: 16rpx; }
 .parts-action { width: auto; margin: 0; padding: 0 24rpx; font-size: 24rpx; }
-.parts-upload { margin: 18rpx 0; font-size: 24rpx; }
+.parts-upload { min-height: 80rpx; height: auto; margin: 18rpx 0; padding: 14rpx 24rpx; font-size: 24rpx; line-height: 1.35; }
+.parts-fulfill-sheet { max-height: 90vh; padding-bottom: calc(44rpx + env(safe-area-inset-bottom)); }
 .parts-radio { display: block; margin: 16rpx 0; color: var(--text-2); font-size: 25rpx; }
 .return-hint { display: block; color: var(--text-3); font-size: 23rpx; margin-bottom: 16rpx; }
 .return-label { display: block; color: var(--text-2); font-size: 25rpx; margin: 20rpx 0 10rpx; }

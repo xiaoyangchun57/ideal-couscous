@@ -278,6 +278,16 @@ class AuthSecurityTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/auth/me', headers=self.headers(temporary_token)).status_code, 401)
         self.assertEqual(self.client.get('/api/auth/me', headers=self.headers(changed.json['token'])).status_code, 200)
 
+    def test_admin_can_set_a_custom_password_without_temporary_flag(self):
+        admin_token = self.login('admin', 'AdminPass123')
+        response = self.client.put('/api/users/2/password', headers=self.headers(admin_token), json={
+            'password': 'OperatorCustom456',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertFalse(response.json['must_change_password'])
+        new_token = self.login('operator', 'OperatorCustom456')
+        self.assertEqual(self.client.get('/api/auth/me', headers=self.headers(new_token)).status_code, 200)
+
     def test_login_rate_limit_blocks_account_and_ip_after_repeated_failures(self):
         for _ in range(app_module.LOGIN_FAILURE_LIMIT):
             response = self.client.post('/api/auth/login', json={'username': 'operator', 'password': 'wrong'})

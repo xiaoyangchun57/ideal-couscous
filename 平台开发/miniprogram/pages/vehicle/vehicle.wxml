@@ -1,4 +1,5 @@
 <view class="page">
+  <view class="vehicle-expiry-banner" wx:if="{{hasVehicleExpiry}}">车辆安排已超期，关联巡检计划尚未完成，请延续用车时间；车辆归还前不会重新进入可申请列表。</view>
   <view class="vehicle-hero" wx:if="{{activeUse}}">
     <text class="hero-kicker">当前行程</text><text class="hero-plate">{{activeUse.vehicle_label}}</text>
     <text class="hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.can_return ? '计划末日，可还车' : ('计划行程至 ' + activeUse.trip_end_date)}}</text></text>

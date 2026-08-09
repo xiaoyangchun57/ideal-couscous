@@ -130,6 +130,19 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(row['is_flagged'], 1)
         self.assertIn('完全相同', row['flag_reason'])
 
+    def test_replay_with_same_idempotency_key_returns_original_record(self):
+        image = jpeg_with_capture_time('cyan')
+        first = self.upload(image, capture_source='watermark_album', _idempotency_key='photo-replay-1')
+        second = self.upload(image, capture_source='watermark_album', _idempotency_key='photo-replay-1')
+
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertEqual(second.json['id'], first.json['id'])
+        self.assertEqual(second.json['url'], first.json['url'])
+        with app_module.get_db() as db:
+            count = db.execute('SELECT COUNT(*) AS c FROM operation_attachments').fetchone()['c']
+        self.assertEqual(count, 1)
+
     def test_camera_metadata_is_kept_as_field_capture_evidence(self):
         response = self.upload(
             jpeg_with_capture_time('red'), capture_source='camera',

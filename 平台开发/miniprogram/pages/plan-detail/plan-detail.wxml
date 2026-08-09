@@ -38,12 +38,12 @@
     </view>
   </view>
 
-  <view class="reuse-entry" wx:if="{{canFavorite}}" bindtap="onFavorite">
+  <view class="reuse-entry" wx:if="{{canFavorite}}" bindtap="onFavoriteAction">
     <view>
-      <text class="reuse-title">收藏为常用计划</text>
-      <text class="reuse-hint">保存本站点组合、相对日期、车辆和备件</text>
+      <text class="reuse-title">{{favorite ? '由常用计划生成新草稿' : '收藏为常用计划'}}</text>
+      <text class="reuse-hint">{{favorite ? '复用站点、相对日期、车辆和备件并继续编辑' : '保存本站点组合、相对日期、车辆和备件'}}</text>
     </view>
-    <text class="reuse-action">{{favoriting ? '保存中…' : '收藏 ›'}}</text>
+    <text class="reuse-action">{{favoriting ? '保存中…' : (favorite ? '生成草稿 ›' : '收藏 ›')}}</text>
   </view>
 
   <!-- 出发前准备：车辆、备件、顺路工单集中呈现，避免临出发再切换多个页面核对。 -->
@@ -102,8 +102,8 @@
     </view>
     <view class="card task-list">
       <view class="task-item" wx:for="{{generatedPlans}}" wx:key="id">
-        <text class="task-name">{{item.site_name || ('计划#' + item.id)}}</text>
-        <text class="tag tag-green">{{item.status === 'active' ? '执行中' : item.status}}</text>
+        <text class="task-name">{{item.display_name}}</text>
+        <text class="tag tag-{{item.status_cls}} task-status">{{item.status_cn}}</text>
       </view>
     </view>
   </block>
@@ -116,5 +116,19 @@
   <view class="bottom-bar" wx:if="{{canChange || canExecute}}">
     <button class="btn-warn bottom-btn" wx:if="{{canChange}}" bindtap="onChangeRequest">发起变更</button>
     <button class="btn-primary bottom-btn" wx:if="{{canExecute}}" bindtap="onGoExecution">进入现场执行</button>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{favoriteSheet.open}}" bindtap="onCloseFavoriteSheet"></view>
+  <view class="sheet favorite-sheet" wx:if="{{favoriteSheet.open}}">
+    <view class="sheet-head">
+      <text class="sheet-title">生成新计划草稿</text>
+      <text class="sheet-close" bindtap="onCloseFavoriteSheet">×</text>
+    </view>
+    <text class="favorite-label">新周期开始日期</text>
+    <picker mode="date" value="{{favoriteSheet.periodStart}}" bindchange="onFavoriteDate">
+      <view class="favorite-picker">{{favoriteSheet.periodStart || '请选择日期'}} ›</view>
+    </picker>
+    <text class="favorite-hint">按收藏中的相对日期复用站点、车辆和备件；生成后直接进入编辑页。</text>
+    <button class="btn-primary favorite-submit" loading="{{favoriteSheet.submitting}}" disabled="{{favoriteSheet.submitting}}" bindtap="onCreateFavoriteDraft">生成并编辑草稿</button>
   </view>
 </view>

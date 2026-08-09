@@ -56,7 +56,8 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                 CREATE TABLE insp_plan_items (
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, item_name TEXT,
                     category TEXT, frequency TEXT, result TEXT, calibrator TEXT,
-                    calibration_values TEXT, photo_urls TEXT, remark TEXT, check_time TEXT, execution_status TEXT
+                    calibration_values TEXT, photo_urls TEXT, remark TEXT, check_time TEXT, execution_status TEXT,
+                    check_out_time TEXT
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER, title TEXT, status TEXT,
@@ -114,10 +115,10 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                 (102, '其他人今日计划', 3, 12, today, 'active', 0),
                 (103, '昨日遗留计划', 2, 13, yesterday, 'active', 0),
             ])
-            db.executemany('INSERT INTO insp_plan_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
-                (1001, 101, 1, '甲的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
-                (1002, 102, 1, '乙的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
-                (1003, 103, 2, '昨日未完成检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active'),
+            db.executemany('INSERT INTO insp_plan_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+                (1001, 101, 1, '甲的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active', None),
+                (1002, 102, 1, '乙的检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active', None),
+                (1003, 103, 2, '昨日未完成检查项', '设备', 'weekly', None, '', '', '[]', '', '', 'active', None),
             ])
             db.execute('INSERT INTO vehicles VALUES (1, ?, ?, ?, ?, ?)', ('赣A00001', '巡检车', 'idle', 12000, 'gasoline'))
             db.execute('''INSERT INTO vehicle_applications
@@ -163,6 +164,28 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(carryovers[0]['work_date'], (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'))
         self.assertEqual([site['name'] for site in carryovers[0]['sites']], ['昨日遗留站'])
         self.assertEqual(carryovers[0]['sites'][0]['total'], 1)
+
+    def test_completed_historical_site_stays_until_checkout_then_is_archived(self):
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=1003")
+            db.execute("INSERT INTO inspection_checkins (site_id, user_id, check_time) VALUES (2, 2, datetime('now','localtime'))")
+            db.commit()
+        finally:
+            db.close()
+        response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        carryover = next(item for item in response.json['packages'] if item['plan_id'] == 103)
+        self.assertTrue(carryover['sites'][0]['checked_in'])
+        self.assertFalse(carryover['sites'][0]['checked_out'])
+
+        checkout = self.client.post('/api/mobile/execution-plans/103/sites/2/check-out',
+                                    headers={'Authorization': 'Bearer operator-token'},
+                                    json={'lat': 28.7001, 'lng': 115.8001})
+        self.assertEqual(checkout.status_code, 200, checkout.json)
+        response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertFalse(any(item['plan_id'] == 103 for item in response.json['packages']))
 
     def test_today_execution_keeps_one_vehicle_trip_until_plan_end(self):
         response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})

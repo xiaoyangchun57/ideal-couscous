@@ -1,5 +1,6 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
+const { resolveUploadUrl } = require('../../utils/url.js');
 
 const app = getApp();
 
@@ -16,6 +17,55 @@ function groupByLabel(list) {
     map[k].push(it);
   });
   return Object.keys(map).map(k => ({ label: k, items: map[k] }));
+}
+
+function parsePhotoUrls(value) {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+
+function decorateItem(item) {
+  const details = Array.isArray(item.attachment_details) ? item.attachment_details : [];
+  const paths = details.map(row => row.stored_path).concat(parsePhotoUrls(item.photo_urls));
+  const photoUrls = paths.filter((path, index) => path && paths.indexOf(path) === index).map(resolveUploadUrl);
+  const itemDetails = (Array.isArray(item.item_details) ? item.item_details : []).map(detail => {
+    const detailPaths = parsePhotoUrls(detail.photo_urls);
+    return Object.assign({}, detail, {
+      photoUrls: detailPaths.filter((path, index) => path && detailPaths.indexOf(path) === index).map(resolveUploadUrl)
+    });
+  });
+  const detailHint = {
+    plan_schedule: '查看站点、路线与资源安排',
+    inspection_batch: '查看检查项结果与统一影像',
+    parts_request: '查看备件清单与履约方式',
+    spare_part_request: '查看备件申请明细',
+    vehicle_application: '查看车辆、时段与用途',
+    workorder_review: '查看工单处置与证据',
+    photo_review: '查看影像与风险标记'
+  }[item.source_type] || '查看审批详情';
+  const approveLabel = {
+    plan_schedule: item.is_change ? '批准变更' : '批准计划',
+    inspection_batch: '全部通过',
+    parts_request: '批准备件',
+    spare_part_request: '批准备件',
+    vehicle_application: '批准用车',
+    workorder_review: '通过办结',
+    photo_review: '通过影像'
+  }[item.source_type] || '通过';
+  const rejectLabel = {
+    plan_schedule: '退回计划',
+    inspection_batch: '退回并整改',
+    parts_request: '驳回备件',
+    spare_part_request: '驳回备件',
+    vehicle_application: '驳回用车',
+    workorder_review: '退回工单',
+    photo_review: '驳回影像'
+  }[item.source_type] || '驳回';
+  return Object.assign({}, item, { detailOpen: false, photoUrls, itemDetails, detailHint, approveLabel, rejectLabel });
 }
 
 Page({
@@ -41,7 +91,7 @@ Page({
     this.setData({ loading: true });
     api.auditPending()
       .then(res => {
-        const list = Array.isArray(res) ? res : [];
+        const list = (Array.isArray(res) ? res : []).map(decorateItem);
         this.setData({
           loading: false,
           total: list.length,
@@ -86,6 +136,23 @@ Page({
     return found;
   },
 
+  onToggleDetails(e) {
+    const id = e.currentTarget.dataset.id;
+    const groups = this.data.groups.map(group => Object.assign({}, group, {
+      items: group.items.map(item => item.id === id
+        ? Object.assign({}, item, { detailOpen: !item.detailOpen }) : item)
+    }));
+    this.setData({ groups });
+  },
+
+  onPreviewPhoto(e) {
+    const id = e.currentTarget.dataset.id;
+    const item = this._findItem(id);
+    if (item && item.photoUrls && item.photoUrls.length) {
+      wx.previewImage({ urls: item.photoUrls, current: e.currentTarget.dataset.url });
+    }
+  },
+
   _dispatch(action, reason) {
     if (this.data.submitting) return;
     const item = this._findItem(this.data.curId);
@@ -99,8 +166,12 @@ Page({
       case 'inspection':
         p = api.reviewInspectionItem(nid, action === 'approve' ? 'approved' : 'rejected', reason);
         break;
+      case 'inspection_batch':
+        p = api.reviewInspectionBatch(item.item_ids || [], action, reason);
+        break;
       case 'workorder_status':
-        p = action === 'approve' ? api.approveWorkorder(item.order_no) : api.rejectWorkorder(item.order_no);
+      case 'workorder_review':
+        p = action === 'approve' ? api.approveWorkorder(item.order_no) : api.rejectWorkorder(item.order_no, reason);
         break;
       case 'workorder_photo':
       case 'photo_review':
@@ -113,8 +184,10 @@ Page({
         p = action === 'approve' ? api.approveSparePart(nid) : api.rejectSparePart(nid);
         break;
       case 'vehicle_application':
-        if (action !== 'approve') { wx.showToast({ title: '用车仅支持通过', icon: 'none' }); this.setData({ submitting: false }); return; }
-        p = api.approveVehicle(nid);
+        p = api.approveVehicle(nid, action, reason);
+        break;
+      case 'plan_schedule':
+        p = action === 'approve' ? api.approvePlanSchedule(nid) : api.rejectPlanSchedule(nid, reason);
         break;
       default:
         wx.showToast({ title: '未知类型', icon: 'none' });
@@ -128,6 +201,22 @@ Page({
       this.load();
     }).catch(err => {
       this.setData({ submitting: false });
+      if ((type === 'workorder_review' || type === 'workorder_status') && action === 'approve'
+          && err && err.code === 'EVIDENCE_ACKNOWLEDGEMENT_REQUIRED') {
+        wx.showModal({
+          title: '请确认影像风险',
+          content: err.error || '影像存在重复或拍摄信息不完整，请查看详情后确认继续通过。',
+          confirmText: '确认通过',
+          success: result => {
+            if (!result.confirm) return;
+            this.setData({ submitting: true });
+            api.approveWorkorder(item.order_no, { evidence_acknowledged: true })
+              .then(() => { wx.showToast({ title: '已通过', icon: 'success' }); this.setData({ submitting: false }); this.load(); })
+              .catch(retryErr => { this.setData({ submitting: false }); wx.showModal({ title: '操作失败', content: (retryErr && retryErr.error) || '请稍后重试', showCancel: false }); });
+          }
+        });
+        return;
+      }
       const msg = (err && err.errMsg) ? err.errMsg : '操作失败';
       wx.showModal({ title: '操作失败', content: String(msg).replace('request:fail ', ''), showCancel: false });
     });

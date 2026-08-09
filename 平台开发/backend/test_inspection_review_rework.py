@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -51,6 +52,12 @@ class InspectionReviewReworkTest(unittest.TestCase):
                     actual_photos INTEGER, review_status INTEGER, review_comment TEXT, reviewer_id INTEGER,
                     review_time TEXT, check_time TEXT, completed_at TEXT, photo_urls TEXT, remark TEXT,
                     calibrator TEXT, calibration_values TEXT, gps_lat REAL, gps_lng REAL
+                    , check_out_time TEXT, rework_required_at TEXT
+                );
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY, stored_path TEXT, site_id INTEGER, uploader_id INTEGER,
+                    description TEXT, filename TEXT, review_status TEXT, reviewer_id INTEGER,
+                    reviewed_at TEXT, reject_reason TEXT
                 );
                 CREATE TABLE inspection_template_items (id INTEGER PRIMARY KEY, template_id INTEGER, item_name TEXT, need_review INTEGER);
                 CREATE TABLE mobile_idempotency (idempotency_key TEXT, endpoint TEXT, response_json TEXT);
@@ -135,6 +142,75 @@ class InspectionReviewReworkTest(unittest.TestCase):
         self.assertEqual((item['result'], item['review_status']), (None, 3))
         self.assertEqual((plan['status'], plan['completion_rate']), ('active', 0))
         self.assertEqual((notification['user_id'], notification['source_type']), (2, 'inspection_review'))
+
+    def test_rejected_field_photo_reopens_its_item_and_requires_a_new_checkin(self):
+        resubmitted = self.submit()
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.json)
+
+    def test_pending_item_accepts_only_new_supplemental_evidence(self):
+        first = self.submit()
+        self.assertEqual(first.status_code, 200, first.json)
+        duplicate = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal',
+            'photo_urls': json.dumps(['/uploads/inspection/reading.jpg']), 'remark': '重复提交',
+        })
+        self.assertEqual(duplicate.status_code, 409, duplicate.json)
+        supplement = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps(['/uploads/inspection/reading.jpg', '/uploads/inspection/extra.jpg']),
+        })
+        self.assertEqual(supplement.status_code, 200, supplement.json)
+        self.assertTrue(supplement.json['supplemented'])
+        with app_module.get_db() as db:
+            item = db.execute('SELECT result, review_status, actual_photos, photo_urls FROM insp_plan_items WHERE id=100').fetchone()
+        self.assertEqual((item['result'], item['review_status'], item['actual_photos']), ('normal', 1, 2))
+        same = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps(['/uploads/inspection/reading.jpg', '/uploads/inspection/extra.jpg']),
+        })
+        self.assertEqual(same.status_code, 409, same.json)
+
+    def test_approved_item_is_frozen(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET review_status=2 WHERE id=100')
+            db.commit()
+        response = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps(['/uploads/inspection/approved-extra.jpg']),
+        })
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'INSPECTION_ITEM_APPROVED')
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET check_out_time='2026-08-07 10:00:00' WHERE id=100")
+            db.execute("UPDATE insp_plans SET status='completed', completion_rate=100 WHERE id=10")
+            db.execute("""INSERT INTO operation_attachments
+                VALUES (200, '/uploads/inspection/reading.jpg', 1, 2, '仪表读数', 'reading.jpg', 'pending', NULL, NULL, NULL)""")
+            db.commit()
+
+        rejected = self.client.post('/api/operation-attachments/review', headers=self.headers('admin-token'), json={
+            'attachment_ids': [200], 'action': 'reject', 'reject_reason': '缺少水印',
+        })
+        self.assertEqual(rejected.status_code, 200, rejected.json)
+        with app_module.get_db() as db:
+            item = db.execute("SELECT result, review_status, review_comment, check_out_time, rework_required_at FROM insp_plan_items WHERE id=100").fetchone()
+            plan = db.execute('SELECT status, completion_rate FROM insp_plans WHERE id=10').fetchone()
+        self.assertIsNone(item['result'])
+        self.assertEqual(item['review_status'], 3)
+        self.assertIn('水印', item['review_comment'])
+        self.assertIsNone(item['check_out_time'])
+        self.assertTrue(item['rework_required_at'])
+        self.assertEqual((plan['status'], plan['completion_rate']), ('active', 0))
+
+        blocked = self.submit()
+        self.assertEqual(blocked.status_code, 400, blocked.json)
+        self.assertIn('重新到站', blocked.json['error'])
+        with app_module.get_db() as db:
+            fresh_checkin = (datetime.now() + timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+            db.execute("UPDATE inspection_checkins SET check_time=? WHERE id=1", (fresh_checkin,))
+            db.commit()
+        resubmitted = self.submit()
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.json)
 
 
 if __name__ == '__main__':

@@ -7,7 +7,7 @@ const { todayStr } = require('../../utils/util.js');
 const app = getApp();
 
 Page({
-  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, vehicleUses: [], vehicleHistoryOpen: false, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
+  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, reviewTodo: 0, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, vehicleUses: [], vehicleHistoryOpen: false, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
@@ -21,6 +21,9 @@ Page({
     api.unreadCount()
       .then(r => this.setData({ unread: (r && r.count) || 0 }))
       .catch(() => {});
+    api.auditPending()
+      .then(rows => this.setData({ reviewTodo: Array.isArray(rows) ? rows.length : 0 }))
+      .catch(() => this.setData({ reviewTodo: 0 }));
     api.myPartsRequests().then(rows => {
       const routeLabels = { stock: '库存领用', local_purchase: '附近急购', vendor_order: '厂家订购' };
       const statusLabels = { pending: '待审批', approved: '已批准', ordered: '运输中', issued: '已领用', completed: '已完成', rejected: '已驳回' };

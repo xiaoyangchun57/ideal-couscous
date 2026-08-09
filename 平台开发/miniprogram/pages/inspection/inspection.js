@@ -35,6 +35,12 @@ function isTransientSyncError(error) {
   return !error || error.code === -1 || error.status >= 500;
 }
 
+function photoIdempotencyKey(siteId, path, index) {
+  // Keep one key when a request times out after the server has committed it.
+  const safePath = String(path || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(-24);
+  return 'photo_' + siteId + '_' + Date.now() + '_' + index + '_' + safePath + '_' + Math.floor(Math.random() * 1e6);
+}
+
 function decoratePackageResources(pkg) {
   if (!pkg) return pkg;
   const resourceParts = (pkg.resource_parts || []).map(part => Object.assign({}, part, {
@@ -76,8 +82,9 @@ Page({
     reportTypes: REPORT_TYPES,
     reportSheet: { open: false, typeIndex: 0, description: '', photos: [], submitting: false },
     reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
-    sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [], localPhotoMeta: [] },
+    sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], localPhotos: [], localPhotoMeta: [], supplementOnly: false, originalPhotoCount: 0 },
     submitting: false,
+    checkingOut: false,
     confirmingDeparture: false,
     partsIssueSheet: { open: false, items: [], submitting: false },
     partsOptions: [{ id: 0, label: '手动输入（自定义名称）' }],
@@ -552,8 +559,12 @@ Page({
     chooseAndCompress(remaining).then(paths => {
       if (!paths || !paths.length) return [];
       wx.showLoading({ title: '上传中' });
-      return Promise.allSettled(paths.map(path => fileToBase64(path)
-        .then(image => api.uploadSitePhoto(this.data.selSiteId, image))));
+      return Promise.allSettled(paths.map((path, index) => {
+        const idempotencyKey = photoIdempotencyKey(this.data.selSiteId, path, index);
+        return fileToBase64(path).then(image => api.uploadSitePhoto(
+          this.data.selSiteId, image, idempotencyKey, { _idempotency_key: idempotencyKey }
+        ));
+      }));
     }).then(results => {
       if (!Array.isArray(results)) return;
       const uploaded = results.filter(row => row.status === 'fulfilled' && row.value && row.value.url)
@@ -608,12 +619,52 @@ Page({
 
   refreshStationStage(siteId) {
     const checkin = localStore.getSiteCheckIn(siteId);
-    const stationStage = !checkin && !this.hasSiteCheckIn(siteId)
+    const site = (this.data.site && this.data.site.id === siteId)
+      ? this.data.site : (this.data.sites || []).find(item => item.id === siteId);
+    const stationStage = site && site.checked_out
+      ? { code: 'checked_out', label: '已离站', cls: 'station-stage-ok' }
+      : site && site.rework_checkin_required
+        ? { code: 'unvisited', label: '待复到站', cls: 'station-stage-wait' }
+      : !checkin && !this.hasSiteCheckIn(siteId)
       ? { code: 'unvisited', label: '待到站', cls: 'station-stage-wait' }
       : checkin && checkin.syncStatus === 'pending'
         ? { code: 'local_pending', label: '已到站，待同步', cls: 'station-stage-pending' }
         : { code: 'checked_in', label: '已到站', cls: 'station-stage-ok' };
     this.setData({ stationStage });
+  },
+
+  onCheckOut() {
+    const site = this.data.site;
+    const planId = this.data.selectedPlanId;
+    if (!site || !planId || this.data.checkingOut) return;
+    if (this.data.completed < this.data.total) {
+      wx.showToast({ title: '请先完成本站全部检查项', icon: 'none' });
+      return;
+    }
+    if (localStore.getSiteCheckIn(site.id) && localStore.getSiteCheckIn(site.id).syncStatus === 'pending') {
+      wx.showToast({ title: '到站打卡尚未同步，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({ checkingOut: true });
+    requestLocation().then(gps => api.checkOutExecutionSite(planId, site.id, {
+      lat: gps.lat, lng: gps.lng
+    })).then(res => {
+      const sites = (this.data.sites || []).map(item => item.id === site.id
+        ? Object.assign({}, item, { checked_out: true, check_out_time: res.check_out_time }) : item);
+      const currentPackage = this.data.currentPackage ? Object.assign({}, this.data.currentPackage, { sites }) : this.data.currentPackage;
+      this.setData({ sites, currentPackage, site: Object.assign({}, site, { checked_out: true }), selSite: Object.assign({}, this.data.selSite, { checked_out: true }), checkingOut: false }, () => {
+        this.refreshStationStage(site.id);
+      });
+      wx.showModal({ title: '离站打卡成功', content: '本站巡检已完成，作业流已闭环。', showCancel: false });
+    }).catch(err => {
+      this.setData({ checkingOut: false });
+      wx.showModal({ title: '离站打卡失败', content: (err && (err.error || err.message)) || '请确认定位有效且仍在站点附近', showCancel: false });
+    });
+  },
+
+  showCheckoutPrompt() {
+    if (!this.data.site || (this.data.site.checked_out) || !this.hasSiteCheckIn(this.data.site.id)) return;
+    wx.showModal({ title: '巡检项已完成', content: '请完成离站打卡，闭合本站作业流。', confirmText: '离站打卡', cancelText: '稍后处理', success: result => { if (result.confirm) this.onCheckOut(); } });
   },
 
   onCheckIn() {
@@ -626,6 +677,10 @@ Page({
       payload.lat = gps.lat; payload.lng = gps.lng;
       // 本地先落库：断网/弱网也留存打卡态，联网后静默同步
       const opId = localStore.addOp('checkin', payload);
+      if (site.rework_checkin_required) {
+        this.setData({ site: Object.assign({}, site, { rework_checkin_required: false }),
+          selSite: Object.assign({}, this.data.selSite, { rework_checkin_required: false }) });
+      }
       this.refreshStationStage(site.id);
       api.trackEvent('inspection.checkin.queued', { site_id: site.id, operation_id: opId });
       api.checkIn(payload, true)
@@ -638,6 +693,10 @@ Page({
         .catch((error) => {
           if (!isTransientSyncError(error)) {
             localStore.removeOp(opId);
+            if (site.rework_checkin_required) {
+              this.setData({ site: Object.assign({}, site, { rework_checkin_required: true }),
+                selSite: Object.assign({}, this.data.selSite, { rework_checkin_required: true }) });
+            }
             this.refreshStationStage(site.id);
             this.setData({ syncCount: pendingSyncCount() });
             wx.showModal({ title: '打卡未完成', content: error.error || '服务器拒绝了本次打卡，请按提示处理', showCancel: false });
@@ -669,6 +728,16 @@ Page({
   },
 
   onOpenItem(e) {
+    if (this.data.site && this.data.site.rework_checkin_required) {
+      wx.showModal({
+        title: '请重新到站打卡',
+        content: '该检查项影像已被驳回，必须重新到站打卡成功后才能补拍提交。',
+        confirmText: '去打卡',
+        cancelText: '稍后处理',
+        success: result => { if (result.confirm) this.onCheckIn(); }
+      });
+      return;
+    }
     if (!this.hasSiteCheckIn(this.data.selSiteId)) {
       wx.showModal({
         title: '请先到站打卡',
@@ -682,23 +751,33 @@ Page({
     let target = null;
     (this.data.categories || []).forEach(cat => (cat.items || []).forEach(it => { if (it.item_id === id) target = it; }));
     if (!target) return;
+    const reviewStatus = Number(target.review_status || 0);
+    if (target.result && reviewStatus === 2) {
+      wx.showToast({ title: '该检查项已通过审核，不能再次上传或提交', icon: 'none' });
+      return;
+    }
     if (target.sync_pending || localStore.getPendingSubmit(target.item_id, target.plan_id)) {
       wx.showToast({ title: '该检查项已本地保存，等待同步完成', icon: 'none' });
       return;
     }
+    const rejectedSubmit = localStore.getRejectedSubmit(target.item_id, target.plan_id);
+    const rejectedLocalPhotos = rejectedSubmit && rejectedSubmit.data && Array.isArray(rejectedSubmit.data.localPhotos)
+      ? rejectedSubmit.data.localPhotos : [];
+    const rejectedPhotoMeta = rejectedSubmit && rejectedSubmit.data && Array.isArray(rejectedSubmit.data.localPhotoMeta)
+      ? rejectedSubmit.data.localPhotoMeta : [];
     let photos = [];
     try { photos = target.photo_urls ? JSON.parse(target.photo_urls) : []; } catch (e) { photos = []; }
     const requiredPhotos = target.required_photos || 0;
     this.setData({
-      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: [], localPhotoMeta: [], requiredPhotos, photoInfo: photoRequirement(requiredPhotos, photos.length, 0) }
+      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: rejectedLocalPhotos, localPhotoMeta: rejectedPhotoMeta, requiredPhotos, originalPhotoCount: photos.length, supplementOnly: !!(target.result && reviewStatus === 1), photoInfo: photoRequirement(requiredPhotos, photos.length, rejectedLocalPhotos.length) }
     });
   },
 
   onCloseSheet() { this.setData({ 'sheet.open': false }); },
-  onSetResult(e) { this.setData({ 'sheet.result': e.currentTarget.dataset.r }); },
-  onRemark(e) { this.setData({ 'sheet.remark': e.detail.value }); },
-  onCalibrator(e) { this.setData({ 'sheet.calibrator': e.detail.value }); },
-  onCalValues(e) { this.setData({ 'sheet.calValues': e.detail.value }); },
+  onSetResult(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.result': e.currentTarget.dataset.r }); },
+  onRemark(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.remark': e.detail.value }); },
+  onCalibrator(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.calibrator': e.detail.value }); },
+  onCalValues(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.calValues': e.detail.value }); },
 
   onAddPhoto(e) {
     const sheet = this.data.sheet;
@@ -718,10 +797,14 @@ Page({
             if (gps) { metadata.gps_lat = gps.lat; metadata.gps_lng = gps.lng; }
           }
           // 成功取回 URL；失败（弱网/离线）保留原图与来源，待联网由同步引擎上传。
-          const tasks = paths.map(p => fileToBase64(p)
-            .then(b64 => api.uploadSitePhoto(siteId, b64, '', metadata)
+          const tasks = paths.map((p, index) => {
+            const idempotencyKey = photoIdempotencyKey(siteId, p, index);
+            const photoMetadata = Object.assign({}, metadata, { _idempotency_key: idempotencyKey });
+            return fileToBase64(p)
+            .then(b64 => api.uploadSitePhoto(siteId, b64, idempotencyKey, photoMetadata)
               .then(r => ({ url: resolveUploadUrl(r.url), reviewRequired: !!r.review_required })))
-            .catch(() => persistFile(p).then(saved => ({ localPath: saved, metadata }))));
+            .catch(() => persistFile(p).then(saved => ({ localPath: saved, metadata: photoMetadata })));
+          });
           return Promise.allSettled(tasks);
         });
       })
@@ -761,6 +844,10 @@ Page({
 
   onDelPhoto(e) {
     const idx = e.currentTarget.dataset.idx;
+    if (this.data.sheet.supplementOnly && idx < (this.data.sheet.originalPhotoCount || 0)) {
+      wx.showToast({ title: '审核中的原始证据不能删除，只能补充照片', icon: 'none' });
+      return;
+    }
     const photos = this.data.sheet.photos.slice();
     const item = this.data.sheet.item;
     if (item && item.result) api.deletePhoto(item.item_id, idx); // 已提交则通知后端删除
@@ -801,18 +888,31 @@ Page({
       if (it.result === 'abnormal') abnormalCount++;
     }));
     this.setData({ categories, completed, total, abnormalCount,
-      completionPercent: total ? Math.round(completed * 100 / total) : 0 });
+      completionPercent: total ? Math.round(completed * 100 / total) : 0 }, () => this.refreshStationStage(this.data.selSiteId));
+    return { completed, total };
   },
 
   onSubmitItem() {
     const s = this.data.sheet;
     if (!s.item || this._submittingItem) return;
+    if (Number(s.item.review_status || 0) === 2) {
+      wx.showToast({ title: '该检查项已通过审核，不能再次提交', icon: 'none' });
+      return;
+    }
+    if (this.data.site && this.data.site.rework_checkin_required) {
+      wx.showToast({ title: '请重新到站打卡后再补拍', icon: 'none' });
+      return;
+    }
     if (s.item.sync_pending || localStore.getPendingSubmit(s.item.item_id, s.item.plan_id)) {
       wx.showToast({ title: '该检查项已本地保存，等待同步完成', icon: 'none' });
       this.setData({ 'sheet.open': false });
       return;
     }
     const photoInfo = photoRequirement(s.requiredPhotos, s.photos.length, s.localPhotos.length);
+    if (s.supplementOnly && s.photos.length <= (s.originalPhotoCount || 0) && !s.localPhotos.length) {
+      wx.showToast({ title: '请先补充新的现场照片', icon: 'none' });
+      return;
+    }
     if (!hasInspectionFieldRecord({
       remark: s.remark,
       calibrator: s.calibrator,
@@ -840,6 +940,7 @@ Page({
         item_id: s.item.item_id,
         plan_id: s.item.plan_id,
         result: s.result,
+        supplement: !!s.supplementOnly,
         remark: s.remark,
         photo_urls: photoUrls,
         calibrator: s.calibrator,
@@ -877,8 +978,17 @@ Page({
   _afterSubmit(s, syncPending = false) {
     this._submittingItem = false;
     this.setData({ submitting: false, 'sheet.open': false });
-    this.updateItemResult(s.item.item_id, s.result, s.photos.concat(s.localPhotos), syncPending);
+    if (!syncPending && s && s.item) {
+      const oldRejected = localStore.clearRejectedSubmit(s.item.item_id, s.item.plan_id);
+      oldRejected.forEach(op => (op.data.localPhotos || []).forEach(filePath => {
+        wx.removeSavedFile({ filePath, fail() {} });
+      }));
+    }
+    const progress = this.updateItemResult(s.item.item_id, s.result, s.photos.concat(s.localPhotos), syncPending);
     this.setData({ syncCount: pendingSyncCount() });
+    if (!syncPending) {
+      if (progress.completed >= progress.total && progress.total > 0) this.showCheckoutPrompt();
+    }
   },
 
   onSyncNow() {
@@ -891,6 +1001,12 @@ Page({
       this.refreshSyncState();
       if (this.data.selSiteId) this.loadTasks(this.data.selSiteId);
       const rejected = (requestSummary.rejected || []).length + (localSummary.rejected || []).length;
+      if (rejected) {
+        const details = (requestSummary.rejected || []).concat(localSummary.rejected || [])
+          .map(item => item.error).filter(Boolean).slice(0, 2).join('；');
+        wx.showModal({ title: '同步被服务器拒绝', content: details || `${rejected} 项操作被服务器拒绝，请按提示重新操作。`, showCancel: false });
+        return;
+      }
       if (rejected) wx.showModal({ title: '部分操作未同步', content: `${rejected} 项被服务器拒绝，请按提示重新操作。`, showCancel: false });
       else if (this.data.syncCount === 0) wx.showToast({ title: '同步完成', icon: 'success' });
     }).catch(() => {

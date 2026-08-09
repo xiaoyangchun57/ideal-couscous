@@ -51,7 +51,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     execution_status TEXT, result TEXT, category TEXT, item_name TEXT,
                     frequency TEXT, remark TEXT, check_time TEXT, calibrator TEXT,
                     calibration_values TEXT, photo_urls TEXT, required_photos INTEGER DEFAULT 0,
-                    actual_photos INTEGER DEFAULT 0
+                    actual_photos INTEGER DEFAULT 0, check_out_time TEXT
                 );
                 CREATE TABLE inspection_checkins (site_id INTEGER, site_name TEXT, user_id INTEGER, user_name TEXT, check_time TEXT, lat REAL, lng REAL);
                 CREATE TABLE mobile_idempotency (idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT, created_at TEXT);
@@ -139,6 +139,31 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.json)
         self.assertIn('打卡', response.json['error'])
 
+    def test_site_checkout_requires_completion_and_closes_the_loop(self):
+        checked = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'site_name': '测试站点一', 'lat': 28.6801, 'lng': 115.7301,
+        })
+        self.assertEqual(checked.status_code, 200, checked.json)
+        before_complete = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
+            headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
+        self.assertEqual(before_complete.status_code, 400, before_complete.json)
+
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=30")
+            db.commit()
+        finally:
+            db.close()
+        response = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
+            headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['check_out_time'])
+        db = sqlite3.connect(self.db_path)
+        try:
+            self.assertIsNotNone(db.execute('SELECT check_out_time FROM insp_plan_items WHERE id=30').fetchone()[0])
+        finally:
+            db.close()
+
     def test_site_tasks_are_scoped_to_user_and_unfinished_carryover(self):
         today = datetime.now().strftime('%Y-%m-%d')
         db = sqlite3.connect(self.db_path)
@@ -156,6 +181,40 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertIn(30, item_ids)
         self.assertIn(41, item_ids)
         self.assertNotIn(40, item_ids)
+
+    def test_scheduled_and_legacy_carryover_remain_checkin_eligible(self):
+        """Every carryover visible on the mobile home page must remain executable at the station."""
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute("INSERT INTO sites VALUES (5, '历史结转站', 'S-5', 'water_quality', 28.7100, 115.7600)")
+            db.execute("INSERT INTO sites VALUES (6, '兼容结转站', 'S-6', 'water_quality', 28.7200, 115.7700)")
+            db.execute("INSERT INTO insp_plans VALUES (23, 2, date('now','-1 day'), 'active', 10)")
+            db.execute("INSERT INTO insp_plans VALUES (24, 2, date('now','-1 day'), 'active', NULL)")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency)
+                VALUES (42,23,5,'active',NULL,'结转检查项','设备','daily')""")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency)
+                VALUES (43,24,6,'active',NULL,'兼容结转检查项','设备','daily')""")
+            db.commit()
+        finally:
+            db.close()
+
+        for site_id, site_name, lat, lng in [
+            (5, '历史结转站', 28.7101, 115.7601),
+            (6, '兼容结转站', 28.7201, 115.7701),
+        ]:
+            detail = self.client.get(f'/api/mobile/site-tasks/{site_id}', headers=self.headers('operator-token'))
+            self.assertEqual(detail.status_code, 200, detail.json)
+            self.assertTrue(detail.json['site']['can_check_in'])
+            self.assertTrue(detail.json['site']['has_carryover'])
+            self.assertEqual(detail.json['site']['carryover_items'], 1)
+            self.assertEqual(detail.json['site']['task_state'], 'carryover')
+
+            checked = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
+                'site_id': site_id, 'site_name': site_name, 'lat': lat, 'lng': lng,
+            })
+            self.assertEqual(checked.status_code, 200, checked.json)
 
 
 if __name__ == '__main__':

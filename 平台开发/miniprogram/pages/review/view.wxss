@@ -13,6 +13,22 @@
 .review-row { padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
 .review-row:last-child { border-bottom: none; }
 .review-note { display: block; margin-top: 12rpx; padding: 14rpx 16rpx; background: var(--fill-2); border-radius: 12rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.5; }
+.approval-summary { display: block; margin-top: 12rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
+.detail-toggle { display: inline-block; margin-top: 14rpx; color: var(--brand); font-size: 23rpx; }
+.review-detail { margin-top: 14rpx; padding: 16rpx; background: var(--fill-2); border-radius: 10rpx; }
+.detail-label, .detail-text { display: block; }
+.detail-label { margin-top: 8rpx; color: var(--text-3); font-size: 21rpx; }
+.detail-text { margin-top: 4rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
+.detail-line { margin-top: 4rpx; }
+.detail-muted { display: block; margin-top: 4rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.4; }
+.detail-risk { color: var(--red); }
+.inspection-item { padding: 12rpx 0; border-bottom: 1rpx solid var(--line); }
+.inspection-item:last-child { border-bottom: none; }
+.inspection-item-head { display: flex; justify-content: space-between; gap: 16rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.4; }
+.item-result { color: var(--brand); flex-shrink: 0; }
+.review-photos { display: flex; flex-wrap: wrap; gap: 12rpx; margin-top: 14rpx; }
+.review-photo { width: 170rpx; height: 170rpx; border-radius: 8rpx; background: var(--fill); }
+.detail-empty { display: block; margin-top: 14rpx; color: var(--text-3); font-size: 22rpx; }
 .card-actions { display: flex; gap: 20rpx; margin-top: 20rpx; }
 .card-actions .btn-sm, .sheet-actions .btn-sm { flex: 1; margin: 0; }
 .reason { width: 100%; height: 200rpx; background: var(--fill-2); border-radius: 16rpx; padding: 20rpx; font-size: 26rpx; box-sizing: border-box; }

@@ -71,7 +71,8 @@ Page({
           part_name: part.part_name,
           label: (part.part_name || '备件') + (part.part_code ? '（' + part.part_code + '）' : '') + ' 余' + (part.quantity || 0)
         })));
-        this.setData({ site: res.site || null, partsOptions });
+        const checkedIn = !!(res.site && res.site.checked_in);
+        this.setData({ site: Object.assign({}, res.site || {}, { checked_in: checkedIn, can_check_in: !!(res.site && res.site.can_check_in && !checkedIn), checkin_sync_pending: false }), partsOptions });
       })
       .catch(() => wx.showToast({ title: '加载失败', icon: 'none' }));
   },
@@ -100,9 +101,15 @@ Page({
       payload.lat = gps.lat;
       payload.lng = gps.lng;
       api.checkIn(payload)
+        .then(() => this.setData({ site: Object.assign({}, this.data.site, { checked_in: true, can_check_in: false, checkin_sync_pending: false, rework_checkin_required: false }) }))
         .then(() => wx.showToast({ title: '打卡成功', icon: 'success' }))
         .catch((err) => {
           this.setData({ syncCount: queueCount() });
+          if (err && err.queued) {
+            this.setData({ site: Object.assign({}, this.data.site, { checked_in: true, can_check_in: false, checkin_sync_pending: true }) });
+          } else {
+            this.setData({ site: Object.assign({}, this.data.site, { checked_in: false, can_check_in: !!s.can_check_in, checkin_sync_pending: false }) });
+          }
           wx.showToast({ title: err && err.queued ? '已离线保存，联网后自动同步' : ((err && err.error) || '打卡失败'), icon: 'none' });
         })
         .finally(() => this.setData({ checkingIn: false }));

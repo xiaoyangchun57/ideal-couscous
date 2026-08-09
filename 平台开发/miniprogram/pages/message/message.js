@@ -24,6 +24,7 @@ Page({
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
+    if (app.globalData.refreshNotificationBadge) app.globalData.refreshNotificationBadge();
     this.load(true);
   },
 
@@ -61,6 +62,10 @@ Page({
 
   openBusinessTarget(item) {
     const sourceType = item.source_type;
+    if (sourceType === 'vehicle_use_expiry') {
+      wx.navigateTo({ url: '/pages/vehicle/vehicle' });
+      return;
+    }
     if (sourceType === 'workorder' || sourceType === 'workorder_review') {
       getApp().globalData.selWorkorderNo = item.source_id;
       wx.navigateTo({ url: '/pages/workorder/workorder' });
@@ -78,7 +83,7 @@ Page({
       wx.navigateTo({ url: '/pages/alert/alert' });
       return;
     }
-    if (['inspection_review', 'photo_review', 'data_review', 'parts_request', 'spare_part_request', 'vehicle_application'].includes(sourceType)) {
+    if (['inspection_review', 'photo_review', 'attachment_review', 'data_review', 'parts_request', 'spare_part_request', 'vehicle_application'].includes(sourceType)) {
       wx.navigateTo({ url: '/pages/review/view' });
     }
   },
@@ -93,6 +98,7 @@ Page({
         .then(() => {
           const list = this.data.list.map(n => n.id === id ? Object.assign({}, n, { is_read: true }) : n);
           this.setData({ list });
+          if (app.globalData.refreshNotificationBadge) app.globalData.refreshNotificationBadge();
           open();
         })
         .catch(open);
@@ -106,6 +112,7 @@ Page({
       .then(() => {
         const list = this.data.list.map(n => Object.assign({}, n, { is_read: true }));
         this.setData({ list });
+        if (app.globalData.refreshNotificationBadge) app.globalData.refreshNotificationBadge();
         wx.showToast({ title: '已全部已读', icon: 'success' });
       })
       .catch(() => wx.showToast({ title: '操作失败', icon: 'none' }));

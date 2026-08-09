@@ -4,6 +4,9 @@ const { getUser } = require('../../utils/auth.js');
 
 const app = getApp();
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const EXECUTION_STATUS = {
+  active: '执行中', completed: '已完成', rejected: '已驳回', cancelled: '已取消', draft: '待执行'
+};
 
 function weekdayCn(dateStr) {
   return WEEKDAYS[new Date(dateStr.replace(/-/g, '/')).getDay()];
@@ -39,7 +42,9 @@ Page({
     canEdit: false,
     canExecute: false,
     canFavorite: false,
-    favoriting: false
+    favoriting: false,
+    favorite: null,
+    favoriteSheet: { open: false, periodStart: '', submitting: false }
   },
 
   onLoad(opts) {
@@ -59,8 +64,14 @@ Page({
   },
 
   load(done) {
-    api.planScheduleDetail(this.scheduleId)
-      .then(res => {
+    const user = getUser() || {};
+    const roles = user.roles || [user.role || ''];
+    const canUseFavorites = roles.includes('operator');
+    Promise.all([
+      api.planScheduleDetail(this.scheduleId),
+      canUseFavorites ? api.planScheduleFavorites().catch(() => []) : Promise.resolve([])
+    ])
+      .then(([res, favorites]) => {
         const planData = res.plan_data || {};
         const vehicleDays = res.vehicle_days || {};
         const vehicleMap = res.vehicle_map || {};
@@ -103,23 +114,28 @@ Page({
             status_cn: '待审批'
           })) : []);
 
-        const user = getUser() || {};
-        const roles = user.roles || [user.role || ''];
+        const favorite = (favorites || []).find(item => Number(item.source_schedule_id) === Number(this.scheduleId)) || null;
+        const executionCompleted = !!res.execution_completed;
         this.setData({
           loaded: true,
           detail: res,
           days,
-          statusCn: maps.map(maps.PLAN_SCHEDULE_STATUS, res.status, res.status),
+          statusCn: executionCompleted ? '已完成' : maps.map(maps.PLAN_SCHEDULE_STATUS, res.status, res.status),
           statusCls: maps.PLAN_SCHEDULE_STATUS_CLS[res.status] || 'gray',
           typeCn: maps.map(maps.SCHEDULE_TYPE, res.schedule_type, res.schedule_type),
-          generatedPlans: res.generated_plans || [],
+          generatedPlans: (res.generated_plans || []).map(item => Object.assign({}, item, {
+            display_name: item.plan_name || ('巡检任务#' + item.id),
+            status_cn: EXECUTION_STATUS[item.status] || '状态未知',
+            status_cls: item.status === 'completed' ? 'green' : (item.status === 'active' ? 'blue' : 'gray')
+          })),
           resourceDays,
           resourceParts: plannedParts,
           linkedWorkorders: res.linked_workorders || [],
           canEdit: res.status === 'draft' || res.status === 'rejected',
-          canChange: res.status === 'approved',
-          canExecute: res.status === 'approved' && days.some(day => day.date === todayString() && day.sites.length > 0),
-          canFavorite: roles.includes('operator') && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0)
+          canChange: res.status === 'approved' && !executionCompleted,
+          canExecute: res.status === 'approved' && !executionCompleted && days.some(day => day.date === todayString() && day.sites.length > 0),
+          canFavorite: canUseFavorites && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0),
+          favorite
         });
         if (done) done();
       })
@@ -151,11 +167,53 @@ Page({
         if (!result.confirm) return;
         this.setData({ favoriting: true });
         api.addPlanScheduleFavorite(this.scheduleId, (result.content || '').trim())
-          .then(() => wx.showToast({ title: '已加入常用计划', icon: 'success' }))
+          .then(() => {
+            wx.showToast({ title: '已加入常用计划', icon: 'success' });
+            this.load();
+          })
           .catch(err => wx.showToast({ title: (err && (err.error || err.message)) || '收藏失败', icon: 'none' }))
           .finally(() => this.setData({ favoriting: false }));
       }
     });
+  },
+
+  onFavoriteAction() {
+    if (this.data.favorite) this.onUseFavorite();
+    else this.onFavorite();
+  },
+
+  onUseFavorite() {
+    const favorite = this.data.favorite;
+    if (!favorite) return;
+    this.setData({ favoriteSheet: {
+      open: true, periodStart: favorite.suggested_period_start || todayString(), submitting: false
+    } });
+  },
+
+  onFavoriteDate(e) {
+    this.setData({ 'favoriteSheet.periodStart': e.detail.value });
+  },
+
+  onCloseFavoriteSheet() {
+    if (!this.data.favoriteSheet.submitting) this.setData({ 'favoriteSheet.open': false });
+  },
+
+  onCreateFavoriteDraft() {
+    const favorite = this.data.favorite;
+    const sheet = this.data.favoriteSheet;
+    if (!favorite || !sheet.periodStart || sheet.submitting) return;
+    this.setData({ 'favoriteSheet.submitting': true });
+    api.createDraftFromPlanScheduleFavorite(favorite.id, sheet.periodStart)
+      .then(res => {
+        const scheduleId = res && res.schedule && res.schedule.id;
+        if (!scheduleId) throw new Error('草稿创建结果无效');
+        this.setData({ 'favoriteSheet.open': false, 'favoriteSheet.submitting': false });
+        wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + scheduleId });
+      })
+      .catch(err => {
+        this.setData({ 'favoriteSheet.submitting': false });
+        wx.showToast({ title: (err && (err.error || err.message)) || '生成草稿失败', icon: 'none' });
+      });
   },
 
   // 发起变更：已通过的计划 → modifying，随后进入编辑页修改

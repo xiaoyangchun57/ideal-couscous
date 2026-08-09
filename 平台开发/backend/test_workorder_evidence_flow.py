@@ -207,6 +207,26 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                                    json={'status': 'accepted'})
         self.assertEqual(response.status_code, 403, response.json)
 
+    def test_workorder_evidence_lifecycle_freezes_after_close_and_allows_review_supplement(self):
+        encoded = base64.b64encode(b'new-evidence' * 32).decode('ascii')
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
+            db.commit()
+        supplemental = self.client.post('/api/workorders/WO-TEST-001/photos',
+                                        headers=self.headers('operator-token'), json={'image': encoded})
+        self.assertEqual(supplemental.status_code, 200, supplemental.json)
+        locked_delete = self.client.post('/api/workorders/WO-TEST-001/photos',
+                                         headers=self.headers('operator-token'),
+                                         json={'delete_url': supplemental.json['url']})
+        self.assertEqual(locked_delete.status_code, 409, locked_delete.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='closed' WHERE order_no='WO-TEST-001'")
+            db.commit()
+        frozen = self.client.post('/api/workorders/WO-TEST-001/photos',
+                                  headers=self.headers('operator-token'), json={'image': encoded})
+        self.assertEqual(frozen.status_code, 409, frozen.json)
+        self.assertEqual(frozen.json['code'], 'WORKORDER_CLOSED')
+
 
 if __name__ == '__main__':
     unittest.main()

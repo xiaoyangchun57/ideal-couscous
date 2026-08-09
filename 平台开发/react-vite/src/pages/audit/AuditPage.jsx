@@ -99,6 +99,9 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
   const typeOptions = sourceTypes.map(t => {
     const map = {
       inspection: { label: '巡检质控' },
+      inspection_batch: { label: '巡检站点审核' },
+      plan_schedule: { label: '巡检计划审批' },
+      parts_request: { label: '备件审批' },
       workorder_review: { label: '工单办结' },
       photo_review: { label: '影像审核' },
       vehicle_application: { label: '用车审批' },
@@ -123,7 +126,7 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
 
   let metrics = [];
   let helpText = '';
-  if (sourceTypes.includes('inspection')) {
+  if (sourceTypes.includes('inspection') || sourceTypes.includes('inspection_batch')) {
     metrics = [
       { title: '巡检待审', value: statValue || 0, color: (statValue || 0) > 0 ? statusColors.warning[mode] : statusColors.success[mode] },
       { title: '涉及站点', value: siteCount, color: statusColors.info[mode] },
@@ -131,6 +134,14 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
       { title: '等待最久', value: oldestDays !== null ? `${oldestDays}天` : '-', color: tokens.colorTextTertiary },
     ];
     helpText = '点击「审核」处理巡检检查项；通过后数据正式生效，驳回后需执行人补充或整改。';
+  } else if (sourceTypes.includes('plan_schedule')) {
+    metrics = [
+      { title: '计划待审', value: statValue || 0, color: (statValue || 0) > 0 ? statusColors.warning[mode] : statusColors.success[mode] },
+      { title: '涉及站点', value: siteCount, color: statusColors.info[mode] },
+      { title: '变更申请', value: filtered.filter(i => i.is_change).length, color: statusColors.warning[mode] },
+      { title: '等待最久', value: oldestDays !== null ? `${oldestDays}天` : '-', color: tokens.colorTextTertiary },
+    ];
+    helpText = '计划审批重点核验站点覆盖、路线顺序、用车和备件安排；计划变更需对照变更前路线。';
   } else if (sourceTypes.includes('workorder_review')) {
     const photoCount = filtered.reduce((sum, i) => sum + (i.actual_photos || 0), 0);
     metrics = [
@@ -158,6 +169,8 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
         // 类型 Tag 专用小映射：仅用 antd 预设色名（主题无关，符合规范 §7）
         const map = {
           inspection: ['orange', <FileTextOutlined />],
+          inspection_batch: ['orange', <FileTextOutlined />],
+          plan_schedule: ['gold', <FileTextOutlined />],
           workorder_review: ['blue', <AuditOutlined />],
           photo_review: ['cyan', <CameraOutlined />],
           vehicle_application: ['purple', <FileTextOutlined />],
@@ -437,7 +450,7 @@ export default function AuditPage() {
 
   // ---- 统计 ----
   const [stats, setStats] = useState({
-    total: 0, inspection_pending: 0, workorder_pending: 0,
+    total: 0, plan_pending: 0, inspection_pending: 0, workorder_pending: 0,
     parts_pending: 0, vehicle_pending: 0, photo_pending: 0,
   });
   const [dataStats, setDataStats] = useState({ total: 0 });
@@ -488,13 +501,29 @@ export default function AuditPage() {
     setProcessing(true);
     try {
       let successMessage = '';
-      if (item.source_type === 'inspection') {
+      if (item.source_type === 'inspection_batch') {
+        if (action === 'reject' && !reviewComment.trim()) {
+          message.error('驳回需填写现场需补充或整改的内容'); return;
+        }
+        await api.postStrict('/inspection-v2/items/batch-review', action === 'approve'
+          ? { approve_ids: item.item_ids || [], reject_items: [] }
+          : { approve_ids: [], reject_items: (item.item_ids || []).map(id => ({ id, reason: reviewComment })) });
+        successMessage = action === 'approve' ? '站点巡检已全部通过' : '站点巡检已退回整改';
+      } else if (item.source_type === 'inspection') {
         if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写现场需补充或整改的内容'); return;
         }
         const realId = item.id.replace('insp_', '');
         await api.putStrict(`/inspection-v2/items/${realId}/review`, { action, comment: reviewComment });
         successMessage = action === 'approve' ? '巡检审核通过' : '巡检已退回现场整改';
+      } else if (item.source_type === 'plan_schedule') {
+        if (action === 'reject' && !reviewComment.trim()) {
+          message.error('驳回需填写计划退回原因'); return;
+        }
+        const realId = item.id.replace('ps_', '');
+        await api.postStrict(`/plan-schedules/${realId}/${action === 'approve' ? 'approve' : 'reject'}`,
+          action === 'approve' ? {} : { reason: reviewComment });
+        successMessage = action === 'approve' ? '巡检计划已批准' : '巡检计划已退回';
       } else if (item.source_type === 'workorder_review') {
         if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写现场需补充或整改的内容'); return;
@@ -654,7 +683,7 @@ export default function AuditPage() {
           description={[missingResolution ? '未记录现场处置说明' : '', missingRequiredPhotos ? '处置影像数量不足' : ''].filter(Boolean).join('；')} />}
         <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="类型">
-            <Tag color={item.source_type === 'inspection' ? 'orange' : 'blue'} style={{ borderRadius: 4, fontSize: 11 }}>
+            <Tag color={['inspection', 'inspection_batch'].includes(item.source_type) ? 'orange' : item.source_type === 'plan_schedule' ? 'gold' : 'blue'} style={{ borderRadius: 4, fontSize: 11 }}>
               {item.source_label}
             </Tag>
           </Descriptions.Item>
@@ -670,8 +699,32 @@ export default function AuditPage() {
               <Descriptions.Item label="现场处置说明">{item.resolution_note || <Text type="danger">未记录，建议退回补充</Text>}</Descriptions.Item>
             </>
           )}
-          {item.source_type === 'inspection' && (
+          {['inspection', 'inspection_batch'].includes(item.source_type) && (
             <Descriptions.Item label="巡检计划">{item.source_name}</Descriptions.Item>
+          )}
+          {item.source_type === 'inspection_batch' && (
+            <Descriptions.Item label="待审检查项">
+              {(item.item_details || []).map(check => <div key={check.id}>{check.item_name} · {check.result || '已提交'}{check.remark ? ` · ${check.remark}` : ''}</div>)}
+            </Descriptions.Item>
+          )}
+          {item.source_type === 'plan_schedule' && (
+            <>
+              <Descriptions.Item label="计划周期">{item.title}</Descriptions.Item>
+              <Descriptions.Item label="审批重点">站点、路线、用车与备件安排{item.is_change ? '（计划变更）' : ''}</Descriptions.Item>
+              <Descriptions.Item label="路线">
+                {(item.plan_days || []).map(day => <div key={day.date}>{day.date}：{(day.sites || []).map(site => site.name).join(' → ')}</div>)}
+              </Descriptions.Item>
+              {item.is_change && item.change_reason && <Descriptions.Item label="变更原因">{item.change_reason}</Descriptions.Item>}
+              {item.previous_plan_days?.length > 0 && <Descriptions.Item label="变更前路线">
+                {item.previous_plan_days.map(day => <div key={day.date}>{day.date}：{(day.sites || []).map(site => site.name).join(' → ')}</div>)}
+              </Descriptions.Item>}
+              {item.vehicle_days_detail?.length > 0 && <Descriptions.Item label="用车安排">
+                {item.vehicle_days_detail.map(day => <div key={day.date}>{day.date}：{day.plate_no || '未指定车辆'} {day.model || ''}</div>)}
+              </Descriptions.Item>}
+              {item.spare_parts?.length > 0 && <Descriptions.Item label="备件计划">
+                {item.spare_parts.map((part, index) => <div key={index}>{part.part_name || part.name || part.part_sku || '备件'} × {part.quantity || part.planned_quantity || 0}</div>)}
+              </Descriptions.Item>}
+            </>
           )}
           <Descriptions.Item label="站点">{item.site_name || '-'}</Descriptions.Item>
           {item.source_type === 'parts_request' && (
@@ -706,10 +759,12 @@ export default function AuditPage() {
               )}
             </>
           )}
-          <Descriptions.Item label="照片进度">
-            {item.actual_photos || 0} / {item.required_photos || 0} 张
-          </Descriptions.Item>
-          {item.remark && item.source_type !== 'workorder_review' && (
+          {!['plan_schedule', 'vehicle_application', 'parts_request', 'spare_part_request'].includes(item.source_type) && (
+            <Descriptions.Item label="照片进度">
+              {item.actual_photos || 0} / {item.required_photos || 0} 张
+            </Descriptions.Item>
+          )}
+          {item.remark && !['workorder_review', 'plan_schedule', 'inspection_batch'].includes(item.source_type) && (
             <Descriptions.Item label="检查标准">{item.remark}</Descriptions.Item>
           )}
         </Descriptions>
@@ -721,7 +776,7 @@ export default function AuditPage() {
               style={{ borderRadius: 6, objectFit: 'cover' }} preview={{ mask: '预览' }} />
           </div>
         )}
-        {item.source_type === 'inspection' && item.photo_urls && (() => {
+        {['inspection', 'inspection_batch'].includes(item.source_type) && item.photo_urls && (() => {
           try {
             const urls = typeof item.photo_urls === 'string' ? JSON.parse(item.photo_urls) : item.photo_urls;
             if (!Array.isArray(urls) || !urls.length) return <Text type="secondary">本项未附现场照片</Text>;
@@ -766,7 +821,7 @@ export default function AuditPage() {
         <div>
           <Text strong>审核意见</Text>
           <TextArea rows={3} value={reviewComment} onChange={e => setReviewComment(e.target.value)}
-        placeholder={['workorder_review', 'inspection'].includes(item.source_type)
+        placeholder={['workorder_review', 'inspection', 'inspection_batch', 'plan_schedule'].includes(item.source_type)
           ? '通过可留空；退回时必须填写需补充或整改内容'
           : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
         </div>
@@ -794,7 +849,7 @@ export default function AuditPage() {
       label: tabLabel('巡检质控', stats.inspection_pending || 0),
       children: (
         <BusinessAuditTab
-          sourceTypes={['inspection']}
+          sourceTypes={['inspection_batch']}
           title="巡检质控"
           statValue={stats.inspection_pending}
           allItems={items}
@@ -806,6 +861,23 @@ export default function AuditPage() {
         />
       ),
     },
+    isAdmin ? {
+      key: 'plan',
+      label: tabLabel('计划审批', stats.plan_pending || 0),
+      children: (
+        <BusinessAuditTab
+          sourceTypes={['plan_schedule']}
+          title="巡检计划审批"
+          statValue={stats.plan_pending}
+          allItems={items}
+          loading={loading}
+          loadError={pendingError}
+          onOpenReview={openReview}
+          onRefresh={loadPending}
+          reviewerNames={reviewerNames}
+        />
+      ),
+    } : null,
     {
       key: 'workorder',
       label: tabLabel('工单审核', stats.workorder_pending || 0),

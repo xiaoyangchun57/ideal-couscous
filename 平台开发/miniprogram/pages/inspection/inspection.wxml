@@ -84,9 +84,13 @@
       <text class="checkin-primary-title">到站打卡</text>
       <text class="checkin-primary-hint">获取当前位置后开始本站巡检</text>
     </view>
+    <view class="checkin-primary checkout-primary" wx:elif="{{stationStage.code === 'checked_in' && completed >= total && total > 0}}" bindtap="onCheckOut">
+      <text class="checkin-primary-title">{{checkingOut ? '离站打卡中…' : '完成巡检，离站打卡'}}</text>
+      <text class="checkin-primary-hint">确认已完成本站作业并记录离站位置</text>
+    </view>
     <view class="checked-in-summary" wx:else>
       <text class="checked-in-mark">✓</text>
-      <text>{{stationStage.code === 'local_pending' ? '到站记录已保存，等待联网同步' : '已完成到站打卡，可以开始巡检'}}</text>
+      <text>{{stationStage.code === 'checked_out' ? '已完成离站打卡，本站作业已闭环' : (stationStage.code === 'local_pending' ? '到站记录已保存，等待联网同步' : '已完成到站打卡，可以开始巡检')}}</text>
     </view>
     <view class="site-secondary-actions">
       <view class="site-secondary-action site-secondary-danger" bindtap="onOpenReport">异常上报</view>

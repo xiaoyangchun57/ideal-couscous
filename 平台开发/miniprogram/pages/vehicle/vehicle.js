@@ -33,6 +33,10 @@ function decorateApplication(item, use) {
   if (use) {
     statusCn = use.returned_at ? '已归档' : '使用中';
     statusCls = use.returned_at ? 'green' : 'brand';
+    if (!use.returned_at && use.needs_extension) {
+      statusCn = '使用中 · 已超期';
+      statusCls = 'red';
+    }
   } else if (item.status === 'approved') {
     if (isPlanTrip && useDate <= today && (!tripEnd || today <= tripEnd)) {
       statusCn = '待出车';
@@ -57,7 +61,10 @@ function decorateApplication(item, use) {
     trip_end_date: tripEnd,
     status_cn: statusCn,
     status_cls: statusCls,
-    can_checkout: canCheckout
+    can_checkout: canCheckout,
+    needs_extension: !!(use && use.needs_extension),
+    use_expired: !!(use && use.use_expired),
+    plan_completed: !!(use && use.plan_completed)
   });
 }
 
@@ -91,13 +98,18 @@ function groupPlanHistory(uses) {
 function decorateUse(item) {
   const tripEnd = dateOnly(item.end_at);
   const isPlanTrip = String(item.reason || '').indexOf('巡检计划#') >= 0;
-  const canReturn = !isPlanTrip || !tripEnd || tripEnd <= todayStr() || item.vehicle_status === 'restricted';
+  const canReturn = item.can_return !== undefined
+    ? !!item.can_return
+    : (!isPlanTrip || !tripEnd || tripEnd <= todayStr() || item.vehicle_status === 'restricted');
   return Object.assign({}, item, {
     vehicle_label: vehicleLabel(item),
     is_plan_trip: isPlanTrip,
     trip_end_date: tripEnd,
     plan_schedule_id: item.plan_schedule_id || null,
-    can_return: canReturn
+    can_return: canReturn,
+    needs_extension: !!item.needs_extension,
+    use_expired: !!item.use_expired,
+    plan_completed: !!item.plan_completed
   });
 }
 
@@ -109,7 +121,7 @@ function energyMeta(fuelType) { return fuelType === 'electric' ? { label: '充�
 
 Page({
   data: {
-    loaded: false, activeUse: null, applications: [], history: [], vehicles: [],
+    loaded: false, activeUse: null, hasVehicleExpiry: false, applications: [], history: [], vehicles: [],
     checkoutSheet: { open: false, application: null, mileage: '', remarks: '', items: [], submitting: false },
     returnSheet: { open: false, mileage: '', remarks: '', items: [], submitting: false },
     refuelSheet: { open: false, liters: '', amount: '', mileage: '', remark: '', submitting: false },
@@ -137,6 +149,7 @@ Page({
           loaded: true,
           applications: decoratedApplications.filter(item => !['cancelled', 'archived'].includes(item.status)),
           activeUse: decoratedUses.find(item => !item.returned_at) || null,
+          hasVehicleExpiry: decoratedUses.some(item => !item.returned_at && item.needs_extension),
           history: groupPlanHistory(decoratedUses).slice(0, 10),
           vehicles: (vehicles || []).filter(item => item.dispatchable)
         });
