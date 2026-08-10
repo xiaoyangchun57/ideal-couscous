@@ -41,6 +41,7 @@ class PartsRequestIssueTest(unittest.TestCase):
                 CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, real_name TEXT, role TEXT);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
+                CREATE TABLE work_orders (order_no TEXT PRIMARY KEY, site_id INTEGER);
                 CREATE TABLE spare_parts_inventory (
                     id INTEGER PRIMARY KEY, part_code TEXT, part_name TEXT, quantity INTEGER,
                     updated_at TEXT, unit TEXT, model TEXT, category TEXT, min_quantity INTEGER,
@@ -91,6 +92,7 @@ class PartsRequestIssueTest(unittest.TestCase):
                 (2, 'manager', '主管', 'manager'),
             ])
             db.execute("INSERT INTO sites VALUES (1, '测试站点')")
+            db.execute("INSERT INTO work_orders VALUES ('WO-RELATED-001', 1)")
             db.executemany('INSERT INTO user_sites VALUES (?,?)', [(9, 1), (8, 1)])
             db.execute("INSERT INTO spare_parts_inventory (id,part_code,part_name,quantity,unit,model) VALUES (1, 'P-001', '采样泵', 10, '件','')")
         self.client = app_module.app.test_client()

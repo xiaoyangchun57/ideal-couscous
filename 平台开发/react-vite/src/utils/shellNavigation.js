@@ -33,14 +33,22 @@ export function getNotificationTarget(item, roles) {
     case 'inspection':
     case 'inspection_review':
       return hasAnyRole(roles, ['admin', 'operator']) ? '/plan-schedules' : null;
+    case 'inspection_review_batch':
+      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=inspection' : null;
+    case 'inspection_rework':
+      return hasAnyRole(roles, ['admin', 'operator'])
+        ? (sourceId ? `/plan-schedules?rework_plan=${sourceId}` : '/plan-schedules')
+        : null;
     case 'photo_review':
+    case 'attachment_review':
+    case 'attachment_review_batch':
       return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=photo' : null;
     case 'data_review':
       return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=data' : null;
     case 'parts_request':
       return hasAnyRole(roles, ['admin']) ? '/audit?tab=parts' : null;
     case 'spare_part_request':
-      return hasAnyRole(roles, ['admin']) ? '/audit?tab=spareparts' : null;
+      return hasAnyRole(roles, ['admin']) ? '/audit?tab=parts' : null;
     case 'vehicle_application':
       return hasAnyRole(roles, ['admin']) ? '/audit?tab=vehicle' : null;
     case 'plan_schedule':

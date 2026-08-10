@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { api, ApiError } from './api.js';
 import {
   buildLoginUrl,
+  buildProtectedLoginUrl,
   getLoginReasonMessage,
   getSafeReturnTo,
   isSafeReturnTo,
@@ -155,6 +156,10 @@ test('return paths accept only local non-login routes', () => {
   assert.equal(getSafeReturnTo('?returnTo=%2Fsites%3Fq%3Dtest'), '/sites?q=test');
   assert.equal(getSafeReturnTo('?returnTo=https%3A%2F%2Fevil.example'), '/');
   assert.equal(buildLoginUrl('/sites?q=test', 'session_revoked'), '/login?reason=session_revoked&returnTo=%2Fsites%3Fq%3Dtest');
+  assert.equal(buildLoginUrl('', ''), '/login');
+  assert.equal(buildProtectedLoginUrl('/'), '/login');
+  assert.equal(buildProtectedLoginUrl('/audit?tab=workorder'), '/login?reason=authentication_required&returnTo=%2Faudit%3Ftab%3Dworkorder');
+  assert.equal(getLoginReasonMessage(''), '');
   assert.match(getLoginReasonMessage('?reason=session_expired'), /登录已过期/);
   assert.match(getLoginReasonMessage('?reason=session_revoked'), /账号状态或密码/);
   assert.equal(sessionReasonFromCode('SESSION_EXPIRED'), 'session_expired');

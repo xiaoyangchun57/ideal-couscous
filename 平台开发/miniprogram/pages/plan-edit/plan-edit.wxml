@@ -79,6 +79,20 @@
     </view>
   </view>
 
+  <view class="card vehicle-policy-card">
+    <view class="vehicle-policy-row">
+      <view class="vehicle-policy-copy">
+        <text class="resource-title">计划用车</text>
+        <text class="vehicle-policy-hint">有巡检站点的日期必须安排车辆</text>
+      </view>
+      <switch checked="{{noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#1677ff" />
+    </view>
+    <text class="vehicle-policy-switch-label">本计划无需用车</text>
+    <textarea wx:if="{{noVehicleRequired}}" class="ta vehicle-exception-input"
+      placeholder="请说明无需车辆的具体原因，如站点位于办公区内且可步行到达"
+      value="{{vehicleExceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200" />
+  </view>
+
   <!-- 逐日排程 -->
   <view class="day-card card" wx:for="{{days}}" wx:key="date" wx:for-item="day" wx:for-index="di">
     <view class="day-head">
@@ -109,7 +123,7 @@
     </view>
 
     <!-- 车辆选择 -->
-    <view class="vehicle-row" wx:if="{{ft.daySiteCount(day)}}">
+    <view class="vehicle-row" wx:if="{{ft.daySiteCount(day) && !noVehicleRequired}}">
       <text class="vehicle-label">用车</text>
       <picker mode="selector" range="{{vehicles}}" range-key="name"
               value="{{ft.vehicleIdx(vehicles, day.vehicle_id)}}"

@@ -22,6 +22,9 @@
 .field-input { width: 100%; box-sizing: border-box; font-size: 27rpx; color: var(--text); background: var(--fill-2); border: 1rpx solid var(--line); border-radius: 14rpx; padding: 20rpx; min-height: 88rpx; }
 textarea.field-input { height: 180rpx; }
 .parts-route-note { margin: 18rpx 0 8rpx; padding: 18rpx 20rpx; background: var(--fill); border-left: 6rpx solid var(--brand); color: var(--text-2); font-size: 24rpx; line-height: 1.55; }
+.vehicle-exception-row { display: flex; align-items: center; justify-content: space-between; gap: 24rpx; margin: 20rpx 0; padding: 18rpx 0; border-top: 1rpx solid var(--line); border-bottom: 1rpx solid var(--line); }
+.vehicle-exception-title { margin-bottom: 4rpx; color: var(--text-2); }
+.vehicle-exception-hint { display: block; font-size: 22rpx; line-height: 1.45; color: var(--text-3); }
 
 /* 流程进度条 */
 .flow { display: flex; align-items: flex-start; margin: 24rpx 0 8rpx; }

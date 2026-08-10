@@ -26,7 +26,12 @@ export function buildLoginUrl(returnTo, reason = 'authentication_required') {
   const params = new URLSearchParams();
   if (reason) params.set('reason', reason);
   if (isSafeReturnTo(returnTo)) params.set('returnTo', returnTo);
-  return `/login?${params.toString()}`;
+  const query = params.toString();
+  return query ? `/login?${query}` : '/login';
+}
+
+export function buildProtectedLoginUrl(returnTo) {
+  return returnTo === '/' ? '/login' : buildLoginUrl(returnTo);
 }
 
 export function sessionReasonFromCode(code) {

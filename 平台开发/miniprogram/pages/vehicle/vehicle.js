@@ -1,7 +1,11 @@
 const api = require('../../services/api.js');
 const { todayStr } = require('../../utils/util.js');
+const { normalizePagedList, appendPagedItems } = require('../../utils/pagedList.js');
+const { myVehicleQuery, isReturnedUse } = require('../../utils/vehicleScope.js');
 
 const app = getApp();
+const CURRENT_PAGE_LIMIT = 100;
+const HISTORY_PAGE_LIMIT = 20;
 
 const APPLICATION_STATUS = {
   pending: ['待审批', 'orange'], approved: ['待出车', 'brand'], rejected: ['已驳回', 'red'], cancelled: ['已取消', 'gray']
@@ -30,15 +34,19 @@ function decorateApplication(item, use) {
   let statusCn = state[0];
   let statusCls = state[1];
   let canCheckout = false;
+  const needsExtension = !!(item.needs_extension || (use && use.needs_extension));
   if (use) {
-    statusCn = use.returned_at ? '已归档' : '使用中';
-    statusCls = use.returned_at ? 'green' : 'brand';
-    if (!use.returned_at && use.needs_extension) {
+    statusCn = use.is_returned ? '已归档' : '使用中';
+    statusCls = use.is_returned ? 'green' : 'brand';
+    if (!use.is_returned && use.needs_extension) {
       statusCn = '使用中 · 已超期';
       statusCls = 'red';
     }
   } else if (item.status === 'approved') {
-    if (isPlanTrip && useDate <= today && (!tripEnd || today <= tripEnd)) {
+    if (needsExtension) {
+      statusCn = '待延续';
+      statusCls = 'red';
+    } else if (isPlanTrip && useDate <= today && (!tripEnd || today <= tripEnd)) {
       statusCn = '待出车';
       statusCls = 'brand';
       canCheckout = true;
@@ -62,16 +70,17 @@ function decorateApplication(item, use) {
     status_cn: statusCn,
     status_cls: statusCls,
     can_checkout: canCheckout,
-    needs_extension: !!(use && use.needs_extension),
-    use_expired: !!(use && use.use_expired),
-    plan_completed: !!(use && use.plan_completed)
+    needs_extension: needsExtension,
+    reserves_vehicle: !!item.reserves_vehicle,
+    use_expired: !!(item.use_expired || (use && use.use_expired)),
+    plan_completed: !!(item.plan_completed || (use && use.plan_completed))
   });
 }
 
 function groupPlanHistory(uses) {
   const grouped = {};
   const history = [];
-  (uses || []).filter(item => item.returned_at).forEach(item => {
+  (uses || []).filter(item => item.is_returned).forEach(item => {
     if (!item.is_plan_trip || !item.plan_schedule_id) {
       history.push(item);
       return;
@@ -107,6 +116,7 @@ function decorateUse(item) {
     trip_end_date: tripEnd,
     plan_schedule_id: item.plan_schedule_id || null,
     can_return: canReturn,
+    is_returned: isReturnedUse(item),
     needs_extension: !!item.needs_extension,
     use_expired: !!item.use_expired,
     plan_completed: !!item.plan_completed
@@ -121,9 +131,10 @@ function energyMeta(fuelType) { return fuelType === 'electric' ? { label: '充�
 
 Page({
   data: {
-    loaded: false, activeUse: null, hasVehicleExpiry: false, applications: [], history: [], vehicles: [],
+    loaded: false, activeUse: null, activeArrangement: null, hasVehicleExpiry: false, applications: [], history: [], historyUses: [], historyPage: 1, historyTotal: 0, historyHasMore: false, historyLoading: false, vehicles: [],
     checkoutSheet: { open: false, application: null, mileage: '', remarks: '', items: [], submitting: false },
     returnSheet: { open: false, mileage: '', remarks: '', items: [], submitting: false },
+    extensionSheet: { open: false, applicationId: null, endDate: '', submitting: false },
     refuelSheet: { open: false, liters: '', amount: '', mileage: '', remark: '', submitting: false },
     faultSheet: { open: false, faultType: '车辆故障', mileage: '', description: '', remark: '', submitting: false },
     applySheet: { open: false, vehicleIndex: 0, date: '', startTime: '08:00', endTime: '18:00', destination: '', reason: '', submitting: false }
@@ -134,28 +145,72 @@ Page({
     this.load();
   },
   onPullDownRefresh() { this.load(() => wx.stopPullDownRefresh()); },
+  onReachBottom() {
+    if (!this.data.historyLoading && this.data.historyHasMore) this.loadMoreHistory();
+  },
 
   load(done) {
-    Promise.all([api.vehicleApplications(), api.vehicleUseRecords(), api.vehicles()])
-      .then(([applications, uses, vehicles]) => {
-        const decoratedUses = (uses || []).map(decorateUse);
+    const user = app.globalData.user || {};
+    Promise.all([
+      api.vehicleApplications(myVehicleQuery('current', user, { limit: CURRENT_PAGE_LIMIT })),
+      api.vehicleUseRecords(myVehicleQuery('current', user, { limit: CURRENT_PAGE_LIMIT })),
+      api.vehicleUseRecords(myVehicleQuery('history', user, { page: 1, limit: HISTORY_PAGE_LIMIT })),
+      api.vehicles()
+    ])
+      .then(([applicationsResponse, usesResponse, historyResponse, vehicles]) => {
+        const applicationsPage = normalizePagedList(applicationsResponse);
+        const usesPage = normalizePagedList(usesResponse);
+        const historyPage = normalizePagedList(historyResponse);
+        const decoratedUses = usesPage.items.map(decorateUse);
+        const historyUses = historyPage.items.map(decorateUse);
         const useByApplication = {};
         decoratedUses.forEach(item => { useByApplication[item.application_id] = item; });
-        const decoratedApplications = (applications || []).map(item => {
+        const decoratedApplications = applicationsPage.items.map(item => {
           const use = useByApplication[item.id];
           return decorateApplication(item, use);
         });
+        const activeUse = decoratedUses.find(item => !item.is_returned) || null;
+        const activeArrangement = decoratedApplications.find(item => item.reserves_vehicle && !item.has_active_use) || null;
         this.setData({
           loaded: true,
-          applications: decoratedApplications.filter(item => !['cancelled', 'archived'].includes(item.status)),
-          activeUse: decoratedUses.find(item => !item.returned_at) || null,
-          hasVehicleExpiry: decoratedUses.some(item => !item.returned_at && item.needs_extension),
-          history: groupPlanHistory(decoratedUses).slice(0, 10),
+          applications: decoratedApplications,
+          activeUse,
+          activeArrangement,
+          hasVehicleExpiry: decoratedUses.some(item => !item.is_returned && item.needs_extension)
+            || decoratedApplications.some(item => item.needs_extension),
+          historyUses,
+          history: groupPlanHistory(historyUses),
+          historyPage: historyPage.page,
+          historyTotal: historyPage.total,
+          historyHasMore: historyPage.hasMore,
+          historyLoading: false,
           vehicles: (vehicles || []).filter(item => item.dispatchable)
         });
         if (done) done();
       })
       .catch(() => { this.setData({ loaded: true }); if (done) done(); wx.showToast({ title: '车辆信息加载失败', icon: 'none' }); });
+  },
+
+  loadMoreHistory() {
+    const nextPage = Number(this.data.historyPage || 1) + 1;
+    this.setData({ historyLoading: true });
+    api.vehicleUseRecords(myVehicleQuery('history', app.globalData.user || {}, { page: nextPage, limit: HISTORY_PAGE_LIMIT }))
+      .then(response => {
+        const merged = appendPagedItems(this.data.historyUses, response);
+        const historyUses = merged.items.map(decorateUse);
+        this.setData({
+          historyUses,
+          history: groupPlanHistory(historyUses),
+          historyPage: merged.page,
+          historyTotal: merged.total,
+          historyHasMore: merged.hasMore,
+          historyLoading: false
+        });
+      })
+      .catch(() => {
+        this.setData({ historyLoading: false });
+        wx.showToast({ title: '行程历史加载失败', icon: 'none' });
+      });
   },
 
   onOpenCheckout(e) {
@@ -214,13 +269,40 @@ Page({
       .catch(() => this.setData({ returnSheet: { open: true, mileage: String(use.start_mileage || ''), remarks: '', items: inspectionItems(), submitting: false } }));
   },
   onVehiclePrimaryAction() {
-    if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
+    if (this.data.activeUse && this.data.activeUse.needs_extension) this.onOpenExtension();
+    else if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
     else this.onOpenPlanChange();
   },
+  onOpenExtension() {
+    const source = this.data.activeUse && this.data.activeUse.needs_extension
+      ? this.data.activeUse : this.data.activeArrangement;
+    const applicationId = source && (source.application_id || source.id);
+    if (!applicationId) { wx.showToast({ title: '未找到待延续的用车安排', icon: 'none' }); return; }
+    this.setData({ extensionSheet: { open: true, applicationId, endDate: todayStr(), submitting: false } });
+  },
+  onCloseExtension() {
+    if (!this.data.extensionSheet.submitting) this.setData({ 'extensionSheet.open': false });
+  },
+  onExtensionDate(e) { this.setData({ 'extensionSheet.endDate': e.detail.value }); },
+  onSubmitExtension() {
+    const sheet = this.data.extensionSheet;
+    if (!sheet.applicationId || !sheet.endDate) { wx.showToast({ title: '请选择延续截止日期', icon: 'none' }); return; }
+    this.setData({ 'extensionSheet.submitting': true });
+    api.extendVehicleApplication(sheet.applicationId, sheet.endDate)
+      .then(() => {
+        this.setData({ 'extensionSheet.open': false, 'extensionSheet.submitting': false });
+        wx.showToast({ title: '用车时间已延续', icon: 'success' });
+        this.load();
+      })
+      .catch(err => {
+        this.setData({ 'extensionSheet.submitting': false });
+        wx.showToast({ title: (err && err.message) || '延续失败', icon: 'none' });
+      });
+  },
   onOpenPlanChange() {
-    const use = this.data.activeUse;
-    if (!use || !use.plan_schedule_id) { wx.showToast({ title: '未找到关联巡检计划', icon: 'none' }); return; }
-    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + use.plan_schedule_id });
+    const source = this.data.activeUse || this.data.activeArrangement;
+    if (!source || !source.plan_schedule_id) { wx.showToast({ title: '未找到关联巡检计划', icon: 'none' }); return; }
+    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + source.plan_schedule_id });
   },
   onCloseReturn() { this.setData({ 'returnSheet.open': false }); },
   onReturnMileage(e) { this.setData({ 'returnSheet.mileage': e.detail.value }); },

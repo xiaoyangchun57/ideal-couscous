@@ -10,6 +10,7 @@ const { flushLocalOps } = require('../../utils/sync.js');
 const { selectExecutionSite, photoRequirement } = require('../../utils/executionState.js');
 const { hasInspectionFieldRecord } = require('../../utils/inspectionSubmissionState.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
+const { buildCheckinPayload, reworkResourcePresentation } = require('../../utils/reworkFlow.js');
 
 const app = getApp();
 
@@ -41,6 +42,15 @@ function photoIdempotencyKey(siteId, path, index) {
   return 'photo_' + siteId + '_' + Date.now() + '_' + index + '_' + safePath + '_' + Math.floor(Math.random() * 1e6);
 }
 
+function inspectionItemStatus(item, syncPending) {
+  if (syncPending) return { label: '待同步', code: 'sync' };
+  const reviewStatus = Number(item.review_status || 0);
+  if (reviewStatus === 3) return { label: '待整改', code: 'rework' };
+  if (item.result && reviewStatus === 1) return { label: '待审核', code: 'review' };
+  if (item.result && reviewStatus === 2) return { label: '已通过', code: 'approved' };
+  return { label: RESULT[item.result] || '待检', code: item.result || 'pending' };
+}
+
 function decoratePackageResources(pkg) {
   if (!pkg) return pkg;
   const resourceParts = (pkg.resource_parts || []).map(part => Object.assign({}, part, {
@@ -56,7 +66,11 @@ function decoratePackageResources(pkg) {
     summary.remainingKinds += part.remaining_quantity > 0 ? 1 : 0;
     return summary;
   }, { planned: 0, issued: 0, remaining: 0, totalKinds: 0, remainingKinds: 0 });
-  return Object.assign({}, pkg, { resource_parts: resourceParts, resource_summary: resourceSummary });
+  return Object.assign({}, pkg, {
+    resource_parts: resourceParts,
+    resource_summary: resourceSummary,
+    rework_resource: reworkResourcePresentation(pkg),
+  });
 }
 
 Page({
@@ -91,6 +105,7 @@ Page({
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
     partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0, submitting: false },
     vehicleSheet: { open: false, mode: 'dispatch', mileage: '', remarks: '', items: [], submitting: false },
+    reworkResourceSheet: { open: false, mode: 'vehicle', vehicles: [], vehicleIndex: 0, exceptionReason: '', submitting: false },
     refuelSheet: { open: false, quantity: '', amount: '', mileage: '', remark: '', label: '加油', unit: 'L', submitting: false },
     vehicleFaultSheet: { open: false, faultType: '车辆故障', mileage: '', description: '', remark: '', submitting: false }
   },
@@ -149,6 +164,7 @@ Page({
 
   isTripReady(pkg) {
     if (!pkg) return false;
+    if (pkg.is_rework) return pkg.resource_state === 'ready';
     if (pkg.is_carryover) return true;
     const confirmation = pkg.departure_confirmation || {};
     const resourcesReady = confirmation.vehicle_confirmed && confirmation.parts_confirmed;
@@ -274,6 +290,17 @@ Page({
     const pkg = this.data.currentPackage;
     if (!pkg || !pkg.vehicle) return;
     if (!pkg.vehicle_application_id) { wx.showToast({ title: '未找到本计划获批的用车安排', icon: 'none' }); return; }
+    if (pkg.vehicle_needs_extension) {
+      wx.showModal({
+        title: '用车安排已超期',
+        content: '结转巡检尚未完成，请先到“我的车辆”延续本次用车截止日期。',
+        confirmText: '立即延续',
+        success: result => {
+          if (result.confirm) wx.navigateTo({ url: '/pages/vehicle/vehicle' });
+        }
+      });
+      return;
+    }
     if (pkg.vehicle_use && pkg.vehicle_use.returned_at) { wx.showToast({ title: '本计划车辆已完成还车', icon: 'none' }); return; }
     if (pkg.vehicle_use && !pkg.vehicle_can_return) {
       wx.showToast({ title: '车辆行程中，到站打卡会自动记录行程节点', icon: 'none' });
@@ -427,16 +454,12 @@ Page({
           category_cn: cat.category_cn || map(INSPECTION_CATEGORY, cat.category, cat.category || '其他检查'),
           items: (cat.items || []).map(it => {
             const pendingSubmit = localStore.getPendingSubmit(it.item_id, it.plan_id);
-            return pendingSubmit ? {
-              ...it,
+            const merged = pendingSubmit ? Object.assign({}, it, {
               result: pendingSubmit.data.result,
-              result_cn: '待同步',
               sync_pending: true,
-            } : {
-              ...it,
-              result_cn: RESULT[it.result] || '待检',
-              sync_pending: false,
-            };
+            }) : Object.assign({}, it, { sync_pending: false });
+            const status = inspectionItemStatus(merged, merged.sync_pending);
+            return Object.assign({}, merged, { result_cn: status.label, status_code: status.code });
           })
         }));
         const localCompleted = decorated.reduce((count, cat) => count + (cat.items || [])
@@ -633,6 +656,56 @@ Page({
     this.setData({ stationStage });
   },
 
+  onOpenReworkResource() {
+    const pkg = this.data.currentPackage;
+    if (!pkg || !pkg.rework_resource || !pkg.rework_resource.canRequest) return;
+    api.vehicles().then(vehicles => {
+      this.setData({ reworkResourceSheet: {
+        open: true, mode: 'vehicle', vehicles: vehicles || [], vehicleIndex: 0,
+        exceptionReason: '', submitting: false
+      } });
+    }).catch(() => {
+      this.setData({ reworkResourceSheet: {
+        open: true, mode: 'no_vehicle', vehicles: [], vehicleIndex: 0,
+        exceptionReason: '', submitting: false
+      } });
+    });
+  },
+
+  onCloseReworkResource() {
+    if (!this.data.reworkResourceSheet.submitting) this.setData({ 'reworkResourceSheet.open': false });
+  },
+
+  onReworkResourceMode(e) { this.setData({ 'reworkResourceSheet.mode': e.currentTarget.dataset.mode }); },
+  onReworkVehiclePick(e) { this.setData({ 'reworkResourceSheet.vehicleIndex': Number(e.detail.value) || 0 }); },
+  onReworkExceptionReason(e) { this.setData({ 'reworkResourceSheet.exceptionReason': e.detail.value }); },
+
+  onSubmitReworkResource() {
+    const pkg = this.data.currentPackage;
+    const sheet = this.data.reworkResourceSheet;
+    if (!pkg || !pkg.rework_resource || sheet.submitting) return;
+    const payload = sheet.mode === 'vehicle'
+      ? { vehicle_id: (sheet.vehicles[sheet.vehicleIndex] || {}).id }
+      : { no_vehicle_required: true, vehicle_exception_reason: (sheet.exceptionReason || '').trim() };
+    if (sheet.mode === 'vehicle' && !payload.vehicle_id) {
+      wx.showToast({ title: '请选择可用车辆', icon: 'none' });
+      return;
+    }
+    if (sheet.mode === 'no_vehicle' && !payload.vehicle_exception_reason) {
+      wx.showToast({ title: '请填写无车例外原因', icon: 'none' });
+      return;
+    }
+    this.setData({ 'reworkResourceSheet.submitting': true });
+    api.requestReworkResource(pkg.plan_id, payload).then(() => {
+      this.setData({ 'reworkResourceSheet.open': false, 'reworkResourceSheet.submitting': false });
+      wx.showToast({ title: '整改资源申请已提交', icon: 'success' });
+      this.loadExecution();
+    }).catch(err => {
+      this.setData({ 'reworkResourceSheet.submitting': false });
+      wx.showToast({ title: (err && err.error) || '资源申请提交失败', icon: 'none' });
+    });
+  },
+
   onCheckOut() {
     const site = this.data.site;
     const planId = this.data.selectedPlanId;
@@ -669,12 +742,12 @@ Page({
 
   onCheckIn() {
     const site = this.data.site;
-    if (!site) return;
+    const planId = this.data.selectedPlanId;
+    if (!site || !planId) return;
     wx.showLoading({ title: '定位中' });
     requestLocation().then(gps => {
       wx.hideLoading();
-      const payload = { site_id: site.id, site_name: site.name, check_time: nowStr() };
-      payload.lat = gps.lat; payload.lng = gps.lng;
+      const payload = buildCheckinPayload(site, planId, gps, nowStr());
       // 本地先落库：断网/弱网也留存打卡态，联网后静默同步
       const opId = localStore.addOp('checkin', payload);
       if (site.rework_checkin_required) {
@@ -791,7 +864,12 @@ Page({
         const siteId = this.data.selSiteId;
         const locationTask = captureSource === 'camera' ? requestLocation().catch(() => null) : Promise.resolve(null);
         return locationTask.then(gps => {
-          const metadata = { capture_source: captureSource };
+          const metadata = {
+            capture_source: captureSource,
+            plan_id: sheet.item.plan_id,
+            item_id: sheet.item.item_id,
+            item_name: sheet.item.item_name,
+          };
           if (captureSource === 'camera') {
             metadata.taken_at = nowStr();
             if (gps) { metadata.gps_lat = gps.lat; metadata.gps_lng = gps.lng; }
@@ -869,16 +947,20 @@ Page({
     wx.previewImage({ urls: this.data.sheet.photos.concat(this.data.sheet.localPhotos), current: src });
   },
 
-  updateItemResult(itemId, result, photos, syncPending = false) {
+  updateItemResult(itemId, result, photos, syncPending = false, reviewStatus) {
     const categories = this.data.categories.map(cat => {
       return {
         ...cat,
-        items: cat.items.map(it => it.item_id === itemId ? {
-          ...it,
-          result,
-          result_cn: syncPending ? '待同步' : (RESULT[result] || '待检'),
-          sync_pending: syncPending,
-        } : it)
+        items: cat.items.map(it => {
+          if (it.item_id !== itemId) return it;
+          const merged = Object.assign({}, it, {
+            result,
+            review_status: reviewStatus === undefined ? it.review_status : reviewStatus,
+            sync_pending: syncPending,
+          });
+          const status = inspectionItemStatus(merged, syncPending);
+          return Object.assign({}, merged, { result_cn: status.label, status_code: status.code });
+        })
       };
     });
     let completed = 0, total = 0, abnormalCount = 0;
@@ -964,7 +1046,8 @@ Page({
       submitPromise
         .then((res) => {
           localStore.markSynced(opId);
-          this._afterSubmit(s);
+          this._afterSubmit(s, false, res);
+          if (localPhotos.length && this.data.selSiteId) this.loadTasks(this.data.selSiteId);
           wx.showToast({ title: res && res.order_no ? '异常已转工单' : '已提交', icon: 'success' });
         })
         .catch(() => {
@@ -975,7 +1058,7 @@ Page({
     });
   },
 
-  _afterSubmit(s, syncPending = false) {
+  _afterSubmit(s, syncPending = false, response) {
     this._submittingItem = false;
     this.setData({ submitting: false, 'sheet.open': false });
     if (!syncPending && s && s.item) {
@@ -984,7 +1067,10 @@ Page({
         wx.removeSavedFile({ filePath, fail() {} });
       }));
     }
-    const progress = this.updateItemResult(s.item.item_id, s.result, s.photos.concat(s.localPhotos), syncPending);
+    const progress = this.updateItemResult(
+      s.item.item_id, s.result, s.photos.concat(s.localPhotos), syncPending,
+      response && response.review_status
+    );
     this.setData({ syncCount: pendingSyncCount() });
     if (!syncPending) {
       if (progress.completed >= progress.total && progress.total > 0) this.showCheckoutPrompt();

@@ -30,9 +30,16 @@
 
     <view class="journey-details" wx:if="{{tripExpanded || !tripReady}}">
       <view class="carryover-note" wx:if="{{currentPackage.is_carryover}}">
-        此任务来自 {{currentPackage.work_date}} 未完成检查项，仅补做现场记录；车辆、备件和出发确认不再重复办理。
+        此任务来自 {{currentPackage.work_date}} 的未完成检查项；原车辆安排继续占用至计划闭环，超期时需先延续用车时间。
       </view>
-      <view class="departure-confirmation" wx:else>
+      <view class="rework-resource-card" wx:if="{{currentPackage.rework_resource && currentPackage.rework_resource.canRequest}}">
+        <view class="rework-resource-copy-wrap">
+          <text class="rework-resource-title">整改补检资源</text>
+          <text class="rework-resource-copy">{{currentPackage.rework_resource.label}}，重新安排车辆或登记无车例外后才能到站。</text>
+        </view>
+        <view class="rework-resource-button" bindtap="onOpenReworkResource">安排资源</view>
+      </view>
+      <view class="departure-confirmation" wx:if="{{!currentPackage.is_carryover && !(currentPackage.rework_resource && currentPackage.rework_resource.canRequest)}}">
         <view class="departure-copy">
           <text class="departure-label">出发资源</text>
           <text class="departure-hint">仅留痕，不锁车、不扣库</text>
@@ -55,11 +62,11 @@
           {{currentPackage.resource_summary.remaining === 0 ? '已领用' : (currentPackage.departure_confirmation && currentPackage.departure_confirmation.parts_confirmed ? '确认领用' : '待确认')}}
         </view>
       </view>
-      <view class="vehicle-dispatch" wx:if="{{!currentPackage.is_carryover && currentPackage.vehicle}}">
-        <view class="vehicle-dispatch-copy"><text class="vehicle-dispatch-title">{{currentPackage.vehicle.plate_no}}</text><text class="vehicle-dispatch-meta {{currentPackage.vehicle.document_warning ? 'vehicle-doc-warning' : ''}}">{{currentPackage.vehicle.document_warning || (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车，行程已归档' : (currentPackage.vehicle_can_return ? '计划末日，完成还车验车后归档' : '行程中，到站打卡自动记录节点')) : '出发前完成车况和里程登记')}}</text></view>
-        <view class="vehicle-dispatch-btn {{currentPackage.vehicle_use && currentPackage.vehicle_use.returned_at ? 'vehicle-dispatch-returned' : (currentPackage.vehicle_use ? 'vehicle-dispatch-done' : '')}}" bindtap="onOpenVehicleCheckout">{{currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车' : (currentPackage.vehicle_can_return ? '还车登记' : '行程中')) : '出车登记'}}</view>
+      <view class="vehicle-dispatch" wx:if="{{currentPackage.vehicle}}">
+        <view class="vehicle-dispatch-copy"><text class="vehicle-dispatch-title">{{currentPackage.vehicle.plate_no}}</text><text class="vehicle-dispatch-meta {{currentPackage.vehicle.document_warning || currentPackage.vehicle_needs_extension ? 'vehicle-doc-warning' : ''}}">{{currentPackage.vehicle.document_warning || (currentPackage.vehicle_needs_extension ? ('用车安排已于 ' + currentPackage.vehicle_trip_end_date + ' 到期，车辆仍由本计划占用') : (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车，行程已归档' : (currentPackage.vehicle_can_return ? '计划已闭环，完成还车验车后归档' : '行程中，到站打卡自动记录节点')) : '出发前完成车况和里程登记'))}}</text></view>
+        <view class="vehicle-dispatch-btn {{currentPackage.vehicle_needs_extension ? 'vehicle-dispatch-warning' : (currentPackage.vehicle_use && currentPackage.vehicle_use.returned_at ? 'vehicle-dispatch-returned' : (currentPackage.vehicle_use ? 'vehicle-dispatch-done' : ''))}}" bindtap="onOpenVehicleCheckout">{{currentPackage.vehicle_needs_extension ? '延续用车' : (currentPackage.vehicle_use ? (currentPackage.vehicle_use.returned_at ? '已还车' : (currentPackage.vehicle_can_return ? '还车登记' : '行程中')) : '出车登记')}}</view>
       </view>
-      <view class="vehicle-live-actions" wx:if="{{!currentPackage.is_carryover && currentPackage.vehicle_use && !currentPackage.vehicle_use.returned_at}}">
+      <view class="vehicle-live-actions" wx:if="{{currentPackage.vehicle_use && !currentPackage.vehicle_use.returned_at}}">
         <view class="vehicle-live-action" bindtap="onOpenRefuel">{{currentPackage.vehicle.fuel_type === 'electric' ? '充电记录' : '加油记录'}}</view>
         <view class="vehicle-live-action vehicle-live-danger" bindtap="onOpenVehicleFault">车辆故障</view>
       </view>
@@ -160,8 +167,8 @@
           <view class="item-review-reject" wx:if="{{it.review_status === 3 && it.review_comment}}">退回：{{it.review_comment}}</view>
         </view>
         <view class="item-right">
-          <view class="item-status {{it.review_status === 3 ? 'st-bad' : (it.result === 'normal' ? 'st-ok' : (it.result === 'abnormal' ? 'st-bad' : 'st-wait'))}}">
-            {{it.review_status === 3 ? '待整改' : it.result_cn}}
+          <view class="item-status {{it.status_code === 'rework' || it.result === 'abnormal' ? 'st-bad' : (it.status_code === 'approved' || (it.result === 'normal' && it.status_code !== 'review') ? 'st-ok' : 'st-wait')}}">
+            {{it.result_cn}}
           </view>
         </view>
       </view>
@@ -183,6 +190,26 @@
     <view class="empty-circle"></view>
     <text class="empty-tx">{{executionError || '今日暂无已批准的巡检任务'}}</text>
     <text class="empty-hint" wx:if="{{!executionError}}">请由管理员确认巡检计划已批准并分派至当前账号</text>
+  </view>
+
+  <view class="sheet-mask" wx:if="{{reworkResourceSheet.open}}" bindtap="onCloseReworkResource"></view>
+  <view class="sheet" wx:if="{{reworkResourceSheet.open}}">
+    <view class="sheet-head"><text class="sheet-title">整改补检资源</text><text class="sheet-close" bindtap="onCloseReworkResource">X</text></view>
+    <view class="segmented-row">
+      <view class="segment {{reworkResourceSheet.mode === 'vehicle' ? 'segment-on' : ''}}" data-mode="vehicle" bindtap="onReworkResourceMode">安排车辆</view>
+      <view class="segment {{reworkResourceSheet.mode === 'no_vehicle' ? 'segment-on' : ''}}" data-mode="no_vehicle" bindtap="onReworkResourceMode">无车例外</view>
+    </view>
+    <block wx:if="{{reworkResourceSheet.mode === 'vehicle'}}">
+      <view class="sheet-hint">提交后需等待审批；获批后仍须完成出车登记。</view>
+      <picker mode="selector" range="{{reworkResourceSheet.vehicles}}" range-key="plate_no" value="{{reworkResourceSheet.vehicleIndex}}" bindchange="onReworkVehiclePick">
+        <view class="picker-row">{{reworkResourceSheet.vehicles[reworkResourceSheet.vehicleIndex].plate_no || '请选择车辆'}} · {{reworkResourceSheet.vehicles[reworkResourceSheet.vehicleIndex].model || ''}} &gt;</view>
+      </picker>
+    </block>
+    <block wx:else>
+      <view class="sheet-hint">仅在确实无需车辆时使用，说明会进入审批记录。</view>
+      <textarea class="ta" value="{{reworkResourceSheet.exceptionReason}}" bindinput="onReworkExceptionReason" placeholder="填写无车例外原因" maxlength="200" />
+    </block>
+    <button class="btn-primary submit-btn" loading="{{reworkResourceSheet.submitting}}" disabled="{{reworkResourceSheet.submitting}}" bindtap="onSubmitReworkResource">提交资源申请</button>
   </view>
 
   <view class="sheet-mask" wx:if="{{vehicleSheet.open}}" bindtap="onCloseVehicleCheckout"></view>

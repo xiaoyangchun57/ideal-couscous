@@ -35,10 +35,10 @@ Page({
     resolutionNote: '',
     online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
-    vehicleOptions: [{ id: 0, label: '不指定（仅填事由）' }],
+    vehicleOptions: [{ id: 0, label: '暂无可用车辆' }],
     partsOptions: [{ id: 0, label: '手动输入（自定义名称）' }],
     // 极简申请弹层（含关联下标）
-    vehicleApply: { open: false, reason: '', index: 0 },
+    vehicleApply: { open: false, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' },
     partsFulfillmentOptions: [
       { key: 'stock', label: '使用现有库存' },
       { key: 'local_purchase', label: '附近紧急购买' },
@@ -145,7 +145,7 @@ Page({
   onResolutionNote(e) { this.setData({ resolutionNote: e.detail.value }); },
 
   afterAction(tip) {
-    this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0 }, partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } });
+    this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' }, partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } });
     wx.showToast({ title: tip, icon: 'success' });
     this.load();
   },
@@ -290,10 +290,11 @@ Page({
   loadLists() {
     Promise.all([api.vehicles(), api.partsInventory()])
       .then(([vs, ps]) => {
-        const vehicleOptions = [{ id: 0, label: '不指定（仅填事由）' }].concat((vs || []).map(v => ({
+        const availableVehicles = (vs || []).filter(v => v.dispatchable).map(v => ({
           id: v.id,
           label: (v.plate_no || '未上牌') + (v.model ? '（车型：' + v.model + '）' : '')
-        })));
+        }));
+        const vehicleOptions = availableVehicles.length ? availableVehicles : [{ id: 0, label: '暂无可用车辆' }];
         const partsOptions = [{ id: 0, label: '手动输入（自定义名称）' }].concat((ps || []).map(p => ({
           id: p.id,
           part_name: p.part_name,
@@ -304,19 +305,28 @@ Page({
       .catch(() => {});
   },
 
-  // ---- 极简申请弹层（可选关联车辆/库存备件） ----
-  onApplyVehicle() { this.setData({ 'vehicleApply.open': true, 'vehicleApply.reason': '', 'vehicleApply.index': 0 }); },
+  // ---- 工单资源申请弹层 ----
+  onApplyVehicle() { this.setData({ vehicleApply: { open: true, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' } }); },
   onVehicleReason(e) { this.setData({ 'vehicleApply.reason': e.detail.value }); },
   onVehiclePick(e) { this.setData({ 'vehicleApply.index': parseInt(e.detail.value, 10) }); },
+  onNoVehicleRequired(e) { this.setData({ 'vehicleApply.noVehicleRequired': !!e.detail.value }); },
+  onVehicleExceptionReason(e) { this.setData({ 'vehicleApply.exceptionReason': e.detail.value }); },
   submitVehicle() {
     const va = this.data.vehicleApply;
     const reason = (va.reason || '').trim();
     if (!reason) { wx.showToast({ title: '请填写用车事由', icon: 'none' }); return; }
     const item = this.data.sheet.item;
     const opt = this.data.vehicleOptions[va.index];
-    const vehicle_id = (opt && opt.id) ? opt.id : null;
+    const vehicle_id = (!va.noVehicleRequired && opt && opt.id) ? opt.id : null;
+    const exceptionReason = (va.exceptionReason || '').trim();
+    if (!va.noVehicleRequired && !vehicle_id) { wx.showToast({ title: '请选择可用车辆', icon: 'none' }); return; }
+    if (va.noVehicleRequired && !exceptionReason) { wx.showToast({ title: '请填写无需用车原因', icon: 'none' }); return; }
     wx.showLoading({ title: '提交中' });
-    api.applyVehicle({ site_id: item.site_id, work_order_no: item.order_no, reason, vehicle_id })
+    api.applyVehicle({
+      site_id: item.site_id, work_order_no: item.order_no, reason, vehicle_id,
+      no_vehicle_required: va.noVehicleRequired,
+      vehicle_exception_reason: va.noVehicleRequired ? exceptionReason : ''
+    })
       .then(() => { wx.hideLoading(); wx.showToast({ title: '用车申请已提交', icon: 'success' }); this.setData({ 'vehicleApply.open': false }); })
       .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'vehicleApply.open'); });
   },

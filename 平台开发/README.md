@@ -1,87 +1,44 @@
-# 水文监测智慧运营平台
+# 水质智慧运维平台
 
-水利监测站点综合管理、告警处置、工单流转、运维巡检一体化平台。支持雨量站、水位站、水文站、墒情站、蒸发站、地下水站等多种站点类型统一管理。
+本仓库包含 Flask 后端、React 管理台和微信小程序。后端直接提供已构建的 React 管理台；日常开发可单独启动 Vite。
 
-## 功能模块
+## 本地运行
 
-- **信息中心（驾驶舱）**：全屏地图展示 234 个监测站点实时状态，聚合告警、设备健康、工单态势、数据健康度等多维信息，支持站点类型筛选、搜索定位、自动刷新
-- **站点管理**：234 个监测站点统一管理，含站点详情、设备清单、数据趋势、巡检记录、告警历史、文档管理
-- **预警中心**：告警分级（严重/较大/一般）、督办、转工单、批量处理、状态追踪
-- **工单管理**：工单全生命周期流转（待受理→已受理→处理中→待验收→已关闭），支持派单、转单、催办
-- **设备管理**：设备台账、备件库存、备件审批、设备回收四个子模块
-- **运维管理**：巡检计划制定与执行、巡检任务追踪、统计分析
-- **用户管理**：管理员/操作员角色权限控制
+### 后端和已构建管理台
 
-## 技术栈
-
-| 层级 | 技术 |
-|------|------|
-| 前端（主应用） | React 18 + Vite + Ant Design 5 + React Router 6 |
-| 前端（旧版/移动端） | 纯 HTML/CSS/JS 单页面 |
-| 地图 | Leaflet + 高德卫星图 |
-| 图表 | ECharts + Chart.js |
-| 后端 | Flask 3.1 + APScheduler |
-| 数据库 | SQLite |
-
-## 项目结构
-
-```
-├── backend/          # Flask 后端服务
-│   ├── app.py        # 主应用（API 路由、业务逻辑）
-│   ├── data/         # SQLite 数据库文件
-│   ├── seed_*.py     # 数据初始化脚本
-│   └── requirements.txt
-├── react-vite/       # React + Vite 主前端应用
-│   └── src/
-│       ├── pages/    # 驾驶舱、站点、预警、工单、设备、运维、用户等页面
-│       ├── layouts/  # 主布局
-│       ├── hooks/    # 认证、主题等自定义 Hook
-│       └── theme/    # 主题配置
-├── frontend/         # 旧版前端（保留）
-│   ├── v2/           # 构建产物
-│   ├── dashboard.html
-│   ├── mobile.html   # 移动端页面
-│   └── shared/       # 共享配置
-├── miniprogram/      # 微信小程序（开发中）
-└── docs/             # 文档与截图
-```
-
-## 快速启动
-
-### 1. 启动后端
-
-```bash
+```powershell
 cd backend
 pip install -r requirements.txt
 python app.py
 ```
 
-后端默认运行在 `http://localhost:5000`。
+后端和 Vite 开发服务器默认仅监听 `127.0.0.1`；如部署环境明确需要对外绑定，启动后端前显式设置 `BACKEND_HOST=0.0.0.0`，本地开发不要设置该变量。
 
-### 2. 启动前端（React 版）
+访问 `http://127.0.0.1:5000`。后端使用 Waitress 监听 5000 端口，API 健康检查为 `http://127.0.0.1:5000/api/health`，本地数据库为 `backend/data/water.db`。
 
-```bash
+### React 管理台开发模式
+
+```powershell
 cd react-vite
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
-前端默认运行在 `http://localhost:5173`。
+开发服务器为 `http://127.0.0.1:5174`，`/api` 和 `/uploads` 均代理到本地后端。当前依赖基线为 React 19、React Router 7、Ant Design 5 和 Vite 8。构建产物输出到 `frontend/v2`，由后端直接提供。
 
-### 3. 访问系统
+### 微信小程序
 
-打开浏览器访问 `http://localhost:5173`。
+在微信开发者工具中打开 `miniprogram` 目录。该目录包含受版本控制的 `app.json` 和 `project.config.json`。桌面开发者工具会由 `miniprogram/utils/config.js` 使用 `http://127.0.0.1:5000`；真机预览和正式版本使用已配置的 HTTPS 地址。不要将本地地址带入真机或正式版本。
 
-## 默认账号
+## 验收入口
 
-| 账号 | 密码 | 角色 |
-|------|------|------|
-| admin | admin123 | 管理员 |
-| zhangsan | 123456 | 操作员 |
-| lisi | 123456 | 操作员 |
-| wangwu | 123456 | 操作员 |
-| zhaoliu | 123456 | 操作员 |
+推荐在提交前执行：
 
-## 数据说明
+```powershell
+python -m pytest backend -q --ignore=backend/test_api.py
+cd react-vite; npm.cmd run test:api
+cd react-vite; npm.cmd run build
+node --test miniprogram/tests/executionState.test.js miniprogram/tests/inspectionSubmissionState.test.js miniprogram/tests/inspectionReviewDecision.test.js miniprogram/tests/reworkFlow.test.js miniprogram/tests/notificationTarget.test.js miniprogram/tests/pagedList.test.js miniprogram/tests/vehicleScope.test.js
+```
 
-系统内置 234 个监测站点、548 台设备的模拟数据，包含告警、工单、巡检任务等完整业务数据，开箱即用无需额外配置。
+`backend/test_api.py` 是依赖本地 5000 端口的服务集成测试，不纳入上述 pytest 收集。完整交接要求见 `docs/RELEASE_TEST_HANDOFF.md`，开发约束见 `docs/DEVELOPMENT_STANDARDS.md`。

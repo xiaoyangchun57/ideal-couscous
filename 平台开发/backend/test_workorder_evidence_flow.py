@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import sqlite3
 import sys
@@ -68,7 +69,11 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     perceptual_hash TEXT DEFAULT ''
                 );
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
-                CREATE TABLE notifications (user_id INTEGER, source_type TEXT, source_id TEXT, title TEXT, content TEXT);
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
+                    source_id TEXT, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE hotline_events (related_order_no TEXT, status TEXT);
                 CREATE TABLE manual_reports (id INTEGER PRIMARY KEY, order_no TEXT, status TEXT, resolved_at TEXT);
                 CREATE TABLE alerts (id INTEGER PRIMARY KEY, status TEXT, resolved_at TEXT, resolve_reason TEXT, site_id INTEGER, metric TEXT);
@@ -100,6 +105,52 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
     @staticmethod
     def headers(token):
         return {'Authorization': f'Bearer {token}'}
+
+    def seed_workorder_review_notifications(self, with_evidence=False):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
+            if with_evidence:
+                db.execute("""INSERT INTO operation_attachments
+                    (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                     taken_at,review_status)
+                    VALUES ('review.jpg','/uploads/review.jpg','image','workorder',1,1,2,
+                            datetime('now','localtime'),'pending')""")
+            db.executemany("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content)
+                VALUES (?,'workorder_review','WO-TEST-001','待核验','现场处置已提交')""",
+                [(1,), (3,)])
+
+    def assert_other_reviewer_has_history_only(self):
+        current = self.client.get('/api/notifications?status=unread',
+                                  headers=self.headers('manager-token'))
+        history = self.client.get('/api/notifications?status=read',
+                                  headers=self.headers('manager-token'))
+        self.assertEqual(current.status_code, 200, current.json)
+        self.assertEqual(history.status_code, 200, history.json)
+        self.assertFalse(any(item['source_type'] == 'workorder_review'
+                             for item in current.json['notifications']))
+        archived = [item for item in history.json['notifications']
+                    if item['source_type'] == 'workorder_review']
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(archived[0]['source_id'], 'WO-TEST-001')
+        self.assertEqual(archived[0]['is_read'], 1)
+
+    def test_approve_archives_review_notifications_for_every_reviewer(self):
+        self.seed_workorder_review_notifications(with_evidence=True)
+        response = self.client.post('/api/workorders/WO-TEST-001/approve',
+                                    headers=self.headers('admin-token'), json={})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['status'], 'closed')
+        self.assert_other_reviewer_has_history_only()
+
+    def test_reject_archives_review_notifications_for_every_reviewer(self):
+        self.seed_workorder_review_notifications()
+        response = self.client.post('/api/workorders/WO-TEST-001/reject',
+                                    headers=self.headers('admin-token'),
+                                    json={'reason': '请补充仪表读数'})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['status'], 'in_progress')
+        self.assert_other_reviewer_has_history_only()
 
     def test_evidence_append_delete_reject_resubmit_and_approve(self):
         # 同一秒内连续上传的三张影像必须保留三条附件和三条 images 缓存记录。
@@ -133,6 +184,8 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             'url': base64_upload.json['url'],
         })
         self.assertEqual(cleanup_upload.status_code, 200, cleanup_upload.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
 
         # 首次提交、退回、补充后再次提交并办结，工单不会因影像审核而丢失。
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review', headers=self.headers('operator-token'), json={'client': 'mobile', 'resolution_note': '已检查并完成现场处置'})
@@ -164,6 +217,21 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(closed.status_code, 400, closed.json)
         self.assertIn('核验', closed.json['error'])
 
+    def test_workorder_delete_is_retired_for_all_authenticated_roles_and_preserves_audit(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='closed' WHERE order_no='WO-TEST-001'")
+            db.execute("INSERT INTO timeline_events VALUES ('workorder','WO-TEST-001','closed','Admin','closed')")
+
+        anonymous = self.client.delete('/api/workorders/WO-TEST-001')
+        self.assertEqual(anonymous.status_code, 401, anonymous.json)
+        denied = self.client.delete('/api/workorders/WO-TEST-001', headers=self.headers('other-operator-token'))
+        self.assertEqual((denied.status_code, denied.json.get('code')), (409, 'WORKORDER_DELETE_RETIRED'))
+        admin_denied = self.client.delete('/api/workorders/WO-TEST-001', headers=self.headers('admin-token'))
+        self.assertEqual((admin_denied.status_code, admin_denied.json.get('code')), (409, 'WORKORDER_DELETE_RETIRED'))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT status FROM work_orders WHERE order_no='WO-TEST-001'").fetchone()['status'], 'closed')
+            self.assertEqual(db.execute("SELECT COUNT(*) AS c FROM timeline_events WHERE source_id='WO-TEST-001'").fetchone()['c'], 1)
+
     def test_reused_web_upload_is_flagged_and_keeps_capture_time_unknown(self):
         encoded = base64.b64encode(b'same-image-bytes' * 32).decode('ascii')
         first = self.client.post('/api/workorders/WO-TEST-001/photos',
@@ -182,6 +250,37 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             self.assertEqual(reused['is_flagged'], 1)
             self.assertIn('重复', reused['flag_reason'])
 
+    def test_web_upload_uses_workorder_site_for_base64_and_multipart(self):
+        base64_response = self.client.post(
+            '/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'),
+            json={
+                'image': base64.b64encode(b'base64-site-spoof' * 32).decode('ascii'),
+                'site_id': 999,
+            },
+        )
+        self.assertEqual(base64_response.status_code, 200, base64_response.json)
+
+        multipart_response = self.client.post(
+            '/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'),
+            data={
+                'file': (io.BytesIO(b'multipart-site-spoof' * 32), 'evidence.jpg'),
+                'site_id': '999',
+            },
+            content_type='multipart/form-data',
+        )
+        self.assertEqual(multipart_response.status_code, 200, multipart_response.json)
+
+        with app_module.get_db() as db:
+            rows = db.execute(
+                """SELECT site_id, uploader_id, uploader_name FROM operation_attachments
+                   WHERE source_type='workorder' AND source_id=1 ORDER BY id DESC LIMIT 2"""
+            ).fetchall()
+        self.assertEqual([row['site_id'] for row in rows], [1, 1])
+        self.assertEqual([row['uploader_id'] for row in rows], [2, 2])
+        self.assertTrue(all(row['uploader_name'] == '现场运维' for row in rows))
+
     def test_status_endpoint_cannot_bypass_review_submission(self):
         submitted = self.client.put('/api/workorders/WO-TEST-001/status',
                                     headers=self.headers('operator-token'), json={'status': 'reviewing'})
@@ -189,6 +288,8 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertIn('提交审核', submitted.json['error'])
 
     def test_review_cannot_be_submitted_or_approved_without_evidence(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
                                      headers=self.headers('operator-token'), json={'client': 'web', 'resolution_note': '现场处置完成'})
         self.assertEqual(submitted.status_code, 400, submitted.json)

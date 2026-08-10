@@ -7,7 +7,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined,
-  EditOutlined, DeleteOutlined, ExclamationCircleOutlined,
+  EditOutlined, ExclamationCircleOutlined,
   FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
   InboxOutlined, SwapOutlined, CheckOutlined, AuditOutlined,
   UploadOutlined, DownloadOutlined,
@@ -464,26 +464,6 @@ export default function WorkOrdersPage() {
     }
   };
 
-  const handleDelete = (record) => {
-    modal.confirm({
-      title: '确认删除',
-      icon: <ExclamationCircleOutlined />,
-      content: `确认删除工单 ${record.order_no || record.id}？此操作不可撤销。`,
-      okText: '删除',
-      okType: 'danger',
-      cancelText: '取消',
-      onOk: async () => {
-        const result = await api.delete(`/workorders/${record.order_no}`);
-        if (result && !result.error) {
-          message.success('工单已删除');
-          fetchOrders();
-        } else {
-          message.error('删除失败');
-        }
-      },
-    });
-  };
-
   // Generic status transition handler (uses PUT /status)
   const handleStatusTransition = useCallback(async (record, newStatus, label) => {
     let resolutionNote = '';
@@ -695,12 +675,6 @@ export default function WorkOrdersPage() {
               <Tooltip title="编辑工单">
                 <Button type="text" size="small" icon={<EditOutlined />} aria-label={`编辑工单 ${record.order_no}`}
                   onClick={() => handleEdit(record)} />
-              </Tooltip>
-            )}
-            {s !== 'closed' && s !== 'reviewing' && (
-              <Tooltip title="删除工单">
-                <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`删除工单 ${record.order_no}`}
-                  onClick={() => handleDelete(record)} />
               </Tooltip>
             )}
           </Space>

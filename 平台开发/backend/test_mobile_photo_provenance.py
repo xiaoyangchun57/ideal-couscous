@@ -112,6 +112,47 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(len(row['sha256_hash']), 64)
         self.assertIn('"metadata_source": "exif"', row['extra_json'])
 
+    def test_unreadable_watermark_is_neutral_instead_of_claiming_it_is_missing(self):
+        buffer = io.BytesIO()
+        Image.new('RGB', (64, 48), 'white').save(buffer, format='JPEG')
+        response = self.upload(buffer.getvalue(), capture_source='watermark_album')
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['watermark_status'], 'unreadable')
+        self.assertFalse(response.json['review_required'])
+        self.assertNotIn('未能识别水印内容', response.json['risk_reasons'])
+
+    def test_inspection_upload_is_bound_to_its_item_at_creation(self):
+        with app_module.get_db() as db:
+            db.executescript('''
+                CREATE TABLE plan_schedules (id INTEGER PRIMARY KEY, status TEXT);
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, assignee_id INTEGER, status TEXT,
+                    plan_schedule_id INTEGER, start_date TEXT, plan_date TEXT
+                );
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    item_name TEXT, category TEXT, result TEXT
+                );
+                INSERT INTO plan_schedules VALUES (5,'approved');
+                INSERT INTO insp_plans VALUES (10,2,'active',5,NULL,NULL);
+                INSERT INTO insp_plan_items VALUES (100,10,1,'浊度仪表读数','设备检查',NULL);
+            ''')
+        response = self.upload(
+            jpeg_with_capture_time('navy'), capture_source='watermark_album',
+            plan_id=10, item_id=100, item_name='客户端伪造名称',
+        )
+
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT source_type,source_id,description,category,
+                       recognized_category,extra_json FROM operation_attachments""").fetchone()
+        self.assertEqual((row['source_type'], row['source_id']), ('inspection', 100))
+        self.assertEqual(row['description'], '浊度仪表读数')
+        self.assertEqual(row['category'], '设备检查')
+        self.assertEqual(row['recognized_category'], '浊度仪表读数')
+        self.assertIn('"item_id": 100', row['extra_json'])
+
     def test_exact_duplicate_is_accepted_and_marked_for_review(self):
         image = jpeg_with_capture_time('green')
         first = self.upload(image, capture_source='watermark_album')

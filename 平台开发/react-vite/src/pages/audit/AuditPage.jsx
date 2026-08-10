@@ -14,6 +14,8 @@ import { useTheme } from '../../hooks/useTheme';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
+import { approveItemIdsForPhotoSelection, photoRejectionNeedsReason } from '../../utils/inspectionReviewDecision';
+import { getAuditAllowedTabs, getAuditColumnProfile } from './auditColumnDefinitions';
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import DataReviewTab from '../alerts/components/DataReviewTab';
@@ -162,7 +164,7 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
     helpText = '正常照片可一键通过，仅系统标红（GPS偏离/时间异常/关联异常项）需人工确认；展开全部照片→只点异常→其余自动通过。';
   }
 
-  const columns = [
+  const defaultColumns = [
     ...(showType ? [{
       title: '类型', dataIndex: 'source_label', width: 110,
       render: (t, r) => {
@@ -240,6 +242,124 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
       ),
     },
   ];
+
+  const planColumns = [
+    {
+      title: '计划内容', key: 'plan', width: 220,
+      render: (_, record) => (
+        <div>
+          <Text strong>{record.title}</Text>
+          <div><Text type="secondary" style={{ fontSize: 11 }}>{record.source_name || '-'}</Text></div>
+          {record.is_change && <Tag color="warning" style={{ marginTop: 4, borderRadius: 4 }}>变更申请</Tag>}
+        </div>
+      ),
+    },
+    {
+      title: '路线 / 站点', key: 'route_sites', width: 270,
+      render: (_, record) => {
+        const routeDays = record.plan_days || [];
+        if (routeDays.length) {
+          return routeDays.map((day) => (
+            <div key={day.date}>
+              <Text type="secondary" style={{ fontSize: 11 }}>{day.date}</Text>
+              <div>{(day.sites || []).map(site => site.name || site).join(' -> ') || '-'}</div>
+            </div>
+          ));
+        }
+        return record.site_name || '-';
+      },
+    },
+    {
+      title: '用车', key: 'vehicle', width: 170,
+      render: (_, record) => (record.vehicle_days_detail || []).length
+        ? record.vehicle_days_detail.map(day => (
+          <div key={day.date}><Text type="secondary" style={{ fontSize: 11 }}>{day.date}</Text> {day.plate_no || '未指定车辆'} {day.model || ''}</div>
+        ))
+        : <Text type="secondary">未安排</Text>,
+    },
+    {
+      title: '备件', key: 'spare_parts', width: 170,
+      render: (_, record) => (record.spare_parts || []).length
+        ? record.spare_parts.map((part, index) => (
+          <div key={`${part.part_sku || part.part_name || part.name || 'part'}_${index}`}>
+            {part.part_name || part.name || part.part_sku || '备件'} x {part.quantity || part.planned_quantity || 0}
+          </div>
+        ))
+        : <Text type="secondary">无</Text>,
+    },
+    {
+      title: '提交时间', dataIndex: 'submit_time', width: 140,
+      render: value => value || <Text type="secondary">历史记录未保存</Text>,
+    },
+    {
+      title: '操作', width: 100, fixed: 'right',
+      render: (_, record) => (
+        <Button type="link" size="small" icon={<AuditOutlined />}
+          aria-label={`审核 ${record.source_name || record.title}`}
+          onClick={() => onOpenReview(record)}>
+          审核
+        </Button>
+      ),
+    },
+  ];
+  const vehicleColumns = [
+    {
+      title: '申请人 / 车辆', key: 'applicant_vehicle', width: 190,
+      render: (_, record) => (
+        <div>
+          <Text strong>{record.applicant_name || '未记录申请人'}</Text>
+          <div><Text type="secondary" style={{ fontSize: 11 }}>
+            {record.plate_no || '未指定车辆'} {record.model || ''}
+          </Text></div>
+        </div>
+      ),
+    },
+    {
+      title: '使用时间', key: 'use_time', width: 210,
+      render: (_, record) => <>
+        <div>{record.start_at || '-'}</div>
+        <Text type="secondary" style={{ fontSize: 11 }}>至 {record.end_at || '-'}</Text>
+      </>,
+    },
+    {
+      title: '目的地 / 事由', key: 'destination_reason', width: 240,
+      render: (_, record) => <>
+        <div>{record.destination || '未填写目的地'}</div>
+        <Text type="secondary" style={{ fontSize: 11 }}>{record.reason || '-'}</Text>
+      </>,
+    },
+    {
+      title: '关联计划 / 工单', key: 'related_work', width: 170,
+      render: (_, record) => {
+        const related = [
+          record.plan_name && `计划：${record.plan_name}`,
+          record.rework_plan_id && `整改计划#${record.rework_plan_id}`,
+          record.work_order_no && `工单：${record.work_order_no}`,
+        ].filter(Boolean);
+        return related.length ? related.map(item => <div key={item}>{item}</div>) : <Text type="secondary">未关联</Text>;
+      },
+    },
+    {
+      title: '提交时间', dataIndex: 'submit_time', width: 140,
+      render: value => value || <Text type="secondary">历史记录未保存</Text>,
+    },
+    {
+      title: '操作', width: 100, fixed: 'right',
+      render: (_, record) => (
+        <Button type="link" size="small" icon={<AuditOutlined />}
+          aria-label={`审核 ${record.source_name || record.title}`}
+          onClick={() => onOpenReview(record)}>
+          审核
+        </Button>
+      ),
+    },
+  ];
+  const columnProfile = getAuditColumnProfile(sourceTypes);
+  const columns = columnProfile === 'plan'
+    ? planColumns
+    : columnProfile === 'vehicle'
+      ? vehicleColumns
+      : defaultColumns;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -419,6 +539,7 @@ export default function AuditPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const userRoles = user?.roles || [user?.role];
   const isAdmin = userRoles.includes('admin');
+  const canReviewData = isAdmin || userRoles.includes('reviewer');
   const isDualRole = isAdmin && userRoles.includes('operator');
   const reviewerNames = [user?.real_name, user?.login_name, user?.username, user?.name].filter(Boolean);
   const reviewerId = user?.id || 1;
@@ -428,10 +549,8 @@ export default function AuditPage() {
   const [pendingError, setPendingError] = useState('');
   const [statsError, setStatsError] = useState('');
   const [dataStatsError, setDataStatsError] = useState('');
-  const allowedTabs = isAdmin
-    ? ['data', 'inspection', 'workorder', 'parts', 'vehicle', 'photo']
-    : ['inspection', 'workorder', 'photo'];
-  const defaultTab = isAdmin ? 'data' : 'inspection';
+  const allowedTabs = getAuditAllowedTabs(userRoles);
+  const defaultTab = allowedTabs[0] || 'inspection';
   const requestedTab = searchParams.get('tab');
   const initialTab = allowedTabs.includes(requestedTab) ? requestedTab : defaultTab;
   const [activeKey, setActiveKey] = useState(initialTab);
@@ -464,6 +583,7 @@ export default function AuditPage() {
   const [processing, setProcessing] = useState(false);
   const [autoPassing, setAutoPassing] = useState(false);
   const [evidenceAcknowledged, setEvidenceAcknowledged] = useState(false);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState([]);
 
   const loadPending = useCallback(async () => {
     setLoading(true);
@@ -498,17 +618,40 @@ export default function AuditPage() {
 
   // ---- 审核操作 ----
   const handleReview = async (item, action) => {
+    if (photoRejectionNeedsReason(item.attachment_ids, selectedPhotoIds) && !reviewComment.trim()) {
+      message.error('勾选驳回照片后必须填写统一驳回原因');
+      return;
+    }
     setProcessing(true);
     try {
       let successMessage = '';
       if (item.source_type === 'inspection_batch') {
-        if (action === 'reject' && !reviewComment.trim()) {
+        const attachmentIds = item.attachment_ids || [];
+        if (attachmentIds.length) {
+          const rejected = new Set(selectedPhotoIds);
+          const rejectIds = attachmentIds.filter(id => rejected.has(id));
+          const approveIds = attachmentIds.filter(id => !rejected.has(id));
+          const approveItemIds = approveItemIdsForPhotoSelection(
+            item.item_ids || [], item.attachment_details || [], rejectIds);
+          await api.postStrict('/operation-attachments/review', {
+            approve_ids: approveIds,
+            reject_ids: rejectIds,
+            approve_item_ids: approveItemIds,
+            reject_reason: rejectIds.length ? reviewComment : '',
+            reviewer_id: reviewerId,
+          });
+          successMessage = rejectIds.length
+            ? `已驳回 ${rejectIds.length} 张，其他照片和未受影响检查项已通过`
+            : '站点巡检照片与检查项已全部通过';
+        } else {
+          if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写现场需补充或整改的内容'); return;
+          }
+          await api.postStrict('/inspection-v2/items/batch-review', action === 'approve'
+            ? { approve_ids: item.item_ids || [], reject_items: [] }
+            : { approve_ids: [], reject_items: (item.item_ids || []).map(id => ({ id, reason: reviewComment })) });
+          successMessage = action === 'approve' ? '站点巡检已全部通过' : '站点巡检已退回整改';
         }
-        await api.postStrict('/inspection-v2/items/batch-review', action === 'approve'
-          ? { approve_ids: item.item_ids || [], reject_items: [] }
-          : { approve_ids: [], reject_items: (item.item_ids || []).map(id => ({ id, reason: reviewComment })) });
-        successMessage = action === 'approve' ? '站点巡检已全部通过' : '站点巡检已退回整改';
       } else if (item.source_type === 'inspection') {
         if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写现场需补充或整改的内容'); return;
@@ -555,13 +698,16 @@ export default function AuditPage() {
       } else if (item.source_type === 'photo_review') {
         const attachmentIds = item.attachment_ids || [];
         if (attachmentIds.length === 0) { message.error('无待审核照片'); return; }
+        const rejected = new Set(selectedPhotoIds);
         await api.postStrict(`/operation-attachments/review`, {
-          attachment_ids: attachmentIds,
-          action: action,
-          reject_reason: action === 'reject' ? (reviewComment || '未达标') : '',
+          approve_ids: attachmentIds.filter(id => !rejected.has(id)),
+          reject_ids: attachmentIds.filter(id => rejected.has(id)),
+          reject_reason: selectedPhotoIds.length ? reviewComment : '',
           reviewer_id: reviewerId,
         });
-        successMessage = action === 'approve' ? `已确认 ${attachmentIds.length} 张照片` : '照片已驳回，已通知重拍';
+        successMessage = selectedPhotoIds.length
+          ? `已驳回 ${selectedPhotoIds.length} 张，其余 ${attachmentIds.length - selectedPhotoIds.length} 张通过`
+          : `已确认 ${attachmentIds.length} 张照片全部通过`;
       } else {
         throw new Error('无法识别当前审核类型，请刷新待办后重试');
       }
@@ -579,6 +725,7 @@ export default function AuditPage() {
       setReviewingItem(null);
       setReviewComment('');
       setEvidenceAcknowledged(false);
+      setSelectedPhotoIds([]);
       loadPending();
     } catch (err) {
       console.error('handleReview error:', err);
@@ -598,6 +745,7 @@ export default function AuditPage() {
     setReviewingItem(item);
     setReviewComment('');
     setEvidenceAcknowledged(false);
+    setSelectedPhotoIds([]);
     setReviewModalOpen(true);
   };
 
@@ -661,17 +809,19 @@ export default function AuditPage() {
       <Modal
         title={<Space><AuditOutlined />{item.source_type === 'workorder_review' ? `工单审核 · ${item.source_name}` : `审核 · ${item.title}`}</Space>}
         open={reviewModalOpen}
-        onCancel={() => { setReviewModalOpen(false); setReviewingItem(null); }}
+        onCancel={() => { setReviewModalOpen(false); setReviewingItem(null); setSelectedPhotoIds([]); }}
         footer={[
-          <Button key="cancel" onClick={() => { setReviewModalOpen(false); setReviewingItem(null); }}>取消</Button>,
-          <Button key="reject" danger loading={processing}
+          <Button key="cancel" onClick={() => { setReviewModalOpen(false); setReviewingItem(null); setSelectedPhotoIds([]); }}>取消</Button>,
+          item.source_type !== 'photo_review' && !(item.source_type === 'inspection_batch' && item.attachment_ids?.length) && <Button key="reject" danger loading={processing}
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>,
           <Button key="approve" type="primary" loading={processing}
             disabled={missingResolution || missingRequiredPhotos || (riskyEvidence.length > 0 && !evidenceAcknowledged)}
             onClick={() => handleReview(item, 'approve')}
-            icon={<CheckOutlined />}>审核通过</Button>,
-        ]}
+            icon={<CheckOutlined />}>{(item.source_type === 'photo_review' || item.source_type === 'inspection_batch') && item.attachment_ids?.length
+              ? (selectedPhotoIds.length ? `驳回 ${selectedPhotoIds.length} 张，其余通过` : '全部通过')
+              : '审核通过'}</Button>,
+        ].filter(Boolean)}
         width={680}
         styles={{ body: { maxHeight: 'calc(100vh - 220px)', overflowY: 'auto' } }}
       >
@@ -748,15 +898,9 @@ export default function AuditPage() {
           )}
           {item.source_type === 'photo_review' && (
             <>
-              <Descriptions.Item label="自动归类">{item.recognized_category || '-'}</Descriptions.Item>
-              <Descriptions.Item label="水印说明">{item.remark || '-'}</Descriptions.Item>
-              {item.is_flagged ? (
-                <Descriptions.Item label="系统标红">
-                  <Tag color="red" style={{ borderRadius: 4 }}>{item.flag_reason || '触发标红规则'}</Tag>
-                </Descriptions.Item>
-              ) : (
-                <Descriptions.Item label="系统标红"><Tag color="green" style={{ borderRadius: 4 }}>正常照片</Tag></Descriptions.Item>
-              )}
+              <Descriptions.Item label="审核方式">勾选需驳回照片，未勾选照片一次通过</Descriptions.Item>
+              <Descriptions.Item label="待审数量">{item.pending_photo_count || item.actual_photos || 0} 张</Descriptions.Item>
+              <Descriptions.Item label="系统标红">{item.flagged_count || 0} 张</Descriptions.Item>
             </>
           )}
           {!['plan_schedule', 'vehicle_application', 'parts_request', 'spare_part_request'].includes(item.source_type) && (
@@ -769,14 +913,44 @@ export default function AuditPage() {
           )}
         </Descriptions>
         <div>
-        {item.source_type === 'photo_review' && item.attachment_details && item.attachment_details[0]?.stored_path && (
+        {(item.source_type === 'photo_review' || item.source_type === 'inspection_batch') && item.attachment_details?.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>照片预览</Text>
-            <Image width={220} src={item.attachment_details[0].stored_path}
-              style={{ borderRadius: 6, objectFit: 'cover' }} preview={{ mask: '预览' }} />
+            <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>
+              现场照片（已选择驳回 {selectedPhotoIds.length} 张）
+            </Text>
+            <Image.PreviewGroup>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10 }}>
+                {item.attachment_details.map((photo) => {
+                  const selected = selectedPhotoIds.includes(photo.id);
+                  const itemLabel = photo.item_name || photo.description || '未关联检查项';
+                  const categoryLabel = photo.recognized_category || photo.item_name || '待人工归类';
+                  const classificationLabel = photo.classification_source === 'inspection_item'
+                    ? '按检查项自动归类' : '按水印文字自动归类';
+                  const watermarkLabel = photo.capture_source !== 'watermark_album'
+                    ? '非水印相册来源'
+                    : photo.watermark_status === 'recognized'
+                      ? '水印文字已自动识别'
+                      : '水印自动识别未确认，请结合原图人工查看';
+                  return <div key={photo.id} style={{ border: `1px solid ${selected ? tokens.colorError : tokens.colorBorder}`, borderRadius: 6, padding: 6 }}>
+                    <Image src={photo.stored_path} width="100%" height={110}
+                      style={{ objectFit: 'cover', borderRadius: 4 }} preview={{ mask: '预览' }} />
+                    <Checkbox checked={selected} style={{ marginTop: 6 }}
+                      onChange={(event) => setSelectedPhotoIds((ids) => event.target.checked
+                        ? [...ids, photo.id] : ids.filter(id => id !== photo.id))}>
+                      驳回此照片
+                    </Checkbox>
+                    <Text strong style={{ display: 'block', fontSize: 11, marginTop: 5 }}>检查项：{itemLabel}</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>自动归类：{categoryLabel}（{classificationLabel}）</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>水印核验：{watermarkLabel}</Text>
+                    {photo.watermark_text && <Text type="secondary" ellipsis={{ tooltip: photo.watermark_text }} style={{ display: 'block', fontSize: 11 }}>识别文字：{photo.watermark_text}</Text>}
+                    {photo.flag_reason && <Text type="danger" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>{photo.flag_reason}</Text>}
+                  </div>;
+                })}
+              </div>
+            </Image.PreviewGroup>
           </div>
         )}
-        {['inspection', 'inspection_batch'].includes(item.source_type) && item.photo_urls && (() => {
+        {['inspection', 'inspection_batch'].includes(item.source_type) && !item.attachment_details?.length && item.photo_urls && (() => {
           try {
             const urls = typeof item.photo_urls === 'string' ? JSON.parse(item.photo_urls) : item.photo_urls;
             if (!Array.isArray(urls) || !urls.length) return <Text type="secondary">本项未附现场照片</Text>;
@@ -821,9 +995,11 @@ export default function AuditPage() {
         <div>
           <Text strong>审核意见</Text>
           <TextArea rows={3} value={reviewComment} onChange={e => setReviewComment(e.target.value)}
-        placeholder={['workorder_review', 'inspection', 'inspection_batch', 'plan_schedule'].includes(item.source_type)
-          ? '通过可留空；退回时必须填写需补充或整改内容'
-          : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
+        placeholder={(item.source_type === 'photo_review' || item.source_type === 'inspection_batch') && item.attachment_ids?.length
+          ? (selectedPhotoIds.length ? '请填写所选照片的统一驳回原因（必填）' : '未选择驳回照片，将全部通过')
+          : ['workorder_review', 'inspection', 'inspection_batch', 'plan_schedule'].includes(item.source_type)
+            ? '通过可留空；退回时必须填写需补充或整改内容'
+            : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
         </div>
       </Modal>
     );
@@ -839,7 +1015,7 @@ export default function AuditPage() {
   );
 
   const tabItems = [
-    isAdmin ? {
+    canReviewData ? {
       key: 'data',
       label: tabLabel('数据审核', dataStats.total || 0),
       children: <DataReviewTab tokens={tokens} />,

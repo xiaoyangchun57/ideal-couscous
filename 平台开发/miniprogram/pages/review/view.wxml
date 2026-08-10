@@ -87,12 +87,29 @@
               <text class="detail-label" wx:if="{{it.flag_reason}}">风险提示</text>
               <text class="detail-text detail-risk" wx:if="{{it.flag_reason}}">{{it.flag_reason}}</text>
             </block>
-            <view class="review-photos" wx:if="{{it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'photo_review' || it.source_type === 'workorder_photo')}}">
+            <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
+              <text class="photo-select-hint">勾选需驳回的照片，未勾选照片将一次通过</text>
+              <view class="review-photos">
+                <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="review-photo-wrap {{photo.selectedForReject ? 'review-photo-reject' : ''}}">
+                  <image class="review-photo" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                  <view class="photo-select" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">{{photo.selectedForReject ? '已选驳回' : '选择驳回'}}</view>
+                  <text class="photo-meta photo-item-name">检查项：{{photo.itemLabel}}</text>
+                  <text class="photo-meta">自动归类：{{photo.categoryLabel}}（{{photo.classificationLabel}}）</text>
+                  <text class="photo-meta">水印核验：{{photo.watermarkStatusLabel}}</text>
+                  <text class="photo-watermark" wx:if="{{photo.watermark_text}}">识别文字：{{photo.watermark_text}}</text>
+                  <text class="photo-risk" wx:if="{{photo.flag_reason}}">{{photo.flag_reason}}</text>
+                </view>
+              </view>
+            </block>
+            <view class="review-photos" wx:elif="{{it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'workorder_photo')}}">
               <image wx:for="{{it.photoUrls}}" wx:key="*this" wx:for-item="photo" class="review-photo" src="{{photo}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo}}" />
             </view>
             <text class="detail-empty" wx:if="{{!it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'photo_review' || it.source_type === 'workorder_photo')}}">暂无可查看的影像</text>
           </view>
-          <view class="card-actions">
+          <view class="card-actions" wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
+            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" bindtap="onSubmitPhotoReview">{{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}</button>
+          </view>
+          <view class="card-actions" wx:else>
             <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onApprove">{{it.approveLabel}}</button>
             <button class="btn-danger btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onReject">{{it.rejectLabel}}</button>
           </view>

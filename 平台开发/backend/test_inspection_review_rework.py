@@ -122,6 +122,11 @@ class InspectionReviewReworkTest(unittest.TestCase):
         self.assertIn('重拍', item['review_comment'])
         self.assertEqual((plan['status'], plan['completion_rate']), ('active', 0))
 
+        blocked = self.submit()
+        self.assertEqual(blocked.status_code, 400, blocked.json)
+        with app_module.get_db() as db:
+            fresh_checkin = (datetime.now() + timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+            db.execute("UPDATE inspection_checkins SET check_time=? WHERE id=1", (fresh_checkin,))
         resubmitted = self.submit()
         self.assertEqual(resubmitted.status_code, 200, resubmitted.json)
         with app_module.get_db() as db:
@@ -141,11 +146,84 @@ class InspectionReviewReworkTest(unittest.TestCase):
             notification = db.execute('SELECT user_id, source_type FROM notifications').fetchone()
         self.assertEqual((item['result'], item['review_status']), (None, 3))
         self.assertEqual((plan['status'], plan['completion_rate']), ('active', 0))
-        self.assertEqual((notification['user_id'], notification['source_type']), (2, 'inspection_review'))
+        self.assertEqual((notification['user_id'], notification['source_type']), (2, 'inspection_rework'))
 
     def test_rejected_field_photo_reopens_its_item_and_requires_a_new_checkin(self):
-        resubmitted = self.submit()
-        self.assertEqual(resubmitted.status_code, 200, resubmitted.json)
+        self.assertEqual(self.submit().status_code, 200)
+
+    def test_selective_photo_review_rejects_selected_and_approves_the_rest(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO operation_attachments
+                VALUES (?, ?, 1, 2, ?, ?, 'pending', NULL, NULL, NULL)""", [
+                (200, '/uploads/inspection/reading.jpg', '仪表读数', 'reading.jpg'),
+                (201, '/uploads/inspection/overview.jpg', '站点全景', 'overview.jpg'),
+            ])
+        response = self.client.post('/api/operation-attachments/review',
+                                    headers=self.headers('admin-token'), json={
+            'approve_ids': [201], 'reject_ids': [200], 'reject_reason': '读数模糊',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual((response.json['approved'], response.json['rejected']), (1, 1))
+        with app_module.get_db() as db:
+            statuses = {row['id']: row['review_status'] for row in db.execute(
+                'SELECT id, review_status FROM operation_attachments').fetchall()}
+            item = db.execute('SELECT result, review_status FROM insp_plan_items WHERE id=100').fetchone()
+            notifications = db.execute(
+                'SELECT source_type,source_id FROM notifications WHERE user_id=2').fetchall()
+        self.assertEqual(statuses, {200: 'rejected', 201: 'approved'})
+        self.assertEqual((item['result'], item['review_status']), (None, 3))
+        self.assertEqual([(row['source_type'], row['source_id']) for row in notifications],
+                         [('inspection_rework', 10)])
+
+    def test_rejecting_directly_bound_photo_reopens_only_its_check_item(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE operation_attachments ADD COLUMN source_type TEXT DEFAULT 'site_photo'")
+            db.execute("ALTER TABLE operation_attachments ADD COLUMN source_id INTEGER DEFAULT 0")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,template_id,item_name,result,execution_status,required_photos,
+                 actual_photos,review_status,photo_urls,remark)
+                VALUES (101,10,1,7,'站房环境','normal','active',1,1,1,'[\"/uploads/inspection/environment.jpg\"]','正常')""")
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,source_type,source_id)
+                VALUES (210,'/uploads/inspection/reading.jpg',1,2,'仪表读数','reading.jpg','pending','inspection',100)""")
+        response = self.client.post('/api/operation-attachments/review',
+                                    headers=self.headers('admin-token'), json={
+            'attachment_ids': [210], 'action': 'reject', 'reject_reason': '读数不清晰',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            rows = {row['id']: row for row in db.execute(
+                'SELECT id,result,review_status FROM insp_plan_items WHERE id IN (100,101)').fetchall()}
+        self.assertEqual((rows[100]['result'], rows[100]['review_status']), (None, 3))
+        self.assertEqual((rows[101]['result'], rows[101]['review_status']), ('normal', 1))
+
+    def test_rework_checkin_never_resets_other_item_results(self):
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plans ADD COLUMN generate_date TEXT")
+            db.execute("UPDATE insp_plans SET generate_date=date('now','localtime') WHERE id=10")
+            db.execute("ALTER TABLE inspection_checkins ADD COLUMN site_name TEXT")
+            db.execute("ALTER TABLE inspection_checkins ADD COLUMN user_name TEXT")
+            db.execute("ALTER TABLE inspection_checkins ADD COLUMN lat REAL")
+            db.execute("ALTER TABLE inspection_checkins ADD COLUMN lng REAL")
+            db.execute("CREATE TABLE sites (id INTEGER PRIMARY KEY,name TEXT,gps_lat REAL,gps_lng REAL)")
+            db.execute("INSERT INTO sites VALUES (1,'测试站',28.071303,115.539684)")
+            db.execute("""UPDATE insp_plan_items SET result=NULL,review_status=3,
+                       rework_required_at=datetime('now','localtime') WHERE id=100""")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,template_id,item_name,result,execution_status,required_photos,
+                 actual_photos,review_status,photo_urls,remark)
+                VALUES (101,10,1,7,'站房环境','normal','active',1,1,1,'[\"/uploads/inspection/environment.jpg\"]','正常')""")
+        response = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'site_name': '测试站', 'lat': 28.071303, 'lng': 115.539684,
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            rows = {row['id']: row for row in db.execute(
+                'SELECT id,result,review_status FROM insp_plan_items WHERE id IN (100,101)').fetchall()}
+        self.assertEqual((rows[100]['result'], rows[100]['review_status']), (None, 3))
+        self.assertEqual((rows[101]['result'], rows[101]['review_status']), ('normal', 1))
 
     def test_pending_item_accepts_only_new_supplemental_evidence(self):
         first = self.submit()

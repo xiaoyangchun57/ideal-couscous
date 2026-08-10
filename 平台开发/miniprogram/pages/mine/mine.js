@@ -3,11 +3,12 @@ const maps = require('../../services/maps.js');
 const api = require('../../services/api.js');
 const { chooseAndCompress, fileToBase64 } = require('../../utils/photos.js');
 const { todayStr } = require('../../utils/util.js');
+const { myVehicleQuery, activeUseFromRows } = require('../../utils/vehicleScope.js');
 
 const app = getApp();
 
 Page({
-  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, reviewTodo: 0, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, vehicleUses: [], vehicleHistoryOpen: false, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
+  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, reviewTodo: 0, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
@@ -36,9 +37,10 @@ Page({
       }));
       this.setData({ partsRequests });
     }).catch(() => {});
-    api.vehicleUseRecords().then(rows => {
+    api.vehicleUseRecords(myVehicleQuery('current', u, { limit: 100 })).then(response => {
       const today = todayStr();
-      const vehicleUses = (rows || []).map(row => {
+      const rows = Array.isArray(response) ? response : ((response && response.items) || []);
+      const currentUses = rows.map(row => {
         const tripEnd = row.end_at ? String(row.end_at).slice(0, 10) : '';
         const isPlanTrip = String(row.reason || '').indexOf('巡检计划#') >= 0;
         return Object.assign({}, row, {
@@ -49,9 +51,8 @@ Page({
           can_return: !isPlanTrip || !tripEnd || tripEnd <= today || row.vehicle_status === 'restricted'
         });
       });
-      const activeVehicleUse = vehicleUses.find(row => !row.returned_at) || null;
-      this.setData({ activeVehicleUse, vehicleUses });
-    }).catch(() => this.setData({ activeVehicleUse: null, vehicleUses: [] }));
+      this.setData({ activeVehicleUse: activeUseFromRows(currentUses) });
+    }).catch(() => this.setData({ activeVehicleUse: null }));
   },
 
   goMessage() { wx.switchTab({ url: '/pages/message/message' }); },
@@ -135,8 +136,6 @@ Page({
     this.setData({ returnSheet: { open: true, mileage: '', remarks: '', blocked: false, submitting: false } });
   },
   onCloseReturnVehicle() { this.setData({ 'returnSheet.open': false }); },
-  onOpenVehicleHistory() { this.setData({ vehicleHistoryOpen: true }); },
-  onCloseVehicleHistory() { this.setData({ vehicleHistoryOpen: false }); },
   onReturnMileage(e) { this.setData({ 'returnSheet.mileage': e.detail.value }); },
   onReturnRemarks(e) { this.setData({ 'returnSheet.remarks': e.detail.value }); },
   onReturnBlocked(e) { this.setData({ 'returnSheet.blocked': !!e.detail.value.length }); },

@@ -77,9 +77,12 @@ export default function MainLayout() {
     if (document.hidden) return;
     setNotifLoading(true);
     try {
-      const data = await api.getStrict('/notifications');
-      setNotifs(data?.notifications || []);
-      setUnread(data?.unread_count || 0);
+      const currentData = await api.getStrict('/notifications?status=unread&limit=100');
+      // The unread query also retires stale business notifications before history is loaded.
+      const historyData = await api.getStrict('/notifications?status=read&limit=100');
+      const merged = [...(currentData?.notifications || []), ...(historyData?.notifications || [])];
+      setNotifs(Array.from(new Map(merged.map((item) => [item.id, item])).values()));
+      setUnread(currentData?.unread_count || 0);
       setNotifError('');
     } catch (error) {
       setNotifError(error.message || '通知加载失败');
@@ -158,8 +161,8 @@ export default function MainLayout() {
     if (open) loadNotifs();
   };
 
-  const currentNotifs = useMemo(() => notifs.filter((item) => !item.is_stale), [notifs]);
-  const historyNotifs = useMemo(() => notifs.filter((item) => item.is_stale), [notifs]);
+  const currentNotifs = useMemo(() => notifs.filter((item) => !item.is_read && !item.is_stale), [notifs]);
+  const historyNotifs = useMemo(() => notifs.filter((item) => item.is_read || item.is_stale), [notifs]);
   const visibleNotifs = notifView === 'history' ? historyNotifs : currentNotifs;
 
   const notificationContent = (

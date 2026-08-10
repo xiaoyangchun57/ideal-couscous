@@ -17,6 +17,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
 import './PlanSchedulesPage.css';
 
 const { Text } = Typography;
@@ -30,6 +31,12 @@ const SCHEDULE_STATUS_MAP = {
   modifying: { label: '变更中', color: 'warning' },
   change_submitted: { label: '变更待审', color: 'processing' },
   archived: { label: '已归档', color: 'default' },
+};
+
+const FIELD_STATUS_MAP = {
+  active: { label: '现场进行中', color: 'processing' },
+  completed: { label: '现场已完成', color: 'success' },
+  rework: { label: '现场待整改', color: 'warning' },
 };
 
 const TYPE_MAP = { weekly: '周巡检', monthly: '月巡检', quarterly: '季巡检', yearly: '年巡检' };
@@ -290,6 +297,26 @@ export default function PlanSchedulesPage() {
     if (Number.isInteger(scheduleId) && scheduleId > 0) openDetail(scheduleId);
   }, [searchParams, openDetail]);
 
+  useEffect(() => {
+    const reworkPlanId = searchParams.get('rework_plan');
+    if (!reworkPlanId) return undefined;
+    let cancelled = false;
+    resolveReworkScheduleId(
+      reworkPlanId,
+      planId => api.getStrict(`/inspection-v2/plans/${planId}`),
+    ).then(scheduleId => {
+      if (cancelled) return;
+      if (!scheduleId) {
+        message.error('整改执行包未关联巡检排程，无法打开计划详情');
+        return;
+      }
+      setSearchParams(replaceReworkWithSchedule(searchParams, scheduleId), { replace: true });
+    }).catch(error => {
+      if (!cancelled) message.error(error?.message || '整改计划详情加载失败');
+    });
+    return () => { cancelled = true; };
+  }, [searchParams, setSearchParams]);
+
   const showExecutionGuide = (task) => {
     setExecutionGuide(task);
   };
@@ -442,6 +469,13 @@ export default function PlanSchedulesPage() {
       title: '状态', dataIndex: 'status', width: 100,
       render: v => {
         const s = SCHEDULE_STATUS_MAP[v] || { label: v, color: 'default' };
+        return <Badge status={s.color} text={s.label} />;
+      },
+    },
+    {
+      title: '现场', dataIndex: 'field_status', width: 110,
+      render: v => {
+        const s = FIELD_STATUS_MAP[v || 'active'];
         return <Badge status={s.color} text={s.label} />;
       },
     },
@@ -669,10 +703,13 @@ export default function PlanSchedulesPage() {
               <Descriptions.Item label="状态">
                 <Badge status={(SCHEDULE_STATUS_MAP[detail.status] || {}).color} text={(SCHEDULE_STATUS_MAP[detail.status] || {}).label || detail.status} />
               </Descriptions.Item>
+              <Descriptions.Item label="现场状态">
+                <Badge status={(FIELD_STATUS_MAP[detail.field_status || 'active'] || {}).color} text={(FIELD_STATUS_MAP[detail.field_status || 'active'] || {}).label || detail.field_status} />
+              </Descriptions.Item>
               <Descriptions.Item label="周期">{detail.period_start} ~ {detail.period_end}</Descriptions.Item>
               <Descriptions.Item label="版本">v{detail.version || 1}</Descriptions.Item>
               <Descriptions.Item label="提交时间">{detail.submitted_at || '-'}</Descriptions.Item>
-              <Descriptions.Item label="审批人">{detail.approver_name || '-'}</Descriptions.Item>
+              <Descriptions.Item label="审批人" span={2}>{detail.approver_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="备注" span={2}>{detail.remarks || '-'}</Descriptions.Item>
               {detail.coverage_exception_reason && (
                 <Descriptions.Item label="漏站例外说明" span={2}>

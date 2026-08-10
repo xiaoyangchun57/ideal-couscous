@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "npm run lint && vite build",
     "lint": "eslint src",
-    "test:api": "node --test src/services/api.test.js src/utils/shellNavigation.test.js",
+    "test:api": "node --test src/services/api.test.js src/utils/shellNavigation.test.js src/utils/inspectionReviewDecision.test.js src/pages/audit/auditColumnDefinitions.test.js src/pages/plan-schedules/planScheduleNavigation.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

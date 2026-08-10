@@ -78,6 +78,8 @@ Page({
     coverageWarning: '',
     remarks: '',
     coverageExceptionReason: '',
+    noVehicleRequired: false,
+    vehicleExceptionReason: '',
     submitting: false,
     loaded: false,
     isChange: false,      // 是否为变更编辑（modifying 状态）
@@ -200,9 +202,11 @@ Page({
           templateContext: Array.isArray(res.template_context) ? res.template_context : [],
           remarks: res.remarks || '',
           coverageExceptionReason: res.coverage_exception_reason || '',
+          noVehicleRequired: !!res.vehicle_exception_reason,
+          vehicleExceptionReason: res.vehicle_exception_reason || '',
           isChange: res.status === 'modifying',
           changeReason: res.change_reason || ''
-        });
+        }, () => this.loadVehicles());
       })
       .catch(() => {
         wx.showToast({ title: '加载失败', icon: 'none' });
@@ -213,11 +217,13 @@ Page({
   loadVehicles() {
     api.vehicles()
       .then(res => {
+        const selectedIds = new Set((this.data.days || [])
+          .map(day => Number(day.vehicle_id || 0)).filter(Boolean));
         const vehicles = (Array.isArray(res) ? res : []).map(v => ({
           id: v.id,
           name: v.plate_no || v.plate_number || v.name || ('车辆#' + v.id),
           disabled: !v.dispatchable
-        })).filter(v => !v.disabled);
+        })).filter(v => !v.disabled || selectedIds.has(Number(v.id)));
         this.setData({ vehicles });
       })
       .catch(() => {});
@@ -309,16 +315,32 @@ Page({
     this.setData({ coverageExceptionReason: e.detail.value });
   },
 
+  onNoVehicleRequired(e) {
+    const enabled = !!e.detail.value;
+    const updates = { noVehicleRequired: enabled };
+    if (enabled) {
+      updates.days = this.data.days.map(day => Object.assign({}, day, { vehicle_id: null }));
+    } else {
+      updates.vehicleExceptionReason = '';
+    }
+    this.setData(updates, () => this.refreshValidation());
+  },
+
+  onVehicleExceptionReason(e) {
+    this.setData({ vehicleExceptionReason: e.detail.value }, () => this.refreshValidation());
+  },
+
   // 构建请求体
   buildPayload(submit) {
-    const { scheduleType, periodStart, periodEnd, days, remarks, coverageExceptionReason, selectedParts, suggestions } = this.data;
+    const { scheduleType, periodStart, periodEnd, days, remarks, coverageExceptionReason,
+      noVehicleRequired, vehicleExceptionReason, selectedParts, suggestions } = this.data;
     const planData = {};
     const vehicleDays = {};
     days.forEach(d => {
       if (d.sites.length) {
         planData[d.date] = { sites: d.sites, notes: d.notes || '' };
       }
-      if (d.vehicle_id) {
+      if (!noVehicleRequired && d.vehicle_id) {
         vehicleDays[d.date] = d.vehicle_id;
       }
     });
@@ -337,6 +359,7 @@ Page({
       work_order_ids: Array.from(new Set(linkedWorkOrderIds)),
       remarks: remarks,
       coverage_exception_reason: coverageExceptionReason,
+      vehicle_exception_reason: noVehicleRequired ? vehicleExceptionReason.trim() : '',
       submit: !!submit
     };
   },

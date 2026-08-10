@@ -154,6 +154,11 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(site_map['昨日遗留站']['carryover_items'], 1)
         self.assertTrue(response.json['sites'][0]['has_carryover'])
         self.assertEqual([item['order_no'] for item in response.json['workorders']], ['WO-A'])
+        package = response.json['work_package']
+        self.assertTrue(package['has_plan'])
+        self.assertIn(13, package['schedule_ids'])
+        self.assertEqual(package['carryover_package_count'], 1)
+        self.assertIn('昨日遗留站', [site['name'] for site in package['sites']])
 
     def test_today_execution_includes_unfinished_historical_package(self):
         response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})

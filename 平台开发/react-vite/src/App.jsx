@@ -10,7 +10,7 @@ import MainLayout from './layouts/MainLayout';
 import LoginPage from './pages/login/LoginPage';
 import ChangePasswordPage from './pages/login/ChangePasswordPage';
 import { pageRoles } from './config/navigation';
-import { buildLoginUrl, getSafeReturnTo } from './utils/authNavigation.js';
+import { buildProtectedLoginUrl, getSafeReturnTo } from './utils/authNavigation.js';
 
 dayjs.locale('zh-cn');
 const antdZhCN = zhCN?.default || zhCN;
@@ -48,7 +48,7 @@ function ProtectedRoute({ children, roles }) {
   const location = useLocation();
   if (!isAuthenticated) {
     const returnTo = `${location.pathname}${location.search}${location.hash}`;
-    return <Navigate to={buildLoginUrl(returnTo)} replace />;
+    return <Navigate to={buildProtectedLoginUrl(returnTo)} replace />;
   }
   if (!user) return <RouteFallback />;
   if (user.must_change_password && location.pathname !== '/change-password') {

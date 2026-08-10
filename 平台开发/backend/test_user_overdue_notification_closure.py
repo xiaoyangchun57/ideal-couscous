@@ -67,7 +67,13 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 CREATE TABLE notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
                     source_id INTEGER, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
+                    dedupe_key TEXT DEFAULT '', payload_json TEXT DEFAULT '',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY, site_id INTEGER, is_deleted INTEGER DEFAULT 0,
+                    review_required INTEGER DEFAULT 1, review_status TEXT DEFAULT 'pending',
+                    source_type TEXT DEFAULT 'inspection'
                 );
                 INSERT INTO users VALUES (1,'admin','管理员','x','admin','管理员','','active',1,NULL,CURRENT_TIMESTAMP);
                 INSERT INTO users VALUES (2,'source','原运维','x','operator','原运维','','active',1,NULL,CURRENT_TIMESTAMP);
@@ -143,6 +149,9 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'cancelled')
 
     def test_stale_plan_notification_is_removed_from_unread_count(self):
+        count = self.client.get('/api/notifications/unread-count', headers=self.headers())
+        self.assertEqual(count.status_code, 200, count.json)
+        self.assertEqual(count.json['count'], 0)
         response = self.client.get('/api/notifications', headers=self.headers())
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json['unread_count'], 0)
@@ -150,6 +159,107 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         self.assertTrue(notice['is_stale'])
         self.assertEqual(notice['current_status'], 'approved')
         self.assertEqual(notice['is_read'], 1)
+
+    def test_notification_status_filter_separates_current_and_history(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (1,'alert',1,'当前消息','待处理',0)""")
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (1,'alert',2,'历史消息','已查看',1)""")
+        current = self.client.get('/api/notifications?status=unread', headers=self.headers())
+        history = self.client.get('/api/notifications?status=read', headers=self.headers())
+        self.assertEqual(current.status_code, 200, current.json)
+        self.assertEqual(history.status_code, 200, history.json)
+        self.assertEqual([row['title'] for row in current.json['notifications']], ['当前消息'])
+        self.assertIn('历史消息', [row['title'] for row in history.json['notifications']])
+
+    def test_notification_pagination_retires_stale_rows_before_selecting_page(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read,created_at)
+                VALUES (1,'alert',1,'后续消息一','仍待处理',0,'2026-08-10 10:00:00')""")
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read,created_at)
+                VALUES (1,'alert',2,'后续消息二','仍待处理',0,'2026-08-10 10:00:00')""")
+            # This newest row is already obsolete because schedule #20 is approved.
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read,created_at)
+                VALUES (1,'plan_schedule',20,'有新的巡检计划待审批','已不需要处理',0,'2026-08-10 10:00:00')""")
+
+        first = self.client.get('/api/notifications?status=unread&page=1&limit=1', headers=self.headers())
+        second = self.client.get('/api/notifications?status=unread&page=2&limit=1', headers=self.headers())
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertEqual(first.json['total'], 2)
+        self.assertTrue(first.json['has_more'])
+        self.assertEqual(first.json['page'], 1)
+        self.assertEqual(first.json['limit'], 1)
+        self.assertEqual(first.json['notifications'][0]['title'], '后续消息二')
+        self.assertEqual(second.json['notifications'][0]['title'], '后续消息一')
+        self.assertNotEqual(first.json['notifications'][0]['id'], second.json['notifications'][0]['id'])
+
+        invalid = self.client.get('/api/notifications?page=0', headers=self.headers())
+        capped = self.client.get('/api/notifications?limit=999', headers=self.headers())
+        self.assertEqual(invalid.status_code, 400, invalid.json)
+        self.assertEqual(capped.status_code, 200, capped.json)
+        self.assertEqual(capped.json['limit'], 100)
+
+    def test_read_photo_batch_does_not_reappear_until_a_new_photo_arrives(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO operation_attachments (id,site_id) VALUES (10,1)")
+            app_module._notify_attachment_reviewers(db, 1, 10, '测试站影像')
+            batch = db.execute("""SELECT id FROM notifications
+                WHERE source_type='attachment_review_batch'""").fetchone()
+            db.execute('UPDATE notifications SET is_read=1 WHERE id=?', (batch['id'],))
+
+        for _ in range(3):
+            response = self.client.get('/api/notifications?status=unread', headers=self.headers())
+            self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            batches = db.execute("""SELECT is_read FROM notifications
+                WHERE source_type='attachment_review_batch'""").fetchall()
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['is_read'], 1)
+
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO operation_attachments (id,site_id) VALUES (11,1)")
+        first = self.client.get('/api/notifications?status=unread', headers=self.headers())
+        second = self.client.get('/api/notifications/unread-count', headers=self.headers())
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        with app_module.get_db() as db:
+            batches = db.execute("""SELECT is_read FROM notifications
+                WHERE source_type='attachment_review_batch' ORDER BY id""").fetchall()
+        self.assertEqual(len(batches), 2)
+        self.assertEqual([row['is_read'] for row in batches], [1, 0])
+
+    def test_unread_dedupe_migration_archives_older_duplicates_and_enforces_uniqueness(self):
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read,dedupe_key,payload_json)
+                VALUES (1,'attachment_review_batch',1,'Batch','',0,'batch:1','{}')""", [(), ()])
+            self.assertTrue(app_module._ensure_notification_unread_dedupe_invariant(db))
+            rows = db.execute("""SELECT id,is_read FROM notifications
+                WHERE dedupe_key='batch:1' ORDER BY id""").fetchall()
+            self.assertEqual([row['is_read'] for row in rows], [1, 0])
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("""INSERT INTO notifications
+                    (user_id,source_type,source_id,title,content,is_read,dedupe_key,payload_json)
+                    VALUES (1,'attachment_review_batch',1,'Duplicate','',0,'batch:1','{}')""")
+
+    def test_repeated_deduped_creation_reuses_the_current_notification(self):
+        with app_module.get_db() as db:
+            app_module._ensure_notification_unread_dedupe_invariant(db)
+            first_id = app_module._upsert_unread_notification(
+                db, 1, 'attachment_review_batch', 1, 'Batch', 'First', 'batch:repeat', '{}')
+            second_id = app_module._upsert_unread_notification(
+                db, 1, 'attachment_review_batch', 1, 'Batch', 'Second', 'batch:repeat', '{}')
+            rows = db.execute("""SELECT id,content FROM notifications
+                WHERE user_id=1 AND dedupe_key='batch:repeat' AND is_read=0""").fetchall()
+        self.assertEqual(first_id, second_id)
+        self.assertEqual([(row['id'], row['content']) for row in rows], [(first_id, 'Second')])
 
 
 if __name__ == '__main__':

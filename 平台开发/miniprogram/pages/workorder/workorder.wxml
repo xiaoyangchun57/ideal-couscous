@@ -99,14 +99,19 @@
     </view>
   </view>
 
-  <!-- 用车申请（极简：仅填事由，可选关联车辆） -->
+  <!-- 工单用车申请：车辆必选，确实无需用车时登记例外 -->
   <view class="sheet-mask" wx:if="{{vehicleApply.open}}" bindtap="onCloseVehicle"></view>
   <view class="sheet" wx:if="{{vehicleApply.open}}">
     <view class="sheet-head"><text class="sheet-title">申请用车</text><text class="sheet-close" bindtap="onCloseVehicle">×</text></view>
     <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
-    <picker mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
+    <picker wx:if="{{!vehicleApply.noVehicleRequired}}" mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
       <view class="d-row"><text class="d-k">选择车辆</text><text class="d-v">{{vehicleOptions[vehicleApply.index].label}}</text></view>
     </picker>
+    <view class="vehicle-exception-row">
+      <view><text class="field-label vehicle-exception-title">本工单无需用车</text><text class="vehicle-exception-hint">仅限站点可步行到达等明确情形</text></view>
+      <switch checked="{{vehicleApply.noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#1677ff" />
+    </view>
+    <view class="field" wx:if="{{vehicleApply.noVehicleRequired}}"><text class="field-label">无需用车原因</text><textarea class="field-input" placeholder="请说明无需车辆的具体原因" value="{{vehicleApply.exceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200"></textarea></view>
     <view class="field"><text class="field-label">用车事由</text><textarea class="field-input" placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea></view>
     <view class="sheet-ops">
       <button class="btn-primary op-btn" bindtap="submitVehicle">提交申请</button>

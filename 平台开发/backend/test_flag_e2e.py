@@ -29,6 +29,7 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
         app_module.get_db = temporary_db
         app_module._tokens.clear()
         app_module._tokens['reviewer-token'] = {'id': 7, 'role': 'reviewer'}
+        app_module._tokens['operator-token'] = {'id': 8, 'role': 'operator'}
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
@@ -60,6 +61,7 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
                 );
             ''')
             db.execute('INSERT INTO user_sites VALUES (7, 1)')
+            db.execute('INSERT INTO user_sites VALUES (8, 1)')
             db.execute('INSERT INTO sites VALUES (1, 28.6833, 115.7333)')
             db.execute('INSERT INTO photo_requirements VALUES (10, 1)')
             db.executemany(
@@ -125,7 +127,7 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
     def test_inspection_photo_uses_capture_time_for_flag_evaluation(self):
         response = self.client.post(
             '/api/inspection/photos/upload',
-            headers=self.headers,
+            headers={'Authorization': 'Bearer operator-token'},
             json={
                 'site_id': 1,
                 'requirement_id': 10,

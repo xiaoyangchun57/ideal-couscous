@@ -1,6 +1,16 @@
 // 全部后端契约封装（已精确核对 app.py）
 const { request } = require('../utils/request.js');
 
+function vehicleListQuery(options) {
+  if (!options) return '';
+  const pairs = [];
+  ['scope', 'page', 'limit', 'offset', 'vehicle_id', 'applicant_id', 'status'].forEach(key => {
+    const value = options[key];
+    if (value !== undefined && value !== null && value !== '') pairs.push(key + '=' + encodeURIComponent(value));
+  });
+  return pairs.length ? '?' + pairs.join('&') : '';
+}
+
 const api = {
   // 登录（工号密码复用网页端）
   login: (username, password) =>
@@ -47,8 +57,12 @@ const api = {
   returnVehicle: (recordId, payload) => request('/api/vehicle/use-records/' + recordId + '/return', 'POST', payload),
   refuelVehicleUse: (recordId, payload) => request('/api/mobile/vehicle-use-records/' + recordId + '/refueling', 'POST', payload),
   reportVehicleFault: (recordId, payload) => request('/api/mobile/vehicle-use-records/' + recordId + '/faults', 'POST', payload),
-  vehicleUseRecords: () => request('/api/vehicle/use-records', 'GET'),
-  vehicleApplications: () => request('/api/vehicle/applications', 'GET'),
+  vehicleUseRecords: (options) => request('/api/vehicle/use-records' + vehicleListQuery(options), 'GET'),
+  vehicleApplications: (options) => request('/api/vehicle/applications' + vehicleListQuery(options), 'GET'),
+  requestReworkResource: (planId, payload) =>
+    request('/api/inspection-v2/rework-plans/' + planId + '/resource-request', 'POST', payload),
+  extendVehicleApplication: (applicationId, endDate) =>
+    request('/api/vehicle/applications/' + applicationId + '/extend', 'POST', { end_date: endDate }),
 
   // 站点任务（含已完成）
   siteTasks: (siteId) => request('/api/mobile/site-tasks/' + siteId, 'GET'),
@@ -91,7 +105,7 @@ const api = {
   deleteWorkorderImage: (orderNo, url) =>
     request('/api/mobile/workorder/' + orderNo + '/image/delete', 'POST', { url }),
 
-  // 极简用车申请（仅需事由，可关联工单/站点）
+  // 用车申请；无车执行仅允许关联具体工单并登记例外原因。
   applyVehicle: (payload) => request('/api/vehicle/applications', 'POST', payload),
 
   // 备件申请（关联工单/站点）
@@ -139,8 +153,8 @@ const api = {
     request('/api/alerts/' + id + '/acknowledge', 'POST', {}),
 
   // 通知
-  notifications: (page) =>
-    request('/api/notifications?page=' + (page || 1) + '&limit=50', 'GET'),
+  notifications: (page, status) =>
+    request('/api/notifications?page=' + (page || 1) + '&limit=50&status=' + (status || 'all'), 'GET'),
   unreadCount: () => request('/api/notifications/unread-count', 'GET'),
   readNotification: (id) => request('/api/notifications/' + id + '/read', 'PUT', {}),
   readAllNotifications: () => request('/api/notifications/read-all', 'PUT', {}),
@@ -166,6 +180,17 @@ const api = {
   // 照片审核（workorder_photo / photo_review）
   reviewPhoto: (ids, action, reason) =>
     request('/api/operation-attachments/review', 'POST', { attachment_ids: ids, action, reject_reason: reason || '' }),
+  reviewPhotoSelection: (approveIds, rejectIds, reason) =>
+    request('/api/operation-attachments/review', 'POST', {
+      approve_ids: approveIds || [], reject_ids: rejectIds || [], reject_reason: reason || ''
+    }),
+  reviewInspectionPhotoSelection: (approveIds, rejectIds, approveItemIds, reason) =>
+    request('/api/operation-attachments/review', 'POST', {
+      approve_ids: approveIds || [],
+      reject_ids: rejectIds || [],
+      approve_item_ids: approveItemIds || [],
+      reject_reason: reason || ''
+    }),
 
   // 备件预申报审核（source_type=parts_request，来自 parts_requests 表）
   approvePartsRequest: (id) => request('/api/inspection-v2/parts-request/' + id + '/approve', 'PUT'),

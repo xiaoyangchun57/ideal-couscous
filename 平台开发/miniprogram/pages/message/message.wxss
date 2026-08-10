@@ -1,6 +1,9 @@
 .topbar { display: flex; justify-content: flex-end; padding: 20rpx 24rpx 0; }
 .tb-btn { font-size: 26rpx; color: var(--text-2); padding: 10rpx 28rpx; border-radius: 999rpx; border: 1rpx solid var(--line); margin-left: 16rpx; }
 .tb-brand { color: var(--brand); border-color: var(--brand-line); }
+.message-tabs { display: grid; grid-template-columns: 1fr 1fr; margin: 20rpx 24rpx 0; border-bottom: 1rpx solid var(--line); }
+.message-tab { padding: 18rpx 0; text-align: center; color: var(--text-3); font-size: 26rpx; border-bottom: 4rpx solid transparent; }
+.message-tab-active { color: var(--brand); font-weight: 600; border-bottom-color: var(--brand); }
 
 /* 消息行（多行展开语义，独立于全局 .row 单行省略范式，故用 .msg-* 族） */
 .msg-row { display: flex; align-items: flex-start; padding: 26rpx 0; border-bottom: 1rpx solid var(--line); }

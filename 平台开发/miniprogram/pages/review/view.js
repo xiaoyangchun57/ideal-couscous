@@ -1,6 +1,7 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
+const { approveItemIdsForPhotoSelection } = require('../../utils/inspectionReviewDecision.js');
 
 const app = getApp();
 
@@ -26,6 +27,12 @@ function parsePhotoUrls(value) {
     const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) { return []; }
+}
+
+function watermarkStatusLabel(status, captureSource) {
+  if (captureSource !== 'watermark_album') return '非水印相册来源';
+  if (status === 'recognized') return '水印文字已自动识别';
+  return '水印自动识别未确认，请结合原图人工查看';
 }
 
 function decorateItem(item) {
@@ -65,7 +72,18 @@ function decorateItem(item) {
     workorder_review: '退回工单',
     photo_review: '驳回影像'
   }[item.source_type] || '驳回';
-  return Object.assign({}, item, { detailOpen: false, photoUrls, itemDetails, detailHint, approveLabel, rejectLabel });
+  const reviewPhotos = details.map(detail => Object.assign({}, detail, {
+    url: resolveUploadUrl(detail.stored_path),
+    itemLabel: detail.item_name || detail.description || '未关联检查项',
+    categoryLabel: detail.recognized_category || detail.item_name || '待人工归类',
+    classificationLabel: detail.classification_source === 'inspection_item' ? '按检查项自动归类' : '按水印文字自动归类',
+    watermarkStatusLabel: watermarkStatusLabel(detail.watermark_status, detail.capture_source),
+    selectedForReject: false
+  }));
+  return Object.assign({}, item, {
+    detailOpen: item.source_type === 'photo_review' || item.source_type === 'inspection_batch', photoUrls, itemDetails, reviewPhotos,
+    selectedRejectCount: 0, detailHint, approveLabel, rejectLabel
+  });
 }
 
 Page({
@@ -77,6 +95,7 @@ Page({
     rejectReason: '',
     curId: '',
     curType: '',
+    curAction: '',
     submitting: false
   },
 
@@ -110,23 +129,52 @@ Page({
   onReject(e) {
     const id = e.currentTarget.dataset.id;
     const type = e.currentTarget.dataset.type;
-    this.setData({ rejectShow: true, rejectReason: '', curId: id, curType: type });
+    this.setData({ rejectShow: true, rejectReason: '', curId: id, curType: type, curAction: 'reject' });
   },
 
   onReasonInput(e) { this.setData({ rejectReason: e.detail.value }); },
   noop() {},
-  closeReject() { this.setData({ rejectShow: false, rejectReason: '', curId: '', curType: '' }); },
+  closeReject() { this.setData({ rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' }); },
 
   rejectConfirm() {
     const reason = (this.data.rejectReason || '').trim();
     if (!reason) { wx.showToast({ title: '请填写驳回原因', icon: 'none' }); return; }
-    this._dispatch('reject', reason);
+    this._dispatch(this.data.curAction || 'reject', reason);
   },
 
   onApprove(e) {
     const id = e.currentTarget.dataset.id;
     const type = e.currentTarget.dataset.type;
     this.setData({ curId: id, curType: type });
+    this._dispatch('approve', '');
+  },
+
+  onTogglePhotoReject(e) {
+    const id = e.currentTarget.dataset.id;
+    const photoId = Number(e.currentTarget.dataset.photoId);
+    const groups = this.data.groups.map(group => Object.assign({}, group, {
+      items: group.items.map(item => {
+        if (item.id !== id) return item;
+        const reviewPhotos = (item.reviewPhotos || []).map(photo => photo.id === photoId
+          ? Object.assign({}, photo, { selectedForReject: !photo.selectedForReject }) : photo);
+        return Object.assign({}, item, {
+          reviewPhotos,
+          selectedRejectCount: reviewPhotos.filter(photo => photo.selectedForReject).length
+        });
+      })
+    }));
+    this.setData({ groups });
+  },
+
+  onSubmitPhotoReview(e) {
+    const id = e.currentTarget.dataset.id;
+    const item = this._findItem(id);
+    if (!item) return;
+    this.setData({ curId: id, curType: item.source_type });
+    if (item.selectedRejectCount > 0) {
+      this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
+      return;
+    }
     this._dispatch('approve', '');
   },
 
@@ -167,16 +215,31 @@ Page({
         p = api.reviewInspectionItem(nid, action === 'approve' ? 'approved' : 'rejected', reason);
         break;
       case 'inspection_batch':
-        p = api.reviewInspectionBatch(item.item_ids || [], action, reason);
+        if ((item.reviewPhotos || []).length) {
+          const rejectIds = (item.reviewPhotos || []).filter(photo => photo.selectedForReject).map(photo => photo.id);
+          const approveIds = (item.attachment_ids || []).filter(id => rejectIds.indexOf(id) < 0);
+          const approveItemIds = approveItemIdsForPhotoSelection(
+            item.item_ids || [], item.reviewPhotos || [], rejectIds);
+          p = api.reviewInspectionPhotoSelection(approveIds, rejectIds, approveItemIds, reason);
+        } else {
+          p = api.reviewInspectionBatch(item.item_ids || [], action, reason);
+        }
         break;
       case 'workorder_status':
       case 'workorder_review':
         p = action === 'approve' ? api.approveWorkorder(item.order_no) : api.rejectWorkorder(item.order_no, reason);
         break;
       case 'workorder_photo':
-      case 'photo_review':
         p = api.reviewPhoto(item.attachment_ids || [], action, reason);
         break;
+      case 'photo_review': {
+        const rejectIds = (item.reviewPhotos || []).filter(photo => photo.selectedForReject).map(photo => photo.id);
+        const approveIds = (item.attachment_ids || []).filter(id => rejectIds.indexOf(id) < 0);
+        p = action === 'selective'
+          ? api.reviewPhotoSelection(approveIds, rejectIds, reason)
+          : api.reviewPhoto(item.attachment_ids || [], 'approve', '');
+        break;
+      }
       case 'parts_request':
         p = action === 'approve' ? api.approvePartsRequest(nid) : api.rejectPartsRequest(nid);
         break;
@@ -197,7 +260,7 @@ Page({
 
     p.then(() => {
       wx.showToast({ title: action === 'approve' ? '已通过' : '已驳回', icon: 'success' });
-      this.setData({ submitting: false, rejectShow: false, rejectReason: '', curId: '', curType: '' });
+      this.setData({ submitting: false, rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' });
       this.load();
     }).catch(err => {
       this.setData({ submitting: false });
