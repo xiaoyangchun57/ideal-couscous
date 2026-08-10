@@ -31,6 +31,7 @@ Page({
       const partsRequests = (rows || []).map(row => Object.assign({}, row, {
         route_label: routeLabels[row.fulfillment_type] || '备件申请',
         status_label: statusLabels[row.status] || row.status,
+        reject_reason: row.approve_comment || row.reject_reason || '',
         can_issue: row.fulfillment_type === 'stock' && row.status === 'approved' && (row.items || []).some(i => i.remaining_quantity > 0),
         can_order: row.fulfillment_type === 'vendor_order' && row.status === 'approved',
         can_fulfill: row.fulfillment_type !== 'stock' && ['approved', 'ordered'].includes(row.status)

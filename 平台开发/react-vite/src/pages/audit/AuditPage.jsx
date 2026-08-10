@@ -14,7 +14,14 @@ import { useTheme } from '../../hooks/useTheme';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
-import { approveItemIdsForPhotoSelection, photoRejectionNeedsReason } from '../../utils/inspectionReviewDecision';
+import {
+  approveItemIdsForPhotoSelection,
+  canApprovePhotoReview,
+  getRiskAcknowledgementLabel,
+  getRiskyPhotoIds,
+  photoRejectionNeedsReason,
+} from '../../utils/inspectionReviewDecision';
+import { getAuditTargetFromSearchParams, resolveAuditTarget } from '../../utils/shellNavigation';
 import { getAuditAllowedTabs, getAuditColumnProfile } from './auditColumnDefinitions';
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
@@ -584,6 +591,7 @@ export default function AuditPage() {
   const [autoPassing, setAutoPassing] = useState(false);
   const [evidenceAcknowledged, setEvidenceAcknowledged] = useState(false);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState([]);
+  const [targetNotice, setTargetNotice] = useState('');
 
   const loadPending = useCallback(async () => {
     setLoading(true);
@@ -618,6 +626,17 @@ export default function AuditPage() {
 
   // ---- 审核操作 ----
   const handleReview = async (item, action) => {
+    const riskPhotoOptions = {
+      includeMissingCaptureTime: item.source_type === 'workorder_review',
+      rejectedPhotoIds: selectedPhotoIds,
+    };
+    const riskPhotoIds = ['workorder_review', 'photo_review', 'inspection_batch'].includes(item.source_type)
+      ? getRiskyPhotoIds(item.attachment_details, riskPhotoOptions)
+      : [];
+    if (action === 'approve' && !canApprovePhotoReview(item.attachment_details, evidenceAcknowledged, riskPhotoOptions)) {
+      message.error(`${getRiskAcknowledgementLabel(riskPhotoIds.length)}后才能提交通过结果`);
+      return;
+    }
     if (photoRejectionNeedsReason(item.attachment_ids, selectedPhotoIds) && !reviewComment.trim()) {
       message.error('勾选驳回照片后必须填写统一驳回原因');
       return;
@@ -728,7 +747,7 @@ export default function AuditPage() {
       setSelectedPhotoIds([]);
       loadPending();
     } catch (err) {
-      console.error('handleReview error:', err);
+      if (!err?.status || err.status >= 500) console.error('handleReview error:', err);
       message.error(err.message || '审核操作失败，请重试');
     } finally {
       setProcessing(false);
@@ -751,12 +770,37 @@ export default function AuditPage() {
 
   useEffect(() => {
     const orderNo = searchParams.get('order') || '';
-    if (!orderNo || loading || !pendingLoaded || pendingError || focusedOrderRef.current === orderNo) return;
+    const auditTarget = getAuditTargetFromSearchParams(searchParams);
+    if (auditTarget || !orderNo || loading || !pendingLoaded || pendingError || focusedOrderRef.current === orderNo) return;
     const target = items.find((item) => item.source_type === 'workorder_review'
       && (item.order_no === orderNo || item.source_name === orderNo));
     focusedOrderRef.current = orderNo;
     if (target) openReview(target);
     else message.info(`工单 ${orderNo} 当前已不在待审核列表中`);
+  }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
+
+  useEffect(() => {
+    const target = getAuditTargetFromSearchParams(searchParams);
+    if (!target || loading || !pendingLoaded || pendingError) return;
+    if (target.tab === 'data') return;
+    const targetKey = `${target.tab}:${target.kind}:${target.value || ''}`;
+    if (focusedOrderRef.current === targetKey) return;
+    focusedOrderRef.current = targetKey;
+    if (target.kind === 'missing') {
+      const notice = `${target.sourceType || '审核通知'}通知缺少可定位对象标识，请刷新通知后重试`;
+      setTargetNotice(notice);
+      message.warning(notice);
+      return;
+    }
+    const resolution = resolveAuditTarget(items, target);
+    if (resolution.status === 'found') {
+      setTargetNotice('');
+      openReview(resolution.item);
+      return;
+    }
+    const notice = '通知对应的审核对象不存在、已处理或当前权限范围不可见';
+    setTargetNotice(notice);
+    message.warning(notice);
   }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
 
   // 一键通过正常照片（影像抽样审核核心减负动作）
@@ -798,9 +842,14 @@ export default function AuditPage() {
     if (!reviewModalOpen) return null;
     const item = reviewingItem;
     if (!item) return null;
-    const riskyEvidence = item.source_type === 'workorder_review'
-      ? (item.attachment_details || []).filter(photo => photo.is_flagged || photo.duplicate_of_id || !photo.taken_at)
+    const riskPhotoOptions = {
+      includeMissingCaptureTime: item.source_type === 'workorder_review',
+      rejectedPhotoIds: selectedPhotoIds,
+    };
+    const riskyEvidence = ['workorder_review', 'photo_review', 'inspection_batch'].includes(item.source_type)
+      ? getRiskyPhotoIds(item.attachment_details, riskPhotoOptions)
       : [];
+    const riskApprovalBlocked = !canApprovePhotoReview(item.attachment_details, evidenceAcknowledged, riskPhotoOptions);
     const isSelfReview = item.source_type === 'workorder_review' && reviewerNames.includes(item.assignee);
     const missingResolution = item.source_type === 'workorder_review' && !item.resolution_note;
     const missingRequiredPhotos = item.source_type === 'workorder_review'
@@ -816,7 +865,7 @@ export default function AuditPage() {
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>,
           <Button key="approve" type="primary" loading={processing}
-            disabled={missingResolution || missingRequiredPhotos || (riskyEvidence.length > 0 && !evidenceAcknowledged)}
+            disabled={missingResolution || missingRequiredPhotos || riskApprovalBlocked}
             onClick={() => handleReview(item, 'approve')}
             icon={<CheckOutlined />}>{(item.source_type === 'photo_review' || item.source_type === 'inspection_batch') && item.attachment_ids?.length
               ? (selectedPhotoIds.length ? `驳回 ${selectedPhotoIds.length} 张，其余通过` : '全部通过')
@@ -983,14 +1032,16 @@ export default function AuditPage() {
                 ))}
               </div>
             </Image.PreviewGroup> : <Text type="secondary">未上传处置影像</Text>}
-            {riskyEvidence.length > 0 && <Alert type="warning" showIcon style={{ marginTop: 12 }}
-              message={`${riskyEvidence.length} 张影像需要人工核对`}
-              description={<Checkbox checked={evidenceAcknowledged} onChange={event => setEvidenceAcknowledged(event.target.checked)}>
-                我已核对重复风险、拍摄时间与现场上下文，确认可作为本工单办结证据
-              </Checkbox>} />}
           </div>
         )}
         </div>
+        {riskyEvidence.length > 0 && (
+          <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+            message={`${riskyEvidence.length} 张风险影像需要人工核对`}
+            description={<Checkbox checked={evidenceAcknowledged} onChange={event => setEvidenceAcknowledged(event.target.checked)}>
+              {getRiskAcknowledgementLabel(riskyEvidence.length)}
+            </Checkbox>} />
+        )}
         <Divider style={{ margin: '8px 0' }} />
         <div>
           <Text strong>审核意见</Text>
@@ -1018,7 +1069,13 @@ export default function AuditPage() {
     canReviewData ? {
       key: 'data',
       label: tabLabel('数据审核', dataStats.total || 0),
-      children: <DataReviewTab tokens={tokens} />,
+      children: <DataReviewTab
+        tokens={tokens}
+        targetReviewId={getAuditTargetFromSearchParams(searchParams)?.tab === 'data'
+          ? getAuditTargetFromSearchParams(searchParams)?.value
+          : null}
+        onTargetStatus={setTargetNotice}
+      />,
     } : null,
     {
       key: 'inspection',
@@ -1156,6 +1213,8 @@ export default function AuditPage() {
       {(statsError || dataStatsError) && <Alert type="warning" showIcon style={{ marginBottom: 12, flexShrink: 0 }}
         message="部分待办数量加载失败，页签徽标可能不完整"
         action={<Button size="small" onClick={loadPending}>重试</Button>} />}
+
+      {targetNotice && <Alert type="warning" showIcon style={{ marginBottom: 12, flexShrink: 0 }} message={targetNotice} />}
 
       <Tabs
         className="audit-tabs"

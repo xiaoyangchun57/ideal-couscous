@@ -790,6 +790,14 @@ def migrate_parts_requests_v2():
             approved_at TEXT,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS parts_request_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id INTEGER NOT NULL,
+            part_sku TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (request_id) REFERENCES parts_requests(id)
+        )""")
         for column_sql in [
             "ALTER TABLE parts_requests ADD COLUMN site_id INTEGER",
             "ALTER TABLE parts_requests ADD COLUMN work_order_no TEXT DEFAULT ''",
@@ -818,8 +826,11 @@ def migrate_parts_requests_v2():
         ]:
             try:
                 db.execute(column_sql)
-            except Exception:
-                pass
+            except sqlite3.OperationalError as exc:
+                if 'duplicate column name' not in str(exc).lower():
+                    raise
+        db.execute("""CREATE INDEX IF NOT EXISTS idx_parts_request_items_request_id
+            ON parts_request_items(request_id)""")
         db.execute("""CREATE TABLE IF NOT EXISTS parts_request_reservations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             request_id INTEGER NOT NULL,
@@ -4162,6 +4173,33 @@ def _site_access_denied(site_id, action='访问'):
     return None
 
 
+def _authorized_site_ids(raw_site_ids, action='访问'):
+    """Normalize a site list and validate every site before a write starts."""
+    if not isinstance(raw_site_ids, list):
+        return None, (jsonify({'error': 'site_ids 必须是数组'}), 400)
+    site_ids = []
+    for raw_site_id in raw_site_ids:
+        try:
+            site_id = int(raw_site_id)
+        except (TypeError, ValueError):
+            return None, (jsonify({'error': '站点参数无效'}), 400)
+        denied = _site_access_denied(site_id, action)
+        if denied:
+            return None, denied
+        if site_id not in site_ids:
+            site_ids.append(site_id)
+    if site_ids:
+        placeholders = ','.join('?' * len(site_ids))
+        with get_db() as db:
+            existing = {row['id'] for row in db.execute(
+                f'SELECT id FROM sites WHERE id IN ({placeholders})', site_ids,
+            ).fetchall()}
+        missing = [site_id for site_id in site_ids if site_id not in existing]
+        if missing:
+            return None, (jsonify({'error': '站点不存在', 'site_ids': missing}), 404)
+    return site_ids, None
+
+
 def _station_operator(site_id):
     """返回站点责任运维人员姓名（user_sites 为唯一真相源）；无则空串。
     管理员永不作为 assignee；忽略任意前端传入的指派。"""
@@ -7044,7 +7082,7 @@ def get_inspections():
 
 @app.route('/api/inspections', methods=['POST'])
 def create_inspection():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     with get_db() as db:
         scheme_id = data.get('scheme_id')
         # 支持 site_ids 数组（多站点）和 site_id 单个站点（兼容旧版）
@@ -7054,6 +7092,9 @@ def create_inspection():
             site_ids = [site_id]
         if not site_ids:
             return jsonify({'success': False, 'error': '请指定至少一个站点'}), 400
+        site_ids, denied = _authorized_site_ids(site_ids, '创建巡检计划涉及')
+        if denied:
+            return denied
         first_site = site_ids[0]
         cursor = db.execute("""
             INSERT INTO inspection_plans (plan_name,site_id,type,start_date,end_date,period,description,category,scheme_id)
@@ -7894,9 +7935,21 @@ def auto_generate_inspections():
     - end_date: 截止日期（默认+30天）
     """
     data = request.get_json(silent=True) or {}
+    current_user = g.current_user
+    if not _has_any_role(current_user, 'admin', 'operator'):
+        return jsonify({'error': '需要运维人员或管理员权限'}), 403
     period = data.get('period', 'monthly')
     start_str = data.get('start_date', datetime.now().strftime('%Y-%m-%d'))
     user_id = data.get('user_id')
+    if user_id is not None:
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'user_id 参数无效'}), 400
+    if not _has_any_role(current_user, 'admin'):
+        if user_id is not None and user_id != int(current_user['id']):
+            return jsonify({'error': '只能为自己生成巡检计划'}), 403
+        user_id = int(current_user['id'])
     force = data.get('force', False)  # 是否覆盖已存在的计划
     
     start = datetime.strptime(start_str, '%Y-%m-%d')
@@ -10154,13 +10207,22 @@ def v2_review_item(item_id):
     if not action:
         status = data.get('status', '')
         action = 'reject' if status in ('rejected', 'reject') else 'approve'
-    comment = data.get('comment', data.get('review_comment', ''))
+    if action not in ('approve', 'reject'):
+        return jsonify({'error': '无效审核动作'}), 400
+    comment = data.get('comment', data.get('review_comment', '')) or ''
+    if not isinstance(comment, str):
+        return jsonify({'error': '审核意见格式无效'}), 400
     reviewer_id = g.current_user.get('id', 0) if hasattr(g, 'current_user') else 0
 
     with get_db() as db:
         item = db.execute("SELECT * FROM insp_plan_items WHERE id=?", (item_id,)).fetchone()
         if not item:
             return jsonify({'error': '检查项不存在'}), 404
+        if item['site_id'] is None:
+            return jsonify({'error': '检查项未绑定有效站点，无法审核'}), 403
+        denied = _site_access_denied(item['site_id'], '审核')
+        if denied:
+            return denied
         if item['review_status'] != 1:
             return jsonify({'error': '该检查项已审核，无需重复提交', 'code': 'REVIEW_ALREADY_PROCESSED'}), 409
         if action == 'approve':
@@ -10194,12 +10256,71 @@ def v2_batch_review_items():
     data = request.get_json(silent=True) or {}
     approve_ids = data.get('approve_ids') or []
     reject_items = data.get('reject_items') or []
+    if not isinstance(approve_ids, list) or not isinstance(reject_items, list):
+        return jsonify({'error': '审核 ID 格式无效'}), 400
+    normalized_approve_ids = []
+    for raw_id in approve_ids:
+        try:
+            item_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': '审核 ID 格式无效'}), 400
+        if item_id <= 0:
+            return jsonify({'error': '审核 ID 格式无效'}), 400
+        if item_id not in normalized_approve_ids:
+            normalized_approve_ids.append(item_id)
+    normalized_reject_items = []
+    normalized_reject_ids = []
+    for raw_item in reject_items:
+        if not isinstance(raw_item, dict):
+            return jsonify({'error': '驳回项格式无效'}), 400
+        try:
+            item_id = int(raw_item.get('id'))
+        except (TypeError, ValueError):
+            return jsonify({'error': '审核 ID 格式无效'}), 400
+        if item_id <= 0:
+            return jsonify({'error': '审核 ID 格式无效'}), 400
+        if item_id in normalized_reject_ids:
+            continue
+        if 'reason' not in raw_item or raw_item.get('reason') is None:
+            reason = '照片不合格'
+        else:
+            reason = raw_item.get('reason')
+            if not isinstance(reason, str) or not reason.strip():
+                return jsonify({'error': '驳回需填写原因'}), 400
+            reason = reason.strip()
+        normalized_reject_ids.append(item_id)
+        normalized_reject_items.append({'id': item_id, 'reason': reason})
+    if set(normalized_approve_ids).intersection(normalized_reject_ids):
+        return jsonify({'error': '同一检查项不能同时通过和驳回'}), 400
+    approve_ids = normalized_approve_ids
+    reject_items = normalized_reject_items
     if not approve_ids and not reject_items:
         return jsonify({'error': '无审核内容'}), 400
     reviewer_id = g.current_user.get('id', 0) if hasattr(g, 'current_user') else 0
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     approved_count, rejected_count = 0, 0
     with get_db() as db:
+        all_ids = approve_ids + normalized_reject_ids
+        placeholders = ','.join('?' * len(all_ids))
+        rows = db.execute(
+            f'SELECT id, site_id, review_status FROM insp_plan_items WHERE id IN ({placeholders})',
+            all_ids).fetchall()
+        row_map = {row['id']: row for row in rows}
+        missing_ids = [item_id for item_id in all_ids if item_id not in row_map]
+        if missing_ids:
+            return jsonify({'error': '检查项不存在', 'item_ids': missing_ids}), 404
+        for item_id in all_ids:
+            if row_map[item_id]['site_id'] is None:
+                return jsonify({'error': '检查项未绑定有效站点，无法审核'}), 403
+            denied = _site_access_denied(row_map[item_id]['site_id'], '审核')
+            if denied:
+                return denied
+            if row_map[item_id]['review_status'] != 1:
+                return jsonify({
+                    'error': '存在已审核或不可处理的检查项',
+                    'item_id': item_id,
+                    'code': 'REVIEW_ALREADY_PROCESSED',
+                }), 409
         # 驳回会撤销现场提交结果。记录受影响执行包，稍后统一回算完成率，
         # 避免全部项目曾完成时，移动端仍把该包误显示为已完成。
         rejected_rows = []
@@ -10213,13 +10334,7 @@ def v2_batch_review_items():
             approved_count = db.execute("SELECT changes()").fetchone()[0]
         # 逐项驳回（各有原因）
         for ri in reject_items:
-            rid = ri.get('id')
-            reason = ri.get('reason') or '照片不合格'
-            if not rid:
-                continue
-            item_before = db.execute("SELECT id FROM insp_plan_items WHERE id=? AND review_status=1", (rid,)).fetchone()
-            if item_before:
-                rejected_rows.append((rid, reason))
+            rejected_rows.append((ri['id'], ri['reason']))
         rejection = _reject_inspection_items(db, rejected_rows, reviewer_id, now_str, 'batch-review')
         rejected_count = len(rejection)
         db.commit()
@@ -11595,23 +11710,57 @@ def api_operation_attachments_review():
     action = data.get('action', 'approve')  # approve | reject
     approve_ids = data.get('approve_ids')
     reject_ids = data.get('reject_ids')
-    approve_item_ids = list(dict.fromkeys(data.get('approve_item_ids') or []))
+    approve_item_ids = data.get('approve_item_ids') or []
     reviewer_id = g.current_user.get('id')
     reject_reason = data.get('reject_reason', '')
 
     selective = approve_ids is not None or reject_ids is not None
     if selective:
-        approve_ids = list(dict.fromkeys(approve_ids or []))
-        reject_ids = list(dict.fromkeys(reject_ids or []))
+        if approve_ids is not None and not isinstance(approve_ids, list):
+            return jsonify({'error': 'approve_ids 格式无效'}), 400
+        if reject_ids is not None and not isinstance(reject_ids, list):
+            return jsonify({'error': 'reject_ids 格式无效'}), 400
+        approve_ids = approve_ids or []
+        reject_ids = reject_ids or []
+        try:
+            approve_ids = list(dict.fromkeys(int(aid) for aid in approve_ids))
+            reject_ids = list(dict.fromkeys(int(aid) for aid in reject_ids))
+        except (TypeError, ValueError):
+            return jsonify({'error': '附件 ID 格式无效'}), 400
+        if any(aid <= 0 for aid in approve_ids + reject_ids):
+            return jsonify({'error': '附件 ID 格式无效'}), 400
         if set(approve_ids).intersection(reject_ids):
             return jsonify({'error': '同一照片不能同时通过和驳回'}), 400
-        if reject_ids and not reject_reason.strip():
+        if reject_ids and (not isinstance(reject_reason, str) or not reject_reason.strip()):
             return jsonify({'error': '勾选驳回照片后必须填写驳回原因'}), 400
         decisions = [(aid, 'approve') for aid in approve_ids] + [(aid, 'reject') for aid in reject_ids]
     else:
+        if not isinstance(attachment_ids, list) or not isinstance(approve_item_ids, list):
+            return jsonify({'error': '附件 ID 格式无效'}), 400
+        if action not in ('approve', 'reject'):
+            return jsonify({'error': '无效审核动作'}), 400
+        try:
+            attachment_ids = list(dict.fromkeys(int(aid) for aid in attachment_ids))
+            approve_item_ids = list(dict.fromkeys(int(item_id) for item_id in approve_item_ids))
+        except (TypeError, ValueError):
+            return jsonify({'error': '附件 ID 格式无效'}), 400
+        if any(item_id <= 0 for item_id in attachment_ids + approve_item_ids):
+            return jsonify({'error': '附件 ID 格式无效'}), 400
         decisions = [(aid, action) for aid in attachment_ids]
+        if action == 'reject' and (not isinstance(reject_reason, str) or not reject_reason.strip()):
+            return jsonify({'error': '驳回附件必须填写驳回原因'}), 400
+    if not isinstance(approve_item_ids, list):
+        return jsonify({'error': '检查项 ID 格式无效'}), 400
+    if selective:
+        try:
+            approve_item_ids = list(dict.fromkeys(int(item_id) for item_id in approve_item_ids))
+        except (TypeError, ValueError):
+            return jsonify({'error': '检查项 ID 格式无效'}), 400
+        if any(item_id <= 0 for item_id in approve_item_ids):
+            return jsonify({'error': '检查项 ID 格式无效'}), 400
     if not decisions:
-        return jsonify({'error': '缺少 attachment_ids'}), 400
+        if not approve_item_ids:
+            return jsonify({'error': '缺少 attachment_ids'}), 400
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     approved_count = 0
@@ -11621,40 +11770,65 @@ def api_operation_attachments_review():
     rejected_item_rows = []
     affected_inspection_batches = set()
     with get_db() as db:
-        allowed_site_ids = _filter_site_ids()
-        if allowed_site_ids is not None:
-            scoped_site_ids = set()
-            for site_id in allowed_site_ids:
-                try:
-                    scoped_site_ids.add(int(site_id))
-                except (TypeError, ValueError):
-                    continue
+        attachment_decision_ids = list(dict.fromkeys(aid for aid, _ in decisions))
+        attachment_map = {}
+        if attachment_decision_ids:
+            placeholders = ','.join('?' for _ in attachment_decision_ids)
+            attachment_rows = db.execute(
+                f'SELECT * FROM operation_attachments WHERE id IN ({placeholders})',
+                attachment_decision_ids).fetchall()
+            attachment_map = {row['id']: row for row in attachment_rows}
+            missing_ids = [aid for aid in attachment_decision_ids if aid not in attachment_map]
+            if missing_ids:
+                return jsonify({'error': '附件不存在', 'attachment_ids': missing_ids}), 404
+            for aid in attachment_decision_ids:
+                att = attachment_map[aid]
+                if 'source_type' in att.keys() and att['source_type'] == 'workorder':
+                    return jsonify({
+                        'error': '工单附件必须通过工单审核链路处理',
+                        'attachment_id': aid,
+                        'code': 'ATTACHMENT_TYPE_NOT_REVIEWABLE',
+                    }), 400
+                if att['site_id'] is None:
+                    return jsonify({'error': '附件未绑定有效站点，无法审核'}), 403
+                denied = _site_access_denied(att['site_id'], '审核')
+                if denied:
+                    return denied
+                if 'is_deleted' in att.keys() and att['is_deleted']:
+                    return jsonify({'error': '附件已删除，无法审核', 'attachment_id': aid}), 409
+                if att['review_status'] not in (None, 'pending'):
+                    return jsonify({
+                        'error': '存在已处理或不可处理的附件',
+                        'attachment_id': aid,
+                        'code': 'REVIEW_ALREADY_PROCESSED',
+                    }), 409
 
-            attachment_decision_ids = list(dict.fromkeys(aid for aid, _ in decisions))
-            if attachment_decision_ids:
-                placeholders = ','.join('?' for _ in attachment_decision_ids)
-                scoped_rows = db.execute(
-                    f'SELECT id, site_id FROM operation_attachments WHERE id IN ({placeholders})',
-                    attachment_decision_ids).fetchall()
-            else:
-                scoped_rows = []
-            if approve_item_ids:
-                placeholders = ','.join('?' for _ in approve_item_ids)
-                scoped_rows += db.execute(
-                    f'SELECT id, site_id FROM insp_plan_items WHERE id IN ({placeholders})',
-                    approve_item_ids).fetchall()
-            for row in scoped_rows:
-                try:
-                    row_site_id = int(row['site_id'])
-                except (TypeError, ValueError):
-                    return jsonify({'error': 'No permission for this site'}), 403
-                if row_site_id not in scoped_site_ids:
-                    return jsonify({'error': 'No permission for this site'}), 403
+        item_map = {}
+        if approve_item_ids:
+            placeholders = ','.join('?' for _ in approve_item_ids)
+            item_rows = db.execute(
+                f'SELECT id, site_id, review_status FROM insp_plan_items WHERE id IN ({placeholders})',
+                approve_item_ids).fetchall()
+            item_map = {row['id']: row for row in item_rows}
+            missing_item_ids = [item_id for item_id in approve_item_ids if item_id not in item_map]
+            if missing_item_ids:
+                return jsonify({'error': '检查项不存在', 'item_ids': missing_item_ids}), 404
+            for item_id in approve_item_ids:
+                item = item_map[item_id]
+                if item['site_id'] is None:
+                    return jsonify({'error': '检查项未绑定有效站点，无法审核'}), 403
+                denied = _site_access_denied(item['site_id'], '审核')
+                if denied:
+                    return denied
+                if item['review_status'] != 1:
+                    return jsonify({
+                        'error': '存在已审核或不可处理的检查项',
+                        'item_id': item_id,
+                        'code': 'REVIEW_ALREADY_PROCESSED',
+                    }), 409
 
         for aid, decision in decisions:
-            att = db.execute('SELECT * FROM operation_attachments WHERE id=?', (aid,)).fetchone()
-            if not att:
-                continue
+            att = attachment_map[aid]
             new_status = 'approved' if decision == 'approve' else 'rejected'
             db.execute(
                 '''UPDATE operation_attachments
@@ -11691,8 +11865,7 @@ def api_operation_attachments_review():
                          f'「{name}」被驳回，原因：{reject_reason or "未达标"}。请重新拍摄上传。'))
         for item_id in approve_item_ids:
             item = db.execute('SELECT plan_id, site_id FROM insp_plan_items WHERE id=?', (item_id,)).fetchone()
-            if item:
-                affected_inspection_batches.add((item['plan_id'], item['site_id']))
+            affected_inspection_batches.add((item['plan_id'], item['site_id']))
             db.execute("""UPDATE insp_plan_items
                 SET review_status=2, reviewer_id=?, review_time=?
                 WHERE id=? AND review_status=1""", (reviewer_id, now, item_id))
@@ -17718,22 +17891,38 @@ def _inspection_attachment_review_scope(db, photo_ids, require_single_site=False
     unique_ids = list(dict.fromkeys(normalized_ids))
     placeholders = ','.join('?' * len(unique_ids))
     rows = db.execute(f"""
-        SELECT id, site_id, uploader_id, uploader_name, description
+        SELECT id, site_id, uploader_id, uploader_name, description,
+               source_type, review_status
         FROM operation_attachments
         WHERE id IN ({placeholders})
           AND COALESCE(is_deleted, 0)=0
-          AND source_type='inspection'
     """, unique_ids).fetchall()
     row_map = {row['id']: row for row in rows}
     missing_ids = [photo_id for photo_id in unique_ids if photo_id not in row_map]
     if missing_ids:
         return None, (jsonify({'error': 'inspection attachment not found', 'photo_ids': missing_ids}), 404)
+    wrong_type = [photo_id for photo_id in unique_ids
+                  if row_map[photo_id]['source_type'] != 'inspection']
+    if wrong_type:
+        return None, (jsonify({'error': 'inspection attachment not found', 'photo_ids': wrong_type}), 404)
+    if any(row['site_id'] is None for row in rows):
+        return None, (jsonify({'error': 'inspection attachment has no valid site'}), 403)
 
     allowed = _filter_site_ids()
     if allowed is not None:
+        allowed = {int(site_id) for site_id in allowed}
         unauthorized = sorted({row['site_id'] for row in rows if row['site_id'] not in allowed})
         if unauthorized:
             return None, (jsonify({'error': 'inspection attachment site is not authorized', 'site_ids': unauthorized}), 403)
+
+    processed_ids = [photo_id for photo_id in unique_ids
+                     if row_map[photo_id]['review_status'] not in (None, 'pending')]
+    if processed_ids:
+        return None, (jsonify({
+            'error': 'inspection attachment already processed',
+            'photo_ids': processed_ids,
+            'code': 'REVIEW_ALREADY_PROCESSED',
+        }), 409)
 
     site_ids = {row['site_id'] for row in rows}
     if require_single_site and len(site_ids) > 1:
@@ -19520,10 +19709,27 @@ def api_weekly_plans():
 @app.route('/api/weekly-plans', methods=['POST'])
 def api_weekly_plans_create():
     """新建/提交周计划"""
-    data = request.get_json() or {}
-    user_id = data['user_id']
-    week_start = data['week_start']
+    data = request.get_json(silent=True) or {}
+    current_user = g.current_user
+    try:
+        user_id = int(data['user_id'])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'error': '缺少有效的 user_id'}), 400
+    if not _has_any_role(current_user, 'admin') and user_id != int(current_user['id']):
+        return jsonify({'error': '只能为自己创建周计划'}), 403
+    week_start = data.get('week_start')
+    if not week_start:
+        return jsonify({'error': '缺少 week_start'}), 400
     plan_data = data.get('plan_data', {})
+    if not isinstance(plan_data, dict):
+        return jsonify({'error': 'plan_data 格式无效'}), 400
+    normalized_plan_data = {}
+    for day, raw_site_ids in plan_data.items():
+        site_ids, denied = _authorized_site_ids(raw_site_ids, '创建巡检计划涉及')
+        if denied:
+            return denied
+        normalized_plan_data[day] = site_ids
+    plan_data = normalized_plan_data
     vehicle_id = data.get('vehicle_id')
     submit = data.get('submit', False)
     remarks = data.get('remarks', '')
@@ -19913,7 +20119,11 @@ def api_plan_schedule_favorite_create_draft(favorite_id):
                 continue
             if 0 <= offset < duration and isinstance(day, dict):
                 date_str = (period_start_date + timedelta(days=offset)).strftime('%Y-%m-%d')
-                plan_data[date_str] = {'sites': day.get('sites') or [], 'notes': day.get('notes') or ''}
+                site_ids, denied = _authorized_site_ids(
+                    day.get('sites') or [], '创建巡检计划涉及')
+                if denied:
+                    return denied
+                plan_data[date_str] = {'sites': site_ids, 'notes': day.get('notes') or ''}
         for offset_text, vehicle_id in (snapshot.get('vehicle_days') or {}).items():
             try:
                 offset = int(offset_text)
@@ -20890,6 +21100,17 @@ def api_plan_schedules_create():
     plan_data = data.get('plan_data') or {}
     if not isinstance(plan_data, dict):
         return jsonify({'error': 'plan_data 必须是 日期→安排 的对象'}), 400
+    normalized_plan_data = {}
+    for date_str, day_data in plan_data.items():
+        if not isinstance(day_data, dict):
+            normalized_plan_data[date_str] = day_data
+            continue
+        site_ids, denied = _authorized_site_ids(
+            day_data.get('sites') or [], '创建巡检计划涉及')
+        if denied:
+            return denied
+        normalized_plan_data[date_str] = {**day_data, 'sites': site_ids}
+    plan_data = normalized_plan_data
     # 非管理者只能给自己排程
     user_id = data.get('user_id') or u['id']
     if u['role'] not in ('admin', 'manager') and int(user_id) != u['id']:
@@ -21190,6 +21411,12 @@ def api_plan_schedules_approve(sid):
             return jsonify({'error': '计划不存在'}), 404
         if row['status'] not in ('submitted', 'change_submitted'):
             return jsonify({'error': f'当前状态（{row["status"]}）不可审批'}), 400
+        if row['period_end'] and str(row['period_end'])[:10] < datetime.now().strftime('%Y-%m-%d'):
+            db.rollback()
+            return jsonify({
+                'error': '计划周期已过期，不能通过普通审批生成历史执行包或资源申请，请重新创建排程',
+                'code': 'PLAN_EXPIRED',
+            }), 409
         is_change = row['status'] == 'change_submitted'
         try:
             plan_data = json.loads(row['plan_data'] or '{}')
@@ -22208,6 +22435,9 @@ def api_data_reviews_generate():
 # ---------- 审核列表（多维筛选 + 分页） ----------
 @app.route('/api/data-reviews', methods=['GET'])
 def api_data_reviews_list():
+    denied = require_reviewer()
+    if denied:
+        return denied
     status = request.args.get('status')
     site_id = request.args.get('site_id')
     metric = request.args.get('metric')
@@ -22220,6 +22450,13 @@ def api_data_reviews_list():
         q = '''SELECT dr.*, s.name as site_name, s.code as site_code
                FROM data_reviews dr JOIN sites s ON dr.site_id = s.id WHERE 1=1'''
         params = []
+        allowed = _filter_site_ids()
+        if allowed is not None:
+            if allowed:
+                q += f" AND dr.site_id IN ({','.join('?' * len(allowed))})"
+                params.extend(allowed)
+            else:
+                q += ' AND 1=0'
         if status:
             q += ' AND dr.status=?'; params.append(status)
         if site_id:
@@ -22241,6 +22478,12 @@ def api_data_reviews_list():
         items = [dict(r) for r in db.execute(q, params).fetchall()]
         cq = 'SELECT COUNT(*) FROM data_reviews dr WHERE 1=1'
         cparams = []
+        if allowed is not None:
+            if allowed:
+                cq += f" AND dr.site_id IN ({','.join('?' * len(allowed))})"
+                cparams.extend(allowed)
+            else:
+                cq += ' AND 1=0'
         if status: cq += ' AND dr.status=?'; cparams.append(status)
         if site_id: cq += ' AND dr.site_id=?'; cparams.append(site_id)
         if metric: cq += ' AND dr.metric=?'; cparams.append(metric)
@@ -22254,6 +22497,27 @@ def api_data_reviews_list():
             cq += " AND dr.status IN ('smart_reviewed','manual_reviewed')"
         total = db.execute(cq, cparams).fetchone()[0]
         return jsonify({'items': items, 'total': total, 'page': page, 'per_page': per_page})
+
+
+@app.route('/api/data-reviews/<int:review_id>', methods=['GET'])
+def api_data_review_detail(review_id):
+    denied = require_reviewer()
+    if denied:
+        return denied
+    allowed = _filter_site_ids()
+    where = 'dr.id=?'
+    params = [review_id]
+    if allowed is not None:
+        if not allowed:
+            return jsonify({'error': '数据审核对象不存在或当前账号无权访问'}), 404
+        where += f" AND dr.site_id IN ({','.join('?' * len(allowed))})"
+        params.extend(allowed)
+    with get_db() as db:
+        row = db.execute(f'''SELECT dr.*, s.name AS site_name, s.code AS site_code
+            FROM data_reviews dr JOIN sites s ON s.id=dr.site_id WHERE {where}''', params).fetchone()
+    if not row:
+        return jsonify({'error': '数据审核对象不存在或当前账号无权访问'}), 404
+    return jsonify(dict(row))
 
 
 # ---------- L1: 仪器自动审核（已整合到 auto_data_review 定时任务） ----------

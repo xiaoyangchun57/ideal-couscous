@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -152,7 +152,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                     (1, 'Manager', 'manager', 'manager', 'active'),
                     (2, 'Operator', 'operator', 'operator', 'active'),
                     (3, 'Other', 'other', 'operator', 'active');
-                INSERT INTO sites VALUES (1, 'Station', 'S-1', 'water_quality', 'active', 28.68, 115.73);
+                INSERT INTO sites VALUES
+                    (1, 'Station', 'S-1', 'water_quality', 'active', 28.68, 115.73),
+                    (2, 'Station 2', 'S-2', 'water_quality', 'active', 28.69, 115.74);
                 INSERT INTO user_sites VALUES (2, 1);
                 INSERT INTO vehicles VALUES (1, 'TEST-001', 'Test vehicle', 'idle', 1000, NULL, NULL);
             ''')
@@ -201,6 +203,76 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id=10').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=10').fetchone()[0], 0)
+
+    def test_expired_schedule_approval_has_no_execution_or_resource_side_effects(self):
+        old_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        with self.db() as db:
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,status,
+                 version,tasks_generated,validation_snapshot)
+                VALUES (99,2,'monthly',?,?,?,?,'submitted',1,0,?)''', (
+                    old_day, old_day,
+                    json.dumps({old_day: {'sites': [1]}}),
+                    json.dumps({old_day: 1}),
+                    json.dumps({'ok': True, 'errors': []}),
+                ))
+
+        response = self.client.post('/api/plan-schedules/99/approve',
+                                    headers=self.headers('manager-token'))
+
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json.get('code'), 'PLAN_EXPIRED')
+        self.assertEqual(self.schedule_status(99), 'submitted')
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id=99'
+            ).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM vehicle_applications WHERE reason LIKE '%计划#99%'"
+            ).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=99'
+            ).fetchone()[0], 0)
+
+    def test_schedule_creation_rejects_mixed_sites_before_any_insert(self):
+        today = self.day()
+        with self.db() as db:
+            before = db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0]
+
+        response = self.client.post('/api/plan-schedules', headers=self.headers('operator-token'), json={
+            'schedule_type': 'monthly',
+            'period_start': today,
+            'period_end': today,
+            'plan_data': {today: {'sites': [1, 2]}},
+            'vehicle_days': {},
+        })
+
+        self.assertEqual(response.status_code, 403, response.json)
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0], before)
+
+        admin_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
+            'schedule_type': 'monthly',
+            'period_start': today,
+            'period_end': today,
+            'plan_data': {today: {'sites': [1, 2]}},
+            'vehicle_days': {},
+        })
+        self.assertEqual(admin_response.status_code, 201, admin_response.json)
+        self.assertEqual(admin_response.json['plan_data'][today]['sites'], [1, 2])
+
+        forged_day = (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        forged_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
+            'schedule_type': 'monthly',
+            'period_start': forged_day,
+            'period_end': forged_day,
+            'plan_data': {forged_day: {'sites': [999]}},
+            'vehicle_days': {},
+        })
+        self.assertEqual(forged_response.status_code, 404, forged_response.json)
+        with self.db() as db:
+            forged = db.execute("SELECT 1 FROM plan_schedules WHERE plan_data LIKE '%999%'").fetchone()
+        self.assertIsNone(forged)
 
     def test_second_submitted_plan_cannot_obtain_the_same_vehicle_after_first_approval(self):
         self.add_submitted_schedule(11, user_id=2)

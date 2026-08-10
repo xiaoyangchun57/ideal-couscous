@@ -19,41 +19,105 @@ export function buildGlobalSearchPath(item) {
   }
 }
 
+const hasIdentifier = (value) => value !== undefined && value !== null && String(value) !== '';
+
+function buildAuditTargetPath(tab, queryKey, sourceId, sourceType, extra = {}) {
+  const params = new URLSearchParams({ tab });
+  if (hasIdentifier(sourceId)) {
+    params.set(queryKey, String(sourceId));
+  } else {
+    params.set('target_missing', '1');
+    params.set('source_type', sourceType);
+  }
+  Object.entries(extra).forEach(([key, value]) => {
+    if (hasIdentifier(value)) params.set(key, String(value));
+  });
+  return `/audit?${params.toString()}`;
+}
+
+function notificationPayload(item) {
+  if (!item?.payload_json) return {};
+  try {
+    const payload = typeof item.payload_json === 'string'
+      ? JSON.parse(item.payload_json)
+      : item.payload_json;
+    return payload && typeof payload === 'object' ? payload : {};
+  } catch {
+    return {};
+  }
+}
+
 export function getNotificationTarget(item, roles) {
-  const sourceId = item?.source_id ? encodeURIComponent(item.source_id) : '';
+  const sourceId = item?.source_id;
   switch (item?.source_type) {
     case 'workorder':
       return hasAnyRole(roles, ['admin', 'operator'])
-        ? (sourceId ? `/workorders?search=${sourceId}` : '/workorders')
+        ? (hasIdentifier(sourceId) ? `/workorders?search=${encodeURIComponent(sourceId)}` : '/workorders')
         : null;
     case 'workorder_review':
       return hasAnyRole(roles, ['admin', 'reviewer'])
-        ? (sourceId ? `/audit?tab=workorder&order=${sourceId}` : '/audit?tab=workorder')
+        ? buildAuditTargetPath('workorder', 'order', sourceId, item.source_type)
         : null;
     case 'inspection':
-    case 'inspection_review':
       return hasAnyRole(roles, ['admin', 'operator']) ? '/plan-schedules' : null;
+    case 'inspection_review':
+      if (hasAnyRole(roles, ['admin', 'reviewer'])) {
+        return buildAuditTargetPath('inspection', 'inspection', sourceId, item.source_type);
+      }
+      return hasAnyRole(roles, ['operator']) ? '/plan-schedules' : null;
     case 'inspection_review_batch':
-      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=inspection' : null;
+    case 'inspection_batch':
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? buildAuditTargetPath('inspection', 'inspection_batch', sourceId, item.source_type)
+        : null;
     case 'inspection_rework':
       return hasAnyRole(roles, ['admin', 'operator'])
-        ? (sourceId ? `/plan-schedules?rework_plan=${sourceId}` : '/plan-schedules')
+        ? (hasIdentifier(sourceId) ? `/plan-schedules?rework_plan=${encodeURIComponent(sourceId)}` : '/plan-schedules')
         : null;
     case 'photo_review':
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? buildAuditTargetPath('photo', 'photo', sourceId, item.source_type)
+        : null;
     case 'attachment_review':
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? buildAuditTargetPath('photo', 'photo', sourceId, item.source_type)
+        : null;
     case 'attachment_review_batch':
-      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=photo' : null;
+      if (!hasAnyRole(roles, ['admin', 'reviewer'])) return null;
+      {
+        const attachmentIds = notificationPayload(item).pending_attachment_ids;
+        return Array.isArray(attachmentIds) && attachmentIds.length
+          ? buildAuditTargetPath('photo', 'photos', attachmentIds.join(','), item.source_type)
+          : buildAuditTargetPath('photo', 'site', sourceId, item.source_type);
+      }
     case 'data_review':
-      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/audit?tab=data' : null;
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? buildAuditTargetPath('data', 'review', sourceId, item.source_type)
+        : null;
     case 'parts_request':
-      return hasAnyRole(roles, ['admin']) ? '/audit?tab=parts' : null;
+      return hasAnyRole(roles, ['admin'])
+        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type)
+        : null;
     case 'spare_part_request':
-      return hasAnyRole(roles, ['admin']) ? '/audit?tab=parts' : null;
+      return hasAnyRole(roles, ['admin'])
+        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type)
+        : null;
     case 'vehicle_application':
-      return hasAnyRole(roles, ['admin']) ? '/audit?tab=vehicle' : null;
+      return hasAnyRole(roles, ['admin'])
+        ? buildAuditTargetPath('vehicle', 'request', sourceId, item.source_type)
+        : null;
     case 'plan_schedule':
-      return hasAnyRole(roles, ['admin', 'operator'])
-        ? (sourceId ? `/plan-schedules?schedule=${sourceId}` : '/plan-schedules')
+      if (hasAnyRole(roles, ['admin'])) {
+        return buildAuditTargetPath('plan', 'plan', sourceId, item.source_type,
+          /变更|change/i.test(`${item.title || ''} ${item.content || ''}`) ? { change: 1 } : {});
+      }
+      return hasAnyRole(roles, ['operator'])
+        ? (hasIdentifier(sourceId) ? `/plan-schedules?schedule=${encodeURIComponent(sourceId)}` : '/plan-schedules')
+        : null;
+    case 'plan_schedule_change':
+    case 'plan_change':
+      return hasAnyRole(roles, ['admin'])
+        ? buildAuditTargetPath('plan', 'plan', sourceId, item.source_type, { change: 1 })
         : null;
     case 'user_work_transfer':
       return hasAnyRole(roles, ['admin', 'operator']) ? '/?view=operations' : null;
@@ -66,4 +130,104 @@ export function getNotificationTarget(item, roles) {
     default:
       return null;
   }
+}
+
+function normalizeSearchParams(searchParams) {
+  return searchParams instanceof URLSearchParams
+    ? searchParams
+    : new URLSearchParams(searchParams || '');
+}
+
+export function getAuditTargetFromSearchParams(searchParams) {
+  const params = normalizeSearchParams(searchParams);
+  const tab = params.get('tab') || '';
+  if (!tab) return null;
+  if (params.get('target_missing') === '1') {
+    return { tab, kind: 'missing', value: null, sourceType: params.get('source_type') || '' };
+  }
+  const targets = [
+    ['plan', 'plan', 'plan'],
+    ['plan', 'plan_change', 'plan'],
+    ['inspection', 'inspection_batch', 'inspection_batch'],
+    ['inspection', 'inspection', 'inspection'],
+    ['photo', 'photo', 'photo'],
+    ['photo', 'photos', 'photos'],
+    ['photo', 'site', 'site'],
+    ['parts', 'request', 'request'],
+    ['vehicle', 'request', 'request'],
+    ['workorder', 'order', 'order'],
+    ['data', 'review', 'review'],
+  ];
+  for (const [targetTab, kind, queryKey] of targets) {
+    if (tab !== targetTab) continue;
+    const value = params.get(queryKey);
+    if (hasIdentifier(value)) {
+      return {
+        tab,
+        kind: kind === 'plan' && params.get('change') === '1' ? 'plan_change' : kind,
+        value,
+        queryKey,
+      };
+    }
+  }
+  return null;
+}
+
+function matchesValue(value, targetValue) {
+  return hasIdentifier(value) && String(value) === String(targetValue);
+}
+
+function matchesPrefixedId(value, targetValue, prefix) {
+  return matchesValue(value, targetValue) || matchesValue(value, `${prefix}${targetValue}`);
+}
+
+export function resolveAuditTarget(items, target) {
+  if (!target) return { status: 'none', item: null };
+  if (target.kind === 'missing' || !hasIdentifier(target.value)) {
+    return { status: 'invalid', item: null };
+  }
+  const targetValue = String(target.value);
+  const item = (items || []).find((candidate) => {
+    switch (target.kind) {
+      case 'plan':
+      case 'plan_change':
+        return candidate.source_type === 'plan_schedule'
+          && (matchesValue(candidate.schedule_id, targetValue)
+            || matchesPrefixedId(candidate.id, targetValue, 'ps_'))
+          && (target.kind !== 'plan_change' || Boolean(candidate.is_change));
+      case 'inspection_batch':
+        return candidate.source_type === 'inspection_batch'
+          && matchesValue(candidate.id, targetValue);
+      case 'inspection':
+        return ['inspection', 'inspection_batch'].includes(candidate.source_type)
+          && (matchesPrefixedId(candidate.id, targetValue, 'insp_')
+            || (candidate.item_ids || []).some((id) => matchesValue(id, targetValue)));
+      case 'photo':
+        return ['photo_review', 'inspection_batch'].includes(candidate.source_type)
+          && ((candidate.attachment_ids || []).some((id) => matchesValue(id, targetValue))
+            || (candidate.attachment_details || []).some((photo) => matchesValue(photo.id, targetValue)));
+      case 'photos': {
+        const targetIds = new Set(targetValue.split(',').filter(Boolean));
+        return ['photo_review', 'inspection_batch'].includes(candidate.source_type)
+          && ((candidate.attachment_ids || []).some((id) => targetIds.has(String(id)))
+            || (candidate.attachment_details || []).some((photo) => targetIds.has(String(photo.id))));
+      }
+      case 'site':
+        return candidate.source_type === 'photo_review' && matchesValue(candidate.site_id, targetValue);
+      case 'request':
+        return ['parts_request', 'vehicle_application'].includes(candidate.source_type)
+          && ((candidate.source_type === 'parts_request' && matchesPrefixedId(candidate.id, targetValue, 'pr_'))
+            || (candidate.source_type === 'vehicle_application' && matchesPrefixedId(candidate.id, targetValue, 'va_'))
+            || matchesValue(candidate.request_id, targetValue)
+            || matchesValue(candidate.application_id, targetValue));
+      case 'order':
+        return candidate.source_type === 'workorder_review'
+          && (matchesValue(candidate.order_no, targetValue) || matchesValue(candidate.source_name, targetValue));
+      case 'review':
+        return matchesValue(candidate.id, targetValue);
+      default:
+        return false;
+    }
+  });
+  return item ? { status: 'found', item } : { status: 'missing', item: null };
 }

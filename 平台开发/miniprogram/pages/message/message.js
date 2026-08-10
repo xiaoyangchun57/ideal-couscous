@@ -1,6 +1,6 @@
 const api = require('../../services/api.js');
 const { relativeTime } = require('../../utils/util.js');
-const { planScheduleDetailUrl } = require('../../utils/notificationTarget.js');
+const { resolveNotificationTarget } = require('../../utils/notificationTarget.js');
 const { hasMoreFromResponse, appendDistinctById } = require('../../utils/pagedList.js');
 
 const app = getApp();
@@ -16,6 +16,7 @@ function decorate(n) {
     source_id: n.source_id || '',
     title: n.title,
     content: n.content || '',
+    payload_json: n.payload_json || '',
     is_read: !!n.is_read,
     time: relativeTime(n.created_at)
   };
@@ -72,35 +73,22 @@ Page({
   },
 
   openBusinessTarget(item) {
-    const sourceType = item.source_type;
-    if (sourceType === 'vehicle_use_expiry') {
-      wx.navigateTo({ url: '/pages/vehicle/vehicle' });
+    const target = resolveNotificationTarget(item);
+    if (target.kind === 'invalid') {
+      wx.showModal({ title: '无法打开通知对象', content: target.message, showCancel: false });
       return;
     }
-    if (sourceType === 'workorder' || sourceType === 'workorder_review') {
-      getApp().globalData.selWorkorderNo = item.source_id;
-      wx.navigateTo({ url: '/pages/workorder/workorder' });
+    if (target.kind === 'tab') {
+      if (target.planId) getApp().globalData.selPlanId = Number(target.planId) || target.planId;
+      if (target.siteId) getApp().globalData.selSiteId = Number(target.siteId) || target.siteId;
+      wx.switchTab({ url: target.page });
       return;
     }
-    if (sourceType === 'inspection' || sourceType === 'reagent_qc') {
-      wx.switchTab({ url: '/pages/inspection/inspection' });
-      return;
+    if (target.kind === 'page' && target.workorderNo) {
+      getApp().globalData.selWorkorderNo = target.workorderNo;
     }
-    if (sourceType === 'inspection_rework') {
-      getApp().globalData.selPlanId = Number(item.source_id) || item.source_id;
-      wx.switchTab({ url: '/pages/inspection/inspection' });
-      return;
-    }
-    if (sourceType === 'plan_schedule') {
-      wx.navigateTo({ url: planScheduleDetailUrl(item.source_id) });
-      return;
-    }
-    if (sourceType === 'alert' || sourceType === 'manual_report') {
-      wx.navigateTo({ url: '/pages/alert/alert' });
-      return;
-    }
-    if (['inspection_review', 'inspection_review_batch', 'photo_review', 'attachment_review', 'attachment_review_batch', 'data_review', 'parts_request', 'spare_part_request', 'vehicle_application'].includes(sourceType)) {
-      wx.navigateTo({ url: '/pages/review/view' });
+    if (target.kind === 'page' || target.kind === 'review') {
+      wx.navigateTo({ url: target.page });
     }
   },
 

@@ -1,7 +1,11 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
-const { approveItemIdsForPhotoSelection } = require('../../utils/inspectionReviewDecision.js');
+const {
+  approveItemIdsForPhotoSelection,
+  getRiskyPhotoIds
+} = require('../../utils/inspectionReviewDecision.js');
+const { findReviewItem } = require('../../utils/notificationTarget.js');
 
 const app = getApp();
 
@@ -52,7 +56,8 @@ function decorateItem(item) {
     spare_part_request: '查看备件申请明细',
     vehicle_application: '查看车辆、时段与用途',
     workorder_review: '查看工单处置与证据',
-    photo_review: '查看影像与风险标记'
+    photo_review: '查看影像与风险标记',
+    data_review: '查看指标、数值与自动审核结论'
   }[item.source_type] || '查看审批详情';
   const approveLabel = {
     plan_schedule: item.is_change ? '批准变更' : '批准计划',
@@ -61,7 +66,8 @@ function decorateItem(item) {
     spare_part_request: '批准备件',
     vehicle_application: '批准用车',
     workorder_review: '通过办结',
-    photo_review: '通过影像'
+    photo_review: '通过影像',
+    data_review: '核准数据'
   }[item.source_type] || '通过';
   const rejectLabel = {
     plan_schedule: '退回计划',
@@ -70,7 +76,8 @@ function decorateItem(item) {
     spare_part_request: '驳回备件',
     vehicle_application: '驳回用车',
     workorder_review: '退回工单',
-    photo_review: '驳回影像'
+    photo_review: '驳回影像',
+    data_review: '驳回数据'
   }[item.source_type] || '驳回';
   const reviewPhotos = details.map(detail => Object.assign({}, detail, {
     url: resolveUploadUrl(detail.stored_path),
@@ -96,7 +103,19 @@ Page({
     curId: '',
     curType: '',
     curAction: '',
-    submitting: false
+    submitting: false,
+    reviewTarget: null
+  },
+
+  onLoad(options) {
+    const targetType = String(options && options.target_type || '').trim();
+    const targetId = String(options && options.target_id || '').trim();
+    const attachmentIds = String(options && options.target_attachment_ids || '')
+      .split(',').map(id => id.trim()).filter(Boolean);
+    if (targetType && targetId) {
+      this.reviewTarget = { kind: 'review', reviewType: targetType, sourceId: targetId, attachmentIds };
+      this.setData({ reviewTarget: this.reviewTarget });
+    }
   },
 
   onShow() {
@@ -111,16 +130,49 @@ Page({
     api.auditPending()
       .then(res => {
         const list = (Array.isArray(res) ? res : []).map(decorateItem);
+        if (this.reviewTarget && this.reviewTarget.reviewType === 'data_review'
+            && !findReviewItem(groupByLabel(list), this.reviewTarget)) {
+          return api.dataReviewDetail(this.reviewTarget.sourceId).then(review => {
+            list.push(decorateItem({
+              source_type: 'data_review',
+              source_label: '数据审核',
+              id: 'dr_' + review.id,
+              title: (review.site_name || '站点') + '数据人工复核',
+              site_name: review.site_name || '',
+              source_name: review.metric || '',
+              submit_time: review.recorded_at || '',
+              metric: review.metric || '',
+              value: review.value,
+              recorded_at: review.recorded_at || '',
+              review_status_label: review.status || '',
+              auto_reason: review.auto_reason || review.auto_result || '',
+              smart_result: review.smart_result || '',
+              remark: '请核对原始数值、采集时间和自动审核结论'
+            }));
+            return list;
+          });
+        }
+        return list;
+      })
+      .then(list => {
         this.setData({
           loading: false,
           total: list.length,
           groups: groupByLabel(list)
-        });
+        }, () => this._focusReviewTarget());
         if (done) done();
       })
-      .catch(() => {
+      .catch(err => {
         this.setData({ loading: false, groups: [], total: 0 });
         if (done) done();
+        if (this.reviewTarget) {
+          wx.showModal({
+            title: '无法打开审核对象',
+            content: (err && err.error) || '当前账号无权访问审核列表，或该审核对象已不存在。',
+            showCancel: false
+          });
+          return;
+        }
         wx.showToast({ title: '加载失败', icon: 'none' });
       });
   },
@@ -149,6 +201,26 @@ Page({
     this._dispatch('approve', '');
   },
 
+  _focusReviewTarget() {
+    if (!this.reviewTarget || this._reviewTargetHandled) return;
+    const item = findReviewItem(this.data.groups, this.reviewTarget);
+    if (!item) {
+      this._reviewTargetHandled = true;
+      wx.showModal({
+        title: '无法打开审核对象',
+        content: '该审核对象不存在、已处理，或当前账号无权访问。',
+        showCancel: false
+      });
+      return;
+    }
+    const groups = this.data.groups.map(group => Object.assign({}, group, {
+      items: group.items.map(row => row.id === item.id
+        ? Object.assign({}, row, { targeted: true, detailOpen: true }) : row)
+    }));
+    this._reviewTargetHandled = true;
+    this.setData({ groups }, () => wx.pageScrollTo({ selector: '.review-target', duration: 0 }));
+  },
+
   onTogglePhotoReject(e) {
     const id = e.currentTarget.dataset.id;
     const photoId = Number(e.currentTarget.dataset.photoId);
@@ -171,11 +243,26 @@ Page({
     const item = this._findItem(id);
     if (!item) return;
     this.setData({ curId: id, curType: item.source_type });
-    if (item.selectedRejectCount > 0) {
-      this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
+    const rejectedIds = (item.reviewPhotos || [])
+      .filter(photo => photo.selectedForReject).map(photo => photo.id);
+    const unresolvedRiskIds = getRiskyPhotoIds(item.reviewPhotos || [], rejectedIds);
+    const continueSubmit = () => {
+      if (item.selectedRejectCount > 0) {
+        this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
+        return;
+      }
+      this._dispatch('approve', '');
+    };
+    if (!unresolvedRiskIds.length) {
+      continueSubmit();
       return;
     }
-    this._dispatch('approve', '');
+    wx.showModal({
+      title: '确认风险影像',
+      content: `仍有 ${unresolvedRiskIds.length} 张系统标红影像将被通过，请确认已逐张核对。`,
+      confirmText: '已核对并继续',
+      success: result => { if (result.confirm) continueSubmit(); }
+    });
   },
 
   _findItem(id) {
@@ -241,16 +328,19 @@ Page({
         break;
       }
       case 'parts_request':
-        p = action === 'approve' ? api.approvePartsRequest(nid) : api.rejectPartsRequest(nid);
+        p = action === 'approve' ? api.approvePartsRequest(nid) : api.rejectPartsRequest(nid, reason);
         break;
       case 'spare_part_request':
-        p = action === 'approve' ? api.approveSparePart(nid) : api.rejectSparePart(nid);
+        p = action === 'approve' ? api.approveSparePart(nid) : api.rejectSparePart(nid, reason);
         break;
       case 'vehicle_application':
         p = api.approveVehicle(nid, action, reason);
         break;
       case 'plan_schedule':
         p = action === 'approve' ? api.approvePlanSchedule(nid) : api.rejectPlanSchedule(nid, reason);
+        break;
+      case 'data_review':
+        p = api.reviewDataReview(nid, action, reason);
         break;
       default:
         wx.showToast({ title: '未知类型', icon: 'none' });

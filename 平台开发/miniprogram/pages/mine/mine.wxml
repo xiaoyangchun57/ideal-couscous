@@ -57,6 +57,7 @@
       <view class="parts-request-head"><text class="parts-request-name">{{item.requested_part_name || item.items[0].part_name}}</text><text class="tag">{{item.status_label}}</text></view>
       <text class="parts-request-sub">{{item.route_label}} · {{item.site_name}} · {{item.request_no}}</text>
       <text class="parts-request-sub">数量 {{item.items[0].quantity || 1}} · {{item.reason || '无补充说明'}}</text>
+      <text class="parts-request-sub parts-request-reject" wx:if="{{item.status === 'rejected' && item.reject_reason}}">驳回原因：{{item.reject_reason}}</text>
       <view class="parts-request-actions">
         <button wx:if="{{item.can_issue}}" class="btn-primary parts-action" data-id="{{item.id}}" bindtap="onOpenPartsIssue">确认领用</button>
         <button wx:if="{{item.can_order}}" class="btn-primary parts-action" data-id="{{item.id}}" bindtap="onOpenPartsOrder">登记厂家下单</button>

@@ -85,6 +85,30 @@ class FreezeSecurityTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                     source_type TEXT, source_id INTEGER, title TEXT, content TEXT
                 );
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, plan_name TEXT, assignee TEXT,
+                    assignee_id INTEGER, period TEXT, generate_date TEXT,
+                    status TEXT, plan_schedule_id INTEGER, schedule_version INTEGER,
+                    plan_snapshot TEXT, completion_rate REAL DEFAULT 0
+                );
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    template_id INTEGER, item_name TEXT, category TEXT,
+                    frequency TEXT, required_photos INTEGER DEFAULT 0,
+                    actual_photos INTEGER DEFAULT 0, result TEXT,
+                    execution_status TEXT DEFAULT 'active', review_status INTEGER,
+                    review_comment TEXT, reviewer_id INTEGER, review_time TEXT,
+                    photo_urls TEXT DEFAULT '[]', remark TEXT DEFAULT '',
+                    completed_at TEXT, check_out_time TEXT
+                );
+                CREATE TABLE inspection_schedules (
+                    id INTEGER PRIMARY KEY, site_id INTEGER, template_id INTEGER,
+                    template_item_id INTEGER, status TEXT
+                );
+                CREATE TABLE inspection_template_items (
+                    id INTEGER PRIMARY KEY, template_id INTEGER, item_name TEXT,
+                    category TEXT
+                );
             ''')
             db.executemany('INSERT INTO user_sites VALUES (?,?)', [
                 (2, 1), (3, 2), (5, 1), (6, 2),
@@ -113,6 +137,30 @@ class FreezeSecurityTest(unittest.TestCase):
                 (1, 'WO-SITE-1', 1, 'Site 1 order', '', 'in_progress', '[]', 'Operator 1'),
                 (2, 'WO-SITE-2', 2, 'Site 2 order', '', 'in_progress', '[]', 'Operator 2'),
             ])
+            db.executemany('''
+                INSERT INTO insp_plan_items
+                    (id, plan_id, site_id, item_name, review_status, result)
+                VALUES (?, 1, ?, ?, ?, ?)
+            ''', [
+                (100, 1, 'Site 1 pending', 1, 'normal'),
+                (101, 2, 'Site 2 pending', 1, 'normal'),
+                (102, 1, 'Site 1 approved', 2, 'normal'),
+            ])
+            db.execute("INSERT INTO insp_plans (id,plan_name,assignee_id,status) VALUES (1,'Review plan',2,'active')")
+            db.execute('''
+                INSERT INTO operation_attachments
+                    (id,filename,stored_path,file_type,source_type,source_id,site_id,
+                     uploader_id,description,requirement_id,is_deleted,review_status)
+                VALUES (13,'deleted.jpg','/uploads/deleted.jpg','image','site_photo',0,1,
+                        2,'Deleted photo',NULL,1,'pending')
+            ''')
+            db.execute('''
+                INSERT INTO operation_attachments
+                    (id,filename,stored_path,file_type,source_type,source_id,site_id,
+                     uploader_id,description,requirement_id,is_deleted,review_status)
+                VALUES (14,'processed.jpg','/uploads/processed.jpg','image','site_photo',0,1,
+                        2,'Processed photo',NULL,0,'approved')
+            ''')
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -252,6 +300,98 @@ class FreezeSecurityTest(unittest.TestCase):
         self.assertEqual(self.status('operator-1', 'get', '/api/workorders/WO-SITE-1/photo-progress').status_code, 200)
         self.assertEqual(self.status('operator-1', 'get', '/api/workorders/WO-SITE-1/related').status_code, 200)
         self.assertEqual(self.status('operator-1', 'get', '/api/workorders/UNKNOWN/photo-progress').status_code, 404)
+
+    def test_inspection_item_review_requires_scope_and_rejects_invalid_batches_atomically(self):
+        def item_statuses():
+            with app_module.get_db() as db:
+                return dict(db.execute(
+                    'SELECT id, review_status FROM insp_plan_items ORDER BY id'
+                ).fetchall())
+
+        before = item_statuses()
+        self.assertEqual(self.status('operator-1', 'put',
+                                     '/api/inspection-v2/items/100/review',
+                                     json={'action': 'approve'}).status_code, 403)
+        self.assertEqual(self.status('reviewer-1', 'put',
+                                     '/api/inspection-v2/items/101/review',
+                                     json={'action': 'approve'}).status_code, 403)
+        for payload, expected in [
+            ({'approve_ids': [100, 999]}, 404),
+            ({'approve_ids': [100, 101]}, 403),
+            ({'approve_ids': [100, 102]}, 409),
+        ]:
+            response = self.status('reviewer-1', 'post',
+                                   '/api/inspection-v2/items/batch-review', json=payload)
+            self.assertEqual(response.status_code, expected, response.json)
+            self.assertEqual(item_statuses(), before)
+
+        valid = self.status('reviewer-1', 'post',
+                            '/api/inspection-v2/items/batch-review',
+                            json={'approve_ids': [100]})
+        self.assertEqual(valid.status_code, 200, valid.json)
+        self.assertEqual(item_statuses()[100], 2)
+
+    def test_operation_attachment_batch_prevalidates_every_object_before_writing(self):
+        def snapshot():
+            with app_module.get_db() as db:
+                statuses = {
+                    row['id']: (row['review_status'], row['reviewer_id'])
+                    for row in db.execute(
+                        'SELECT id, review_status, reviewer_id FROM operation_attachments ORDER BY id'
+                    ).fetchall()
+                }
+                notices = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+            return statuses, notices
+
+        for payload, expected in [
+            ({'attachment_ids': [10, 999], 'action': 'approve'}, 404),
+            ({'attachment_ids': [10, 12], 'action': 'approve'}, 403),
+            ({'attachment_ids': [10, 13], 'action': 'approve'}, 409),
+            ({'attachment_ids': [10, 14], 'action': 'approve'}, 409),
+            ({'attachment_ids': [10, 20], 'action': 'approve'}, 400),
+        ]:
+            before = snapshot()
+            response = self.status('reviewer-1', 'post',
+                                   '/api/operation-attachments/review', json=payload)
+            self.assertEqual(response.status_code, expected, response.json)
+            self.assertEqual(snapshot(), before)
+
+        allowed = self.status('admin', 'post', '/api/operation-attachments/review', json={
+            'attachment_ids': [10, 12], 'action': 'approve',
+        })
+        self.assertEqual(allowed.status_code, 200, allowed.json)
+        self.assertEqual(allowed.json['count'], 2)
+
+    def test_parts_request_migration_creates_items_first_and_is_idempotent(self):
+        temp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        temp.close()
+        original_get_db = app_module.get_db
+
+        @contextmanager
+        def fresh_db():
+            db = sqlite3.connect(temp.name)
+            db.row_factory = sqlite3.Row
+            try:
+                yield db
+                db.commit()
+            finally:
+                db.close()
+
+        try:
+            app_module.get_db = fresh_db
+            app_module.migrate_parts_requests_v2()
+            app_module.migrate_parts_requests_v2()
+            with fresh_db() as db:
+                tables = {row['name'] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+                self.assertIn('parts_request_items', tables)
+                self.assertIn('part_id', {
+                    row['name'] for row in db.execute('PRAGMA table_info(parts_request_items)').fetchall()
+                })
+        finally:
+            app_module.get_db = original_get_db
+            os.unlink(temp.name)
 
 
 if __name__ == '__main__':

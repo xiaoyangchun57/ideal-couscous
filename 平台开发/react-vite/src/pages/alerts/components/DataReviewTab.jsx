@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Table, Card, Button, Space, Tag, Typography,
   App as AntApp, Modal, Select, Input, Tooltip, Form, Popconfirm,
@@ -78,7 +78,7 @@ const LEVEL_OPTIONS = [
   { value: '3', label: 'L2→L3 人工复核' },
 ];
 
-export default function DataReviewTab({ tokens }) {
+export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }) {
   const { message } = AntApp.useApp();
   const [reviews, setReviews] = useState([]);
   const [total, setTotal] = useState(0);
@@ -92,6 +92,7 @@ export default function DataReviewTab({ tokens }) {
   const [traceDrawer, setTraceDrawer] = useState({ open: false, chain: null, loading: false });
   const [trendDrawer, setTrendDrawer] = useState({ open: false, data: null, loading: false, metric: '', site_id: null, site_name: '' });
   const [trendSel, setTrendSel] = useState({ site_id: null, metric: '' });
+  const handledTargetRef = useRef('');
   const [reviewer] = useState(() => {
     try { return JSON.parse(localStorage.getItem('auth_user') || '{}').id || 1; }
     catch { return 1; }
@@ -185,6 +186,26 @@ export default function DataReviewTab({ tokens }) {
   const openReview = (mode, items, action = 'approve') => {
     setReviewModal({ open: true, mode, items, action, reason: '', conclusion: '' });
   };
+
+  useEffect(() => {
+    const targetId = String(targetReviewId || '').trim();
+    if (!targetId || handledTargetRef.current === targetId) return;
+    handledTargetRef.current = targetId;
+    api.getStrict(`/data-reviews/${encodeURIComponent(targetId)}`)
+      .then((review) => {
+        if (!['smart_reviewed', 'manual_reviewed'].includes(review.status)) {
+          onTargetStatus?.('通知对应的数据审核对象已处理，不再处于待审核状态');
+          return;
+        }
+        onTargetStatus?.('');
+        openReview('single', [review], 'approve');
+      })
+      .catch((error) => {
+        const notice = error?.message || '通知对应的数据审核对象不存在或当前权限范围不可见';
+        onTargetStatus?.(notice);
+        message.warning(notice);
+      });
+  }, [message, onTargetStatus, targetReviewId]);
 
   // 提交人工复核
   const submitReview = async () => {
@@ -354,6 +375,16 @@ export default function DataReviewTab({ tokens }) {
         width={520}
       >
         <Form layout="vertical">
+          {reviewModal.mode === 'single' && reviewModal.items[0] ? (
+            <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="站点">{reviewModal.items[0].site_name || '-'}</Descriptions.Item>
+              <Descriptions.Item label="指标">{metricMap[reviewModal.items[0].metric] || reviewModal.items[0].metric || '-'}</Descriptions.Item>
+              <Descriptions.Item label="数值">{reviewModal.items[0].value ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="采集时间">{reviewModal.items[0].recorded_at || '-'}</Descriptions.Item>
+              <Descriptions.Item label="自动判定">{reviewModal.items[0].auto_reason || reviewModal.items[0].auto_result || '-'}</Descriptions.Item>
+              <Descriptions.Item label="智能判定">{reviewModal.items[0].smart_result || '-'}</Descriptions.Item>
+            </Descriptions>
+          ) : null}
           <Form.Item label={`将对 ${reviewModal.items.length} 条数据进行${reviewModal.action === 'approve' ? '核准' : '驳回'}操作`}>
             <Text type="secondary">{reviewModal.action === 'approve'
               ? '确认该数据无异常，操作后将归档为已审核。'

@@ -139,10 +139,14 @@ Page({
         });
         if (done) done();
       })
-      .catch(() => {
+      .catch(err => {
         this.setData({ loaded: true });
         if (done) done();
-        wx.showToast({ title: '加载失败', icon: 'none' });
+        wx.showModal({
+          title: '无法打开计划',
+          content: (err && err.error) || '该计划不存在或当前账号无权访问。',
+          showCancel: false
+        });
       });
   },
 

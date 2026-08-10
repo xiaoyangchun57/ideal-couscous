@@ -161,6 +161,11 @@ const api = {
 
   // 移动端审核（管理者/审批者；复用现有审核端点，token 需 admin/manager）
   auditPending: () => request('/api/audit/pending', 'GET'),
+  dataReviewDetail: (id) => request('/api/data-reviews/' + id, 'GET'),
+  reviewDataReview: (id, action, reason) =>
+    request('/api/data-reviews/' + id + '/manual-review', 'POST', {
+      action: action || 'approve', reason: reason || ''
+    }),
 
   // 巡检检查项审核（source_type=inspaction）
   reviewInspectionItem: (id, status, comment) =>
@@ -194,11 +199,15 @@ const api = {
 
   // 备件预申报审核（source_type=parts_request，来自 parts_requests 表）
   approvePartsRequest: (id) => request('/api/inspection-v2/parts-request/' + id + '/approve', 'PUT'),
-  rejectPartsRequest: (id) => request('/api/inspection-v2/parts-request/' + id + '/reject', 'PUT', {}),
+  rejectPartsRequest: (id, reason) => request('/api/inspection-v2/parts-request/' + id + '/reject', 'PUT', {
+    comment: reason || ''
+  }),
 
   // 备件申请审核（source_type=spare_part_request，来自 spare_part_requests 表）
   approveSparePart: (id) => request('/api/parts/requests/' + id + '/approve', 'PUT'),
-  rejectSparePart: (id) => request('/api/parts/requests/' + id + '/reject', 'PUT'),
+  rejectSparePart: (id, reason) => request('/api/parts/requests/' + id + '/reject', 'PUT', {
+    comment: reason || ''
+  }),
 
   // 用车申请审核（source_type=vehicle_application，仅通过）
   approveVehicle: (id, action, reason) => request('/api/vehicle/applications/' + id + '/approve', 'POST', {

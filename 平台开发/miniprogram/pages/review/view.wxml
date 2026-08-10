@@ -15,7 +15,7 @@
     <view wx:for="{{groups}}" wx:key="label" class="group">
       <view class="group-hd">{{item.label}}（{{item.items.length}}）</view>
       <view class="list-card review-list">
-        <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="review-row">
+        <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="review-row {{it.targeted ? 'review-target' : ''}}">
           <text class="row-title">{{it.title}}</text>
           <text class="row-sub" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
           <text class="row-sub" wx:if="{{it.source_name}}">单号：{{it.source_name}}</text>
@@ -33,6 +33,9 @@
           </view>
           <view class="approval-summary" wx:elif="{{it.source_type === 'vehicle_application'}}">
             <text>审批重点：车辆、使用时段、目的地与用车事由</text>
+          </view>
+          <view class="approval-summary" wx:elif="{{it.source_type === 'data_review'}}">
+            <text>审批重点：原始数值、采集时间与自动审核结论</text>
           </view>
           <view class="detail-toggle" data-id="{{it.id}}" bindtap="onToggleDetails">{{it.detailOpen ? '收起审批详情' : it.detailHint}}</view>
           <view class="review-detail" wx:if="{{it.detailOpen}}">
@@ -78,6 +81,13 @@
               <text class="detail-label">使用时段</text><text class="detail-text">{{it.start_at}} 至 {{it.end_at}}</text>
               <text class="detail-label" wx:if="{{it.destination}}">目的地</text><text class="detail-text" wx:if="{{it.destination}}">{{it.destination}}</text>
               <text class="detail-label" wx:if="{{it.reason}}">用车事由</text><text class="detail-text" wx:if="{{it.reason}}">{{it.reason}}</text>
+            </block>
+            <block wx:elif="{{it.source_type === 'data_review'}}">
+              <text class="detail-label">指标与数值</text><text class="detail-text">{{it.metric}}：{{it.value}}</text>
+              <text class="detail-label">采集时间</text><text class="detail-text">{{it.recorded_at || '未记录'}}</text>
+              <text class="detail-label">当前审核状态</text><text class="detail-text">{{it.review_status_label}}</text>
+              <text class="detail-label">自动审核结论</text><text class="detail-text">{{it.auto_reason || '未记录'}}</text>
+              <text class="detail-label">智能审核结论</text><text class="detail-text">{{it.smart_result || '未记录'}}</text>
             </block>
             <block wx:else>
               <text class="detail-label" wx:if="{{it.original_description}}">现场描述</text>

@@ -34,12 +34,13 @@
 - React 路由、登录返回地址、通知跳转和角色可见性改变时，至少补充对应逻辑测试。
 - 未复跑的结果必须标为“待最终验收”，不得沿用历史通过数量。
 
-## 2026-08-10 本地冻结证据
+## 2026-08-10 本地冻结 r2 证据
 
-- 后端全量测试：`224 passed`，退出码 0；运行期间有全局 `pytest-qt`、PySide6、NumPy 兼容警告，但不影响通过结果。
-- 小程序 Node `7/7`，React `23/23`；React lint/build、`python -m py_compile backend/app.py` 和 `git diff --check` 均通过。`git diff --check` 仅有 LF→CRLF 提示。
+- 旧提交 `c78de8c` 和标签 `release-20260810-cross-module-freeze` 已被产品评审打回，只保留历史追溯，禁止交给部署线使用。
+- 后端全量测试：`230 passed`，退出码 0；运行期间有全局 `pytest-qt`、PySide6、NumPy 兼容警告，但不影响通过结果。
+- 小程序 Node `8/8`，React `27/27`；React lint/build、`python -m py_compile backend/app.py` 和 `git diff --check` 均通过。`git diff --check` 仅有 LF→CRLF 提示。
 - `python backend/test_api.py` 通过并读取 37 个站点。后端最终仅监听 `127.0.0.1:5000`，遗留 `0.0.0.0` 进程已清理。
-- 浏览器实测：数据审核页签可见；计划审批保持选中且表头为“计划内容/路线与站点/用车/备件/提交时间/操作”；整改 `rework_plan=128` 解析为 `schedule=37` 且无控制台错误；备件 `?tab=parts` 正确选中；计划详情 Descriptions 告警已消失。
-- 微信开发者工具实测：admin 肖永平 `unread/reviewTodo=0/1`、周雄雄 `=2/0`、万松 `=0/1`；当前/历史消息为 `0/22`、`2/1`、`0/20`；周雄雄车辆卡片只含 `applicant_id=26`，其他账号未串入。
+- 浏览器实测：`/audit?tab=plan&plan=38` 准确打开计划 #38；过期计划审批返回明确业务提示且待办不消失；不存在的数据审核对象显示无权限/不存在提示；消息 current/history 为 `0/22`。
+- 微信开发者工具实测：现有实例编译并加载本地代码成功；admin 当前/历史消息为 `0/22`；点击计划 #38 的真实通知准确进入 `/pages/plan-detail/plan-detail?id=38`；系统标红影像在提交前显示逐张核对确认，取消后不产生提交。
 - 安全回归覆盖旧巡检照片与工单直达端点角色/站点授权、批量原子校验和默认回环绑定。
-- 边界：仍未提交、未打标签、未推送、未部署，未操作线上数据库或容器；全部门槛通过后才创建本地冻结提交和标签交上线测试线。
+- r2 本地冻结标签为 `release-20260810-cross-module-freeze-r2`；仅交上线测试线，未推送、未部署，未操作线上数据库或容器。

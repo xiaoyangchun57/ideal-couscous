@@ -1,5 +1,8 @@
 const assert = require('assert');
-const { approveItemIdsForPhotoSelection } = require('../utils/inspectionReviewDecision.js');
+const {
+  approveItemIdsForPhotoSelection,
+  getRiskyPhotoIds
+} = require('../utils/inspectionReviewDecision.js');
 
 const itemIds = [100, 101, 101, 102];
 const photos = [
@@ -13,6 +16,16 @@ assert.deepStrictEqual(
   approveItemIdsForPhotoSelection(itemIds, photos, [200]),
   [101, 102],
   'A rejected photo must withhold only its linked check item.'
+);
+
+assert.deepStrictEqual(
+  getRiskyPhotoIds([
+    { id: 1, is_flagged: 1, flag_reason: 'GPS偏离' },
+    { id: 2, duplicate_of_id: 1 },
+    { id: 3, is_flagged: 0 }
+  ]),
+  [1, 2],
+  'Flagged or duplicate photos must require explicit reviewer acknowledgement.'
 );
 assert.deepStrictEqual(
   approveItemIdsForPhotoSelection(itemIds, photos, []),

@@ -45,7 +45,7 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                 );
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
-                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
+                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, code TEXT);
                 CREATE TABLE insp_plans (
                     id INTEGER PRIMARY KEY, assignee_id INTEGER, completion_rate REAL, status TEXT
                 );
@@ -72,7 +72,7 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                 CREATE TABLE data_reviews (
                     id INTEGER PRIMARY KEY, site_id INTEGER, metric TEXT, status TEXT,
                     auto_result TEXT, smart_result TEXT, manual_result TEXT, manual_reason TEXT,
-                    reviewer_id INTEGER, reviewed_at TEXT
+                    reviewer_id INTEGER, reviewed_at TEXT, value REAL, recorded_at TEXT
                 );
                 INSERT INTO users (id,role,real_name) VALUES
                     (1,'admin','dual admin'), (2,'operator','secondary reviewer'),
@@ -81,7 +81,7 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                     (1,'admin'), (1,'operator'), (2,'operator'), (2,'reviewer'),
                     (3,'reviewer'), (4,'operator');
                 INSERT INTO user_sites VALUES (2,1), (3,2), (4,1);
-                INSERT INTO sites VALUES (1,'site one'), (2,'site two');
+                INSERT INTO sites (id,name) VALUES (1,'site one'), (2,'site two');
                 INSERT INTO data_reviews (id,site_id,metric,status,auto_result,smart_result)
                     VALUES (100,1,'ph','smart_reviewed','reject','suspicious');
                 INSERT INTO data_reviews (id,site_id,metric,status,auto_result,smart_result)
@@ -174,6 +174,26 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json['total'], 1)
         self.assertEqual([row['site_id'] for row in response.json['by_site']], [1])
+
+    def test_data_review_list_and_direct_target_are_site_scoped(self):
+        scoped = self.client.get('/api/data-reviews?per_page=50',
+                                 headers=self.headers('secondary-reviewer-token'))
+        self.assertEqual(scoped.status_code, 200, scoped.json)
+        self.assertEqual([row['id'] for row in scoped.json['items']], [100])
+
+        direct = self.client.get('/api/data-reviews/100',
+                                 headers=self.headers('secondary-reviewer-token'))
+        self.assertEqual(direct.status_code, 200, direct.json)
+        self.assertEqual(direct.json['id'], 100)
+
+        hidden = self.client.get('/api/data-reviews/200',
+                                 headers=self.headers('secondary-reviewer-token'))
+        self.assertEqual(hidden.status_code, 404, hidden.json)
+
+        admin = self.client.get('/api/data-reviews/200',
+                                headers=self.headers('dual-admin-token'))
+        self.assertEqual(admin.status_code, 200, admin.json)
+        self.assertEqual(admin.json['id'], 200)
 
     def test_attachment_review_rejects_mixed_site_batch_atomically_and_admin_can_cross_site(self):
         payload = {
