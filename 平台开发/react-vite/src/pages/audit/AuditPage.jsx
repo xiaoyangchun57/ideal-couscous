@@ -42,6 +42,10 @@ function AuditEmptyState({ title, onRefresh, error }) {
     description={error ? `${title}加载失败，当前不能判断是否没有待处理事项。` : `${title}当前没有待处理事项`} />;
 }
 
+function auditItemKey(item) {
+  return item ? `${item.source_type || ''}:${item.id ?? ''}` : '';
+}
+
 // 通用工具栏：搜索 + 筛选 + 刷新 + 计数
 // 结构一致性（B 类）：统一走 FilterBar 组合——筛选控件左对齐为 children，动作按钮收 extra
 function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, extraAction, total, filteredCount, refresh, helpText }) {
@@ -84,7 +88,7 @@ function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, ext
 // ---------------------------------------------------------------------------
 // 业务审核通用 Tab：按 sourceTypes 分组展示一类待办，含指标/筛选/列表
 // ---------------------------------------------------------------------------
-function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, loadError, onOpenReview, onRefresh, extraAction, reviewerNames = [] }) {
+function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, loadError, onOpenReview, onRefresh, extraAction, reviewerNames = [], highlightedItemId }) {
   const { tokens, isDark } = useTheme();
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
@@ -262,6 +266,10 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
       ),
     },
     {
+      title: '执行人', key: 'executor', width: 130,
+      render: (_, record) => `执行人：${record.executor_name || record.user_name || '未记录'}`,
+    },
+    {
       title: '路线 / 站点', key: 'route_sites', width: 270,
       render: (_, record) => {
         const routeDays = record.plan_days || [];
@@ -397,6 +405,7 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
 
       {loadError && <Alert type="warning" showIcon message="待审列表刷新失败，当前显示的数量和内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
+        rowClassName={record => auditItemKey(record) === highlightedItemId ? 'audit-target-row' : ''}
         emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -405,27 +414,39 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
 // ---------------------------------------------------------------------------
 // 备件预申报专用 Tab：按明细行展示，含指标/筛选/富列表
 // ---------------------------------------------------------------------------
-function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRefresh }) {
+function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRefresh, highlightedItemId }) {
   const { tokens, isDark } = useTheme();
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [sourceFilter, setSourceFilter] = useState(undefined);
 
-  const flattened = allItems
-    .filter(i => i.source_type === 'parts_request')
+  const requestItems = allItems.filter(i => ['parts_request', 'spare_part_request'].includes(i.source_type));
+  const flattened = requestItems
     .flatMap(parent => {
-      const details = Array.isArray(parent.parts_detail) ? parent.parts_detail : [];
+      const details = Array.isArray(parent.parts_detail) && parent.parts_detail.length
+        ? parent.parts_detail
+        : parent.source_type === 'spare_part_request'
+          ? [{
+            part_sku: parent.part_sku || parent.part_code || parent.part_name,
+            part_name: parent.part_name,
+            manufacturer: parent.manufacturer,
+            model: parent.model,
+            quantity: parent.quantity,
+          }]
+          : [];
       const base = {
         parent_id: parent.id,
+        parent_key: `${parent.source_type}:${parent.id}`,
+        source_type: parent.source_type,
         parent_title: parent.title,
-        source_name: parent.source_name,
+        source_name: parent.source_name || parent.request_no,
         site_name: parent.site_name,
-        requester_name: parent.requester_name,
+        requester_name: parent.requester_name || parent.applicant,
         submit_time: parent.submit_time,
       };
       return details.map((d, idx) => ({
         ...base,
-        id: `${parent.id}_${d.part_sku || idx}`,
+        id: `${base.parent_key}_${d.part_sku || idx}`,
         part_sku: d.part_sku,
         part_name: d.part_name || d.part_sku,
         manufacturer: d.manufacturer || '-',
@@ -455,8 +476,8 @@ function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRe
       })
     : sourceFiltered;
 
-  const parents = allItems.filter(i => i.source_type === 'parts_request');
-  const totalRequests = new Set(parents.map(i => i.id)).size;
+  const parents = requestItems;
+  const totalRequests = new Set(parents.map(i => `${i.source_type}:${i.id}`)).size;
   const distinctParts = new Set(searched.map(i => i.part_sku)).size;
   const totalQuantity = searched.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
   const distinctSources = new Set(searched.map(i => i.source_name).filter(Boolean)).size;
@@ -482,6 +503,12 @@ function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRe
       </>,
     },
     {
+      title: '类型', key: 'request_type', width: 110,
+      render: (_, r) => <Tag color={r.source_type === 'spare_part_request' ? 'purple' : 'blue'}>
+        {r.source_type === 'spare_part_request' ? '备件申请' : '备件预申报'}
+      </Tag>,
+    },
+    {
       title: '申请信息', key: 'request', width: 190,
       render: (_, r) => <>
         <Text>{r.requester_name || '—'} · {r.quantity || 0} 件</Text>
@@ -494,7 +521,10 @@ function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRe
       title: '操作', width: 100, fixed: 'right',
       render: (_, r) => (
         <Button type="link" size="small" icon={<AuditOutlined />}
-          onClick={() => onOpenReview(allItems.find(p => p.id === r.parent_id))}>
+          onClick={() => {
+            const parent = allItems.find(p => p.id === r.parent_id && p.source_type === r.source_type);
+            if (parent) onOpenReview(parent);
+          }}>
           审核
         </Button>
       ),
@@ -531,6 +561,7 @@ function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRe
 
       {loadError && <Alert type="warning" showIcon message="备件待审列表刷新失败，当前内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
+        rowClassName={record => record.parent_key === highlightedItemId ? 'audit-target-row' : ''}
         emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -592,6 +623,7 @@ export default function AuditPage() {
   const [evidenceAcknowledged, setEvidenceAcknowledged] = useState(false);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState([]);
   const [targetNotice, setTargetNotice] = useState('');
+  const [highlightedAuditItemId, setHighlightedAuditItemId] = useState(null);
 
   const loadPending = useCallback(async () => {
     setLoading(true);
@@ -703,6 +735,16 @@ export default function AuditPage() {
         const endpoint = `/parts/requests/${realId}/${action === 'approve' ? 'approve' : 'reject'}`;
         await api.putStrict(endpoint, { comment: reviewComment, approver_id: reviewerId });
         successMessage = action === 'approve' ? '备件需求已批准，未锁定库存' : '备件需求已驳回';
+      } else if (item.source_type === 'spare_part_request') {
+        if (action === 'reject' && !reviewComment.trim()) {
+          message.error('驳回需填写原因'); return;
+        }
+        const realId = item.id.replace('spr_', '');
+        const endpoint = `/parts/requests/${realId}/${action === 'approve' ? 'approve' : 'reject'}`;
+        await api.putStrict(endpoint, {
+          comment: reviewComment, approver_id: reviewerId, request_type: 'spare_part_request',
+        });
+        successMessage = action === 'approve' ? '备件申请已批准' : '备件申请已驳回';
       } else if (item.source_type === 'vehicle_application') {
         if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写原因'); return;
@@ -783,11 +825,19 @@ export default function AuditPage() {
     const target = getAuditTargetFromSearchParams(searchParams);
     if (!target || loading || !pendingLoaded || pendingError) return;
     if (target.tab === 'data') return;
-    const targetKey = `${target.tab}:${target.kind}:${target.value || ''}`;
+    const targetKey = `${target.tab}:${target.kind}:${target.requestType || ''}:${target.value || ''}`;
     if (focusedOrderRef.current === targetKey) return;
     focusedOrderRef.current = targetKey;
     if (target.kind === 'missing') {
+      setHighlightedAuditItemId(null);
       const notice = `${target.sourceType || '审核通知'}通知缺少可定位对象标识，请刷新通知后重试`;
+      setTargetNotice(notice);
+      message.warning(notice);
+      return;
+    }
+    if (target.tab === 'parts' && !isAdmin) {
+      setHighlightedAuditItemId(null);
+      const notice = '该备件审核对象存在，但当前账号无权查看。';
       setTargetNotice(notice);
       message.warning(notice);
       return;
@@ -795,13 +845,21 @@ export default function AuditPage() {
     const resolution = resolveAuditTarget(items, target);
     if (resolution.status === 'found') {
       setTargetNotice('');
+      setHighlightedAuditItemId(auditItemKey(resolution.item));
       openReview(resolution.item);
       return;
     }
-    const notice = '通知对应的审核对象不存在、已处理或当前权限范围不可见';
+    setHighlightedAuditItemId(null);
+    const notice = {
+      ambiguous: '历史通知未携带备件申请类型，且同编号存在两类申请，无法安全定位；请从备件审核列表手动选择。',
+      processed: '通知对应的审核对象已处理，当前不可再次审核。',
+      forbidden: '通知对应的审核对象存在，但当前账号无权查看。',
+      invalid: '通知中的审核对象标识或类型无效，无法打开。',
+      missing: '通知对应的审核对象不存在，可能已被删除。',
+    }[resolution.status] || '通知对应的审核对象当前不可定位，请从审核列表确认。';
     setTargetNotice(notice);
     message.warning(notice);
-  }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
+  }, [items, isAdmin, loading, message, pendingError, pendingLoaded, searchParams]);
 
   // 一键通过正常照片（影像抽样审核核心减负动作）
   const handleAutoPassNormal = async () => {
@@ -909,6 +967,8 @@ export default function AuditPage() {
           {item.source_type === 'plan_schedule' && (
             <>
               <Descriptions.Item label="计划周期">{item.title}</Descriptions.Item>
+              <Descriptions.Item label="执行人">{item.executor_name || item.user_name || '未记录'}</Descriptions.Item>
+              {item.requester_name && <Descriptions.Item label="申报人">{item.requester_name}</Descriptions.Item>}
               <Descriptions.Item label="审批重点">站点、路线、用车与备件安排{item.is_change ? '（计划变更）' : ''}</Descriptions.Item>
               <Descriptions.Item label="路线">
                 {(item.plan_days || []).map(day => <div key={day.date}>{day.date}：{(day.sites || []).map(site => site.name).join(' → ')}</div>)}
@@ -926,11 +986,11 @@ export default function AuditPage() {
             </>
           )}
           <Descriptions.Item label="站点">{item.site_name || '-'}</Descriptions.Item>
-          {item.source_type === 'parts_request' && (
+          {['parts_request', 'spare_part_request'].includes(item.source_type) && (
             <>
               <Descriptions.Item label="处理方式">{item.fulfillment_label || '备件需求'}</Descriptions.Item>
               <Descriptions.Item label="关联任务">{item.source_name}</Descriptions.Item>
-              <Descriptions.Item label="申报人">{item.requester_name || '-'}</Descriptions.Item>
+              <Descriptions.Item label="申请人">{item.requester_name || item.applicant || '-'}</Descriptions.Item>
               <Descriptions.Item label="用途说明">{item.reason || '-'}</Descriptions.Item>
               {item.specification && <Descriptions.Item label="规格型号">{item.specification}</Descriptions.Item>}
               {item.estimated_amount !== null && item.estimated_amount !== undefined && (
@@ -941,6 +1001,8 @@ export default function AuditPage() {
                   ? item.parts_detail.map((p, i) => (
                     <div key={i}>{p.part_sku} × {p.quantity}</div>
                   ))
+                  : item.part_name
+                    ? `${item.part_name} × ${item.quantity || 0}`
                   : '-'}
               </Descriptions.Item>
             </>
@@ -1091,6 +1153,7 @@ export default function AuditPage() {
           onOpenReview={openReview}
           onRefresh={loadPending}
           reviewerNames={reviewerNames}
+          highlightedItemId={highlightedAuditItemId}
         />
       ),
     },
@@ -1108,6 +1171,7 @@ export default function AuditPage() {
           onOpenReview={openReview}
           onRefresh={loadPending}
           reviewerNames={reviewerNames}
+          highlightedItemId={highlightedAuditItemId}
         />
       ),
     } : null,
@@ -1125,6 +1189,7 @@ export default function AuditPage() {
           onOpenReview={openReview}
           onRefresh={loadPending}
           reviewerNames={reviewerNames}
+          highlightedItemId={highlightedAuditItemId}
         />
       ),
     },
@@ -1139,6 +1204,7 @@ export default function AuditPage() {
           loadError={pendingError}
           onOpenReview={openReview}
           onRefresh={loadPending}
+          highlightedItemId={highlightedAuditItemId}
         />
       ),
     } : null,
@@ -1156,6 +1222,7 @@ export default function AuditPage() {
           onOpenReview={openReview}
           onRefresh={loadPending}
           reviewerNames={reviewerNames}
+          highlightedItemId={highlightedAuditItemId}
         />
       ),
     } : null,
@@ -1173,6 +1240,7 @@ export default function AuditPage() {
           onOpenReview={openReview}
           onRefresh={loadPending}
           reviewerNames={reviewerNames}
+          highlightedItemId={highlightedAuditItemId}
           extraAction={
             <Button
               type="primary"
@@ -1199,6 +1267,8 @@ export default function AuditPage() {
         .audit-tabs > .ant-tabs-content-holder { flex: 1 1 auto; min-height: 0; }
         .audit-tabs > .ant-tabs-content-holder > .ant-tabs-content { height: 100%; }
         .audit-tabs .ant-tabs-tabpane-active { height: 100%; }
+        .audit-target-row > td { background: #fff7e6 !important; }
+        .audit-target-row:hover > td { background: #ffe7ba !important; }
       `}</style>
       <div style={{ marginBottom: 16, flexShrink: 0 }}>
         <Title level={4} style={{ margin: 0, color: tokens.colorText }}>

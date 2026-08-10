@@ -6,6 +6,10 @@ const {
   getRiskyPhotoIds
 } = require('../../utils/inspectionReviewDecision.js');
 const { findReviewItem } = require('../../utils/notificationTarget.js');
+const {
+  getSubmissionGuard,
+  getRetryErrorMessage
+} = require('../../utils/reviewSubmissionState.js');
 
 const app = getApp();
 
@@ -103,7 +107,7 @@ Page({
     curId: '',
     curType: '',
     curAction: '',
-    submitting: false,
+    submittingId: '',
     reviewTarget: null
   },
 
@@ -181,6 +185,7 @@ Page({
   onReject(e) {
     const id = e.currentTarget.dataset.id;
     const type = e.currentTarget.dataset.type;
+    if (!this._guardSubmission(id)) return;
     this.setData({ rejectShow: true, rejectReason: '', curId: id, curType: type, curAction: 'reject' });
   },
 
@@ -197,8 +202,9 @@ Page({
   onApprove(e) {
     const id = e.currentTarget.dataset.id;
     const type = e.currentTarget.dataset.type;
+    if (!this._guardSubmission(id)) return;
     this.setData({ curId: id, curType: type });
-    this._dispatch('approve', '');
+    this._dispatch('approve', '', id);
   },
 
   _focusReviewTarget() {
@@ -224,6 +230,7 @@ Page({
   onTogglePhotoReject(e) {
     const id = e.currentTarget.dataset.id;
     const photoId = Number(e.currentTarget.dataset.photoId);
+    if (!this._guardSubmission(id)) return;
     const groups = this.data.groups.map(group => Object.assign({}, group, {
       items: group.items.map(item => {
         if (item.id !== id) return item;
@@ -242,16 +249,18 @@ Page({
     const id = e.currentTarget.dataset.id;
     const item = this._findItem(id);
     if (!item) return;
+    if (!this._guardSubmission(id)) return;
     this.setData({ curId: id, curType: item.source_type });
     const rejectedIds = (item.reviewPhotos || [])
       .filter(photo => photo.selectedForReject).map(photo => photo.id);
     const unresolvedRiskIds = getRiskyPhotoIds(item.reviewPhotos || [], rejectedIds);
     const continueSubmit = () => {
+      if (!this._guardSubmission(id)) return;
       if (item.selectedRejectCount > 0) {
         this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
         return;
       }
-      this._dispatch('approve', '');
+      this._dispatch('approve', '', id);
     };
     if (!unresolvedRiskIds.length) {
       continueSubmit();
@@ -288,13 +297,29 @@ Page({
     }
   },
 
-  _dispatch(action, reason) {
-    if (this.data.submitting) return;
-    const item = this._findItem(this.data.curId);
+  _guardSubmission(id) {
+    const guard = getSubmissionGuard(this._submittingId || this.data.submittingId, id);
+    if (!guard.allowed) {
+      if (guard.message) wx.showToast({ title: guard.message, icon: 'none' });
+      return false;
+    }
+    return true;
+  },
+
+  _setSubmittingId(id, extra) {
+    const hasId = id !== undefined && id !== null && id !== '';
+    this._submittingId = hasId ? String(id) : '';
+    this.setData(Object.assign({ submittingId: hasId ? id : '' }, extra || {}));
+  },
+
+  _dispatch(action, reason, itemId) {
+    const id = itemId || this.data.curId;
+    if (!this._guardSubmission(id)) return;
+    const item = this._findItem(id);
     if (!item) return;
     const type = item.source_type;
     const nid = numId(item.id);
-    this.setData({ submitting: true, rejectShow: false });
+    this._setSubmittingId(item.id, { rejectShow: false });
 
     let p;
     switch (type) {
@@ -344,16 +369,18 @@ Page({
         break;
       default:
         wx.showToast({ title: '未知类型', icon: 'none' });
-        this.setData({ submitting: false });
+        this._setSubmittingId('');
         return;
     }
 
     p.then(() => {
       wx.showToast({ title: action === 'approve' ? '已通过' : '已驳回', icon: 'success' });
-      this.setData({ submitting: false, rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' });
+      this._setSubmittingId('', { rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' });
       this.load();
     }).catch(err => {
-      this.setData({ submitting: false });
+      this._setSubmittingId('', {
+        rejectShow: action === 'reject' || action === 'selective'
+      });
       if ((type === 'workorder_review' || type === 'workorder_status') && action === 'approve'
           && err && err.code === 'EVIDENCE_ACKNOWLEDGEMENT_REQUIRED') {
         wx.showModal({
@@ -362,17 +389,28 @@ Page({
           confirmText: '确认通过',
           success: result => {
             if (!result.confirm) return;
-            this.setData({ submitting: true });
-            api.approveWorkorder(item.order_no, { evidence_acknowledged: true })
-              .then(() => { wx.showToast({ title: '已通过', icon: 'success' }); this.setData({ submitting: false }); this.load(); })
-              .catch(retryErr => { this.setData({ submitting: false }); wx.showModal({ title: '操作失败', content: (retryErr && retryErr.error) || '请稍后重试', showCancel: false }); });
+            this._retryWorkorderApproval(item);
           }
         });
         return;
       }
-      const msg = (err && err.errMsg) ? err.errMsg : '操作失败';
-      wx.showModal({ title: '操作失败', content: String(msg).replace('request:fail ', ''), showCancel: false });
+      wx.showModal({ title: '操作失败', content: getRetryErrorMessage(err), showCancel: false });
     });
+  },
+
+  _retryWorkorderApproval(item) {
+    if (!item || !this._guardSubmission(item.id)) return;
+    this._setSubmittingId(item.id, { rejectShow: false });
+    api.approveWorkorder(item.order_no, { evidence_acknowledged: true })
+      .then(() => {
+        wx.showToast({ title: '已通过', icon: 'success' });
+        this._setSubmittingId('', { curId: '', curType: '', curAction: '' });
+        this.load();
+      })
+      .catch(err => {
+        this._setSubmittingId('');
+        wx.showModal({ title: '操作失败', content: getRetryErrorMessage(err), showCancel: false });
+      });
   },
 
   goBack() { wx.navigateBack({ delta: 1 }); }

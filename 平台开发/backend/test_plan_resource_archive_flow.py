@@ -190,6 +190,73 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         with self.db() as db:
             return db.execute('SELECT status FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()['status']
 
+    def add_scope_failure_schedule(self, schedule_id, status, site_id=2):
+        day = self.day()
+        plan_data = json.dumps({day: {'sites': [site_id], 'notes': 'original'}}, ensure_ascii=False)
+        with self.db() as db:
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,remarks,version,tasks_generated,
+                 reject_reason,submitted_at,validation_snapshot)
+                VALUES (?,2,'monthly',?,?,?,'{}','[]','[]',?,?,1,0,'keep','original-submit','{}')''',
+                (schedule_id, day, day, plan_data, status, 'original remarks'))
+            db.execute('''INSERT INTO plan_schedule_events
+                (schedule_id,version,event_type,operator_id,payload)
+                VALUES (?,1,'original',1,'{"original":true}')''', (schedule_id,))
+            db.execute('''INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (2,'plan_schedule',?,'original','original',0)''', (schedule_id,))
+            db.execute('''INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (1,2,? || ' 08:00:00',? || ' 18:00:00',?,'pending')''',
+                (day, day, f'计划#{schedule_id} original'))
+            db.execute('''INSERT INTO plan_resource_reservations
+                (schedule_id,part_id,planned_quantity,reserved_quantity,issued_quantity,status)
+                VALUES (?,1,3,1,0,'planned')''', (schedule_id,))
+            plan_id = schedule_id * 10
+            db.execute('''INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,period,generate_date,status,plan_schedule_id,
+                 schedule_version,plan_snapshot)
+                VALUES (?, 'original', 'Operator', 2, 'monthly', ?, 'active', ?, 1, ?)''',
+                (plan_id, day, schedule_id, plan_data))
+            db.execute('''INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status)
+                VALUES (?,1,'original item',NULL,'active')''', (plan_id,))
+
+    def side_effect_snapshot(self, schedule_id):
+        with self.db() as db:
+            schedule = db.execute('''SELECT plan_data,status,version,vehicle_days,
+                    spare_parts,work_order_ids,remarks,reject_reason,submitted_at,
+                    validation_snapshot FROM plan_schedules WHERE id=?''', (schedule_id,)).fetchone()
+            plan_ids = [row['id'] for row in db.execute(
+                'SELECT id FROM insp_plans WHERE plan_schedule_id=? ORDER BY id', (schedule_id,)).fetchall()]
+            snapshot = {
+                'schedule': tuple(schedule) if schedule else None,
+                'events': [tuple(row) for row in db.execute(
+                    'SELECT * FROM plan_schedule_events WHERE schedule_id=? ORDER BY id', (schedule_id,)).fetchall()],
+                'notifications': [tuple(row) for row in db.execute(
+                    "SELECT * FROM notifications WHERE source_type='plan_schedule' AND source_id=? ORDER BY id",
+                    (schedule_id,)).fetchall()],
+                'vehicle_applications': [tuple(row) for row in db.execute(
+                    'SELECT * FROM vehicle_applications ORDER BY id').fetchall()],
+                'reservations': [tuple(row) for row in db.execute(
+                    'SELECT * FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id',
+                    (schedule_id,)).fetchall()],
+                'insp_plans': [tuple(row) for row in db.execute(
+                    'SELECT * FROM insp_plans WHERE plan_schedule_id=? ORDER BY id', (schedule_id,)).fetchall()],
+                'insp_plan_items': [tuple(row) for row in db.execute(
+                    '''SELECT * FROM insp_plan_items
+                       WHERE plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)
+                       ORDER BY id''', (schedule_id,)).fetchall()],
+            }
+            return snapshot
+
+    def assert_side_effect_snapshot_unchanged(self, before, after):
+        self.assertEqual(after['schedule'], before['schedule'], 'plan_schedules')
+        for table in ('events', 'notifications', 'vehicle_applications', 'reservations',
+                      'insp_plans', 'insp_plan_items'):
+            self.assertEqual(after[table], before[table], table)
+
     def test_approval_revalidates_vehicle_status_and_rolls_back_every_side_effect(self):
         self.add_submitted_schedule(10)
         with self.db() as db:
@@ -248,35 +315,115 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 403, response.json)
+        self.assertEqual(response.json.get('code'), 'PLAN_EXECUTION_SITE_FORBIDDEN')
         with self.db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0], before)
 
-        admin_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
+        legal_admin_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
             'schedule_type': 'monthly',
             'period_start': today,
             'period_end': today,
-            'plan_data': {today: {'sites': [1, 2]}},
+            'user_id': 2,
+            'plan_data': {today: {'sites': [1]}},
             'vehicle_days': {},
         })
-        self.assertEqual(admin_response.status_code, 201, admin_response.json)
-        self.assertEqual(admin_response.json['plan_data'][today]['sites'], [1, 2])
+        self.assertEqual(legal_admin_response.status_code, 201, legal_admin_response.json)
+        self.assertEqual(legal_admin_response.json['user_id'], 2)
+        self.assertEqual(legal_admin_response.json['plan_data'][today]['sites'], [1])
 
-        forged_day = (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-        forged_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
+        unauthorized_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
             'schedule_type': 'monthly',
-            'period_start': forged_day,
-            'period_end': forged_day,
-            'plan_data': {forged_day: {'sites': [999]}},
+            'period_start': (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d'),
+            'period_end': (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d'),
+            'user_id': 2,
+            'plan_data': {(datetime.strptime(today, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d'): {'sites': [2]}},
             'vehicle_days': {},
         })
-        self.assertEqual(forged_response.status_code, 404, forged_response.json)
+        self.assertEqual(unauthorized_response.status_code, 403, unauthorized_response.json)
+        self.assertEqual(unauthorized_response.json.get('code'), 'PLAN_EXECUTION_SITE_FORBIDDEN')
+
+        missing_response = self.client.post('/api/plan-schedules', headers=self.headers('manager-token'), json={
+            'schedule_type': 'monthly',
+            'period_start': (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d'),
+            'period_end': (datetime.strptime(today, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d'),
+            'user_id': 2,
+            'plan_data': {(datetime.strptime(today, '%Y-%m-%d') + timedelta(days=2)).strftime('%Y-%m-%d'): {'sites': [999]}},
+            'vehicle_days': {},
+        })
+        self.assertEqual(missing_response.status_code, 404, missing_response.json)
+        self.assertEqual(missing_response.json.get('code'), 'PLAN_SITE_NOT_FOUND')
         with self.db() as db:
             forged = db.execute("SELECT 1 FROM plan_schedules WHERE plan_data LIKE '%999%'").fetchone()
         self.assertIsNone(forged)
 
+    def test_update_scope_failure_keeps_every_plan_resource_table_unchanged(self):
+        schedule_id = 51
+        self.add_scope_failure_schedule(schedule_id, 'draft', site_id=1)
+        before = self.side_effect_snapshot(schedule_id)
+
+        response = self.client.put('/api/plan-schedules/{}'.format(schedule_id),
+                                   headers=self.headers('manager-token'), json={
+                                       'plan_data': {self.day(): {'sites': [2]}},
+                                   })
+
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (403, 'PLAN_EXECUTION_SITE_FORBIDDEN'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+    def test_submit_scope_failure_keeps_every_plan_resource_table_unchanged(self):
+        schedule_id = 52
+        self.add_scope_failure_schedule(schedule_id, 'draft')
+        before = self.side_effect_snapshot(schedule_id)
+
+        response = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
+                                    headers=self.headers('manager-token'))
+
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (403, 'PLAN_EXECUTION_SITE_FORBIDDEN'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+    def test_approval_scope_failure_keeps_every_plan_resource_table_unchanged(self):
+        schedule_id = 53
+        self.add_scope_failure_schedule(schedule_id, 'submitted')
+        before = self.side_effect_snapshot(schedule_id)
+
+        response = self.client.post('/api/plan-schedules/{}/approve'.format(schedule_id),
+                                    headers=self.headers('manager-token'))
+
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (403, 'PLAN_EXECUTION_SITE_FORBIDDEN'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+    def test_direct_task_generation_rejects_out_of_scope_sites_before_insert(self):
+        schedule_id = 54
+        self.add_scope_failure_schedule(schedule_id, 'approved')
+        with self.db() as db:
+            db.execute('DELETE FROM insp_plan_items WHERE plan_id IN '
+                       '(SELECT id FROM insp_plans WHERE plan_schedule_id=?)', (schedule_id,))
+            db.execute('DELETE FROM insp_plans WHERE plan_schedule_id=?', (schedule_id,))
+            schedule = db.execute('SELECT * FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()
+            with self.assertRaises(app_module.PlanScheduleSiteScopeError):
+                app_module._ps_generate_tasks(db, schedule)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id=?', (schedule_id,)).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM insp_plan_items').fetchone()[0], 0)
+
+    def test_direct_change_rebuild_rejects_out_of_scope_sites_before_cancelling_tasks(self):
+        schedule_id = 55
+        self.add_scope_failure_schedule(schedule_id, 'approved')
+        before = self.side_effect_snapshot(schedule_id)
+        with self.db() as db:
+            schedule = db.execute('SELECT * FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()
+            with self.assertRaises(app_module.PlanScheduleSiteScopeError):
+                app_module._ps_rebuild_tasks_on_change(db, schedule)
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
     def test_second_submitted_plan_cannot_obtain_the_same_vehicle_after_first_approval(self):
         self.add_submitted_schedule(11, user_id=2)
         self.add_submitted_schedule(12, user_id=3)
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (3,1)')
 
         first = self.client.post('/api/plan-schedules/11/approve', headers=self.headers('manager-token'))
         second = self.client.post('/api/plan-schedules/12/approve', headers=self.headers('manager-token'))

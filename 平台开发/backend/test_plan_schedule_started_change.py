@@ -19,6 +19,7 @@ class StartedPlanChangeTest(unittest.TestCase):
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
             CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT);
+            CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
             CREATE TABLE sites (id INTEGER PRIMARY KEY, type TEXT);
             CREATE TABLE inspection_configs (site_type TEXT, template_id INTEGER, is_active INTEGER);
             CREATE TABLE inspection_templates (id INTEGER PRIMARY KEY, status TEXT, frequency TEXT);
@@ -40,6 +41,8 @@ class StartedPlanChangeTest(unittest.TestCase):
                 version INTEGER, tasks_generated INTEGER
             );
             INSERT INTO users VALUES (7, '现场运维');
+            INSERT INTO user_sites VALUES (7, 1);
+            INSERT INTO user_sites VALUES (7, 2);
             INSERT INTO sites VALUES (1, 'water_quality');
             INSERT INTO sites VALUES (2, 'water_quality');
             INSERT INTO inspection_configs VALUES ('water_quality', 3, 1);

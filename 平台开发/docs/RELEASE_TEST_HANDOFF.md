@@ -1,27 +1,33 @@
-# 上线测试交接
+# 上线测试交接（r3）
 
 ## 边界
 
 本交接仅面向上线测试线。所有门槛通过前不得创建标签，也不得执行生产部署、修改线上数据库或切换线上容器。测试线必须使用独立数据和可回滚环境。门槛通过后创建的本地冻结标签只用于交给上线测试线，不代表生产部署授权。
 
-旧提交 `c78de8c` 和标签 `release-20260810-cross-module-freeze` 已被产品评审打回，只保留历史追溯，禁止部署。r2 唯一候选标签为 `release-20260810-cross-module-freeze-r2`。
+历史 r1 提交 `c78de8c`/标签 `release-20260810-cross-module-freeze` 与 r2 提交 `dce1e72`/标签 `release-20260810-cross-module-freeze-r2` 均已退回，只保留历史追溯，禁止部署、复用或移动。`release-20260810-cross-module-freeze-r3` 是本轮唯一候选，必须在最终全量测试全绿后才创建。
 
-本地后端固定为 `http://127.0.0.1:5000`，本地数据库为 `backend/data/water.db`。网页端可直接访问后端提供的管理台；Vite 调试端口为 `5174`。
+本地后端固定为 `http://127.0.0.1:5000`，本地数据库为 `backend/data/water.db`。网页端本轮实际访问 `http://127.0.0.1:5173/`；禁止为了浏览器验收反复切换端口。
 
 ## 提交测试线前的验证命令
 
 ```powershell
-python -m pytest backend -q --ignore=backend/test_api.py
-cd react-vite; npm.cmd run test:api
-cd react-vite; npm.cmd run build
-node --test miniprogram/tests/executionState.test.js miniprogram/tests/inspectionSubmissionState.test.js miniprogram/tests/inspectionReviewDecision.test.js miniprogram/tests/reworkFlow.test.js miniprogram/tests/notificationTarget.test.js miniprogram/tests/pagedList.test.js miniprogram/tests/vehicleScope.test.js miniprogram/tests/partsReview.test.js
-python -m py_compile backend/app.py
+$mods = Get-ChildItem backend -File -Filter 'test_*.py' | Where-Object { $_.Name -ne 'test_api.py' } | Sort-Object BaseName | ForEach-Object { 'backend.' + $_.BaseName }
+python -B -m unittest $mods
+Get-ChildItem miniprogram/tests -File -Filter '*.test.js' | Sort-Object Name | ForEach-Object { node --test $_.FullName }
+Get-ChildItem miniprogram -Recurse -File -Filter '*.js' | Sort-Object FullName | ForEach-Object { node --check $_.FullName }
+Push-Location react-vite; npm.cmd run test:api; Pop-Location
+Push-Location react-vite; npm.cmd run lint; Pop-Location
+Push-Location react-vite; npm.cmd run build; Pop-Location
+Get-ChildItem backend -Recurse -File -Filter '*.py' | Sort-Object FullName | ForEach-Object { python -m py_compile $_.FullName }
 git diff --check
+python backend/test_api.py
+# 停止本地后端后再次执行，必须为非零退出码
+python backend/test_api.py
 ```
 
 记录实际输出、日期和提交版本；未执行或失败的项目不得写为通过。
 
-本地冻结 r2 的当前证据为：后端 `230 passed`（全局 `pytest-qt` / PySide6 / NumPy 兼容警告，退出码 0）、小程序 Node `8/8`、React `27/27`、React lint/build 通过、`backend/test_api.py` 在最新本地 5000 后端通过并读取 37 个站点、`python -m py_compile backend/app.py` 退出码 0、全工作区 `git diff --check` 退出码 0。`git diff --check` 仅报告 Windows LF→CRLF 提示，没有空白错误。
+上方命令是 r3 最终复跑清单。历史 r2 的通过数量不作为 r3 证据；文档更新后必须重新记录实际时间、测试数和退出码。
 
 ## 测试线验收重点
 
@@ -31,15 +37,52 @@ git diff --check
 - 现场闭环：巡检签到/离站、影像审核驳回后的整改资源、车辆从批准至归还的占用与延期、备件实际领用扣减。
 - 登录与密码：会话失效提示和安全返回地址、强制改密、管理员设置自定义密码。
 
-## 微信开发者工具实测
+## 实际工具验收
 
-自动化 9420 通道已恢复。在本地 5000 后端下，现有开发者工具实例完成重新编译并加载用户代码；admin 消息 current/history 为 `0/22`；点击计划 #38 的真实通知准确进入 `/pages/plan-detail/plan-detail?id=38`；系统标红影像显示逐张核对确认，取消后未提交。
+### Web 内置浏览器
 
-浏览器端已实测计划审批表头、用车页签和消息 current/history `0/22`。上线测试线仍应使用独立数据复核完整业务闭环；真机及正式版本不得使用 `127.0.0.1`。
+已读取并使用 `browser:control-in-app-browser` 技能。实际确认计划列表和弹窗显示 `排程人/执行人：万松`。
 
-最终本地冻结证据补充：后端仅监听 `127.0.0.1:5000`，遗留的 `0.0.0.0` 进程已清理。浏览器实测计划 #38 通知定位、过期计划明确拒绝且保留待办、不存在的数据审核对象告警、消息 current/history `0/22`。微信开发者工具实测编译成功、计划 #38 真实通知直达和风险影像确认门禁。安全回归覆盖旧巡检照片与工单直达端点的角色/站点授权、批量原子校验和默认回环绑定。
+以下项目没有真实 browser UI 证据，不能用单测、API 响应或微信开发者工具结果替代，均列为未覆盖：
 
-r2 已完成本地冻结提交并创建 `release-20260810-cross-module-freeze-r2` 标签；未推送、未部署，未操作线上数据库或容器。该标签只允许交上线测试线复核。
+- `spare_part_request` 通知精确定位，以及 Web 上“已处理/不存在”明确状态：未覆盖；通知中心未成功渲染面板。
+- Web 风险影像门禁：未覆盖。
+- Web 消息空状态、失败状态和有旧数据失败提示：未覆盖。
+- Web 截图：未覆盖；截图调用发生工具阻塞并已终止。
+
+浏览器端口未继续切换，最后执行 `iab.tabs.finalize({keep: []})` 清理 tab，未因该工具阻塞制造额外服务进程。
+
+### 微信开发者工具
+
+复用现有开发者工具实例和 `36992/9420` 通道，项目为 `miniprogram`，未启动第二个 IDE。实际证据如下：
+
+- 计划页读取当前计划 `user_name: 肖永平`；审核接口返回 `total: 1`、`source_type: plan_schedule`、`executor_name: 万松`、`requester_name: 万松`。
+- 使用不存在计划 `ps_999999` 做审核失败短链路：提交时设置 `submittingId`，失败后恢复为空，错误弹窗可确认，无 JS exception，覆盖 loading/disabled、防重入和失败恢复。
+- 合成风险照片触发逐张确认弹窗；取消动作返回 `true`，取消后 `submittingId` 为空且没有继续提交。
+- 消息真实空态为 `loaded: true`、`loading: false`、`list: []`、`viewState: "empty"`；无数据失败为 `viewState: "error"`；有旧数据失败保留列表和 `errorMessage`，`viewState: "data"`。
+
+截图工具多次超时，已在命令边界终止对应脚本；该项作为残余工具边界记录，不影响上述状态读取证据。
+
+r3 未推送、未部署、未操作线上数据库或容器。只有最终全量测试全绿后才创建本地提交和 `release-20260810-cross-module-freeze-r3` annotated tag。
+
+## r3 最终复跑记录
+
+文档更新后重新执行以下全量门槛，并在完成后填写实际时间、测试数和退出码；不得沿用 r2 数量：
+
+| 项目 | 实际时间 | 测试数/结果 | 退出码 |
+| --- | --- | --- | --- |
+| 后端全量 unittest（排除独立 `test_api.py`） | 23:25:23-23:26:02 +08:00 | 227 tests，OK | 0 |
+| 小程序全部 Node 测试 | 23:26:12 +08:00 | 10 tests，10 passed | 0 |
+| 小程序全部 JavaScript 语法检查 | 23:26:24-23:26:26 +08:00 | 46 files，0 failures | 0 |
+| React `test:api` | 23:26:34-23:26:35 +08:00 | 31 tests，31 passed | 0 |
+| React lint | 23:26:42-23:26:45 +08:00 | eslint `src` passed | 0 |
+| React build | 23:26:53-23:26:57 +08:00 | Vite build passed | 0 |
+| backend 全量 `py_compile` | 23:27:06-23:27:12 +08:00 | 66 files，0 failures | 0 |
+| `git diff --check` | 23:27:21 +08:00 | 无空白错误；仅 LF→CRLF 警告 | 0 |
+| `backend/test_api.py`（服务运行中） | 23:27:32 +08:00 | `/api/sites` 37 sites，结构 OK | 0 |
+| `backend/test_api.py`（服务停止后） | 23:27:47-23:27:50 +08:00 | WinError 10061 连接拒绝 | 1 |
+
+最终测试结束后停止本轮启动的后端和 Vite 进程，只保留用户已有微信开发者工具；确认无遗留自动化脚本或额外 IDE。
 
 ## 部署线待确认项
 

@@ -12,7 +12,7 @@ test('administrator navigation keeps every rendered approval tab reachable', () 
 
 test('plan approval uses route, vehicle, and spare-part columns instead of photos', () => {
   assert.deepEqual(getAuditColumnKeys(['plan_schedule']), [
-    'plan', 'route_sites', 'vehicle', 'spare_parts', 'submit_time', 'action',
+    'plan', 'executor', 'route_sites', 'vehicle', 'spare_parts', 'submit_time', 'action',
   ]);
   assert.equal(getAuditColumnKeys(['plan_schedule']).includes('photos'), false);
 });
@@ -31,4 +31,8 @@ test('workorder and image review retain the thumbnail-oriented photo column', ()
 
 test('parts requests retain their dedicated list component', () => {
   assert.equal(getAuditColumnProfile(['parts_request']), 'parts');
+  assert.equal(getAuditColumnProfile(['spare_part_request']), 'parts');
+  assert.deepEqual(getAuditColumnKeys(['spare_part_request']), [
+    'part', 'request_type', 'request', 'submit_time', 'action',
+  ]);
 });

@@ -1,4 +1,4 @@
-<view class="page">
+<view class="page message-page">
   <view class="topbar">
     <view class="tb-btn" wx:if="{{view === 'current'}}" bindtap="onReadAll">全部已读</view>
     <view class="tb-btn tb-brand" bindtap="onSubscribe">订阅消息</view>
@@ -9,21 +9,41 @@
     <view class="message-tab {{view === 'history' ? 'message-tab-active' : ''}}" data-view="history" bindtap="onSwitchView">历史消息</view>
   </view>
 
-  <view class="list-card" wx:if="{{list.length}}">
-    <view class="msg-row {{item.is_read ? '' : 'msg-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
-      <view class="msg-dot" wx:if="{{!item.is_read}}"></view>
-      <view class="msg-main">
-        <text class="msg-title">{{item.title}}</text>
-        <text class="msg-sub">{{item.content}}</text>
-        <text class="msg-time">{{item.time}}</text>
-      </view>
-    </view>
+  <view wx:if="{{viewState === 'loading'}}" class="empty">加载中…</view>
+
+  <view wx:elif="{{viewState === 'error'}}" class="empty message-error">
+    <view class="empty-circle"></view>
+    <text class="empty-tx">加载失败</text>
+    <text class="message-error-detail">{{errorMessage}}</text>
+    <button class="btn-primary btn-sm message-retry" size="mini" bindtap="onRetry">重试</button>
   </view>
-  <view class="empty" wx:elif="{{loaded}}">
+
+  <view wx:elif="{{viewState === 'empty'}}" class="empty">
     <view class="empty-circle"></view>
     <text class="empty-tx">{{view === 'history' ? '暂无历史消息' : '暂无未读消息'}}</text>
   </view>
 
-  <view class="list-foot" wx:if="{{list.length && !noMore}}">上拉加载更多</view>
-  <view class="list-foot" wx:if="{{noMore}}">没有更多了</view>
+  <view wx:else>
+    <view class="message-stale" wx:if="{{errorMessage}}">
+      <view class="message-stale-main">
+        <text class="message-stale-title">当前消息可能不是最新</text>
+        <text class="message-stale-detail">{{errorMessage}}</text>
+      </view>
+      <button class="btn-ghost btn-sm message-retry-inline" size="mini" bindtap="onRetry">重试</button>
+    </view>
+
+    <view class="list-card">
+      <view class="msg-row {{item.is_read ? '' : 'msg-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
+        <view class="msg-dot" wx:if="{{!item.is_read}}"></view>
+        <view class="msg-main">
+          <text class="msg-title">{{item.title}}</text>
+          <text class="msg-sub">{{item.content}}</text>
+          <text class="msg-time">{{item.time}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="list-foot" wx:if="{{showLoadMore}}">上拉加载更多</view>
+    <view class="list-foot" wx:if="{{showNoMore}}">没有更多了</view>
+  </view>
 </view>

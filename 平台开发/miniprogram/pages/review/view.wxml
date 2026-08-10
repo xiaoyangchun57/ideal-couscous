@@ -19,7 +19,9 @@
           <text class="row-title">{{it.title}}</text>
           <text class="row-sub" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
           <text class="row-sub" wx:if="{{it.source_name}}">单号：{{it.source_name}}</text>
-          <text class="row-sub" wx:if="{{it.requester_name}}">申报人：{{it.requester_name}}</text>
+          <text class="row-sub" wx:if="{{it.source_type === 'plan_schedule' && it.executor_name}}">执行人：{{it.executor_name}}</text>
+          <text class="row-sub" wx:if="{{it.source_type === 'plan_schedule' && it.requester_name}}">申报人：{{it.requester_name}}</text>
+          <text class="row-sub" wx:elif="{{it.requester_name}}">申报人：{{it.requester_name}}</text>
           <text class="row-sub" wx:if="{{it.submit_time}}">提交：{{it.submit_time}}</text>
           <text class="review-note" wx:if="{{it.remark}}">{{it.remark}}</text>
           <view class="approval-summary" wx:if="{{it.source_type === 'plan_schedule'}}">
@@ -42,6 +44,10 @@
             <block wx:if="{{it.source_type === 'plan_schedule'}}">
               <text class="detail-label">计划周期</text>
               <text class="detail-text">{{it.title}}</text>
+              <text class="detail-label">执行人</text>
+              <text class="detail-text">{{it.executor_name || '未记录'}}</text>
+              <text class="detail-label" wx:if="{{it.requester_name}}">申报人</text>
+              <text class="detail-text" wx:if="{{it.requester_name}}">{{it.requester_name}}</text>
               <text class="detail-label">站点与路线</text>
               <view wx:for="{{it.plan_days}}" wx:for-item="day" wx:key="date" class="detail-line">
                 <text class="detail-text">{{day.date}}：<text wx:for="{{day.sites}}" wx:for-item="routeSite" wx:key="id">{{routeSite.name}}{{index < day.sites.length - 1 ? ' → ' : ''}}</text></text>
@@ -117,11 +123,11 @@
             <text class="detail-empty" wx:if="{{!it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'photo_review' || it.source_type === 'workorder_photo')}}">暂无可查看的影像</text>
           </view>
           <view class="card-actions" wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
-            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" bindtap="onSubmitPhotoReview">{{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}</button>
+            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onSubmitPhotoReview">{{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}</button>
           </view>
           <view class="card-actions" wx:else>
-            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onApprove">{{it.approveLabel}}</button>
-            <button class="btn-danger btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" bindtap="onReject">{{it.rejectLabel}}</button>
+            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onApprove">{{it.approveLabel}}</button>
+            <button class="btn-danger btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onReject">{{it.rejectLabel}}</button>
           </view>
         </view>
       </view>
@@ -135,7 +141,7 @@
       <textarea class="reason" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" />
       <view class="sheet-actions">
         <button class="btn-ghost btn-sm" size="mini" bindtap="closeReject">取消</button>
-        <button class="btn-danger btn-sm" size="mini" bindtap="rejectConfirm" disabled="{{submitting}}">确认驳回</button>
+        <button class="btn-danger btn-sm" size="mini" bindtap="rejectConfirm" disabled="{{!!submittingId}}">确认驳回</button>
       </view>
     </view>
   </view>

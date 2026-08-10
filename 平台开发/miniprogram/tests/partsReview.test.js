@@ -18,6 +18,20 @@ api.rejectPartsRequest(12, '库存不足，请改为采购').then(() => {
     'PUT',
     { comment: '库存不足，请改为采购' }
   ]);
+  return api.approveSparePart(13);
+}).then(() => {
+  assert.deepEqual(calls[1], [
+    '/api/parts/requests/13/approve',
+    'PUT',
+    { request_type: 'spare_part_request' }
+  ]);
+  return api.rejectSparePart(13, '请补充用途');
+}).then(() => {
+  assert.deepEqual(calls[2], [
+    '/api/parts/requests/13/reject',
+    'PUT',
+    { comment: '请补充用途', request_type: 'spare_part_request' }
+  ]);
   console.log('partsReview tests passed');
 }).finally(() => {
   requestModule.request = originalRequest;

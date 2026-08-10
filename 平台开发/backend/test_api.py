@@ -1,43 +1,102 @@
-"""Quick test for API endpoints"""
-import urllib.request, json
+"""Smoke test for the authenticated API contract.
+
+The script is intentionally executable: every transport, JSON, and shape
+failure exits non-zero so it can be used as a local release check.
+"""
+
+import json
+import sys
+import urllib.error
+import urllib.request
+
 
 BASE = 'http://127.0.0.1:5000'
 
-# Login
-req = urllib.request.Request(f'{BASE}/api/auth/login',
-    data=json.dumps({'username':'admin','password':'admin123'}).encode(),
-    headers={'Content-Type': 'application/json'})
-resp = urllib.request.urlopen(req)
-r = json.loads(resp.read())
-token = r['token']
-print(f'Login OK: sites_count={r["sites_count"]}, user={r["user"]["real_name"]}')
 
-# Get sites
-try:
-    req2 = urllib.request.Request(f'{BASE}/api/sites',
-        headers={'Authorization': f'Bearer {token}'})
-    resp2 = urllib.request.urlopen(req2)
-    sites = json.loads(resp2.read())
-    print(f'/api/sites: {len(sites)} sites')
-    if sites:
-        s = sites[0]
-        print(f'  First: {s["name"]} lat={s.get("lat")} lng={s.get("lng")}')
-        nulls = sum(1 for x in sites if not x.get('lat') or not x.get('lng'))
-        print(f'  Without coords: {nulls}')
-except Exception as e:
-    print(f'/api/sites ERROR: {e}')
+def request_json(path, *, method='GET', payload=None, token=None):
+    body = json.dumps(payload).encode() if payload is not None else None
+    headers = {'Accept': 'application/json'}
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    request = urllib.request.Request(f'{BASE}{path}', data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode('utf-8', errors='replace')
+        raise AssertionError(f'{method} {path} returned HTTP {exc.code}: {detail}') from exc
+    except urllib.error.URLError as exc:
+        raise AssertionError(f'{method} {path} failed: {exc.reason}') from exc
+    try:
+        return json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssertionError(f'{method} {path} returned invalid JSON') from exc
 
-# Dashboard summary
-try:
-    req3 = urllib.request.Request(f'{BASE}/api/dashboard/summary',
-        headers={'Authorization': f'Bearer {token}'})
-    resp3 = urllib.request.urlopen(req3)
-    ds = json.loads(resp3.read())
-    print(f'/api/dashboard/summary:')
-    print(f'  sites={ds.get("site_count")} devices={ds.get("device_count")}')
-    print(f'  alerts={len(ds.get("latest_alerts",[]))}')
-    print(f'  work_orders={ds.get("work_orders",{}).get("total",0)}')
-except Exception as e:
-    print(f'/api/dashboard/summary ERROR: {e}')
 
-print('Done')
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def main():
+    login = request_json('/api/auth/login', method='POST', payload={
+        'username': 'admin',
+        'password': 'admin123',
+    })
+    require(isinstance(login, dict) and login.get('success') is True,
+            'login response must be an object with success=true')
+    token = login.get('token')
+    user = login.get('user')
+    require(isinstance(token, str) and bool(token), 'login response is missing token')
+    require(isinstance(user, dict), 'login response is missing user object')
+    require(user.get('id') is not None and isinstance(user.get('real_name'), str),
+            'login user must contain id and real_name')
+    require(isinstance(login.get('sites_count'), int), 'login sites_count must be an integer')
+    require(isinstance(login.get('sites'), list), 'login sites must be a list')
+    require(login['sites_count'] == len(login['sites']),
+            'login sites_count must match sites length')
+
+    sites = request_json('/api/sites', token=token)
+    require(isinstance(sites, list), '/api/sites response must be a list')
+    for index, site in enumerate(sites):
+        require(isinstance(site, dict), f'/api/sites[{index}] must be an object')
+        for field in ('id', 'name', 'code', 'type', 'lat', 'lng', 'status'):
+            require(field in site, f'/api/sites[{index}] is missing {field}')
+
+    dashboard = request_json('/api/dashboard/summary', token=token)
+    require(isinstance(dashboard, dict), 'dashboard response must be an object')
+    require(isinstance(dashboard.get('alerts'), dict), 'dashboard alerts must be an object')
+    require(isinstance(dashboard.get('sites'), dict), 'dashboard sites must be an object')
+    require(isinstance(dashboard.get('workorders'), dict),
+            'dashboard workorders must be an object')
+    require(isinstance(dashboard.get('inspections'), dict),
+            'dashboard inspections must be an object')
+    require(isinstance(dashboard.get('arrival_rate'), (int, float)),
+            'dashboard arrival_rate must be numeric')
+    for section, fields in {
+        'alerts': ('total', 'pending', 'acknowledged', 'resolved', 'by_level', 'by_type'),
+        'sites': ('total', 'online', 'offline', 'with_alerts'),
+        'workorders': ('total', 'by_status', 'today_new', 'today_closed'),
+        'inspections': ('total', 'completed'),
+    }.items():
+        for field in fields:
+            require(field in dashboard[section], f'dashboard {section} is missing {field}')
+    require(isinstance(dashboard.get('latest_alerts'), list),
+            'dashboard latest_alerts must be a list')
+    require(isinstance(dashboard.get('pending_orders'), list),
+            'dashboard pending_orders must be a list')
+
+    print(f'Login OK: user={user["real_name"]} sites_count={login["sites_count"]}')
+    print(f'/api/sites: {len(sites)} sites; structure OK')
+    print('/api/dashboard/summary: actual nested structure OK')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f'API CHECK FAILED: {exc}', file=sys.stderr)
+        sys.exit(1)

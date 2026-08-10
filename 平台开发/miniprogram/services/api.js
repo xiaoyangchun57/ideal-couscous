@@ -204,9 +204,11 @@ const api = {
   }),
 
   // 备件申请审核（source_type=spare_part_request，来自 spare_part_requests 表）
-  approveSparePart: (id) => request('/api/parts/requests/' + id + '/approve', 'PUT'),
+  approveSparePart: (id) => request('/api/parts/requests/' + id + '/approve', 'PUT', {
+    request_type: 'spare_part_request'
+  }),
   rejectSparePart: (id, reason) => request('/api/parts/requests/' + id + '/reject', 'PUT', {
-    comment: reason || ''
+    comment: reason || '', request_type: 'spare_part_request'
   }),
 
   // 用车申请审核（source_type=vehicle_application，仅通过）

@@ -21,6 +21,15 @@ export function buildGlobalSearchPath(item) {
 
 const hasIdentifier = (value) => value !== undefined && value !== null && String(value) !== '';
 
+const REQUEST_SOURCE_TYPES = ['parts_request', 'spare_part_request'];
+const REQUEST_PREFIXES = {
+  parts_request: 'pr_',
+  spare_part_request: 'spr_',
+};
+const PROCESSED_REQUEST_STATUSES = new Set([
+  'approved', 'rejected', 'processed', 'completed', 'migrated', 'legacy_readonly',
+]);
+
 function buildAuditTargetPath(tab, queryKey, sourceId, sourceType, extra = {}) {
   const params = new URLSearchParams({ tab });
   if (hasIdentifier(sourceId)) {
@@ -96,11 +105,11 @@ export function getNotificationTarget(item, roles) {
         : null;
     case 'parts_request':
       return hasAnyRole(roles, ['admin'])
-        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type)
+        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type, { request_type: item.source_type })
         : null;
     case 'spare_part_request':
       return hasAnyRole(roles, ['admin'])
-        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type)
+        ? buildAuditTargetPath('parts', 'request', sourceId, item.source_type, { request_type: item.source_type })
         : null;
     case 'vehicle_application':
       return hasAnyRole(roles, ['admin'])
@@ -143,7 +152,13 @@ export function getAuditTargetFromSearchParams(searchParams) {
   const tab = params.get('tab') || '';
   if (!tab) return null;
   if (params.get('target_missing') === '1') {
-    return { tab, kind: 'missing', value: null, sourceType: params.get('source_type') || '' };
+    return {
+      tab,
+      kind: 'missing',
+      value: null,
+      sourceType: params.get('source_type') || '',
+      requestType: params.get('request_type') || null,
+    };
   }
   const targets = [
     ['plan', 'plan', 'plan'],
@@ -167,6 +182,7 @@ export function getAuditTargetFromSearchParams(searchParams) {
         kind: kind === 'plan' && params.get('change') === '1' ? 'plan_change' : kind,
         value,
         queryKey,
+        ...(kind === 'request' ? { requestType: params.get('request_type') || null } : {}),
       };
     }
   }
@@ -179,6 +195,61 @@ function matchesValue(value, targetValue) {
 
 function matchesPrefixedId(value, targetValue, prefix) {
   return matchesValue(value, targetValue) || matchesValue(value, `${prefix}${targetValue}`);
+}
+
+function normalizedRequestType(value) {
+  return REQUEST_SOURCE_TYPES.includes(value) ? value : null;
+}
+
+function requestIdMatches(candidate, targetValue, requestType) {
+  const prefix = REQUEST_PREFIXES[requestType];
+  const candidateId = String(candidate?.id ?? '').trim();
+  const candidateRequestId = String(candidate?.request_id ?? '').trim();
+  const value = String(targetValue ?? '').trim();
+  if (!prefix || !value) return false;
+
+  if (value.startsWith('pr_') || value.startsWith('spr_')) {
+    return value.startsWith(prefix) && candidateId === value;
+  }
+
+  return candidateId === `${prefix}${value}`
+    || candidateId === value
+    || candidateRequestId === value;
+}
+
+function requestTargetMatches(candidate, target) {
+  if (!REQUEST_SOURCE_TYPES.includes(candidate?.source_type)) return false;
+  if (target.requestType && candidate.source_type !== target.requestType) return false;
+  const requestTypes = target.requestType
+    ? [target.requestType]
+    : REQUEST_SOURCE_TYPES;
+  return requestTypes.some(requestType => requestIdMatches(candidate, target.value, requestType));
+}
+
+function requestCandidateStatus(candidate) {
+  if (candidate?.permission_denied || candidate?.accessible === false || candidate?.can_review === false) {
+    return 'forbidden';
+  }
+  if (candidate?.is_processed || candidate?.processed || PROCESSED_REQUEST_STATUSES.has(candidate?.status)) {
+    return 'processed';
+  }
+  return 'found';
+}
+
+function resolveRequestTarget(items, target) {
+  if (target.requestType && !normalizedRequestType(target.requestType)) {
+    return { status: 'invalid', item: null };
+  }
+
+  const matches = (items || []).filter(candidate => requestTargetMatches(candidate, target));
+  if (matches.length > 1) return { status: 'ambiguous', item: null };
+  if (matches.length === 1) {
+    const status = requestCandidateStatus(matches[0]);
+    return status === 'found'
+      ? { status, item: matches[0] }
+      : { status, item: null };
+  }
+  return { status: 'missing', item: null };
 }
 
 export function resolveAuditTarget(items, target) {
@@ -215,6 +286,7 @@ export function resolveAuditTarget(items, target) {
       case 'site':
         return candidate.source_type === 'photo_review' && matchesValue(candidate.site_id, targetValue);
       case 'request':
+        if (target.requestType || (targetValue.startsWith('pr_') || targetValue.startsWith('spr_'))) return false;
         return ['parts_request', 'vehicle_application'].includes(candidate.source_type)
           && ((candidate.source_type === 'parts_request' && matchesPrefixedId(candidate.id, targetValue, 'pr_'))
             || (candidate.source_type === 'vehicle_application' && matchesPrefixedId(candidate.id, targetValue, 'va_'))
@@ -229,5 +301,8 @@ export function resolveAuditTarget(items, target) {
         return false;
     }
   });
+  if (target.kind === 'request' && target.tab === 'parts') {
+    return resolveRequestTarget(items, target);
+  }
   return item ? { status: 'found', item } : { status: 'missing', item: null };
 }

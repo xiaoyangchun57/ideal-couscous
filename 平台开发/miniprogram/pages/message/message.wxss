@@ -1,3 +1,4 @@
+.message-page { padding-bottom: calc(40rpx + env(safe-area-inset-bottom)); }
 .topbar { display: flex; justify-content: flex-end; padding: 20rpx 24rpx 0; }
 .tb-btn { font-size: 26rpx; color: var(--text-2); padding: 10rpx 28rpx; border-radius: 999rpx; border: 1rpx solid var(--line); margin-left: 16rpx; }
 .tb-brand { color: var(--brand); border-color: var(--brand-line); }
@@ -14,3 +15,10 @@
 .msg-title { font-size: 28rpx; color: var(--text); display: block; }
 .msg-sub { font-size: 24rpx; color: var(--text-2); margin-top: 8rpx; display: block; line-height: 1.5; }
 .msg-time { font-size: 22rpx; color: var(--text-3); margin-top: 10rpx; display: block; }
+.message-error-detail, .message-stale-detail { display: block; margin-top: 10rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.45; text-align: center; }
+.message-retry { margin-top: 24rpx; min-width: 160rpx; }
+.message-stale { display: flex; align-items: center; gap: 20rpx; margin: 20rpx 0; padding: 18rpx 20rpx; background: var(--amber-bg); border: 1rpx solid var(--amber-line); border-radius: 12rpx; }
+.message-stale-main { flex: 1; min-width: 0; }
+.message-stale-title { display: block; color: var(--amber); font-size: 24rpx; font-weight: 600; }
+.message-stale-detail { margin-top: 6rpx; text-align: left; overflow-wrap: anywhere; }
+.message-retry-inline { flex-shrink: 0; margin: 0; }
