@@ -5,12 +5,13 @@ failure exits non-zero so it can be used as a local release check.
 """
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 
-BASE = 'http://127.0.0.1:5000'
+BASE = os.environ.get('TEST_API_BASE_URL', 'http://127.0.0.1:5000').rstrip('/')
 
 
 def request_json(path, *, method='GET', payload=None, token=None):

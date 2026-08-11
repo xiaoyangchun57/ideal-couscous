@@ -6,10 +6,25 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
+
+
+BUSINESS_TIMEZONE = ZoneInfo('Asia/Shanghai')
+BUSINESS_NOW = datetime(2026, 8, 11, 0, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+
+
+class FrozenBusinessDateTime(datetime):
+    """Keep naive application timestamps on the business-local calendar date."""
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return BUSINESS_NOW.replace(tzinfo=None)
+        return BUSINESS_NOW.astimezone(tz)
 
 
 class PlanResourceArchiveFlowTest(unittest.TestCase):
@@ -20,6 +35,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         handle.close()
         self.db_path = handle.name
         self.original_get_db = app_module.get_db
+        self.original_datetime = app_module.datetime
+        app_module.datetime = FrozenBusinessDateTime
         self.original_tokens = dict(app_module._tokens)
 
         @contextmanager
@@ -162,6 +179,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
 
     def tearDown(self):
         app_module.get_db = self.original_get_db
+        app_module.datetime = self.original_datetime
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
         os.unlink(self.db_path)
@@ -172,7 +190,11 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
 
     @staticmethod
     def day():
-        return datetime.now().strftime('%Y-%m-%d')
+        return BUSINESS_NOW.strftime('%Y-%m-%d')
+
+    @staticmethod
+    def business_timestamp():
+        return BUSINESS_NOW.strftime('%Y-%m-%d %H:%M:%S')
 
     def add_submitted_schedule(self, schedule_id, user_id=2, vehicle_id=1, *, no_vehicle_reason=''):
         day = self.day()
@@ -272,7 +294,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=10').fetchone()[0], 0)
 
     def test_expired_schedule_approval_has_no_execution_or_resource_side_effects(self):
-        old_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        old_day = (BUSINESS_NOW - timedelta(days=1)).strftime('%Y-%m-%d')
         with self.db() as db:
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,status,
@@ -522,7 +544,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             db.execute("UPDATE insp_plan_items SET result='normal' WHERE plan_id=420")
             db.execute("""INSERT INTO inspection_checkins
                 (site_id,site_name,user_id,user_name,check_time,lat,lng,plan_id)
-                VALUES (1,'Station',2,'Operator',datetime('now'),28.68,115.73,420)""")
+                VALUES (1,'Station',2,'Operator',?,28.68,115.73,420)""", (self.business_timestamp(),))
             db.execute("INSERT INTO vehicle_inspections VALUES (42,1,'return','normal')")
         self.assertEqual(notice['is_read'], 1)
 
@@ -561,7 +583,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             db.execute("UPDATE plan_schedules SET status='approved', tasks_generated=1 WHERE id=21")
             db.execute("INSERT INTO insp_plans (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id) VALUES (210,'P','Operator',2,?,'active',21)", (self.day(),))
             db.execute("INSERT INTO insp_plan_items (plan_id,site_id,item_name,result,execution_status) VALUES (210,1,'Check','normal','active')")
-            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,lat,lng) VALUES (1,2,datetime('now'),28.68,115.73)")
+            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,lat,lng) VALUES (1,2,?,28.68,115.73)", (self.business_timestamp(),))
 
         checked_out = self.client.post('/api/mobile/execution-plans/210/sites/1/check-out',
                                        headers=self.headers('operator-token'),
@@ -590,7 +612,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             db.execute("INSERT INTO insp_plans (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id) VALUES (231,'P2','Operator',2,?,'active',23)", (self.day(),))
             db.execute("INSERT INTO insp_plan_items (plan_id,site_id,item_name,result,execution_status) VALUES (230,1,'Done','normal','active')")
             db.execute("INSERT INTO insp_plan_items (plan_id,site_id,item_name,result,execution_status) VALUES (231,1,'Pending',NULL,'active')")
-            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,lat,lng) VALUES (1,2,datetime('now'),28.68,115.73)")
+            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,lat,lng) VALUES (1,2,?,28.68,115.73)", (self.business_timestamp(),))
 
         checked_out = self.client.post('/api/mobile/execution-plans/230/sites/1/check-out',
                                        headers=self.headers('operator-token'),

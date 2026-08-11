@@ -11,6 +11,10 @@ assert.deepEqual(
 );
 assert.equal(getSubmissionGuard('ps_1', 'ps_1').allowed, false);
 assert.equal(getSubmissionGuard('ps_1', 'ps_1').sameItem, true);
+assert.deepEqual(
+  getSubmissionGuard('ps_1', 'ps_1', { allowSameItem: true }),
+  { allowed: true, sameItem: true, otherItem: false, message: '' }
+);
 assert.equal(getSubmissionGuard('ps_1', 'ps_2').otherItem, true);
 assert.equal(
   getSubmissionGuard('ps_1', 'ps_2').message,

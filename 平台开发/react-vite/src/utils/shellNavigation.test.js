@@ -5,6 +5,7 @@ import {
   getAuditTargetFromSearchParams,
   getNotificationTarget,
   resolveAuditTarget,
+  resolveAuditTargetFromServer,
 } from './shellNavigation.js';
 
 test('global search paths use the destination page query contract', () => {
@@ -123,4 +124,38 @@ test('request resolution reports processed, forbidden, and missing targets expli
   assert.equal(resolveAuditTarget([
     { id: 'pr_12', source_type: 'parts_request' },
   ], getAuditTargetFromSearchParams('tab=parts&request=12&request_type=unknown')).status, 'invalid');
+});
+
+test('server audit locator contract controls pending, processed, missing, and forbidden states', () => {
+  const target = getAuditTargetFromSearchParams(
+    'tab=parts&request=12&request_type=parts_request',
+  );
+  const pending = resolveAuditTargetFromServer({
+    request_type: 'parts_request', request_id: 12, status: 'pending',
+    item: { id: 'pr_12', source_type: 'parts_request' },
+  }, target);
+  assert.equal(pending.status, 'found');
+  assert.equal(pending.item.id, 'pr_12');
+  assert.equal(resolveAuditTargetFromServer({ status: 'processed' }, target).status, 'processed');
+  assert.equal(resolveAuditTargetFromServer({ status: 'missing' }, target).status, 'missing');
+  assert.equal(resolveAuditTargetFromServer({ status: 'forbidden' }, target).status, 'forbidden');
+});
+
+test('server audit locator keeps same numeric id separated by request type', () => {
+  for (const requestType of ['parts_request', 'spare_part_request']) {
+    const target = getAuditTargetFromSearchParams(
+      `tab=parts&request=12&request_type=${requestType}`,
+    );
+    const result = resolveAuditTargetFromServer({
+      request_type: requestType,
+      request_id: 12,
+      status: 'pending',
+      item: {
+        id: requestType === 'parts_request' ? 'pr_12' : 'spr_12',
+        source_type: requestType,
+      },
+    }, target);
+    assert.equal(result.status, 'found');
+    assert.equal(result.item.source_type, requestType);
+  }
 });

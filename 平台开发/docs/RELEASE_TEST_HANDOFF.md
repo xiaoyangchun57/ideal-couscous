@@ -1,10 +1,51 @@
-# 上线测试交接（r3）
+# 2026-08-11 r4 final local closure
+
+Status: local code-freeze candidate created pending product UI re-test. The r3 product review is returned; r1/r2/r3 remain historical and rejected. `release-20260811-cross-module-freeze-r4` is the only machine-allowed candidate in `deploy/release-candidates.json`. No push, deployment, online database, or container operation was performed.
+
+Final automated evidence (Asia/Shanghai, 2026-08-11):
+
+| Check | Command | Result | Exit |
+| --- | --- | --- | ---: |
+| Backend full unittest, excluding `test_api.py` | `python -B -m unittest $mods` | 240 tests, OK, 09:35:29-09:36:10 | 0 |
+| Miniprogram Node | `node --test` over all `miniprogram/**/*.test.js` | 11/11 passed, 09:35:19 | 0 |
+| Syntax aggregator | `python dev_scripts/check_syntax.py --node-root miniprogram --python-root backend` | 117 files, JS/Python all PASS, 09:35:19-09:35:27 | 0 |
+| React API tests | `npm.cmd run test:api` | 35/35 passed, 09:35:18-09:35:19 | 0 |
+| React lint | `npm.cmd run lint` | passed, 09:35:28-09:35:31 | 0 |
+| React build | `npm.cmd run build` | Vite build passed, 09:35:25 | 0 |
+| Backend Python compile | `python -m py_compile` over all backend Python files | passed, 09:35:28-09:35:29 | 0 |
+| Whitespace | `git diff --check` | no whitespace errors; only LF/CRLF warnings, 09:35:26 | 0 |
+| API with existing local service | `TEST_API_BASE_URL=http://127.0.0.1:5000 python backend/test_api.py` | login/dashboard/sites shape OK; 37 sites, 09:36:50 | 0 |
+| API with unbound local port | `TEST_API_BASE_URL=http://127.0.0.1:5999 python backend/test_api.py` | WinError 10061 connection refused, 09:36:49-09:36:52 | 1 |
+
+The first syntax-aggregator invocation omitted its required roots and returned exit 2 at 09:25:17. It was immediately corrected with the command recorded above and returned exit 0; the invocation error is not a business test failure. `test_api.py` now keeps the default `127.0.0.1:5000` and accepts `TEST_API_BASE_URL` only for local checks; `backend/test_api_base_url.py` covers both defaults and override normalization.
+
+Candidate guard evidence before tagging: `release-20260810-cross-module-freeze`, `...-r2`, and `...-r3` each returned `REJECT`/exit 1; `release-20260811-cross-module-freeze-r4` returned `ACCEPT`/exit 0. The local freeze commit and annotated r4 tag are created only after this handoff is committed; the tag points to that freeze commit. Parent-directory `project.config.json` and `project.private.config.json` are intentionally excluded.
+
+## Image deletion review
+
+The independent review found and fixed the request contract to send only `{ reason }`, added `manual_report` and explicit pending inspection links to the server-owned evidence block, expanded the deletion-before snapshot, and kept failure reasons in the React modal for retry. The implementation is one-record soft deletion only: it never removes the physical file, has no batch-delete endpoint, requires a role set containing `admin`, requires `source_type=test` with no source id and no formal link, returns the fixed 409 message for formal evidence, returns 403/404/400 as applicable, and makes repeated deletion idempotent without another audit row. Focused coverage is included in `backend/test_attachment_delete.py` (5 tests) and the React attachment deletion tests (2 tests).
+
+## UI evidence and residual boundaries
+
+The following are explicitly **未验证 / not verified** for this r4 closure and must be re-tested by the product manager in real UI; API and unit evidence must not be presented as UI proof:
+
+- Web: pending/processed/missing/forbidden notifications for both `parts_request` and `spare_part_request`, same-number exact routing, plan executor display, risk-image gate, and refresh/state rendering.
+- Web image archive: admin deletion of `TEST_DELETE_` unbound test media; confirmation metadata and impact; cancel; empty/whitespace reason; non-admin hidden entry/403; formal evidence 409; failure reason retained for retry; post-delete list/statistics/pending-review/notification/unread/thumbnail consistency after refresh.
+- WeChat developer-tool rapid clicks: exactly one risk confirmation, cancel then resubmit, one request, and failed request releasing the lock while retaining the reason.
+
+The in-app browser skill was read. Browser runtime initialization failed with the exact error `failed to write kernel assets: 系统找不到指定的路径。 (os error 3)`. There was one initial connection attempt followed by two diagnostics; retries stopped before the 09:30:44 local-service check and no browser tab was created in this attempt. No external browser or Playwright was used.
+
+The existing WeChat IDE was not closed and no second IDE was started. Official CLI recovery was attempted twice in the prior handoff: attempt 1 reported `IDE may already started at port 36992, trying to connect` and launched HTTP at 25730; attempt 2 with `--port 36992` failed with `EEXIST: file already exists, mkdir 'C:\Users\11708\AppData\Local\微信开发者工具'`. Automated recovery stopped after attempt 2; no further retry was made. The user-owned IDE processes around 08:59 and the pre-existing backend PID 14584 (`python.exe backend/app.py`, started 09:15) were left untouched.
+
+Agent-started backend/Vite sessions were stopped. The agent Vite attempt used 5175 because 5174 was already in use, then was stopped; the pre-existing 5000 backend was not stopped because it predated this run. No temporary `TEST_DELETE_` rows or temporary SQLite database were created by the blocked browser run; focused-test temporary databases were removed by test teardown. Final status must separately report the existing 5000 service and the product UI re-test boundary.
+
+# 上线测试交接（r4）
 
 ## 边界
 
 本交接仅面向上线测试线。所有门槛通过前不得创建标签，也不得执行生产部署、修改线上数据库或切换线上容器。测试线必须使用独立数据和可回滚环境。门槛通过后创建的本地冻结标签只用于交给上线测试线，不代表生产部署授权。
 
-历史 r1 提交 `c78de8c`/标签 `release-20260810-cross-module-freeze` 与 r2 提交 `dce1e72`/标签 `release-20260810-cross-module-freeze-r2` 均已退回，只保留历史追溯，禁止部署、复用或移动。`release-20260810-cross-module-freeze-r3` 是本轮唯一候选，必须在最终全量测试全绿后才创建。
+历史 r1/r2/r3 标签 `release-20260810-cross-module-freeze`、`release-20260810-cross-module-freeze-r2` 和 `release-20260810-cross-module-freeze-r3` 均只保留历史追溯，禁止部署、复用或移动。`release-20260811-cross-module-freeze-r4` 是当前唯一候选；机器门禁以 `deploy/release-candidates.json` 为准，已在最终全量测试全绿后创建本地冻结提交和注释标签。
 
 本地后端固定为 `http://127.0.0.1:5000`，本地数据库为 `backend/data/water.db`。网页端本轮实际访问 `http://127.0.0.1:5173/`；禁止为了浏览器验收反复切换端口。
 
@@ -14,12 +55,12 @@
 $mods = Get-ChildItem backend -File -Filter 'test_*.py' | Where-Object { $_.Name -ne 'test_api.py' } | Sort-Object BaseName | ForEach-Object { 'backend.' + $_.BaseName }
 python -B -m unittest $mods
 Get-ChildItem miniprogram/tests -File -Filter '*.test.js' | Sort-Object Name | ForEach-Object { node --test $_.FullName }
-Get-ChildItem miniprogram -Recurse -File -Filter '*.js' | Sort-Object FullName | ForEach-Object { node --check $_.FullName }
+python -B dev_scripts/check_syntax.py --node-root miniprogram --python-root backend
 Push-Location react-vite; npm.cmd run test:api; Pop-Location
 Push-Location react-vite; npm.cmd run lint; Pop-Location
 Push-Location react-vite; npm.cmd run build; Pop-Location
-Get-ChildItem backend -Recurse -File -Filter '*.py' | Sort-Object FullName | ForEach-Object { python -m py_compile $_.FullName }
 git diff --check
+python deploy/verify_release_candidate.py --tag release-20260811-cross-module-freeze-r4
 python backend/test_api.py
 # 停止本地后端后再次执行，必须为非零退出码
 python backend/test_api.py
@@ -27,7 +68,7 @@ python backend/test_api.py
 
 记录实际输出、日期和提交版本；未执行或失败的项目不得写为通过。
 
-上方命令是 r3 最终复跑清单。历史 r2 的通过数量不作为 r3 证据；文档更新后必须重新记录实际时间、测试数和退出码。
+上方命令是 r4 最终复跑清单。历史 r3 的通过数量不作为 r4 证据；文档更新后必须重新记录实际时间、测试数和退出码。`check_syntax.py` 会执行全部文件并累计失败，不能由最后一个成功文件覆盖前面的失败。
 
 ## 测试线验收重点
 
@@ -63,11 +104,11 @@ python backend/test_api.py
 
 截图工具多次超时，已在命令边界终止对应脚本；该项作为残余工具边界记录，不影响上述状态读取证据。
 
-r3 未推送、未部署、未操作线上数据库或容器。只有最终全量测试全绿后才创建本地提交和 `release-20260810-cross-module-freeze-r3` annotated tag。
+r4 候选已创建本地提交和 `release-20260811-cross-module-freeze-r4` annotated tag，未推送、未部署、未操作线上数据库或容器；候选校验命令只做精确放行，不创建或移动标签。
 
-## r3 最终复跑记录
+## r3 历史复跑记录（不作为 r4 证据）
 
-文档更新后重新执行以下全量门槛，并在完成后填写实际时间、测试数和退出码；不得沿用 r2 数量：
+以下表格是 r3 的历史复跑证据，仅用于追溯；r4 必须按上方命令重新执行并记录实际时间、测试数和退出码，不得沿用这些数量：
 
 | 项目 | 实际时间 | 测试数/结果 | 退出码 |
 | --- | --- | --- | --- |

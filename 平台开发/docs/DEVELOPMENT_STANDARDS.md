@@ -1,3 +1,12 @@
+# 2026-08-11 r4 candidate closure
+
+- r3 product review is returned. `release-20260810-cross-module-freeze`, `release-20260810-cross-module-freeze-r2`, and `release-20260810-cross-module-freeze-r3` are historical rejection targets and must not move; `release-20260811-cross-module-freeze-r4` is the only candidate allowed by `deploy/release-candidates.json`.
+- The deletion contract is server-owned: one-item soft delete only, no physical file deletion or batch deletion, admin role-set required, explicit `source_type=test` with no business id, all stored inspection/workorder/manual-report links checked server-side, fixed 409 evidence rejection, complete audit snapshot, idempotent repeat, and only `{ reason }` sent by the client.
+- Final local automation was green: backend 240 tests; miniprogram Node 11; syntax aggregate 117 JS/Python files; React test:api 35; lint/build; backend py_compile; and diff check all exit 0. Exact timestamps, counts, commands, and the expected unbound-port exit 1 are in `docs/RELEASE_TEST_HANDOFF.md`.
+- The first syntax command was an invocation error (missing `--node-root`/`--python-root`, exit 2), then the required aggregate command passed exit 0. This distinction must remain visible in handoff evidence.
+- No real UI result may be inferred from these automated/API checks. All r4-affected Web notification/routing, plan executor, image deletion, risk-gate, refresh-consistency, and WeChat rapid-click scenarios are explicitly `未验证` pending product-manager UI re-test.
+- Browser initialization stopped after the exact error `failed to write kernel assets: 系统找不到指定的路径。 (os error 3)`; no external browser fallback was used. WeChat official recovery stopped after two attempts (25730 fallback report, then 36992 `EEXIST`); no second IDE or retry was started.
+
 # 开发规范
 
 ## 权限和数据范围
@@ -37,6 +46,12 @@
 - 变更小程序纯逻辑时，新增可由 Node 直接运行的测试；涉及页面或微信 API 的行为，补充开发者工具验收项。
 - React 路由、登录返回地址、通知跳转和角色可见性改变时，至少补充对应逻辑测试。
 - 未复跑的结果必须标为“待最终验收”，不得沿用历史通过数量。
+
+## 2026-08-11 r4 候选门禁
+
+- r1/r2/r3 标签均为历史追溯对象；当前唯一候选为 `release-20260811-cross-module-freeze-r4`，机器可校验清单见 `deploy/release-candidates.json`。
+- 部署登记或部署前必须执行 `python deploy/verify_release_candidate.py --tag <tag>`。该命令只精确接受清单中的候选名，不创建、移动或删除 Git 标签。
+- 交接语法门槛统一执行 `python -B dev_scripts/check_syntax.py --node-root miniprogram --python-root backend`；脚本累计每个文件的失败并在任一失败时返回非零。
 
 ## 2026-08-10 历史 r2 归档证据（不作为 r3）
 

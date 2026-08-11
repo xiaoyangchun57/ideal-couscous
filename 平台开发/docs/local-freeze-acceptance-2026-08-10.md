@@ -1,10 +1,24 @@
+# 2026-08-11 r4 appendix: code-freeze candidate pending product UI re-test
+
+The r3 product review is returned. r1/r2/r3 remain historical and rejected; `release-20260811-cross-module-freeze-r4` is the sole candidate allowed by the local guard. This appendix records the r4 local closure and does not authorize push, deployment, online database/container access, or delivery-line operations.
+
+Final local evidence (Asia/Shanghai, 2026-08-11): backend unittest 240/240 exit 0 (`09:35:29-09:36:10`); miniprogram Node 11/11 exit 0 (`09:35:19`); `python dev_scripts/check_syntax.py --node-root miniprogram --python-root backend` 117 files exit 0 (`09:35:19-09:35:27`); React test:api 35/35 exit 0 (`09:35:18-09:35:19`); React lint exit 0 (`09:35:28-09:35:31`); React build exit 0 (`09:35:25`); backend py_compile exit 0 (`09:35:28-09:35:29`); diff check exit 0 (`09:35:26`). The initial syntax invocation without root arguments returned exit 2 at `09:25:17`, then the corrected command above returned exit 0.
+
+`backend/test_api.py` retains default `http://127.0.0.1:5000` and now accepts `TEST_API_BASE_URL` for local-only testing. Against the existing local 5000 service it returned exit 0 at `09:36:50` and confirmed 37 sites; against unbound `127.0.0.1:5999` it returned WinError 10061 and exit 1 at `09:36:49-09:36:52`. The 5000 process (PID 14584, `python.exe backend/app.py`, started 09:15) predated this run and was not terminated.
+
+The following r4 UI acceptance items are all `未验证` and require product-manager real UI re-test: both typed parts notification states and same-number routing; plan executor display; Web risk-image gate; admin deletion of unbound `TEST_DELETE_` media; confirmation metadata/impact, cancel, empty reason, non-admin 403, formal-evidence 409, failure retry retention; post-delete list/statistics/pending-review/notification/unread/thumbnail refresh consistency; and WeChat rapid-click single-confirm/request-lock/cancel/failure-release behavior.
+
+Browser runtime exact residual: `failed to write kernel assets: 系统找不到指定的路径。 (os error 3)`. One initial browser connection attempt plus two diagnostics were made; retries stopped before `09:30:44`, no external Playwright was used, and no new tab was created. WeChat official recovery was attempted twice and then stopped: first attempt reported an IDE already at 36992 and launched HTTP 25730; second attempt with 36992 failed `EEXIST: file already exists, mkdir 'C:\Users\11708\AppData\Local\微信开发者工具'`. No second IDE was started or retried. Only agent-started services were stopped; existing IDE and 5000 service remain.
+
+The image deletion audit/soft-delete changes and the `TEST_API_BASE_URL` compatibility test are local code changes. Focused temporary SQLite databases were removed by teardown; the blocked browser run created no UI sample rows. Parent-directory `project.config.json` and `project.private.config.json` remain excluded from the commit.
+
 # 本地冻结 r3 验收与交接（2026-08-10）
 
 ## 边界
 
 - 本记录只覆盖 `平台开发` 本地工作区。
 - 本地后端固定为 `http://127.0.0.1:5000`，数据库为 `backend/data/water.db`。
-- 验收过程未部署服务器、未修改线上数据库、未切换线上容器。r1 标签 `release-20260810-cross-module-freeze` 和 r2 标签 `release-20260810-cross-module-freeze-r2` 均已退回，禁止部署、复用或移动；r3 是唯一候选，未全绿前不得创建。
+- 验收过程未部署服务器、未修改线上数据库、未切换线上容器。r1/r2/r3 标签 `release-20260810-cross-module-freeze`、`release-20260810-cross-module-freeze-r2` 和 `release-20260810-cross-module-freeze-r3` 均已退回，禁止部署、复用或移动；r4 `release-20260811-cross-module-freeze-r4` 是唯一候选，已在全量验证全绿后创建本地冻结提交和注释标签。
 - 微信开发者工具在桌面环境使用本地 API；真机和正式版本不携带 `127.0.0.1`。
 
 ## 本地运行

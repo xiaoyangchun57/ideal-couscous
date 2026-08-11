@@ -306,3 +306,28 @@ export function resolveAuditTarget(items, target) {
   }
   return item ? { status: 'found', item } : { status: 'missing', item: null };
 }
+
+export function resolveAuditTargetFromServer(payload, target) {
+  if (!target || target.tab !== 'parts' || target.kind !== 'request') {
+    return resolveAuditTarget([], target);
+  }
+  if (!normalizedRequestType(target.requestType)) {
+    return { status: 'invalid', item: null };
+  }
+  if (payload?.request_type && payload.request_type !== target.requestType) {
+    return { status: 'invalid', item: null };
+  }
+  if (payload?.request_id !== undefined && String(payload.request_id) !== String(target.value)) {
+    return { status: 'invalid', item: null };
+  }
+  if (payload?.status === 'pending') {
+    const item = payload.item;
+    return requestTargetMatches(item, target)
+      ? { status: 'found', item }
+      : { status: 'missing', item: null };
+  }
+  if (['processed', 'forbidden', 'missing'].includes(payload?.status)) {
+    return { status: payload.status, item: null };
+  }
+  return { status: 'lookup_error', item: null };
+}

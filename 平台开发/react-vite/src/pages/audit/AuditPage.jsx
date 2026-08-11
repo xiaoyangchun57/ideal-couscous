@@ -21,7 +21,11 @@ import {
   getRiskyPhotoIds,
   photoRejectionNeedsReason,
 } from '../../utils/inspectionReviewDecision';
-import { getAuditTargetFromSearchParams, resolveAuditTarget } from '../../utils/shellNavigation';
+import {
+  getAuditTargetFromSearchParams,
+  resolveAuditTarget,
+  resolveAuditTargetFromServer,
+} from '../../utils/shellNavigation';
 import { getAuditAllowedTabs, getAuditColumnProfile } from './auditColumnDefinitions';
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
@@ -617,6 +621,7 @@ export default function AuditPage() {
   const [reviewingItem, setReviewingItem] = useState(null);
   const reviewSessionRef = useRef(null);
   const focusedOrderRef = useRef('');
+  const auditLookupRef = useRef('');
   const [reviewComment, setReviewComment] = useState('');
   const [processing, setProcessing] = useState(false);
   const [autoPassing, setAutoPassing] = useState(false);
@@ -823,11 +828,30 @@ export default function AuditPage() {
 
   useEffect(() => {
     const target = getAuditTargetFromSearchParams(searchParams);
-    if (!target || loading || !pendingLoaded || pendingError) return;
+    if (!target) return;
     if (target.tab === 'data') return;
     const targetKey = `${target.tab}:${target.kind}:${target.requestType || ''}:${target.value || ''}`;
-    if (focusedOrderRef.current === targetKey) return;
-    focusedOrderRef.current = targetKey;
+
+    const announceResolution = (resolution) => {
+      if (resolution.status === 'found') {
+        setTargetNotice('');
+        setHighlightedAuditItemId(auditItemKey(resolution.item));
+        openReview(resolution.item);
+        return;
+      }
+      setHighlightedAuditItemId(null);
+      const notice = {
+        ambiguous: '历史通知未携带备件申请类型，且同编号存在两类申请，无法安全定位；请从备件审核列表手动选择。',
+        processed: '通知对应的审核对象已处理，当前不可再次审核。',
+        forbidden: '通知对应的审核对象存在，但当前账号无权查看。',
+        invalid: '通知中的审核对象标识或类型无效，无法打开。',
+        missing: '通知对应的审核对象不存在，可能已被删除。',
+        lookup_error: '审核对象定位失败，当前无法可信判断其状态，请重试。',
+      }[resolution.status] || '通知对应的审核对象当前不可定位，请从审核列表确认。';
+      setTargetNotice(notice);
+      message.warning(notice);
+    };
+
     if (target.kind === 'missing') {
       setHighlightedAuditItemId(null);
       const notice = `${target.sourceType || '审核通知'}通知缺少可定位对象标识，请刷新通知后重试`;
@@ -835,31 +859,34 @@ export default function AuditPage() {
       message.warning(notice);
       return;
     }
-    if (target.tab === 'parts' && !isAdmin) {
-      setHighlightedAuditItemId(null);
-      const notice = '该备件审核对象存在，但当前账号无权查看。';
-      setTargetNotice(notice);
-      message.warning(notice);
+
+    if (target.tab === 'parts' && target.kind === 'request') {
+      if (!target.requestType) {
+        announceResolution({ status: 'invalid' });
+        return;
+      }
+      if (auditLookupRef.current === targetKey) return;
+      auditLookupRef.current = targetKey;
+      const query = new URLSearchParams({
+        request_type: target.requestType,
+        id: target.value,
+      });
+      api.getStrict(`/audit/locate?${query.toString()}`)
+        .then((payload) => {
+          if (auditLookupRef.current !== targetKey) return;
+          announceResolution(resolveAuditTargetFromServer(payload, target));
+        })
+        .catch(() => {
+          if (auditLookupRef.current === targetKey) announceResolution({ status: 'lookup_error' });
+        });
       return;
     }
+
+    if (loading || !pendingLoaded || pendingError || focusedOrderRef.current === targetKey) return;
+    focusedOrderRef.current = targetKey;
     const resolution = resolveAuditTarget(items, target);
-    if (resolution.status === 'found') {
-      setTargetNotice('');
-      setHighlightedAuditItemId(auditItemKey(resolution.item));
-      openReview(resolution.item);
-      return;
-    }
-    setHighlightedAuditItemId(null);
-    const notice = {
-      ambiguous: '历史通知未携带备件申请类型，且同编号存在两类申请，无法安全定位；请从备件审核列表手动选择。',
-      processed: '通知对应的审核对象已处理，当前不可再次审核。',
-      forbidden: '通知对应的审核对象存在，但当前账号无权查看。',
-      invalid: '通知中的审核对象标识或类型无效，无法打开。',
-      missing: '通知对应的审核对象不存在，可能已被删除。',
-    }[resolution.status] || '通知对应的审核对象当前不可定位，请从审核列表确认。';
-    setTargetNotice(notice);
-    message.warning(notice);
-  }, [items, isAdmin, loading, message, pendingError, pendingLoaded, searchParams]);
+    announceResolution(resolution);
+  }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
 
   // 一键通过正常照片（影像抽样审核核心减负动作）
   const handleAutoPassNormal = async () => {

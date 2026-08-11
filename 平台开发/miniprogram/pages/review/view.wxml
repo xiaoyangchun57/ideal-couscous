@@ -141,7 +141,7 @@
       <textarea class="reason" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" />
       <view class="sheet-actions">
         <button class="btn-ghost btn-sm" size="mini" bindtap="closeReject">取消</button>
-        <button class="btn-danger btn-sm" size="mini" bindtap="rejectConfirm" disabled="{{!!submittingId}}">确认驳回</button>
+        <button class="btn-danger btn-sm" size="mini" bindtap="rejectConfirm" disabled="{{!!submittingId && curAction !== 'selective'}}">确认驳回</button>
       </view>
     </view>
   </view>

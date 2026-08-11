@@ -40,6 +40,13 @@ class AuditPartsContractTest(unittest.TestCase):
             'roles': ['admin'],
             'real_name': '审核管理员',
         }
+        app_module._tokens['reviewer-token'] = {
+            'id': 3,
+            'username': 'reviewer',
+            'role': 'reviewer',
+            'roles': ['reviewer'],
+            'real_name': '审核员',
+        }
         app_module.init_db()
         app_module.migrate_workorder_flow_columns()
         app_module.migrate_parts_requests_v2()
@@ -98,8 +105,72 @@ class AuditPartsContractTest(unittest.TestCase):
         app_module._tokens.update(self.original_tokens)
         os.unlink(self.db_path)
 
-    def headers(self):
-        return {'Authorization': 'Bearer admin-token'}
+    def headers(self, token='admin-token'):
+        return {'Authorization': f'Bearer {token}'}
+
+    def test_locate_contract_distinguishes_pending_processed_missing_and_forbidden(self):
+        pending = self.client.get(
+            '/api/audit/locate?request_type=parts_request&id=11', headers=self.headers()
+        )
+        self.assertEqual(pending.status_code, 200, pending.json)
+        self.assertEqual(pending.json['resolution'], 'found')
+        self.assertEqual(pending.json['status'], 'pending')
+        self.assertTrue(pending.json['found'])
+        self.assertEqual(pending.json['item']['id'], 'pr_11')
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE parts_requests SET status='approved' WHERE id=11")
+
+        processed = self.client.get(
+            '/api/audit/locate?request_type=parts_request&id=11', headers=self.headers()
+        )
+        self.assertEqual(processed.status_code, 200, processed.json)
+        self.assertEqual(processed.json['resolution'], 'processed')
+        self.assertEqual(processed.json['status'], 'processed')
+        self.assertEqual(processed.json['state'], 'approved')
+
+        missing = self.client.get(
+            '/api/audit/locate?request_type=parts_request&id=999', headers=self.headers()
+        )
+        self.assertEqual(missing.status_code, 200, missing.json)
+        self.assertEqual(missing.json['resolution'], 'missing')
+        self.assertEqual(missing.json['status'], 'missing')
+
+        forbidden = self.client.get(
+            '/api/audit/locate?request_type=parts_request&id=11',
+            headers=self.headers('reviewer-token'),
+        )
+        self.assertEqual(forbidden.status_code, 200, forbidden.json)
+        self.assertEqual(forbidden.json['resolution'], 'forbidden')
+        self.assertEqual(forbidden.json['status'], 'forbidden')
+
+    def test_locate_contract_routes_same_id_by_request_type(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO parts_requests
+                (id,plan_id,requester_id,site_id,request_no,source,reason,status,
+                 fulfillment_type,requested_part_name,specification,created_at)
+                VALUES (17,0,2,1,'PR-17','field','同编号 v2','pending','stock','采样泵','M-1',?)""",
+                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
+            db.execute(
+                "INSERT INTO parts_request_items (request_id,part_sku,quantity,part_id) VALUES (17,'P-001',1,1)"
+            )
+            db.execute("""INSERT INTO spare_part_requests
+                (id,request_no,site_id,applicant,part_name,spare_part_id,quantity,
+                 reason,status,created_at,updated_at)
+                VALUES (17,'SPR-17',1,'历史申请人','采样泵',1,2,'同编号 legacy','pending',?,?)""",
+                        (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+
+        v2 = self.client.get(
+            '/api/audit/locate?request_type=parts_request&id=17', headers=self.headers()
+        )
+        legacy = self.client.get(
+            '/api/audit/locate?request_type=spare_part_request&id=17', headers=self.headers()
+        )
+        self.assertEqual(v2.json['status'], 'pending')
+        self.assertEqual(v2.json['item']['id'], 'pr_17')
+        self.assertEqual(legacy.json['status'], 'pending')
+        self.assertEqual(legacy.json['item']['id'], 'spr_17')
 
     def test_pending_and_actions_preserve_typed_parts_contract(self):
         pending = self.client.get('/api/audit/pending', headers=self.headers())

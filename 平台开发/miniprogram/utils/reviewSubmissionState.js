@@ -3,14 +3,18 @@ function normalizeId(id) {
   return String(id);
 }
 
-function getSubmissionGuard(submittingId, itemId) {
+function getSubmissionGuard(submittingId, itemId, options) {
   const activeId = normalizeId(submittingId);
   const targetId = normalizeId(itemId);
+  const allowSameItem = !!(options && options.allowSameItem);
   if (!activeId) {
     return { allowed: !!targetId, sameItem: false, otherItem: false, message: '' };
   }
 
   const sameItem = !!targetId && activeId === targetId;
+  if (sameItem && allowSameItem) {
+    return { allowed: true, sameItem: true, otherItem: false, message: '' };
+  }
   return {
     allowed: false,
     sameItem,

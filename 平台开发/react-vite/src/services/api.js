@@ -205,7 +205,11 @@ export const api = {
   postStrict: (url, data, timeout) => strictRequest(url, { method: 'POST', body: data, timeout }),
   postFormStrict: (url, data, timeout) => strictRequest(url, { method: 'POST', body: data, timeout }),
   putStrict: (url, data, timeout) => strictRequest(url, { method: 'PUT', body: data, timeout }),
-  deleteStrict: (url, timeout) => strictRequest(url, { method: 'DELETE', timeout }),
+  deleteStrict: (url, data, timeout) => strictRequest(url, {
+    method: 'DELETE',
+    body: data && typeof data === 'object' ? data : undefined,
+    timeout: typeof data === 'number' ? data : timeout,
+  }),
   downloadStrict: (url, timeout) => strictDownload(url, timeout),
   track: (eventName, context = {}, eventId = null) => request('/telemetry/events', {
     method: 'POST',

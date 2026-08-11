@@ -1555,6 +1555,22 @@ def init_db():
                 FOREIGN KEY (site_id) REFERENCES sites(id)
             );
 
+            -- 影像软删除审计：只记录删除快照，不物理清理原文件
+            CREATE TABLE IF NOT EXISTS attachment_deletion_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attachment_id INTEGER NOT NULL UNIQUE,
+                original_filename TEXT NOT NULL DEFAULT '',
+                original_stored_path TEXT NOT NULL DEFAULT '',
+                source_type TEXT DEFAULT '',
+                source_id INTEGER,
+                site_id INTEGER,
+                operator_id INTEGER,
+                operator_name TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                deleted_at TEXT NOT NULL,
+                delete_before_state TEXT NOT NULL DEFAULT '{}'
+            );
+
             -- 试剂使用及更换记录
             CREATE TABLE IF NOT EXISTS reagent_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1687,6 +1703,9 @@ def init_db():
             "ALTER TABLE operation_attachments ADD COLUMN reviewed_at TEXT",
             "ALTER TABLE operation_attachments ADD COLUMN reject_reason TEXT DEFAULT ''",
             "ALTER TABLE operation_attachments ADD COLUMN requirement_id INTEGER DEFAULT NULL",
+            "ALTER TABLE operation_attachments ADD COLUMN deleted_at TEXT",
+            "ALTER TABLE operation_attachments ADD COLUMN deleted_by INTEGER",
+            "ALTER TABLE operation_attachments ADD COLUMN delete_reason TEXT DEFAULT ''",
             # 聚合通知保存业务批次游标；已读状态不再作为去重依据。
             "ALTER TABLE notifications ADD COLUMN dedupe_key TEXT DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN payload_json TEXT DEFAULT ''",
@@ -1857,6 +1876,7 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_insp_pi_site ON insp_plan_items(site_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_insp_rework_source_item ON insp_plan_items(rework_source_item_id) WHERE rework_source_item_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_insp_cfg_type ON inspection_configs(site_type)",
+            "CREATE INDEX IF NOT EXISTS idx_attachment_delete_audit_attachment ON attachment_deletion_audits(attachment_id)",
         ]:
             try:
                 db.execute(idx_sql)
@@ -7662,18 +7682,252 @@ def update_attachment(aid):
     return jsonify({'success': True})
 
 
-@app.route('/api/attachments/<int:aid>', methods=['DELETE'])
-def delete_attachment(aid):
-    """软删除附件"""
+ATTACHMENT_DELETE_FORMAL_SOURCE_TYPES = frozenset({
+    'workorder', 'inspection', 'patrol', 'site_photo',
+    'calibration', 'reagent', 'vehicle', 'maintenance', 'manual_report',
+})
+ATTACHMENT_DELETE_BLOCKED_MESSAGE = '该影像已作为业务证据，不能删除'
+
+
+def _attachment_delete_related_rows(db, attachment):
+    """Read stored business links for deletion safety; never trust DELETE payload fields."""
+    stored_path = (attachment.get('stored_path') or '').strip()
+    source_type = (attachment.get('source_type') or '').strip().lower()
+    source_id = attachment.get('source_id')
+    inspection_items = []
+    workorder_links = []
+
+    if _table_exists(db, 'insp_plan_items'):
+        item_columns = {row['name'] for row in db.execute('PRAGMA table_info(insp_plan_items)').fetchall()}
+        if 'photo_urls' in item_columns:
+            if source_type == 'inspection' and source_id:
+                rows = db.execute(
+                    'SELECT * FROM insp_plan_items WHERE id=?', (source_id,)
+                ).fetchall()
+            elif stored_path:
+                rows = db.execute(
+                    'SELECT * FROM insp_plan_items WHERE photo_urls LIKE ?', ('%' + stored_path + '%',)
+                ).fetchall()
+            else:
+                rows = []
+            for row in rows:
+                item = dict(row)
+                plan_status = ''
+                if item.get('plan_id') and _table_exists(db, 'insp_plans'):
+                    plan = db.execute('SELECT * FROM insp_plans WHERE id=?', (item['plan_id'],)).fetchone()
+                    plan_status = (dict(plan).get('status') or '').lower() if plan else ''
+                item['_plan_status'] = plan_status
+                inspection_items.append(item)
+
+    if _table_exists(db, 'work_orders'):
+        order_columns = {row['name'] for row in db.execute('PRAGMA table_info(work_orders)').fetchall()}
+        clauses = []
+        params = []
+        if source_type == 'workorder' and source_id:
+            clauses.append('id=?')
+            params.append(source_id)
+        if stored_path and 'images' in order_columns:
+            clauses.append('images LIKE ?')
+            params.append('%' + stored_path + '%')
+        if clauses:
+            workorder_links = [dict(row) for row in db.execute(
+                f"SELECT * FROM work_orders WHERE {' OR '.join(clauses)}", params
+            ).fetchall()]
+
+    return inspection_items, workorder_links
+
+
+def _attachment_delete_check(db, attachment):
+    """Return the server-owned eligibility decision and the user-facing impact."""
+    source_type = (attachment.get('source_type') or '').strip().lower()
+    source_id = attachment.get('source_id')
+    inspection_items, workorder_links = _attachment_delete_related_rows(db, attachment)
+
+    formal_inspection = False
+    for item in inspection_items:
+        review_status = str(item.get('review_status') or '').lower()
+        plan_status = item.get('_plan_status') or ''
+        if review_status in {'1', '2', '3', 'pending', 'approved', 'rejected', 'reviewed'} \
+                or plan_status in {'submitted', 'approved', 'reviewing', 'completed', 'archived', 'closed'} \
+                or item.get('submitted_at'):
+            formal_inspection = True
+            break
+
+    if source_type in ATTACHMENT_DELETE_FORMAL_SOURCE_TYPES or workorder_links or formal_inspection:
+        return {
+            'can_delete': False,
+            'block_reason': ATTACHMENT_DELETE_BLOCKED_MESSAGE,
+            'impact': '这是正式业务证据，删除会破坏巡检、审核或工单闭环，服务端已阻止操作。',
+            'inspection_items': inspection_items,
+        }
+
+    # Only an explicit test classification with no stored business id is removable.
+    # Blank/unknown source values are intentionally not inferred as test data.
+    if source_type != 'test' or source_id not in (None, '', 0, '0'):
+        return {
+            'can_delete': False,
+            'block_reason': '仅明确标记为测试/误传且未绑定正式业务的影像可以删除',
+            'impact': '当前影像没有满足受控删除条件，未对任何数据做修改。',
+            'inspection_items': inspection_items,
+        }
+
+    draft_warning = ''
+    if inspection_items:
+        draft_warning = '删除后关联的未提交检查项可能出现照片不足；检查记录不会删除，物理文件也不会清理。'
+    return {
+        'can_delete': True,
+        'block_reason': '',
+        'impact': draft_warning or '仅从正常影像档案、统计和待审提醒中移除；不删除物理文件、消息历史或业务记录。',
+        'inspection_items': inspection_items,
+    }
+
+
+def _attachment_delete_response_row(row):
+    item = dict(row)
+    if item.get('uploader_real_name'):
+        item['uploader_name'] = item['uploader_real_name']
+    item.pop('uploader_real_name', None)
+    return item
+
+
+def _sync_attachment_review_notifications_after_delete(db, site_id, attachment_id):
+    """Retire stale photo reminders and rebuild the current site batch when needed."""
+    if not site_id or not _table_exists(db, 'notifications') \
+            or not _table_has_column(db, 'notifications', 'is_read'):
+        return
+    pending = db.execute("""SELECT id FROM operation_attachments
+        WHERE site_id=? AND is_deleted=0 AND review_required=1
+          AND (review_status='pending' OR review_status IS NULL)
+          AND source_type!='workorder' ORDER BY id""", (site_id,)).fetchall()
+    if pending:
+        _notify_attachment_reviewers(db, site_id, pending[0]['id'], '')
+        return
+    db.execute("""UPDATE notifications SET is_read=1
+        WHERE is_read=0 AND source_type='attachment_review'
+          AND (source_id=? OR source_id IN (
+              SELECT id FROM operation_attachments WHERE site_id=?
+          ))""", (attachment_id, site_id))
+    db.execute("""UPDATE notifications SET is_read=1
+        WHERE is_read=0 AND source_type='attachment_review_batch' AND source_id=?""", (site_id,))
+
+
+@app.route('/api/attachments/<int:aid>/delete-check')
+def attachment_delete_check(aid):
     denied = require_admin()
     if denied:
         return denied
     with get_db() as db:
-        db.execute("UPDATE operation_attachments SET is_deleted=1 WHERE id=?", (aid,))
+        row = db.execute("""SELECT oa.*, s.name AS site_name,
+                                  COALESCE(oa.uploader_name, u.real_name, '') AS uploader_real_name
+                           FROM operation_attachments oa
+                           LEFT JOIN sites s ON oa.site_id=s.id
+                           LEFT JOIN users u ON oa.uploader_id=u.id
+                           WHERE oa.id=? AND oa.is_deleted=0""", (aid,)).fetchone()
+        if not row:
+            return jsonify({'error': '影像不存在', 'code': 'ATTACHMENT_NOT_FOUND'}), 404
+        attachment = _attachment_delete_response_row(row)
+        decision = _attachment_delete_check(db, attachment)
+        attachment.update({key: value for key, value in decision.items() if key != 'inspection_items'})
+        attachment['inspection_item_ids'] = [item.get('id') for item in decision['inspection_items']]
+        return jsonify(attachment)
+
+
+@app.route('/api/attachments/<int:aid>', methods=['DELETE'])
+def delete_attachment(aid):
+    denied = require_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+    if not isinstance(reason, str):
+        reason = str(reason or '')
+    reason = reason.strip()
+    with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute("""SELECT oa.*, s.name AS site_name,
+                                  COALESCE(oa.uploader_name, u.real_name, '') AS uploader_real_name
+                           FROM operation_attachments oa
+                           LEFT JOIN sites s ON oa.site_id=s.id
+                           LEFT JOIN users u ON oa.uploader_id=u.id
+                           WHERE oa.id=?""", (aid,)).fetchone()
+        if not row:
+            return jsonify({'error': '影像不存在', 'code': 'ATTACHMENT_NOT_FOUND'}), 404
+        if row['is_deleted']:
+            return jsonify({
+                'success': True,
+                'already_deleted': True,
+                'code': 'ATTACHMENT_ALREADY_DELETED',
+                'message': '影像已删除',
+            })
+        if not reason:
+            return jsonify({'success': False, 'error': '删除原因不能为空', 'code': 'DELETE_REASON_REQUIRED'}), 400
+        if len(reason) > 200:
+            return jsonify({'success': False, 'error': '删除原因不能超过200字', 'code': 'DELETE_REASON_TOO_LONG'}), 400
+
+        attachment = _attachment_delete_response_row(row)
+        decision = _attachment_delete_check(db, attachment)
+        if not decision['can_delete']:
+            return jsonify({
+                'success': False,
+                'error': decision['block_reason'],
+                'code': 'ATTACHMENT_DELETE_BLOCKED',
+                'impact': decision['impact'],
+            }), 409
+
+        deleted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        before_state = dict(attachment)
+        changed = db.execute("""UPDATE operation_attachments
+            SET is_deleted=1, deleted_at=?, deleted_by=?, delete_reason=?
+            WHERE id=? AND is_deleted=0""", (
+                deleted_at, g.current_user.get('id'), reason, aid,
+        ))
+        if changed.rowcount != 1:
+            return jsonify({
+                'success': True,
+                'already_deleted': True,
+                'code': 'ATTACHMENT_ALREADY_DELETED',
+                'message': '影像已删除',
+            })
+
+        operator_name = _current_actor_name()
+        if _table_exists(db, 'attachment_deletion_audits'):
+            db.execute("""INSERT INTO attachment_deletion_audits
+                (attachment_id, original_filename, original_stored_path,
+                 source_type, source_id, site_id, operator_id, operator_name,
+                 reason, deleted_at, delete_before_state)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+                aid, attachment.get('filename') or '', attachment.get('stored_path') or '',
+                attachment.get('source_type') or '', attachment.get('source_id'),
+                attachment.get('site_id'), g.current_user.get('id'), operator_name,
+                reason, deleted_at, json.dumps(before_state, ensure_ascii=False, sort_keys=True),
+            ))
+        if _table_exists(db, 'operation_logs'):
+            db.execute("""INSERT INTO operation_logs
+                (module, action, target_type, target_id, operator, operator_id, details)
+                VALUES (?,?,?,?,?,?,?)""", (
+                'attachment', 'soft_delete', 'attachment', aid, operator_name,
+                g.current_user.get('id'), json.dumps({
+                    'attachment_id': aid,
+                    'original_filename': attachment.get('filename') or '',
+                    'original_stored_path': attachment.get('stored_path') or '',
+                    'source_type': attachment.get('source_type') or '',
+                    'source_id': attachment.get('source_id'),
+                    'site_id': attachment.get('site_id'),
+                    'operator_id': g.current_user.get('id'),
+                    'operator_name': operator_name,
+                    'reason': reason,
+                    'deleted_at': deleted_at,
+                    'delete_before_state': before_state,
+                }, ensure_ascii=False, sort_keys=True),
+            ))
+        _sync_attachment_review_notifications_after_delete(db, attachment.get('site_id'), aid)
         db.commit()
-    return jsonify({'success': True})
-
-
+    return jsonify({
+        'success': True,
+        'deleted': True,
+        'id': aid,
+        'message': '已移出影像档案，物理文件未删除',
+    })
 @app.route('/api/attachments/<int:aid>/archive', methods=['POST'])
 def archive_attachment(aid):
     """归档影像资料：标记为已归档，便于长期留存与独立检索"""
@@ -11134,6 +11388,107 @@ def _legacy_spare_part_audit_items(db, allowed_site_ids):
             'submit_time': item.get('created_at') or '',
         })
     return items
+
+
+def _parts_request_audit_item(db, request_id):
+    """Build one pending v2 request in the same shape as /audit/pending."""
+    row = db.execute("""
+        SELECT pr.id, pr.plan_id, pr.site_id, pr.work_order_no, pr.request_no, pr.reason,
+               pr.fulfillment_type, pr.requested_part_name, pr.specification, pr.estimated_amount,
+               pr.requester_id, pr.created_at as submit_time, p.plan_name, s.name AS site_name,
+               u.real_name as requester_name
+        FROM parts_requests pr
+        LEFT JOIN insp_plans p ON pr.plan_id = p.id
+        LEFT JOIN sites s ON s.id=pr.site_id
+        LEFT JOIN users u ON pr.requester_id = u.id
+        WHERE pr.id=? AND pr.status='pending'
+    """, (request_id,)).fetchone()
+    if not row:
+        return None
+
+    item = dict(row)
+    site_row = db.execute("""
+        SELECT s.id as site_id, s.name FROM insp_plan_items i JOIN sites s ON i.site_id = s.id
+        WHERE i.plan_id = ? LIMIT 1
+    """, (item['plan_id'],)).fetchone()
+    effective_site_id = item.get('site_id') or (site_row['site_id'] if site_row else None)
+    item['site_id'] = effective_site_id
+    item['site_name'] = item.get('site_name') or (site_row['name'] if site_row else '')
+    parts = db.execute("""
+        SELECT pri.part_sku, pri.quantity,
+               COALESCE(spi.part_name, pri.part_sku) AS part_name,
+               spi.manufacturer, COALESCE(spi.model, ?) AS model
+        FROM parts_request_items pri
+        LEFT JOIN spare_parts_inventory spi ON pri.part_sku = spi.part_code
+        WHERE pri.request_id=?
+    """, (item.get('specification') or '', item['id'])).fetchall()
+    item['parts_detail'] = [dict(part) for part in parts]
+    item['source_type'] = 'parts_request'
+    item['source_label'] = '备件申请'
+    item['request_id'] = item['id']
+    item['id'] = f'pr_{item["id"]}'
+    fulfillment_labels = {
+        'stock': '库存领用', 'local_purchase': '附近急购', 'vendor_order': '厂家订购',
+    }
+    item['fulfillment_label'] = fulfillment_labels.get(item.get('fulfillment_type'), '备件需求')
+    item['title'] = f'{item["fulfillment_label"]}（{len(parts)}项）'
+    item['source_name'] = item['work_order_no'] or item['plan_name'] or item['request_no'] or f'计划#{item["plan_id"]}'
+    item['requester_name'] = item.get('requester_name') or ''
+    item['actual_photos'] = 0
+    item['required_photos'] = 0
+    item['remark'] = ''
+    item['submit_time'] = item['submit_time'] or ''
+    return item
+
+
+@app.route('/api/audit/locate')
+def audit_locate():
+    """Locate one typed parts request without deriving its state from the pending list."""
+    request_type = (request.args.get('request_type') or '').strip()
+    if request_type not in ('parts_request', 'spare_part_request'):
+        return jsonify({'error': 'request_type must be parts_request or spare_part_request'}), 400
+    try:
+        request_id = int((request.args.get('id') or '').strip())
+    except (TypeError, ValueError):
+        return jsonify({'error': 'id must be a positive integer'}), 400
+    if request_id <= 0:
+        return jsonify({'error': 'id must be a positive integer'}), 400
+
+    table = 'parts_requests' if request_type == 'parts_request' else 'spare_part_requests'
+    with get_db() as db:
+        row = db.execute(
+            f'SELECT id, site_id, status FROM {table} WHERE id=?', (request_id,)
+        ).fetchone()
+        base = {
+            'request_type': request_type,
+            'source_type': request_type,
+            'request_id': request_id,
+        }
+        if not row:
+            return jsonify({**base, 'resolution': 'missing', 'status': 'missing', 'found': False})
+
+        # Resource approvals are admin-only, matching /audit/pending and the action APIs.
+        if not _has_any_role(g.current_user, 'admin'):
+            return jsonify({**base, 'resolution': 'forbidden', 'status': 'forbidden', 'found': False})
+
+        current_status = str(row['status'] or '').strip().lower()
+        if current_status != 'pending':
+            return jsonify({
+                **base, 'resolution': 'processed', 'status': 'processed',
+                'state': current_status or 'processed', 'found': True,
+            })
+
+        item = (_parts_request_audit_item(db, request_id)
+                if request_type == 'parts_request'
+                else next((item for item in _legacy_spare_part_audit_items(db, None)
+                           if item.get('request_id') == request_id), None))
+        if item is None:
+            # Keep the response conservative if a partially migrated database cannot be rendered.
+            return jsonify({**base, 'resolution': 'missing', 'status': 'missing', 'found': False})
+        return jsonify({
+            **base, 'resolution': 'found', 'status': 'pending', 'state': 'pending',
+            'found': True, 'item': item,
+        })
 
 
 @app.route('/api/audit/pending')

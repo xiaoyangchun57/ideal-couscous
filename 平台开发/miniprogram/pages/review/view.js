@@ -191,12 +191,22 @@ Page({
 
   onReasonInput(e) { this.setData({ rejectReason: e.detail.value }); },
   noop() {},
-  closeReject() { this.setData({ rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' }); },
+  closeReject() {
+    if (this._submissionPhase === 'risk-reject' && this._isSubmissionFor(this.data.curId)) {
+      this._releaseSubmission(this.data.curId);
+      return;
+    }
+    this.setData({ rejectShow: false, rejectReason: '', curId: '', curType: '', curAction: '' });
+  },
 
   rejectConfirm() {
     const reason = (this.data.rejectReason || '').trim();
     if (!reason) { wx.showToast({ title: '请填写驳回原因', icon: 'none' }); return; }
-    this._dispatch(this.data.curAction || 'reject', reason);
+    const riskReasonLock = this._submissionPhase === 'risk-reject'
+      && this._isSubmissionFor(this.data.curId);
+    this._dispatch(this.data.curAction || 'reject', reason, undefined, {
+      lockAlreadyHeld: riskReasonLock
+    });
   },
 
   onApprove(e) {
@@ -250,17 +260,34 @@ Page({
     const item = this._findItem(id);
     if (!item) return;
     if (!this._guardSubmission(id)) return;
-    this.setData({ curId: id, curType: item.source_type });
     const rejectedIds = (item.reviewPhotos || [])
       .filter(photo => photo.selectedForReject).map(photo => photo.id);
     const unresolvedRiskIds = getRiskyPhotoIds(item.reviewPhotos || [], rejectedIds);
+    const riskConfirmation = unresolvedRiskIds.length > 0;
+    if (riskConfirmation) {
+      // Lock before opening the modal so a second tap cannot create another confirmation.
+      this._lockSubmission(id, 'risk-confirm', {
+        curId: id,
+        curType: item.source_type,
+        curAction: '',
+        rejectShow: false,
+        rejectReason: ''
+      });
+    } else {
+      this.setData({ curId: id, curType: item.source_type });
+    }
     const continueSubmit = () => {
-      if (!this._guardSubmission(id)) return;
+      if (riskConfirmation) {
+        if (!this._isSubmissionFor(id)) return;
+      } else if (!this._guardSubmission(id)) {
+        return;
+      }
       if (item.selectedRejectCount > 0) {
+        if (riskConfirmation) this._submissionPhase = 'risk-reject';
         this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
         return;
       }
-      this._dispatch('approve', '', id);
+      this._dispatch('approve', '', id, { lockAlreadyHeld: riskConfirmation });
     };
     if (!unresolvedRiskIds.length) {
       continueSubmit();
@@ -270,7 +297,14 @@ Page({
       title: '确认风险影像',
       content: `仍有 ${unresolvedRiskIds.length} 张系统标红影像将被通过，请确认已逐张核对。`,
       confirmText: '已核对并继续',
-      success: result => { if (result.confirm) continueSubmit(); }
+      success: result => {
+        if (result && result.confirm) {
+          continueSubmit();
+          return;
+        }
+        this._releaseSubmission(id);
+      },
+      fail: () => this._releaseSubmission(id)
     });
   },
 
@@ -297,8 +331,9 @@ Page({
     }
   },
 
-  _guardSubmission(id) {
-    const guard = getSubmissionGuard(this._submittingId || this.data.submittingId, id);
+  _guardSubmission(id, allowSameItem) {
+    const guard = getSubmissionGuard(this._submittingId || this.data.submittingId, id,
+      allowSameItem ? { allowSameItem: true } : undefined);
     if (!guard.allowed) {
       if (guard.message) wx.showToast({ title: guard.message, icon: 'none' });
       return false;
@@ -306,20 +341,49 @@ Page({
     return true;
   },
 
+  _isSubmissionFor(id) {
+    const activeId = this._submittingId || this.data.submittingId;
+    return !!activeId && String(activeId) === String(id);
+  },
+
+  _lockSubmission(id, phase, extra) {
+    this._submissionPhase = phase || 'request';
+    this._setSubmittingId(id, extra);
+  },
+
+  _releaseSubmission(id, extra) {
+    if (id !== undefined && id !== null && id !== '' && !this._isSubmissionFor(id)) return false;
+    this._setSubmittingId('', Object.assign({
+      rejectShow: false,
+      rejectReason: '',
+      curId: '',
+      curType: '',
+      curAction: ''
+    }, extra || {}));
+    return true;
+  },
+
   _setSubmittingId(id, extra) {
     const hasId = id !== undefined && id !== null && id !== '';
+    if (!hasId) this._submissionPhase = '';
+    else if (!this._submissionPhase) this._submissionPhase = 'request';
     this._submittingId = hasId ? String(id) : '';
     this.setData(Object.assign({ submittingId: hasId ? id : '' }, extra || {}));
   },
 
-  _dispatch(action, reason, itemId) {
+  _dispatch(action, reason, itemId, options) {
     const id = itemId || this.data.curId;
-    if (!this._guardSubmission(id)) return;
+    const lockAlreadyHeld = !!(options && options.lockAlreadyHeld);
+    if (lockAlreadyHeld) {
+      if (!this._isSubmissionFor(id) || this._submissionPhase === 'request') return;
+    } else if (!this._guardSubmission(id)) {
+      return;
+    }
     const item = this._findItem(id);
     if (!item) return;
     const type = item.source_type;
     const nid = numId(item.id);
-    this._setSubmittingId(item.id, { rejectShow: false });
+    this._lockSubmission(item.id, 'request', { rejectShow: false });
 
     let p;
     switch (type) {

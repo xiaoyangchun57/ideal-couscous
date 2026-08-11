@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Card, Input, Select, Button, Space, Tag, Row, Col,
-  Alert, App, Modal, Typography, Spin, Image, DatePicker,
+  Alert, App, Modal, Typography, Spin, Image, DatePicker, Descriptions,
   Tooltip, Checkbox, Segmented,
 } from 'antd';
 import {
   SearchOutlined, ReloadOutlined,
   PictureOutlined,
-  FileTextOutlined, DownloadOutlined, InboxOutlined, RollbackOutlined,
+  FileTextOutlined, DownloadOutlined, InboxOutlined, RollbackOutlined, DeleteOutlined,
   AppstoreOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
@@ -20,6 +20,9 @@ import {
   attachmentReviewStatusMap, ATTACHMENT_REVIEW_STATUS_OPTIONS,
 } from '../../services/constants';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  canSubmitAttachmentDelete, hasAdminRole, normalizeDeleteReason,
+} from './attachmentDeletion.js';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -115,7 +118,7 @@ export default function ArchivePage() {
   const { tokens } = useTheme();
   const { user } = useAuth();
   const { modal, message } = App.useApp();
-  const isAdmin = (user?.roles || [user?.role]).includes('admin');
+  const isAdmin = hasAdminRole(user);
 
   // 筛选条件
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
@@ -137,6 +140,12 @@ export default function ArchivePage() {
   const [batchArchiving, setBatchArchiving] = useState(false);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewItem, setPreviewItem] = useState(null);
+  const [deleteVisible, setDeleteVisible] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteCheckLoading, setDeleteCheckLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
 
 
   const loadSites = useCallback(async () => {
@@ -272,6 +281,66 @@ export default function ArchivePage() {
   // 打开预览
   const handlePreview = (item) => { setPreviewItem(item); setPreviewVisible(true); };
 
+  const closeDelete = () => {
+    if (deletingId) return;
+    setDeleteVisible(false);
+    setDeleteTarget(null);
+    setDeleteReason('');
+  };
+
+  const openDelete = async (item) => {
+    setDeleteTarget({ ...item, can_delete: undefined, delete_check_error: '' });
+    setDeleteReason('');
+    setDeleteError('');
+    setDeleteVisible(true);
+    setDeleteCheckLoading(true);
+    try {
+      const check = await api.getStrict(`/attachments/${item.id}/delete-check`);
+      setDeleteTarget(current => current?.id === item.id ? { ...current, ...check } : current);
+    } catch (error) {
+      setDeleteTarget(current => current?.id === item.id
+        ? { ...current, can_delete: false, delete_check_error: error.message || '删除资格校验失败' }
+        : current);
+    } finally {
+      setDeleteCheckLoading(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deletingId || deleteCheckLoading) return;
+    const reason = normalizeDeleteReason(deleteReason);
+    if (!reason) {
+      message.error('删除原因不能为空');
+      return;
+    }
+    if (!deleteTarget.can_delete) {
+      message.error(deleteTarget.block_reason || deleteTarget.delete_check_error || '当前影像不能删除');
+      return;
+    }
+    const targetId = deleteTarget.id;
+    setDeletingId(targetId);
+    try {
+      const result = await api.deleteStrict(`/attachments/${targetId}`, { reason });
+      setList(current => current.filter(item => item.id !== targetId));
+      setTotal(current => Math.max(0, current - 1));
+      setSelectedRowKeys(current => current.filter(id => id !== targetId));
+      setPreviewVisible(false);
+      setPreviewItem(null);
+      setDeleteVisible(false);
+      setDeleteTarget(null);
+      setDeleteReason('');
+      setDeleteError('');
+      message.success(result.already_deleted ? '影像已删除' : '已移出影像档案，物理文件未删除');
+      await Promise.allSettled([loadList(page), refreshStats()]);
+    } catch (error) {
+      const errorMessage = error.message || '删除失败，请检查删除条件后重试';
+      setDeleteError(errorMessage);
+      message.error(errorMessage);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   // 打开归档弹窗（填归档原因）
   const openArchive = (item) => { setArchiveTarget(item); setArchiveReason(''); setArchiveVisible(true); };
 
@@ -400,13 +469,16 @@ export default function ArchivePage() {
       ),
     },
     {
-      title: '操作', key: 'op', width: isAdmin ? 128 : 64,
+      title: '操作', key: 'op', width: isAdmin ? 164 : 64,
       render: (_, it) => (
         <Space size={4}>
           <Button type="link" size="small" aria-label={`预览 ${it.filename}`} onClick={() => handlePreview(it)}>预览</Button>
           {isAdmin && (it.archived
             ? <Button type="link" size="small" aria-label={`取消归档 ${it.filename}`} onClick={() => handleUnarchive(it)}>取消归档</Button>
             : <Button type="link" size="small" aria-label={`归档 ${it.filename}`} onClick={() => openArchive(it)}>归档</Button>)}
+          {isAdmin && <Tooltip title="移出影像档案">
+            <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`移出影像档案 ${it.filename}`} onClick={() => openDelete(it)} />
+          </Tooltip>}
         </Space>
       ),
     },
@@ -560,6 +632,8 @@ export default function ArchivePage() {
                             icon={<RollbackOutlined />} onClick={() => handleUnarchive(item)} />
                         : <Button key="archive" type="text" size="small" title="归档" aria-label={`归档 ${item.filename}`}
                             icon={<InboxOutlined />} onClick={() => openArchive(item)} />),
+                      isAdmin && <Button key="delete" type="text" danger size="small" title="移出影像档案" aria-label={`移出影像档案 ${item.filename}`}
+                        icon={<DeleteOutlined />} onClick={() => openDelete(item)} />,
                     ].filter(Boolean)}
                   >
                     <Card.Meta
@@ -623,6 +697,7 @@ export default function ArchivePage() {
             {isAdmin && (previewItem.archived
               ? <Button icon={<RollbackOutlined />} onClick={() => { setPreviewVisible(false); handleUnarchive(previewItem); }}>取消归档</Button>
               : <Button icon={<InboxOutlined />} onClick={() => { setPreviewVisible(false); openArchive(previewItem); }}>归档</Button>)}
+            {isAdmin && <Button danger icon={<DeleteOutlined />} onClick={() => { setPreviewVisible(false); openDelete(previewItem); }}>移出影像档案</Button>}
           </Space>
         ) : null}
         width={800}
@@ -678,6 +753,61 @@ export default function ArchivePage() {
               </Row>
             </Card>
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        title={<Space><DeleteOutlined />移出影像档案</Space>}
+        open={deleteVisible}
+        onCancel={closeDelete}
+        onOk={confirmDelete}
+        okText="确认删除"
+        cancelText="取消"
+        confirmLoading={Boolean(deletingId)}
+        okButtonProps={{
+          danger: true,
+          disabled: deleteCheckLoading || !canSubmitAttachmentDelete(deleteTarget, deleteReason, Boolean(deletingId)),
+        }}
+        closable={!deletingId}
+        maskClosable={!deletingId}
+        destroyOnHidden
+      >
+        {deleteTarget && (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="文件名">{deleteTarget.filename || '-'}</Descriptions.Item>
+              <Descriptions.Item label="站点">{deleteTarget.site_name || '-'}</Descriptions.Item>
+              <Descriptions.Item label="来源">{sourceLabel(deleteTarget.source_type)}</Descriptions.Item>
+              <Descriptions.Item label="上传人 / 时间">
+                {uploaderOf(deleteTarget)} / {deleteTarget.created_at || deleteTarget.taken_at || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="影响">
+                {deleteCheckLoading ? '正在读取服务端删除资格和影响...' : (deleteTarget.impact || deleteTarget.delete_check_error || '-')}
+              </Descriptions.Item>
+            </Descriptions>
+            {deleteTarget.block_reason && (
+              <Alert type="error" showIcon message={deleteTarget.block_reason} />
+            )}
+            {!deleteTarget.block_reason && !deleteCheckLoading && (
+              <Alert
+                type="warning"
+                showIcon
+                message="仅移出影像档案，不会删除物理文件、业务记录或消息历史。"
+              />
+            )}
+            {deleteError && <Alert type="error" showIcon message={deleteError} />}
+            <Input.TextArea
+              rows={3}
+              value={deleteReason}
+              onChange={event => setDeleteReason(event.target.value)}
+              placeholder="请填写删除原因（必填），例如：测试误传，未绑定正式业务"
+              maxLength={200}
+              showCount
+              aria-label="删除原因"
+              aria-required="true"
+              disabled={Boolean(deletingId)}
+            />
+          </Space>
         )}
       </Modal>
 
