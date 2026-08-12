@@ -75,6 +75,8 @@ class AttachmentVoidClosureTest(unittest.TestCase):
                     is_flagged INTEGER DEFAULT 0, flag_reason TEXT DEFAULT '', flag_rule TEXT DEFAULT '',
                     capture_source TEXT DEFAULT 'camera', sha256_hash TEXT DEFAULT '', duplicate_of_id INTEGER,
                     perceptual_hash TEXT DEFAULT '', watermark_code TEXT DEFAULT '', review_status TEXT DEFAULT 'pending',
+                    evidence_qualification TEXT DEFAULT 'qualified', evidence_basis TEXT DEFAULT 'camera_session',
+                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT '',
                     reviewer_id INTEGER, reviewed_at TEXT, reject_reason TEXT DEFAULT '', requirement_id INTEGER,
                     deleted_at TEXT, deleted_by INTEGER, delete_reason TEXT DEFAULT '', archive_name TEXT DEFAULT '',
                     voided_at TEXT, voided_by INTEGER, void_reason TEXT DEFAULT '');
@@ -265,6 +267,25 @@ class AttachmentVoidClosureTest(unittest.TestCase):
         item = self.db_value('SELECT evidence_status, review_status, actual_photos FROM insp_plan_items WHERE id=101')
         self.assertEqual((item['evidence_status'], item['review_status'], item['actual_photos']), ('effective', 2, 2))
         self.assertEqual(self.db_value('SELECT review_status FROM operation_attachments WHERE id=10')['review_status'], 'voided')
+
+    def test_rejected_replacement_keeps_item_out_of_reviewer_state(self):
+        self.assertEqual(self.client.post('/api/attachments/10/void', headers=self.headers('reviewer-token'), json={
+            'reason': 'TEST_MEDIA_FIX_需要替代证据'}).status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET evidence_status='replacement_submitted', review_status=1 WHERE id=101")
+            db.execute('''
+                INSERT INTO operation_attachments
+                (id, filename, stored_path, description, source_type, source_id, site_id,
+                 uploader_id, uploader_name, category, review_required, review_status)
+                VALUES (20, 'TEST_MEDIA_FIX_replacement.jpg', '/uploads/TEST_MEDIA_FIX_replacement.jpg',
+                        '温度', 'inspection', 101, 1, 2, '执行人', '现场照片', 1, 'pending')
+            ''')
+        response = self.client.post('/api/operation-attachments/review', headers=self.headers('reviewer-token'), json={
+            'reject_ids': [20], 'approve_ids': [], 'reject_reason': 'TEST_MEDIA_FIX_仍需重拍',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        item = self.db_value('SELECT evidence_status, review_status FROM insp_plan_items WHERE id=101')
+        self.assertEqual((item['evidence_status'], item['review_status']), ('supplement_required', 3))
 
 
 if __name__ == '__main__':

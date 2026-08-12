@@ -115,6 +115,9 @@ class InspectionAuditUnitTest(unittest.TestCase):
                     (202, '/uploads/c.jpg', 1, 2, 'Pump', 'c.jpg', 'pending', NULL, NULL, NULL,
                      'inspection', 101, 0, 1, datetime('now'), 'watermark-c', 'pump', '{"ocr_status":"unreadable"}',
                      datetime('now'), 1, 'missing watermark', 'watermark', 'camera', 'image', '', '', NULL);
+                ALTER TABLE operation_attachments ADD COLUMN evidence_qualification TEXT DEFAULT 'qualified';
+                ALTER TABLE operation_attachments ADD COLUMN evidence_reason TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN evidence_next_action TEXT DEFAULT '';
             ''')
         self.client = app_module.app.test_client()
 
@@ -143,9 +146,6 @@ class InspectionAuditUnitTest(unittest.TestCase):
         for photo in card['attachment_details']:
             self.assertTrue(photo['item_id'])
             self.assertTrue(photo['item_name'])
-            self.assertIn('watermark_status', photo)
-            self.assertIn('is_flagged', photo)
-            self.assertIn('flag_reason', photo)
         with app_module.get_db() as db:
             notices = db.execute("""SELECT COUNT(*) FROM notifications
                 WHERE source_type='inspection_review_batch' AND source_id='insp_batch_10_1'""").fetchone()[0]
@@ -204,7 +204,7 @@ class InspectionAuditUnitTest(unittest.TestCase):
             notification = db.execute("""SELECT is_read FROM notifications
                 WHERE source_type='inspection_review_batch' AND source_id='insp_batch_10_1'""").fetchone()
         self.assertEqual(attachments, {200: 'rejected', 201: 'approved', 202: 'approved'})
-        self.assertEqual((items[100]['result'], items[100]['review_status']), (None, 3))
+        self.assertEqual((items[100]['result'], items[100]['review_status']), ('normal', 3))
         self.assertTrue(items[100]['rework_required_at'])
         self.assertEqual((items[101]['result'], items[101]['review_status']), ('normal', 2))
         self.assertEqual(notification['is_read'], 1)
@@ -234,23 +234,38 @@ class InspectionAuditUnitTest(unittest.TestCase):
                          ('inspection_rework', '10'))
         self.assertIn('2', notices[0]['content'])
 
-    def test_unlinked_noninspection_attachment_keeps_photo_notification(self):
+    def test_unlinked_noninspection_attachment_is_not_reviewable_or_listed(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO operation_attachments
                 (id,stored_path,site_id,uploader_id,description,filename,review_status,
                  source_type,source_id,is_deleted,review_required,file_type,created_at)
                 VALUES (203,'/uploads/unlinked.jpg',1,2,'Site note','unlinked.jpg','pending',
                         'site_photo',0,0,1,'image',datetime('now'))""")
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        self.assertFalse(any(203 in (item.get('attachment_ids') or []) for item in pending.json))
         response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
             'attachment_ids': [203], 'action': 'reject', 'reject_reason': 'Retake note image',
         })
-        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'ATTACHMENT_ITEM_REQUIRED')
         with app_module.get_db() as db:
-            notice = db.execute("""SELECT source_type,source_id FROM notifications
-                WHERE user_id=2 AND is_read=0""").fetchone()
-        self.assertEqual((notice['source_type'], notice['source_id']), ('photo_review', '203'))
+            status = db.execute('SELECT review_status FROM operation_attachments WHERE id=203').fetchone()[0]
+        self.assertEqual(status, 'pending')
 
-    def test_legacy_per_photo_notifications_are_archived_into_one_site_batch(self):
+    def test_replacement_required_item_without_pending_attachment_is_not_a_review_batch(self):
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
+            db.execute("UPDATE insp_plan_items SET review_status=1, evidence_status='supplement_required' WHERE id=100")
+            db.execute("UPDATE operation_attachments SET review_status='rejected' WHERE source_type='inspection' AND source_id IN (100, 101)")
+        response = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertFalse(any(
+            card['source_type'] == 'inspection_batch' and card.get('plan_id') == 10
+            for card in response.json
+        ))
+
+    def test_legacy_per_photo_notifications_are_archived_without_new_batch(self):
         with app_module.get_db() as db:
             db.executemany("""INSERT INTO notifications
                 (user_id, source_type, source_id, title, content, is_read)
@@ -264,7 +279,7 @@ class InspectionAuditUnitTest(unittest.TestCase):
             batches = db.execute("""SELECT source_id, is_read FROM notifications
                 WHERE source_type='attachment_review_batch'""").fetchall()
         self.assertEqual(legacy_unread, 0)
-        self.assertEqual([(row['source_id'], row['is_read']) for row in batches], [('1', 0)])
+        self.assertEqual([(row['source_id'], row['is_read']) for row in batches], [])
 
 
 if __name__ == '__main__':

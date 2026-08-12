@@ -2,7 +2,7 @@ const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
-const { chooseAndCompress, fileToBase64, captureFlushedPhoto } = require('../../utils/photos.js');
+const { chooseInspectionPhotos, fileToBase64, captureFlushedPhoto } = require('../../utils/photos.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
@@ -201,11 +201,21 @@ Page({
     if (!item) return;
     const remain = 6 - (item.images_arr ? item.images_arr.length : 0);
     if (remain <= 0) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
-    chooseAndCompress(remain)
-      .then(paths => {
+    requestLocation()
+      .then(gps => api.createPhotoCaptureSession({
+        site_id: item.site_id, order_no: item.order_no,
+        gps_lat: gps.lat, gps_lng: gps.lng,
+      }).then(session => chooseInspectionPhotos(1, 'camera')
+        .then(paths => ({ paths, session, gps }))))
+      .then(({ paths, session, gps }) => {
         if (!paths.length) return;
         wx.showLoading({ title: '上传中' });
-        const tasks = paths.map(p => fileToBase64(p).then(b64 => api.uploadWorkorderImage(item.order_no, b64).then(r => resolveUploadUrl(r.url))));
+        const tasks = paths.map(p => fileToBase64(p).then(b64 => api.uploadWorkorderImage(
+          item.order_no, b64, {
+            capture_source: 'camera', capture_session: session.capture_session, taken_at: nowStr(),
+            ...(gps ? { gps_lat: gps.lat, gps_lng: gps.lng } : {}),
+          }
+        ).then(r => resolveUploadUrl(r.url))));
         Promise.allSettled(tasks).then(results => {
           wx.hideLoading();
           const urls = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);

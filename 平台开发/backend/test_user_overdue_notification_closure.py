@@ -206,13 +206,13 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         self.assertEqual(capped.status_code, 200, capped.json)
         self.assertEqual(capped.json['limit'], 100)
 
-    def test_read_photo_batch_does_not_reappear_until_a_new_photo_arrives(self):
+    def test_legacy_photo_batch_is_archived_and_never_reappears(self):
         with app_module.get_db() as db:
             db.execute("INSERT INTO operation_attachments (id,site_id) VALUES (10,1)")
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (1,'attachment_review_batch',1,'旧影像待审','',0)""")
             app_module._notify_attachment_reviewers(db, 1, 10, '测试站影像')
-            batch = db.execute("""SELECT id FROM notifications
-                WHERE source_type='attachment_review_batch'""").fetchone()
-            db.execute('UPDATE notifications SET is_read=1 WHERE id=?', (batch['id'],))
 
         for _ in range(3):
             response = self.client.get('/api/notifications?status=unread', headers=self.headers())
@@ -232,8 +232,8 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         with app_module.get_db() as db:
             batches = db.execute("""SELECT is_read FROM notifications
                 WHERE source_type='attachment_review_batch' ORDER BY id""").fetchall()
-        self.assertEqual(len(batches), 2)
-        self.assertEqual([row['is_read'] for row in batches], [1, 0])
+        self.assertEqual(len(batches), 1)
+        self.assertEqual([row['is_read'] for row in batches], [1])
 
     def test_unread_dedupe_migration_archives_older_duplicates_and_enforces_uniqueness(self):
         with app_module.get_db() as db:

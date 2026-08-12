@@ -68,7 +68,7 @@
             <block wx:elif="{{it.source_type === 'inspection_batch'}}">
               <text class="detail-label">待审检查项</text>
               <view wx:for="{{it.itemDetails}}" wx:for-item="checkItem" wx:key="id" class="inspection-item">
-                <view class="inspection-item-head"><text>{{checkItem.item_name}}</text><text class="item-result">{{checkItem.result || '已提交'}}</text></view>
+                <view class="inspection-item-head"><text>{{checkItem.item_name}}</text></view>
                 <text class="detail-muted" wx:if="{{checkItem.remark}}">备注：{{checkItem.remark}}</text>
               </view>
             </block>
@@ -103,20 +103,17 @@
               <text class="detail-label" wx:if="{{it.flag_reason}}">风险提示</text>
               <text class="detail-text detail-risk" wx:if="{{it.flag_reason}}">{{it.flag_reason}}</text>
             </block>
-            <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
-              <text class="photo-select-hint">勾选需驳回的照片，未勾选照片将一次通过</text>
+            <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch' || it.source_type === 'workorder_review') && it.reviewPhotos.length}}">
+              <text class="photo-select-hint" wx:if="{{it.source_type !== 'workorder_review'}}">勾选内容不符合要求、需要替换的照片</text>
               <view class="review-photos">
                 <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="review-photo-wrap {{photo.selectedForReject ? 'review-photo-reject' : ''}}">
                   <image class="review-photo" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
-                  <view class="photo-select" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">{{photo.selectedForReject ? '已选驳回' : '选择驳回'}}</view>
+                  <view class="photo-select" wx:if="{{it.source_type !== 'workorder_review'}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">{{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}</view>
                   <text class="photo-meta photo-item-name">检查项：{{photo.itemLabel}}</text>
                   <text class="photo-meta" wx:if="{{photo.archiveName}}">档案名称：{{photo.archiveName}}</text>
                   <text class="photo-meta" wx:if="{{photo.originalFilename}}">原始文件名：{{photo.originalFilename}}</text>
                   <text class="photo-meta">主状态：{{photo.primaryStatusLabel}}</text>
-                  <text class="photo-meta">自动归类：{{photo.categoryLabel}}（{{photo.classificationLabel}}）</text>
-                  <text class="photo-meta">水印核验：{{photo.watermarkStatusLabel}}</text>
-                  <text class="photo-watermark" wx:if="{{photo.watermark_text}}">识别文字：{{photo.watermark_text}}</text>
-                  <text class="photo-risk" wx:if="{{photo.riskLabel || photo.flag_reason}}">{{photo.riskLabel || photo.flag_reason}}</text>
+                  <text class="photo-meta">拍摄时间：{{photo.takenAt || '未记录'}}</text>
                 </view>
               </view>
             </block>

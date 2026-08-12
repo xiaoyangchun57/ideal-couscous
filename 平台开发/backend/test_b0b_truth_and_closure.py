@@ -74,7 +74,9 @@ class B0BTruthAndClosureTest(unittest.TestCase):
                     extra_json TEXT, created_at TEXT, is_deleted INTEGER DEFAULT 0,
                     review_status TEXT, reviewer_id INTEGER, reviewed_at TEXT, reject_reason TEXT,
                     review_required INTEGER DEFAULT 0, is_flagged INTEGER DEFAULT 0,
-                    flag_reason TEXT DEFAULT '', taken_at TEXT, duplicate_of_id INTEGER
+                    flag_reason TEXT DEFAULT '', taken_at TEXT, duplicate_of_id INTEGER,
+                    evidence_qualification TEXT DEFAULT 'qualified',
+                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT ''
                 );
                 CREATE TABLE reagent_records (
                     id INTEGER PRIMARY KEY, site_id INTEGER, reagent_name TEXT, reagent_type TEXT,
@@ -231,6 +233,9 @@ class B0BTruthAndClosureTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 200, rejected.json)
         with self.temporary_db() as db:
             db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-B0B-001'")
+            db.execute("""UPDATE operation_attachments
+                SET review_status='pending', reject_reason=NULL
+                WHERE source_type='workorder' AND source_id=1""")
             db.commit()
         approved = self.client.post('/api/workorders/WO-B0B-001/approve', headers=self.headers('reviewer-token'), json={})
         self.assertEqual(approved.status_code, 200, approved.json)

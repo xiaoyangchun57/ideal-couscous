@@ -4,9 +4,9 @@ import { getAuditAllowedTabs, getAuditColumnKeys, getAuditColumnProfile } from '
 
 test('administrator navigation keeps every rendered approval tab reachable', () => {
   assert.deepEqual(getAuditAllowedTabs(['admin', 'operator']), [
-    'data', 'inspection', 'plan', 'workorder', 'parts', 'vehicle', 'photo',
+    'data', 'inspection', 'plan', 'workorder', 'parts', 'vehicle',
   ]);
-  assert.deepEqual(getAuditAllowedTabs(['reviewer']), ['data', 'inspection', 'workorder', 'photo']);
+  assert.deepEqual(getAuditAllowedTabs(['reviewer']), ['data', 'inspection', 'workorder']);
   assert.deepEqual(getAuditAllowedTabs(['operator']), []);
 });
 
@@ -24,8 +24,8 @@ test('vehicle approval uses request-focused columns instead of photos', () => {
   assert.equal(getAuditColumnKeys(['vehicle_application']).includes('photos'), false);
 });
 
-test('workorder and image review retain the thumbnail-oriented photo column', () => {
-  assert.equal(getAuditColumnKeys(['photo_review']).includes('photos'), true);
+test('workorder and inspection item review retain the thumbnail-oriented photo column', () => {
+  assert.equal(getAuditColumnKeys(['inspection_batch']).includes('photos'), true);
   assert.equal(getAuditColumnKeys(['workorder_review']).includes('photos'), true);
 });
 

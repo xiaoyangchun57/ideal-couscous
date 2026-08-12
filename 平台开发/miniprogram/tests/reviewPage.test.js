@@ -50,8 +50,8 @@ function riskyItem(id, selectedRejectCount = 0) {
     attachment_ids: [11, 12],
     selectedRejectCount,
     reviewPhotos: [
-      { id: 11, is_flagged: 1, flag_reason: 'GPS偏离', selectedForReject: false },
-      { id: 12, selectedForReject: selectedRejectCount > 0 }
+      { id: 11, is_flagged: 1, flag_reason: 'GPS偏离', evidence_qualification: 'qualified', selectedForReject: false },
+      { id: 12, evidence_qualification: 'qualified', selectedForReject: selectedRejectCount > 0 }
     ]
   };
 }
@@ -99,74 +99,23 @@ async function main() {
     resetObservations();
     requestCount = 0;
     request = deferred();
-    const cancelPage = makePage(riskyItem('photo_cancel'));
-    cancelPage.onSubmitPhotoReview(eventFor('photo_cancel'));
-    cancelPage.onSubmitPhotoReview(eventFor('photo_cancel'));
-    assert.equal(modalCalls.length, 1, 'rapid taps should open only one risk confirmation');
-    assert.equal(cancelPage.data.submittingId, 'photo_cancel', 'risk confirmation should lock the item');
-    modalCalls[0].success({ confirm: false, cancel: true });
-    assert.equal(cancelPage.data.submittingId, '', 'cancel should release the risk lock');
-    cancelPage.onSubmitPhotoReview(eventFor('photo_cancel'));
-    assert.equal(modalCalls.length, 2, 'cancelled risk confirmation should be retryable');
-
-    resetObservations();
-    const failModalPage = makePage(riskyItem('photo_modal_fail'));
-    failModalPage.onSubmitPhotoReview(eventFor('photo_modal_fail'));
-    modalCalls[0].fail({ errMsg: 'showModal:fail' });
-    assert.equal(failModalPage.data.submittingId, '', 'modal failure should release the risk lock');
-
-    resetObservations();
-    requestCount = 0;
-    request = deferred();
-    const approvePage = makePage(riskyItem('photo_approve'));
-    approvePage.onSubmitPhotoReview(eventFor('photo_approve'));
-    const riskModal = modalCalls[0];
-    riskModal.success({ confirm: true, cancel: false });
-    assert.equal(requestCount, 1, 'risk confirmation should dispatch one request');
-    assert.equal(approvePage.data.submittingId, 'photo_approve', 'confirmed review should retain the same lock');
-    approvePage.onSubmitPhotoReview(eventFor('photo_approve'));
-    riskModal.success({ confirm: true, cancel: false });
-    assert.equal(modalCalls.length, 1, 'confirmed request should block later confirmation dialogs');
-    assert.equal(requestCount, 1, 'repeated confirmation should not duplicate the request');
-    request.resolve({ ok: true });
-    await flushPromises();
-    assert.equal(approvePage.data.submittingId, '', 'successful request should release the lock');
-
-    resetObservations();
-    request = deferred();
-    api.reviewPhoto = () => { requestCount += 1; return request.promise; };
-    const errorPage = makePage(riskyItem('photo_error'));
-    errorPage.onSubmitPhotoReview(eventFor('photo_error'));
-    modalCalls[0].success({ confirm: true });
-    request.reject({ error: '服务拒绝' });
-    await flushPromises();
-    assert.equal(errorPage.data.submittingId, '', 'failed request should release the lock');
-    assert.equal(modalCalls.length, 2, 'failed request should show the failure reason');
-    assert.match(modalCalls[1].content, /服务拒绝/);
-    errorPage.onSubmitPhotoReview(eventFor('photo_error'));
-    assert.equal(modalCalls.length, 3, 'failed review should be retryable');
-
-    resetObservations();
-    requestCount = 0;
-    request = deferred();
     api.reviewPhotoSelection = () => { requestCount += 1; return request.promise; };
     const selectivePage = makePage(riskyItem('photo_selective', 1));
+    selectivePage.data.groups[0].items[0].reviewPhotos[1].evidence_qualification = 'ineligible';
     selectivePage.onSubmitPhotoReview(eventFor('photo_selective'));
-    modalCalls[0].success({ confirm: true });
-    assert.equal(selectivePage.data.rejectShow, true, 'confirmed selective review should open its reason sheet');
-    assert.equal(selectivePage.data.submittingId, 'photo_selective', 'reason sheet should retain the same lock');
+    assert.equal(selectivePage.data.rejectShow, true, 'rejecting the nonqualified photo should open its reason sheet');
     selectivePage.closeReject();
-    assert.equal(selectivePage.data.submittingId, '', 'closing the reason sheet should release the risk lock');
+    assert.equal(selectivePage.data.submittingId, '', 'closing the reason sheet should leave submission unlocked');
 
     resetObservations();
     request = deferred();
     const selectiveSubmitPage = makePage(riskyItem('photo_selective_submit', 1));
+    selectiveSubmitPage.data.groups[0].items[0].reviewPhotos[1].evidence_qualification = 'ineligible';
     selectiveSubmitPage.onSubmitPhotoReview(eventFor('photo_selective_submit'));
-    modalCalls[0].success({ confirm: true });
     selectiveSubmitPage.data.rejectReason = '影像不完整';
     selectiveSubmitPage.rejectConfirm();
     selectiveSubmitPage.rejectConfirm();
-    assert.equal(requestCount, 1, 'confirmed selective review should issue one request');
+    assert.equal(requestCount, 1, 'selective rejection should issue one request');
     request.resolve({ ok: true });
     await flushPromises();
     assert.equal(selectiveSubmitPage.data.submittingId, '');

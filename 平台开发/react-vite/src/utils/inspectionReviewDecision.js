@@ -30,18 +30,13 @@ export function getRiskyPhotoIds(photos, options = {}) {
     .map((photo) => photo.id)));
 }
 
-export function canApprovePhotoReview(photos, riskAcknowledged, options = {}) {
-  return getRiskyPhotoIds(photos, options).length === 0 || Boolean(riskAcknowledged);
-}
-
-export function getRiskAcknowledgementLabel(count) {
-  return `已核对 ${Number(count) || 0} 张风险影像`;
-}
-
-export function autoPassNormalCount(items) {
-  return (items || []).flatMap((item) => item?.source_type === 'photo_review'
-    ? (item.attachment_details || []) : [])
-    .filter((photo) => photo?.review_status === 'pending' && !photo?.is_flagged && !photo?.flag_reason).length;
+export function getUnqualifiedPhotoIds(photos, rejectedPhotoIds = []) {
+  const rejected = new Set((rejectedPhotoIds || []).map(String));
+  return Array.from(new Set((photos || [])
+    .filter((photo) => photo && photo.id !== undefined && photo.id !== null)
+    .filter((photo) => !rejected.has(String(photo.id)))
+    .filter((photo) => photo.evidence_qualification !== 'qualified')
+    .map((photo) => photo.id)));
 }
 
 export function failedApprovalPhotoIds(photos, rejectedPhotoIds, failedPhotoIds) {

@@ -7,6 +7,7 @@ import {
   attachmentResourceState,
   archiveStatusLayout,
   archivePrimaryTitle,
+  archiveSecondaryMeta,
   hasAdminRole,
   hasReviewerRole,
   isFormalAttachment,
@@ -19,6 +20,12 @@ test('only a real admin role exposes the deletion capability', () => {
   assert.equal(hasAdminRole({ roles: ['reviewer'] }), false);
   assert.equal(hasAdminRole({ role: 'operator' }), false);
   assert.equal(hasAdminRole({ roles: [] }), false);
+});
+
+test('archive metadata keeps capture and upload timestamps semantically separate', () => {
+  assert.deepEqual(archiveSecondaryMeta({
+    site_name: 'Site A', category: 'photo', taken_at: null, created_at: '2026-08-12 10:10:00',
+  }), ['Site A', 'photo', '拍摄时间待确认', '上传：2026-08-12 10:10:00']);
 });
 
 test('delete reasons reject empty and whitespace-only values', () => {

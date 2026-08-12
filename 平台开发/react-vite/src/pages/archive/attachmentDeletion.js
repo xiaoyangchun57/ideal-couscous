@@ -30,7 +30,9 @@ export function archivePrimaryTitle(target) {
 }
 
 export function archiveSecondaryMeta(target) {
-  return [target?.site_name, target?.category || target?.source_type, target?.taken_at || target?.created_at]
+  return [target?.site_name, target?.category || target?.source_type,
+    target?.taken_at ? `拍摄：${target.taken_at}` : '拍摄时间待确认',
+    target?.created_at ? `上传：${target.created_at}` : '上传时间未记录']
     .filter(Boolean);
 }
 
@@ -49,7 +51,7 @@ export function archiveStatusLayout() {
 
 export function voidEligibility(target, user, submitting = false) {
   if (submitting) return { allowed: false, reason: '正在提交作废请求' };
-  if (!hasReviewerRole(user)) return { allowed: false, reason: '当前账号没有影像审核权限' };
+  if (!hasReviewerRole(user)) return { allowed: false, reason: '当前账号没有影像管理权限' };
   if (target?.review_status !== 'approved') return { allowed: false, reason: '仅已通过的正式证据可以作废' };
   if (target?.association_status !== 'linked') return { allowed: false, reason: '该影像未可信关联检查项，不能作废证据' };
   if (target?.archived === true || target?.archived === 1 || target?.archived === '1') return { allowed: false, reason: '已归档业务不能在此处作废' };

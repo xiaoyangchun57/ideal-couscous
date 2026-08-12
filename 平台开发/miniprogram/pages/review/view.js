@@ -1,10 +1,7 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
-const {
-  approveItemIdsForPhotoSelection,
-  getRiskyPhotoIds
-} = require('../../utils/inspectionReviewDecision.js');
+const { approveItemIdsForPhotoSelection } = require('../../utils/inspectionReviewDecision.js');
 const { findReviewItem } = require('../../utils/notificationTarget.js');
 const {
   getSubmissionGuard,
@@ -35,12 +32,6 @@ function parsePhotoUrls(value) {
     const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) { return []; }
-}
-
-function watermarkStatusLabel(status, captureSource) {
-  if (captureSource !== 'watermark_album') return '非水印相册来源';
-  if (status === 'recognized') return '水印文字已自动识别';
-  return '水印自动识别未确认，请结合原图人工查看';
 }
 
 function decorateItem(item) {
@@ -86,13 +77,10 @@ function decorateItem(item) {
   const reviewPhotos = details.map(detail => Object.assign({}, detail, {
     url: resolveUploadUrl(detail.stored_path),
     itemLabel: detail.item_name || '检查项待确认',
-    categoryLabel: detail.recognized_category || '影像待归类',
-    classificationLabel: detail.classification_source === 'inspection_item' ? '按检查项自动归类' : '未可靠关联，不猜测',
     archiveName: detail.archive_name || '',
     originalFilename: detail.original_filename || detail.filename || '',
     primaryStatusLabel: detail.review_status_label || '待审核',
-    riskLabel: detail.risk_label || (detail.is_flagged ? '风险标记' : ''),
-    watermarkStatusLabel: watermarkStatusLabel(detail.watermark_status, detail.capture_source),
+    takenAt: detail.taken_at || '',
     selectedForReject: false
   }));
   return Object.assign({}, item, {
@@ -264,52 +252,12 @@ Page({
     const item = this._findItem(id);
     if (!item) return;
     if (!this._guardSubmission(id)) return;
-    const rejectedIds = (item.reviewPhotos || [])
-      .filter(photo => photo.selectedForReject).map(photo => photo.id);
-    const unresolvedRiskIds = getRiskyPhotoIds(item.reviewPhotos || [], rejectedIds);
-    const riskConfirmation = unresolvedRiskIds.length > 0;
-    if (riskConfirmation) {
-      // Lock before opening the modal so a second tap cannot create another confirmation.
-      this._lockSubmission(id, 'risk-confirm', {
-        curId: id,
-        curType: item.source_type,
-        curAction: '',
-        rejectShow: false,
-        rejectReason: ''
-      });
-    } else {
-      this.setData({ curId: id, curType: item.source_type });
-    }
-    const continueSubmit = () => {
-      if (riskConfirmation) {
-        if (!this._isSubmissionFor(id)) return;
-      } else if (!this._guardSubmission(id)) {
-        return;
-      }
-      if (item.selectedRejectCount > 0) {
-        if (riskConfirmation) this._submissionPhase = 'risk-reject';
-        this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
-        return;
-      }
-      this._dispatch('approve', '', id, { lockAlreadyHeld: riskConfirmation });
-    };
-    if (!unresolvedRiskIds.length) {
-      continueSubmit();
+    this.setData({ curId: id, curType: item.source_type });
+    if (item.selectedRejectCount > 0) {
+      this.setData({ rejectShow: true, rejectReason: '', curAction: 'selective' });
       return;
     }
-    wx.showModal({
-      title: '确认风险影像',
-      content: `仍有 ${unresolvedRiskIds.length} 张系统标红影像将被通过，请确认已逐张核对。`,
-      confirmText: '已核对并继续',
-      success: result => {
-        if (result && result.confirm) {
-          continueSubmit();
-          return;
-        }
-        this._releaseSubmission(id);
-      },
-      fail: () => this._releaseSubmission(id)
-    });
+    this._dispatch('approve', '', id);
   },
 
   _findItem(id) {
@@ -449,36 +397,9 @@ Page({
       this._setSubmittingId('', {
         rejectShow: action === 'reject' || action === 'selective'
       });
-      if ((type === 'workorder_review' || type === 'workorder_status') && action === 'approve'
-          && err && err.code === 'EVIDENCE_ACKNOWLEDGEMENT_REQUIRED') {
-        wx.showModal({
-          title: '请确认影像风险',
-          content: err.error || '影像存在重复或拍摄信息不完整，请查看详情后确认继续通过。',
-          confirmText: '确认通过',
-          success: result => {
-            if (!result.confirm) return;
-            this._retryWorkorderApproval(item);
-          }
-        });
-        return;
-      }
-      wx.showModal({ title: '操作失败', content: getRetryErrorMessage(err), showCancel: false });
+      const retryMessage = getRetryErrorMessage(err);
+      wx.showModal({ title: '操作失败', content: retryMessage, showCancel: false });
     });
-  },
-
-  _retryWorkorderApproval(item) {
-    if (!item || !this._guardSubmission(item.id)) return;
-    this._setSubmittingId(item.id, { rejectShow: false });
-    api.approveWorkorder(item.order_no, { evidence_acknowledged: true })
-      .then(() => {
-        wx.showToast({ title: '已通过', icon: 'success' });
-        this._setSubmittingId('', { curId: '', curType: '', curAction: '' });
-        this.load();
-      })
-      .catch(err => {
-        this._setSubmittingId('');
-        wx.showModal({ title: '操作失败', content: getRetryErrorMessage(err), showCancel: false });
-      });
   },
 
   goBack() { wx.navigateBack({ delta: 1 }); }

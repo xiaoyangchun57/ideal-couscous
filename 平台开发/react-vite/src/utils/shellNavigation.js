@@ -103,20 +103,17 @@ export function getNotificationTarget(item, roles) {
     case 'replacement_review':
       return attachmentSupplementTarget(item, roles);
     case 'photo_review':
-      return hasAnyRole(roles, ['admin', 'reviewer'])
-        ? buildAuditTargetPath('photo', 'photo', sourceId, item.source_type)
-        : null;
     case 'attachment_review':
       return hasAnyRole(roles, ['admin', 'reviewer'])
-        ? buildAuditTargetPath('photo', 'photo', sourceId, item.source_type)
+        ? buildAuditTargetPath('inspection', 'photo', sourceId, item.source_type)
         : null;
     case 'attachment_review_batch':
       if (!hasAnyRole(roles, ['admin', 'reviewer'])) return null;
       {
         const attachmentIds = notificationPayload(item).pending_attachment_ids;
         return Array.isArray(attachmentIds) && attachmentIds.length
-          ? buildAuditTargetPath('photo', 'photos', attachmentIds.join(','), item.source_type)
-          : buildAuditTargetPath('photo', 'site', sourceId, item.source_type);
+          ? buildAuditTargetPath('inspection', 'photos', attachmentIds.join(','), item.source_type)
+          : buildAuditTargetPath('inspection', 'site', sourceId, item.source_type);
       }
     case 'data_review':
       return hasAnyRole(roles, ['admin', 'reviewer'])
@@ -184,6 +181,9 @@ export function getAuditTargetFromSearchParams(searchParams) {
     ['plan', 'plan_change', 'plan'],
     ['inspection', 'inspection_batch', 'inspection_batch'],
     ['inspection', 'inspection', 'inspection'],
+    ['inspection', 'photo', 'photo'],
+    ['inspection', 'photos', 'photos'],
+    ['inspection', 'site', 'site'],
     ['photo', 'photo', 'photo'],
     ['photo', 'photos', 'photos'],
     ['photo', 'site', 'site'],
@@ -293,17 +293,17 @@ export function resolveAuditTarget(items, target) {
           && (matchesPrefixedId(candidate.id, targetValue, 'insp_')
             || (candidate.item_ids || []).some((id) => matchesValue(id, targetValue)));
       case 'photo':
-        return ['photo_review', 'inspection_batch'].includes(candidate.source_type)
+        return candidate.source_type === 'inspection_batch'
           && ((candidate.attachment_ids || []).some((id) => matchesValue(id, targetValue))
             || (candidate.attachment_details || []).some((photo) => matchesValue(photo.id, targetValue)));
       case 'photos': {
         const targetIds = new Set(targetValue.split(',').filter(Boolean));
-        return ['photo_review', 'inspection_batch'].includes(candidate.source_type)
+        return candidate.source_type === 'inspection_batch'
           && ((candidate.attachment_ids || []).some((id) => targetIds.has(String(id)))
             || (candidate.attachment_details || []).some((photo) => targetIds.has(String(photo.id))));
       }
       case 'site':
-        return candidate.source_type === 'photo_review' && matchesValue(candidate.site_id, targetValue);
+        return candidate.source_type === 'inspection_batch' && matchesValue(candidate.site_id, targetValue);
       case 'request':
         if (target.requestType || (targetValue.startsWith('pr_') || targetValue.startsWith('spr_'))) return false;
         return ['parts_request', 'vehicle_application'].includes(candidate.source_type)

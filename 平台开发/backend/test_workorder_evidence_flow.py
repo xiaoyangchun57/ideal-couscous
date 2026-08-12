@@ -66,7 +66,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     flag_reason TEXT DEFAULT '', flag_rule TEXT DEFAULT '', review_status TEXT,
                     reviewer_id INTEGER, reviewed_at TEXT, reject_reason TEXT,
                     capture_source TEXT, sha256_hash TEXT DEFAULT '', duplicate_of_id INTEGER,
-                    perceptual_hash TEXT DEFAULT ''
+                    perceptual_hash TEXT DEFAULT '', evidence_qualification TEXT DEFAULT 'review',
+                    evidence_basis TEXT DEFAULT 'unknown', evidence_reason TEXT DEFAULT '',
+                    evidence_next_action TEXT DEFAULT '', evidence_evaluated_at TEXT,
+                    evidence_evaluation_id INTEGER
                 );
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
                 CREATE TABLE notifications (
@@ -112,9 +115,9 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             if with_evidence:
                 db.execute("""INSERT INTO operation_attachments
                     (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
-                     taken_at,review_status)
+                     taken_at,review_status,evidence_qualification,evidence_basis)
                     VALUES ('review.jpg','/uploads/review.jpg','image','workorder',1,1,2,
-                            datetime('now','localtime'),'pending')""")
+                            datetime('now','localtime'),'pending','qualified','camera_session')""")
             db.executemany("""INSERT INTO notifications
                 (user_id,source_type,source_id,title,content)
                 VALUES (?,'workorder_review','WO-TEST-001','待核验','现场处置已提交')""",
@@ -186,6 +189,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(cleanup_upload.status_code, 200, cleanup_upload.json)
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+            db.execute("""UPDATE operation_attachments
+                SET evidence_qualification='qualified',evidence_basis='camera_session',
+                    taken_at=datetime('now','localtime'),is_flagged=0,flag_reason=''
+                WHERE source_type='workorder' AND source_id=1 AND is_deleted=0""")
 
         # 首次提交、退回、补充后再次提交并办结，工单不会因影像审核而丢失。
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review', headers=self.headers('operator-token'), json={'client': 'mobile', 'resolution_note': '已检查并完成现场处置'})
@@ -193,21 +200,21 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         rejected = self.client.post('/api/workorders/WO-TEST-001/reject', headers=self.headers('admin-token'), json={'reason': '请补拍仪表读数'})
         self.assertEqual(rejected.status_code, 200, rejected.json)
         self.assertEqual(rejected.json['status'], 'in_progress')
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 taken_at,review_status,evidence_qualification,evidence_basis)
+                VALUES ('replacement.jpg','/uploads/replacement.jpg','image','workorder',1,1,2,
+                        datetime('now','localtime'),'pending','qualified','camera_session')""")
         resubmitted = self.client.post('/api/workorders/WO-TEST-001/submit-review', headers=self.headers('operator-token'), json={'client': 'mobile', 'resolution_note': '补拍仪表读数后再次提交'})
         self.assertEqual(resubmitted.status_code, 200, resubmitted.json)
-        acknowledgement_required = self.client.post(
-            '/api/workorders/WO-TEST-001/approve', headers=self.headers('manager-token'), json={}
-        )
-        self.assertEqual(acknowledgement_required.status_code, 409, acknowledgement_required.json)
-        self.assertEqual(acknowledgement_required.json['code'], 'EVIDENCE_ACKNOWLEDGEMENT_REQUIRED')
-        approved = self.client.post('/api/workorders/WO-TEST-001/approve', headers=self.headers('manager-token'), json={
-            'evidence_acknowledged': True,
-        })
+        approved = self.client.post('/api/workorders/WO-TEST-001/approve',
+                                    headers=self.headers('manager-token'), json={})
         self.assertEqual(approved.status_code, 200, approved.json)
         with app_module.get_db() as db:
             self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'closed')
             statuses = [r['review_status'] for r in db.execute("SELECT review_status FROM operation_attachments WHERE is_deleted=0")]
-            self.assertEqual(statuses, ['approved', 'approved'])
+            self.assertEqual(statuses, ['rejected', 'rejected', 'approved'])
 
     def test_status_endpoint_cannot_bypass_review_for_closure(self):
         with app_module.get_db() as db:
@@ -292,15 +299,15 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
                                      headers=self.headers('operator-token'), json={'client': 'web', 'resolution_note': '现场处置完成'})
-        self.assertEqual(submitted.status_code, 400, submitted.json)
-        self.assertIn('影像', submitted.json['error'])
+        self.assertEqual(submitted.status_code, 409, submitted.json)
+        self.assertEqual(submitted.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
 
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
         approved = self.client.post('/api/workorders/WO-TEST-001/approve',
                                     headers=self.headers('manager-token'), json={})
-        self.assertEqual(approved.status_code, 400, approved.json)
-        self.assertIn('影像', approved.json['error'])
+        self.assertEqual(approved.status_code, 409, approved.json)
+        self.assertEqual(approved.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
 
     def test_operator_cannot_change_another_assignees_workorder(self):
         response = self.client.put('/api/workorders/WO-TEST-001/status',

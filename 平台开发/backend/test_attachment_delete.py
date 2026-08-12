@@ -77,7 +77,7 @@ class AttachmentDeleteTest(unittest.TestCase):
                     review_required INTEGER DEFAULT 0, review_status TEXT DEFAULT 'pending',
                     reviewer_id INTEGER, reviewed_at TEXT, reject_reason TEXT DEFAULT '',
                     capture_source TEXT DEFAULT '', deleted_at TEXT, deleted_by INTEGER,
-                    delete_reason TEXT DEFAULT ''
+                    delete_reason TEXT DEFAULT '', evidence_qualification TEXT DEFAULT 'qualified'
                 );
                 CREATE TABLE attachment_deletion_audits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, attachment_id INTEGER UNIQUE,
@@ -227,7 +227,7 @@ class AttachmentDeleteTest(unittest.TestCase):
         self.assertEqual(before_stats.json['total'], 4)
         self.assertEqual(before_stats.json['review_pending'], 1)
         before_notice = self.client.get('/api/notifications?status=unread', headers=self.headers('admin-token'))
-        self.assertEqual(before_notice.json['unread_count'], 1, before_notice.json)
+        self.assertEqual(before_notice.json['unread_count'], 0, before_notice.json)
 
         response = self.client.delete(
             '/api/attachments/10', headers=self.headers('admin-token'),

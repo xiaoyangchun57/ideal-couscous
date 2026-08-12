@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -57,7 +58,12 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
                     reviewer_id INTEGER,
                     reviewed_at TEXT,
                     review_action TEXT DEFAULT '',
-                    reject_reason TEXT
+                    reject_reason TEXT,
+                    review_required INTEGER DEFAULT 1,
+                    evidence_qualification TEXT DEFAULT 'pending',
+                    evidence_reason TEXT DEFAULT '',
+                    evidence_next_action TEXT DEFAULT '',
+                    extra_json TEXT DEFAULT '{}'
                 );
             ''')
             db.execute('INSERT INTO user_sites VALUES (7, 1)')
@@ -81,42 +87,10 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
         app_module._tokens.update(self.original_tokens)
         os.unlink(self.db_file.name)
 
-    def test_reviewer_auto_passes_only_assigned_sites_and_keeps_flagged_photos(self):
+    def test_photo_auto_review_is_retired_without_writes(self):
         response = self.client.post('/api/operation-attachments/auto-review', headers=self.headers, json={})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json['approved'], 1)
-        self.assertEqual(response.json['remaining_flagged'], 1)
-        self.assertEqual(response.json['site_ids'], [1])
-        db = sqlite3.connect(self.db_file.name)
-        try:
-            states = dict(db.execute('SELECT id, review_status FROM operation_attachments').fetchall())
-            review_action = db.execute('SELECT review_action FROM operation_attachments WHERE id=1').fetchone()[0]
-        finally:
-            db.close()
-        self.assertEqual(states, {1: 'approved', 2: 'pending', 3: 'pending'})
-        self.assertEqual(review_action, 'auto_pass_normal')
-
-    def test_reviewer_cannot_request_a_site_outside_assigned_scope(self):
-        response = self.client.post(
-            '/api/operation-attachments/auto-review',
-            headers=self.headers,
-            json={'site_id': 2},
-        )
-
-        self.assertEqual(response.status_code, 403)
-
-    def test_preview_reports_scope_without_changing_review_status(self):
-        response = self.client.post(
-            '/api/operation-attachments/auto-review',
-            headers=self.headers,
-            json={'dry_run': True},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json['preview'])
-        self.assertEqual(response.json['approved'], 1)
-        self.assertEqual(response.json['remaining_flagged'], 1)
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(response.json['code'], 'PHOTO_AUTO_REVIEW_RETIRED')
         db = sqlite3.connect(self.db_file.name)
         try:
             states = dict(db.execute('SELECT id, review_status FROM operation_attachments').fetchall())
@@ -124,7 +98,31 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
             db.close()
         self.assertEqual(states, {1: 'pending', 2: 'pending', 3: 'pending'})
 
-    def test_inspection_photo_uses_capture_time_for_flag_evaluation(self):
+    def test_retired_auto_review_does_not_disclose_site_scope(self):
+        response = self.client.post(
+            '/api/operation-attachments/auto-review',
+            headers=self.headers,
+            json={'site_id': 2},
+        )
+
+        self.assertEqual(response.status_code, 410)
+
+    def test_retired_preview_does_not_change_review_status(self):
+        response = self.client.post(
+            '/api/operation-attachments/auto-review',
+            headers=self.headers,
+            json={'dry_run': True},
+        )
+
+        self.assertEqual(response.status_code, 410)
+        db = sqlite3.connect(self.db_file.name)
+        try:
+            states = dict(db.execute('SELECT id, review_status FROM operation_attachments').fetchall())
+        finally:
+            db.close()
+        self.assertEqual(states, {1: 'pending', 2: 'pending', 3: 'pending'})
+
+    def test_legacy_unlinked_upload_does_not_trust_client_capture_time(self):
         response = self.client.post(
             '/api/inspection/photos/upload',
             headers={'Authorization': 'Bearer operator-token'},
@@ -142,7 +140,13 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json['taken_at'], '2026-07-25 10:00:00')
+        self.assertIsNone(response.json['taken_at'])
+        with app_module.get_db() as db:
+            row = db.execute(
+                'SELECT source_id,review_required,extra_json FROM operation_attachments '
+                'WHERE id=?', (response.json['id'],)).fetchone()
+        self.assertEqual((row['source_id'], row['review_required']), (0, 0))
+        self.assertEqual(json.loads(row['extra_json'])['material_role'], 'supplement')
         self.assertEqual(response.json['is_flagged'], 0)
 
 

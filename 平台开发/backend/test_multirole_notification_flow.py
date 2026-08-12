@@ -98,6 +98,10 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                 INSERT INTO notifications (user_id,source_type,source_id,title,content) VALUES
                     (2,'inspection_review_batch','insp_batch_10_1','site one pending','review'),
                     (2,'inspection_review_batch','insp_batch_20_2','site two pending','review');
+                ALTER TABLE operation_attachments ADD COLUMN evidence_qualification TEXT DEFAULT 'qualified';
+                ALTER TABLE operation_attachments ADD COLUMN evidence_reason TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN evidence_next_action TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN required_photos INTEGER DEFAULT 1;
             ''')
         self.client = app_module.app.test_client()
 
@@ -222,7 +226,8 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                                          'reject_ids': [],
                                          'approve_item_ids': [10, 30],
                                      })
-        self.assertEqual(site_less.status_code, 403, site_less.json)
+        self.assertEqual(site_less.status_code, 409, site_less.json)
+        self.assertEqual(site_less.json['code'], 'ATTACHMENT_ITEM_REQUIRED')
         with self.temporary_db() as db:
             attachments = db.execute('SELECT id,review_status,reviewer_id FROM operation_attachments ORDER BY id').fetchall()
             items = db.execute('SELECT id,review_status,reviewer_id FROM insp_plan_items ORDER BY id').fetchall()

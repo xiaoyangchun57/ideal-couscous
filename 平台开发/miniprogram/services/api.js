@@ -84,6 +84,8 @@ const api = {
       ...(metadata || {}), site_id: siteId, image,
       _idempotency_key: idempotencyKey || (metadata && metadata._idempotency_key) || ''
     }, { queue: false, timeout: 30000, retry: 1 }),
+  createPhotoCaptureSession: (payload) =>
+    request('/api/mobile/photo-capture-session', 'POST', payload, { queue: false, retry: 0 }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
   deletePendingSitePhoto: (url) => request('/api/mobile/site-photos/delete', 'POST', { url }),
 
@@ -99,8 +101,10 @@ const api = {
     request('/api/mobile/delete-photo', 'POST', { item_id: itemId, photo_index: photoIndex }),
 
   // 工单处置影像上传（追加到工单 images，移动端流程卡控用）
-  uploadWorkorderImage: (orderNo, image) =>
-    request('/api/mobile/workorder/' + orderNo + '/image', 'POST', { image }),
+  uploadWorkorderImage: (orderNo, image, metadata) =>
+    request('/api/mobile/workorder/' + orderNo + '/image', 'POST', {
+      ...(metadata || {}), image
+    }),
 
   deleteWorkorderImage: (orderNo, url) =>
     request('/api/mobile/workorder/' + orderNo + '/image/delete', 'POST', { url }),

@@ -53,7 +53,8 @@ class ManualReportClosureTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, source_type TEXT, source_id INTEGER, file_type TEXT,
                     is_deleted INTEGER DEFAULT 0, review_status TEXT, reviewer_id INTEGER,
                     reviewed_at TEXT, reject_reason TEXT, is_flagged INTEGER DEFAULT 0,
-                    flag_reason TEXT DEFAULT '', taken_at TEXT, duplicate_of_id INTEGER
+                    flag_reason TEXT DEFAULT '', taken_at TEXT, duplicate_of_id INTEGER,
+                    evidence_qualification TEXT DEFAULT 'qualified'
                 );
                 CREATE TABLE alerts (id INTEGER PRIMARY KEY, status TEXT, resolved_at TEXT,
                     resolve_reason TEXT, site_id INTEGER, metric TEXT);

@@ -165,7 +165,7 @@
             <text class="tag">{{it.frequency_cn || '未设频次'}}</text>
             <text class="item-time" wx:if="{{it.check_time}}">{{it.check_time}}</text>
           </view>
-          <view class="item-review-reject" wx:if="{{it.review_status === 3 && it.review_comment}}">退回：{{it.review_comment}}</view>
+          <view class="item-review-reject" wx:if="{{it.review_status === 3 && it.review_comment}}">需补拍：{{it.review_comment}} · 去补拍</view>
         </view>
         <view class="item-right">
           <view class="item-status {{it.status_code === 'rework' || it.status_code === 'supplement' || it.status_code === 'supplement_review' || it.result === 'abnormal' ? 'st-bad' : (it.status_code === 'approved' || (it.result === 'normal' && it.status_code !== 'review') ? 'st-ok' : 'st-wait')}}">
@@ -302,8 +302,8 @@
       <text class="sheet-close" bindtap="onCloseSheet">×</text>
     </view>
     <view class="supplement-notice" wx:if="{{sheet.supplementOnly}}">
-      <text class="supplement-notice-title">补传要求</text>
-      <text class="supplement-notice-text">{{sheet.item.supplement_reason || '原证据已作废，请重新拍摄并提交现场照片'}}</text>
+      <text class="supplement-notice-title">需补拍</text>
+      <text class="supplement-notice-text">{{sheet.item.supplement_reason || sheet.item.review_comment || '照片内容未通过审核，请按要求补拍'}}</text>
     </view>
     <text class="sheet-freq" wx:if="{{sheet.item.frequency_cn}}">{{sheet.item.frequency_cn}}</text>
 

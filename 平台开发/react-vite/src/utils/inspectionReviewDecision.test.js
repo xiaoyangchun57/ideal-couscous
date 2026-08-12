@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { autoPassNormalCount, canSubmitPhotoReview, failedApprovalPhotoIds, reviewPhotoGridStyle } from './inspectionReviewDecision.js';
-
-test('auto pass is unavailable when every pending image has risk', () => {
-  assert.equal(autoPassNormalCount([{ source_type: 'photo_review', attachment_details: [{ id: 1, review_status: 'pending', is_flagged: true }] }]), 0);
-});
+import { canSubmitPhotoReview, failedApprovalPhotoIds, getUnqualifiedPhotoIds, reviewPhotoGridStyle } from './inspectionReviewDecision.js';
 
 test('a failed image blocks approval but not a selected rejection', () => {
   const photos = [{ id: 1 }, { id: 2 }];
@@ -19,4 +15,14 @@ test('selected photo rejections require a non-blank shared reason before submiss
   assert.equal(canSubmitPhotoReview([1], [1], '   '), false);
   assert.equal(canSubmitPhotoReview([1], [1], 'image is obstructed'), true);
   assert.equal(canSubmitPhotoReview([1], [], ''), true);
+});
+
+test('nonqualified evidence blocks approval unless that photo is rejected', () => {
+  const photos = [
+    { id: 1, evidence_qualification: 'qualified' },
+    { id: 2, evidence_qualification: 'review' },
+    { id: 3, evidence_qualification: 'ineligible' },
+  ];
+  assert.deepEqual(getUnqualifiedPhotoIds(photos), [2, 3]);
+  assert.deepEqual(getUnqualifiedPhotoIds(photos, [2]), [3]);
 });

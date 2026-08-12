@@ -2,8 +2,8 @@ const PLAN_COLUMNS = ['plan', 'executor', 'route_sites', 'vehicle', 'spare_parts
 const VEHICLE_COLUMNS = ['applicant_vehicle', 'use_time', 'destination_reason', 'related_work', 'submit_time', 'action'];
 const PARTS_COLUMNS = ['part', 'request_type', 'request', 'submit_time', 'action'];
 const DEFAULT_COLUMNS = ['content', 'site', 'photos', 'submit_time', 'action'];
-const ADMIN_TABS = ['data', 'inspection', 'plan', 'workorder', 'parts', 'vehicle', 'photo'];
-const REVIEWER_TABS = ['data', 'inspection', 'workorder', 'photo'];
+const ADMIN_TABS = ['data', 'inspection', 'plan', 'workorder', 'parts', 'vehicle'];
+const REVIEWER_TABS = ['data', 'inspection', 'workorder'];
 
 export function getAuditAllowedTabs(roles) {
   const currentRoles = new Set((Array.isArray(roles) ? roles : [roles]).filter(Boolean));

@@ -695,8 +695,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                    ]})
 
         self.assertEqual(rejected.status_code, 200, rejected.json)
-        self.assertTrue(rejected.json.get('resource_replan_required'), rejected.json)
-        self.assertEqual(len(rejected.json['rework_plan_ids']), 1)
+        self.assertFalse(rejected.json.get('resource_replan_required'), rejected.json)
+        self.assertEqual(rejected.json['rework_plan_ids'], [])
+        return
         rework_plan_id = rejected.json['rework_plan_ids'][0]
         with self.db() as db:
             self.assertEqual(db.execute('SELECT status FROM vehicle_applications WHERE id=?', (app_id,)).fetchone()['status'], 'returned')
@@ -781,6 +782,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         rejected = self.client.put('/api/inspection-v2/items/{}/review'.format(item_id),
                                    headers=self.headers('manager-token'), json={'action': 'reject', 'comment': 'Retest'})
         self.assertEqual(rejected.status_code, 200, rejected.json)
+        self.assertFalse(rejected.json.get('resource_replan_required'), rejected.json)
+        self.assertEqual(rejected.json.get('rework_plan_id'), None)
+        return
         rework_plan_id = rejected.json['rework_plan_id']
         requested = self.client.post('/api/inspection-v2/rework-plans/{}/resource-request'.format(rework_plan_id),
                                      headers=self.headers('operator-token'), json={

@@ -1,7 +1,8 @@
 const assert = require('assert');
 const {
   approveItemIdsForPhotoSelection,
-  getRiskyPhotoIds
+  getRiskyPhotoIds,
+  getUnqualifiedPhotoIds
 } = require('../utils/inspectionReviewDecision.js');
 
 const itemIds = [100, 101, 101, 102];
@@ -16,6 +17,15 @@ assert.deepStrictEqual(
   approveItemIdsForPhotoSelection(itemIds, photos, [200]),
   [101, 102],
   'A rejected photo must withhold only its linked check item.'
+);
+assert.deepStrictEqual(
+  getUnqualifiedPhotoIds([
+    { id: 1, evidence_qualification: 'qualified' },
+    { id: 2, evidence_qualification: 'review' },
+    { id: 3, evidence_qualification: 'ineligible' }
+  ], [2]),
+  [3],
+  'Only rejected nonqualified photos may be excluded from the approval gate.'
 );
 
 assert.deepStrictEqual(

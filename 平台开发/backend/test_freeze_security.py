@@ -60,7 +60,9 @@ class FreezeSecurityTest(unittest.TestCase):
                     is_deleted INTEGER DEFAULT 0, is_flagged INTEGER DEFAULT 0,
                     flag_reason TEXT DEFAULT '', flag_rule TEXT DEFAULT '',
                     review_status TEXT, reviewer_id INTEGER, reviewed_at TEXT,
-                    reject_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    reject_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    evidence_qualification TEXT DEFAULT 'qualified',
+                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT ''
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER,
@@ -124,9 +126,9 @@ class FreezeSecurityTest(unittest.TestCase):
                      uploader_id,description,requirement_id,is_deleted,review_status)
                 VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
             ''', [
-                (10, 'site1-a.jpg', '/uploads/site1-a.jpg', 'image', 'inspection', 0, 1, 2, 'Site 1 A', 100, 'pending'),
-                (11, 'site1-b.jpg', '/uploads/site1-b.jpg', 'image', 'inspection', 0, 1, 2, 'Site 1 B', 100, 'pending'),
-                (12, 'site2-a.jpg', '/uploads/site2-a.jpg', 'image', 'inspection', 0, 2, 3, 'Site 2 A', 100, 'pending'),
+                (10, 'site1-a.jpg', '/uploads/site1-a.jpg', 'image', 'inspection', 100, 1, 2, 'Site 1 A', 100, 'pending'),
+                (11, 'site1-b.jpg', '/uploads/site1-b.jpg', 'image', 'inspection', 100, 1, 2, 'Site 1 B', 100, 'pending'),
+                (12, 'site2-a.jpg', '/uploads/site2-a.jpg', 'image', 'inspection', 101, 2, 3, 'Site 2 A', 100, 'pending'),
                 (20, 'workorder.jpg', '/uploads/workorder.jpg', 'image', 'workorder', 1, 1, 2, 'Workorder photo', None, 'pending'),
             ])
             db.executemany('''

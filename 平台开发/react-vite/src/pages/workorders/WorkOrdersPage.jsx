@@ -337,7 +337,8 @@ export default function WorkOrdersPage() {
                   allPhotos.push({
                     url: p.url || p.stored_path || p,
                     name: p.filename || item.item_name || '',
-                    time: p.created_at || p.taken_at || '',
+                    takenAt: p.taken_at || '',
+                    uploadedAt: p.created_at || '',
                     uploader: p.uploader_name || '',
                   });
                 });
@@ -976,7 +977,8 @@ export default function WorkOrdersPage() {
                                   allPhotos.push({
                                     url: p.url || p.stored_path || p,
                                     name: p.filename || item.item_name || '',
-                                    time: p.created_at || p.taken_at || '',
+                                    takenAt: p.taken_at || '',
+                                    uploadedAt: p.created_at || '',
                                     uploader: p.uploader_name || '',
                                   });
                                 });
