@@ -3,6 +3,7 @@ const assert = require('assert');
 const {
   hasInspectionFieldRecord,
   isPendingInspectionSubmit,
+  resolveLocalSubmitFlush,
 } = require('../utils/inspectionSubmissionState.js');
 
 assert.equal(hasInspectionFieldRecord({}), false, '无备注、照片或完整校准信息时必须拦截');
@@ -17,6 +18,17 @@ assert.equal(isPendingInspectionSubmit(pending, 10, 20), true, '同一检查项�
 assert.equal(isPendingInspectionSubmit(pending, '10', '20'), true, '刷新后的字符串 ID 仍应正确识别');
 assert.equal(isPendingInspectionSubmit(pending, 11, 20), false);
 assert.equal(isPendingInspectionSubmit([{ ...pending[0], syncStatus: 'synced' }], 10, 20), false);
+
+assert.deepEqual(
+  resolveLocalSubmitFlush({ rejected: [{ id: 'op-1', error: '图片数据异常' }] }, 'op-1', false),
+  { status: 'rejected', error: '图片数据异常' },
+  '业务拒绝不能被误判为同步成功'
+);
+assert.deepEqual(resolveLocalSubmitFlush({}, 'op-1', true), { status: 'pending' });
+assert.deepEqual(
+  resolveLocalSubmitFlush({ results: [{ id: 'op-1', response: { review_status: 1 } }] }, 'op-1', false),
+  { status: 'synced', response: { review_status: 1 } }
+);
 
 const storage = {};
 global.wx = {

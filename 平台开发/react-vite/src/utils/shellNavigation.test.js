@@ -24,6 +24,13 @@ test('notification targets respect role-visible pages', () => {
   assert.equal(getNotificationTarget({ source_type: 'spare_part_request', source_id: 9 }, ['admin']), '/audit?tab=parts&request=9&request_type=spare_part_request');
   assert.equal(getNotificationTarget({ source_type: 'data_review', source_id: 7 }, ['reviewer']), '/audit?tab=data&review=7');
   assert.equal(getNotificationTarget({ source_type: 'data_review', source_id: 7 }, ['operator']), null);
+  const voidNotice = {
+    source_type: 'attachment_void', source_id: 10,
+    payload_json: JSON.stringify({ attachment_id: 10, plan_id: 990201, item_id: 990301, site_id: 990101 }),
+  };
+  assert.equal(getNotificationTarget(voidNotice, ['operator']), '/plan-schedules?rework_plan=990201&focus_item=990301&site_id=990101&supplement=1');
+  assert.equal(getNotificationTarget(voidNotice, ['reviewer']), null);
+  assert.equal(getNotificationTarget({ ...voidNotice, payload_json: JSON.stringify({ plan_id: 1, item_id: 0, site_id: 2 }) }, ['operator']), null);
   assert.equal(getNotificationTarget({ source_type: 'reagent_qc', source_id: 2 }, ['reviewer']), null);
 });
 

@@ -155,19 +155,20 @@
         <text class="cat-name">{{cat.category_cn}}</text>
         <text class="cat-count">{{cat.completed}}/{{cat.total}}</text>
       </view>
-      <view class="card item" wx:for="{{cat.items}}" wx:key="item_id" wx:for-item="it"
+      <view class="card item {{it.focused ? 'item-focused' : ''}}" wx:for="{{cat.items}}" wx:key="item_id" wx:for-item="it"
             bindtap="onOpenItem" data-id="{{it.item_id}}">
         <view class="item-strip {{it.result === 'normal' ? 'strip-ok' : (it.result === 'abnormal' ? 'strip-bad' : 'strip-wait')}}"></view>
         <view class="item-left">
           <view class="item-name">{{it.item_name}}</view>
           <view class="item-meta">
+            <text class="item-id">检查项 #{{it.item_id}}</text>
             <text class="tag">{{it.frequency_cn || '未设频次'}}</text>
             <text class="item-time" wx:if="{{it.check_time}}">{{it.check_time}}</text>
           </view>
           <view class="item-review-reject" wx:if="{{it.review_status === 3 && it.review_comment}}">退回：{{it.review_comment}}</view>
         </view>
         <view class="item-right">
-          <view class="item-status {{it.status_code === 'rework' || it.result === 'abnormal' ? 'st-bad' : (it.status_code === 'approved' || (it.result === 'normal' && it.status_code !== 'review') ? 'st-ok' : 'st-wait')}}">
+          <view class="item-status {{it.status_code === 'rework' || it.status_code === 'supplement' || it.status_code === 'supplement_review' || it.result === 'abnormal' ? 'st-bad' : (it.status_code === 'approved' || (it.result === 'normal' && it.status_code !== 'review') ? 'st-ok' : 'st-wait')}}">
             {{it.result_cn}}
           </view>
         </view>
@@ -300,6 +301,10 @@
       <text class="sheet-title">{{sheet.item.item_name}}</text>
       <text class="sheet-close" bindtap="onCloseSheet">×</text>
     </view>
+    <view class="supplement-notice" wx:if="{{sheet.supplementOnly}}">
+      <text class="supplement-notice-title">补传要求</text>
+      <text class="supplement-notice-text">{{sheet.item.supplement_reason || '原证据已作废，请重新拍摄并提交现场照片'}}</text>
+    </view>
     <text class="sheet-freq" wx:if="{{sheet.item.frequency_cn}}">{{sheet.item.frequency_cn}}</text>
 
     <view class="field-label">判定结果</view>
@@ -316,6 +321,7 @@
     <input class="inline-input" placeholder="校准值" value="{{sheet.calValues}}" bindinput="onCalValues" />
 
     <view class="field-label">现场照片<text class="photo-req-hint" wx:if="{{sheet.requiredPhotos > 0}}">（需拍 {{sheet.requiredPhotos}} 张，已拍 {{sheet.photos.length}} 张）</text></view>
+    <text class="photo-source-hint" wx:if="{{sheet.voidedEvidenceCount}}">历史中有 {{sheet.voidedEvidenceCount}} 张已作废证据，当前需补传；原文件可在影像档案审计中追溯</text>
     <view class="photo-summary" wx:if="{{sheet.requiredPhotos > 0}}">已拍 {{sheet.photoInfo.captured}} / 需拍 {{sheet.photoInfo.required}}</view>
     <view class="photos">
       <view class="photo" wx:for="{{sheet.photos}}" wx:key="*this" wx:for-item="p">

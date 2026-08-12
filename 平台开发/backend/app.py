@@ -101,6 +101,7 @@ Flask RESTful API + SQLite + APScheduler
 """
 import os
 import json
+from urllib.parse import unquote, urlsplit
 import sqlite3
 import math
 import random
@@ -1543,6 +1544,9 @@ def init_db():
                 description TEXT DEFAULT '',
                 source_type TEXT DEFAULT '',   -- workorder/inspection/calibration/reagent/vehicle/maintenance/patrol/test（统一归口：所有影像/文件均入本表）
                 source_id INTEGER DEFAULT 0,
+                plan_id INTEGER,
+                item_id INTEGER,
+                item_name TEXT DEFAULT '',
                 site_id INTEGER,
                 uploader_id INTEGER,
                 uploader_name TEXT DEFAULT '',
@@ -1706,6 +1710,19 @@ def init_db():
             "ALTER TABLE operation_attachments ADD COLUMN deleted_at TEXT",
             "ALTER TABLE operation_attachments ADD COLUMN deleted_by INTEGER",
             "ALTER TABLE operation_attachments ADD COLUMN delete_reason TEXT DEFAULT ''",
+            # === 影像证据闭环：作废与补传子状态 ===
+            "ALTER TABLE operation_attachments ADD COLUMN archive_name TEXT DEFAULT ''",
+            "ALTER TABLE operation_attachments ADD COLUMN voided_at TEXT",
+            "ALTER TABLE operation_attachments ADD COLUMN voided_by INTEGER",
+            "ALTER TABLE operation_attachments ADD COLUMN void_reason TEXT DEFAULT ''",
+            # === 巡检影像权威归属：关系直接保存在主附件记录 ===
+            "ALTER TABLE operation_attachments ADD COLUMN plan_id INTEGER",
+            "ALTER TABLE operation_attachments ADD COLUMN item_id INTEGER",
+            "ALTER TABLE operation_attachments ADD COLUMN item_name TEXT DEFAULT ''",
+            "ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''",
+            "ALTER TABLE insp_plan_items ADD COLUMN supplement_required_at TEXT DEFAULT ''",
+            "ALTER TABLE insp_plan_items ADD COLUMN supplement_source_attachment_id INTEGER",
+            "ALTER TABLE insp_plan_items ADD COLUMN supplement_reason TEXT DEFAULT ''",
             # 聚合通知保存业务批次游标；已读状态不再作为去重依据。
             "ALTER TABLE notifications ADD COLUMN dedupe_key TEXT DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN payload_json TEXT DEFAULT ''",
@@ -7179,7 +7196,7 @@ def get_inspection_attachments(plan_id):
         return jsonify([dict(r) for r in rows])
 @app.route('/api/inspections/tasks/<int:task_id>', methods=['PUT'])
 def update_inspection_task(task_id):
-    data = request.json
+    data = request.get_json(silent=True) or {}
     with get_db() as db:
         # 构造动态更新字段
         updates = ["result=?", "photo=?", "gps_lat=?", "gps_lng=?", "check_time=?", "remark=?"]
@@ -7518,6 +7535,157 @@ def _attachment_business_filter(business_type, table_alias='oa'):
     return f"({' OR '.join(clauses)})", params
 
 
+ATTACHMENT_REVIEW_STATUS_LABELS = {
+    'pending': '待审核',
+    'approved': '已通过',
+    'rejected': '已驳回',
+    'voided': '已作废',
+}
+
+
+def _attachment_status_payload(attachment):
+    """Return one mutually exclusive primary status plus an independent risk hint."""
+    status = str(attachment.get('review_status') or 'pending').strip().lower()
+    if attachment.get('voided_at') or status == 'voided':
+        status = 'voided'
+    if status not in ATTACHMENT_REVIEW_STATUS_LABELS:
+        status = 'pending'
+    flagged = bool(attachment.get('is_flagged'))
+    if status == 'approved' and flagged:
+        risk_label = '曾触发风险/人工已核对'
+    elif status == 'pending' and flagged:
+        risk_label = '风险标记'
+    else:
+        risk_label = ''
+    return {
+        'review_status': status,
+        'review_status_label': ATTACHMENT_REVIEW_STATUS_LABELS[status],
+        'primary_status': status,
+        'primary_status_label': ATTACHMENT_REVIEW_STATUS_LABELS[status],
+        'risk_label': risk_label,
+        'risk_notice': risk_label,
+        'is_valid_evidence': int(status not in ('rejected', 'voided') and not attachment.get('is_deleted')),
+    }
+
+
+def _persist_inspection_attachment_link(db, attachment_id, item):
+    """Persist a server-resolved inspection link on the attachment row.
+
+    Older test fixtures and legacy databases may not have the additive columns
+    yet; source_type/source_id remains the compatibility link in that case.
+    """
+    columns = {row['name'] for row in db.execute(
+        'PRAGMA table_info(operation_attachments)').fetchall()}
+    fields = {
+        'plan_id': item['plan_id'],
+        'item_id': item['id'],
+        'item_name': item['item_name'] or f'检查项#{item["id"]}',
+    }
+    updates = [(name, value) for name, value in fields.items() if name in columns]
+    if updates:
+        db.execute(
+            f"UPDATE operation_attachments SET {','.join(f'{name}=?' for name, _ in updates)} WHERE id=?",
+            [value for _, value in updates] + [attachment_id],
+        )
+
+
+def _attachment_presentation(db, attachment):
+    """Decorate an attachment using only server-owned inspection associations."""
+    item = None
+    plan = None
+    source_type = str(attachment.get('source_type') or '').strip().lower()
+    source_id = attachment.get('source_id')
+    stored_item_id = attachment.get('item_id')
+    stored_plan_id = attachment.get('plan_id')
+    stored_item_name = (attachment.get('item_name') or '').strip()
+    if _table_exists(db, 'insp_plan_items'):
+        lookup_id = stored_item_id or (source_id if source_type == 'inspection' and source_id not in (None, '', 0, '0') else None)
+        if lookup_id:
+            item = db.execute('SELECT * FROM insp_plan_items WHERE id=?', (lookup_id,)).fetchone()
+            item_site_id = item['site_id'] if item and 'site_id' in item.keys() else None
+            item_plan_id = item['plan_id'] if item and 'plan_id' in item.keys() else None
+            if (not item or item_site_id is None or attachment.get('site_id') != item_site_id
+                    or (stored_plan_id not in (None, '', 0, '0')
+                        and item_plan_id != stored_plan_id)):
+                item = None
+        if item:
+            stored_item_id = item['id']
+            stored_plan_id = item['plan_id'] if 'plan_id' in item.keys() else stored_plan_id
+            stored_item_name = item['item_name'] if 'item_name' in item.keys() else stored_item_name
+
+        plan_id_for_lookup = stored_plan_id or (item['plan_id'] if item and 'plan_id' in item.keys() else None)
+        if plan_id_for_lookup and _table_exists(db, 'insp_plans'):
+            plan_columns = {row['name'] for row in db.execute('PRAGMA table_info(insp_plans)').fetchall()}
+            plan_select = ['id']
+            if 'plan_name' in plan_columns:
+                plan_select.append('plan_name')
+            if 'status' in plan_columns:
+                plan_select.append('status')
+            plan = db.execute(
+                f"SELECT {','.join(plan_select)} FROM insp_plans WHERE id=?", (plan_id_for_lookup,)
+            ).fetchone()
+
+    site_id = attachment.get('site_id')
+    site_name = attachment.get('site_name') or (f'站点#{site_id}' if site_id else '未关联站点')
+    item_name = stored_item_name or (item['item_name'] if item and 'item_name' in item.keys() else '') or '检查项待确认'
+    linked = bool(item or (stored_item_id not in (None, '', 0, '0') and stored_plan_id not in (None, '', 0, '0')))
+    image_type = (attachment.get('recognized_category') or attachment.get('category') or '影像').strip()
+    record_time = attachment.get('taken_at') or attachment.get('created_at') or '时间待确认'
+    result = {
+        'original_filename': attachment.get('filename') or '',
+        'archive_name': f'{site_name} · {item_name} · {image_type} · {record_time}',
+        'item_id': stored_item_id if linked else None,
+        'item_name': item_name,
+        'plan_id': stored_plan_id if linked else None,
+        'plan_name': (plan['plan_name'] if plan and 'plan_name' in plan.keys() else '') or '',
+        'business_source': source_type or '未记录',
+        'association_status': 'linked' if linked else 'unlinked',
+    }
+    result.update(_attachment_status_payload(attachment))
+    return result
+
+
+def _decorate_attachment(db, attachment):
+    result = dict(attachment)
+    if result.get('uploader_real_name'):
+        result['uploader_name'] = result['uploader_real_name']
+    result.update(_attachment_presentation(db, result))
+    result.pop('uploader_real_name', None)
+    return result
+
+
+def _item_attachment_history(db, item_id):
+    """Return item-owned evidence, including voided rows for history views.
+
+    The attachment row is the durable association.  The item's photo_urls is a
+    compatibility projection and must not be used to reconstruct a voided link.
+    """
+    if not item_id or not _table_exists(db, 'operation_attachments'):
+        return [], []
+    rows = db.execute("""
+        SELECT oa.*, s.name AS site_name,
+               COALESCE(oa.uploader_name, u.real_name, '') AS uploader_real_name
+        FROM operation_attachments oa
+        LEFT JOIN sites s ON s.id=oa.site_id
+        LEFT JOIN users u ON u.id=oa.uploader_id
+        WHERE (oa.item_id=? OR (oa.source_type='inspection' AND oa.source_id=?))
+          AND COALESCE(oa.is_deleted, 0)=0
+        ORDER BY oa.created_at ASC, oa.id ASC
+    """, (item_id, item_id)).fetchall()
+    all_rows = [_decorate_attachment(db, row) for row in rows]
+    if _table_exists(db, 'attachment_void_audits'):
+        for row in all_rows:
+            if row.get('review_status') == 'voided':
+                audit = db.execute(
+                    'SELECT * FROM attachment_void_audits WHERE attachment_id=?', (row['id'],)
+                ).fetchone()
+                row['void_audit'] = dict(audit) if audit else None
+    effective = [row for row in all_rows
+                 if row.get('review_status') not in ('rejected', 'voided')
+                 and not row.get('is_deleted')]
+    return all_rows, effective
+
+
 @app.route('/api/attachments', methods=['GET'])
 def list_attachments():
     """影像档案列表，支持多维筛选"""
@@ -7532,12 +7700,15 @@ def list_attachments():
     keyword = request.args.get('keyword')
     archived = request.args.get('archived')  # '0' / '1' / None(全部)
     review_status = request.args.get('review_status')
+    include_voided = request.args.get('include_voided') == '1'
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 30, type=int)
     offset = (page - 1) * limit
 
     with get_db() as db:
         where = ["oa.is_deleted=0"]
+        if not include_voided and review_status != 'voided':
+            where.append("COALESCE(oa.review_status, 'pending')!='voided'")
         params = []
         if site_id:
             where.append("oa.site_id=?"); params.append(site_id)
@@ -7593,10 +7764,7 @@ def list_attachments():
 
         result = []
         for r in rows:
-            d = dict(r)
-            if d.get('uploader_real_name'):
-                d['uploader_name'] = d['uploader_real_name']
-            result.append(d)
+            result.append(_decorate_attachment(db, r))
         return jsonify({
             'total': total,
             'page': page,
@@ -7610,8 +7778,33 @@ def create_attachment():
     """手动创建附件记录（配合已有图片路径使用）"""
     if not _has_any_role(g.current_user, 'admin', 'operator'):
         return jsonify({'error': '审核角色不能创建现场影像'}), 403
-    data = request.json
+    data = request.get_json(silent=True) or {}
     required = ['filename', 'stored_path']
+    source_type = str(data.get('source_type') or '').strip().lower()
+    source_id = data.get('source_id')
+    inspection_item = None
+    if source_type == 'inspection' and source_id not in (None, '', 0, '0'):
+        with get_db() as db:
+            item = db.execute(
+                'SELECT id, plan_id, site_id, item_name, category FROM insp_plan_items WHERE id=?',
+                (source_id,),
+            ).fetchone()
+            if not item:
+                return jsonify({'error': '检查项不存在，不能伪造影像归属', 'code': 'INSPECTION_ITEM_NOT_FOUND'}), 404
+            if data.get('site_id') not in (None, '', item['site_id']):
+                return jsonify({'error': '影像站点与检查项不一致', 'code': 'INSPECTION_SITE_MISMATCH'}), 400
+            data['source_id'] = item['id']
+            data['site_id'] = item['site_id']
+            data['description'] = item['item_name'] or data.get('description') or ''
+            data['category'] = item['category'] or data.get('category') or '巡检现场照片'
+            inspection_item = dict(item)
+            data['extra_json'] = json.dumps({
+                'plan_id': item['plan_id'], 'item_id': item['id'],
+                'item_name': item['item_name'] or '',
+                'classification_source': 'inspection_item',
+            }, ensure_ascii=False)
+    elif source_type == 'inspection':
+        return jsonify({'error': '巡检影像必须绑定具体检查项', 'code': 'INSPECTION_ITEM_REQUIRED'}), 400
     for f in required:
         if f not in data:
             return jsonify({'error': f'缺少必填字段: {f}'}), 400
@@ -7633,6 +7826,8 @@ def create_attachment():
              data.get('site_id'), g.current_user.get('id'), _current_actor_name('未知用户'),
              data.get('gps_lat'), data.get('gps_lng'), data.get('taken_at'),
              data.get('category','')))
+        if inspection_item:
+            _persist_inspection_attachment_link(db, db.execute("SELECT last_insert_rowid()").fetchone()[0], inspection_item)
         db.commit()
         aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     return jsonify({'success': True, 'id': aid})
@@ -7654,7 +7849,13 @@ def get_attachment(aid):
         denied = _site_access_denied(row['site_id'])
         if denied:
             return denied
-        return jsonify(dict(row))
+        result = _decorate_attachment(db, row)
+        if result.get('review_status') == 'voided' and _table_exists(db, 'attachment_void_audits'):
+            audit = db.execute(
+                'SELECT * FROM attachment_void_audits WHERE attachment_id=?', (aid,)
+            ).fetchone()
+            result['void_audit'] = dict(audit) if audit else None
+        return jsonify(result)
 
 
 @app.route('/api/attachments/<int:aid>', methods=['PUT'])
@@ -7689,11 +7890,19 @@ ATTACHMENT_DELETE_FORMAL_SOURCE_TYPES = frozenset({
 ATTACHMENT_DELETE_BLOCKED_MESSAGE = '该影像已作为业务证据，不能删除'
 
 
+def _positive_business_id(value):
+    """Return a positive persisted business identifier, never a sentinel 0."""
+    try:
+        return int(value) if int(value) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _attachment_delete_related_rows(db, attachment):
     """Read stored business links for deletion safety; never trust DELETE payload fields."""
     stored_path = (attachment.get('stored_path') or '').strip()
     source_type = (attachment.get('source_type') or '').strip().lower()
-    source_id = attachment.get('source_id')
+    source_id = _positive_business_id(attachment.get('source_id'))
     inspection_items = []
     workorder_links = []
 
@@ -7704,7 +7913,7 @@ def _attachment_delete_related_rows(db, attachment):
                 rows = db.execute(
                     'SELECT * FROM insp_plan_items WHERE id=?', (source_id,)
                 ).fetchall()
-            elif stored_path:
+            elif stored_path and not (source_type == 'test' and source_id is None):
                 rows = db.execute(
                     'SELECT * FROM insp_plan_items WHERE photo_urls LIKE ?', ('%' + stored_path + '%',)
                 ).fetchall()
@@ -7726,7 +7935,7 @@ def _attachment_delete_related_rows(db, attachment):
         if source_type == 'workorder' and source_id:
             clauses.append('id=?')
             params.append(source_id)
-        if stored_path and 'images' in order_columns:
+        if stored_path and 'images' in order_columns and not (source_type == 'test' and source_id is None):
             clauses.append('images LIKE ?')
             params.append('%' + stored_path + '%')
         if clauses:
@@ -7740,7 +7949,7 @@ def _attachment_delete_related_rows(db, attachment):
 def _attachment_delete_check(db, attachment):
     """Return the server-owned eligibility decision and the user-facing impact."""
     source_type = (attachment.get('source_type') or '').strip().lower()
-    source_id = attachment.get('source_id')
+    source_id = _positive_business_id(attachment.get('source_id'))
     inspection_items, workorder_links = _attachment_delete_related_rows(db, attachment)
 
     formal_inspection = False
@@ -7763,7 +7972,7 @@ def _attachment_delete_check(db, attachment):
 
     # Only an explicit test classification with no stored business id is removable.
     # Blank/unknown source values are intentionally not inferred as test data.
-    if source_type != 'test' or source_id not in (None, '', 0, '0'):
+    if source_type != 'test' or source_id is not None:
         return {
             'can_delete': False,
             'block_reason': '仅明确标记为测试/误传且未绑定正式业务的影像可以删除',
@@ -7928,6 +8137,183 @@ def delete_attachment(aid):
         'id': aid,
         'message': '已移出影像档案，物理文件未删除',
     })
+@app.route('/api/attachments/<int:aid>/void', methods=['POST'])
+def void_attachment(aid):
+    """Void approved evidence and open replacement state for its exact item."""
+    denied = require_reviewer()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+    if not isinstance(reason, str):
+        return jsonify({'error': '作废理由必须是文本', 'code': 'VOID_REASON_INVALID'}), 400
+    reason = reason.strip()
+    if not reason:
+        return jsonify({'error': '作废理由不能为空', 'code': 'VOID_REASON_REQUIRED'}), 400
+    if len(reason) > 500:
+        return jsonify({'error': '作废理由不能超过500字', 'code': 'VOID_REASON_TOO_LONG'}), 400
+
+    with get_db() as db:
+        if not _table_exists(db, 'attachment_void_audits'):
+            return jsonify({'error': '作废审计表不可用', 'code': 'VOID_AUDIT_UNAVAILABLE'}), 500
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute("""SELECT oa.*, s.name AS site_name,
+                                  COALESCE(oa.uploader_name, u.real_name, '') AS uploader_real_name
+                           FROM operation_attachments oa
+                           LEFT JOIN sites s ON s.id=oa.site_id
+                           LEFT JOIN users u ON u.id=oa.uploader_id
+                           WHERE oa.id=?""", (aid,)).fetchone()
+        if not row:
+            return jsonify({'error': '影像不存在', 'code': 'ATTACHMENT_NOT_FOUND'}), 404
+        att = dict(row)
+        denied = _site_access_denied(att.get('site_id'), '作废影像')
+        if denied:
+            return denied
+
+        if str(att.get('review_status') or '').lower() == 'voided' or att.get('voided_at'):
+            audit = db.execute(
+                'SELECT * FROM attachment_void_audits WHERE attachment_id=?', (aid,)
+            ).fetchone()
+            return jsonify({
+                'success': True, 'idempotent': True, 'status': 'voided',
+                'attachment_id': aid,
+                'audit_id': audit['id'] if audit else None,
+                'replacement_item_id': audit['replacement_item_id'] if audit else None,
+            })
+        if att.get('is_deleted'):
+            return jsonify({'error': '影像已移出档案，不能再作废', 'code': 'ATTACHMENT_DELETED'}), 409
+        if str(att.get('review_status') or '').lower() != 'approved':
+            return jsonify({
+                'error': '仅已通过影像可以作废并要求补传',
+                'code': 'ATTACHMENT_VOID_STATUS_INVALID',
+                'review_status': att.get('review_status') or 'pending',
+            }), 409
+        if att.get('archived'):
+            return jsonify({'error': '已归档影像不能静默修改历史', 'code': 'ATTACHMENT_ARCHIVED'}), 409
+        if str(att.get('source_type') or '').lower() == 'workorder':
+            return jsonify({'error': '工单证据必须通过工单纠错流程处理', 'code': 'WORKORDER_EVIDENCE_LOCKED'}), 409
+
+        item = None
+        if str(att.get('source_type') or '').lower() == 'inspection' and att.get('source_id'):
+            item = db.execute('SELECT * FROM insp_plan_items WHERE id=?', (att['source_id'],)).fetchone()
+            if item and item['site_id'] != att.get('site_id'):
+                item = None
+        if not item:
+            return jsonify({
+                'error': '影像没有可靠的检查项关联，不能作废后伪造补传目标',
+                'code': 'ATTACHMENT_ASSOCIATION_REQUIRED',
+            }), 409
+        plan = db.execute('SELECT id, plan_name, status FROM insp_plans WHERE id=?', (item['plan_id'],)).fetchone()
+        if not plan:
+            return jsonify({'error': '关联巡检计划不存在', 'code': 'INSPECTION_PLAN_NOT_FOUND'}), 409
+        if str(plan['status'] or '').lower() in ('closed', 'archived', 'cancelled'):
+            return jsonify({'error': '已归档或关单业务不得修改历史证据', 'code': 'INSPECTION_HISTORY_LOCKED'}), 409
+        if not all(_table_has_column(db, 'insp_plan_items', column) for column in (
+                'evidence_status', 'supplement_required_at',
+                'supplement_source_attachment_id', 'supplement_reason')):
+            return jsonify({'error': '检查项补传字段不可用', 'code': 'SUPPLEMENT_STATE_UNAVAILABLE'}), 500
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        before_state = dict(att)
+        risk_snapshot = {
+            'is_flagged': att.get('is_flagged') or 0,
+            'flag_reason': att.get('flag_reason') or '',
+            'flag_rule': att.get('flag_rule') or '',
+        }
+        changed = db.execute("""UPDATE operation_attachments
+            SET review_status='voided', voided_at=?, voided_by=?, void_reason=?
+            WHERE id=? AND is_deleted=0 AND review_status='approved'""",
+            (now, g.current_user.get('id'), reason, aid))
+        if changed.rowcount != 1:
+            # BEGIN IMMEDIATE serializes the retry; read the committed winner and
+            # return the same idempotent result without another audit/notification.
+            current = db.execute('SELECT review_status FROM operation_attachments WHERE id=?', (aid,)).fetchone()
+            if current and current['review_status'] == 'voided':
+                audit = db.execute('SELECT id, replacement_item_id FROM attachment_void_audits WHERE attachment_id=?', (aid,)).fetchone()
+                return jsonify({'success': True, 'idempotent': True, 'status': 'voided',
+                                'attachment_id': aid, 'audit_id': audit['id'] if audit else None,
+                                'replacement_item_id': audit['replacement_item_id'] if audit else None})
+            return jsonify({'error': '影像状态已变化，请刷新后重试', 'code': 'ATTACHMENT_STATE_CHANGED'}), 409
+
+        # Keep the original item relation intact while rebuilding only the
+        # current effective-photo projection.  The voided attachment remains
+        # discoverable through operation_attachments.source_id.
+        try:
+            prior_urls = json.loads(item['photo_urls'] or '[]') if item['photo_urls'] else []
+        except (TypeError, json.JSONDecodeError):
+            prior_urls = []
+        prior_urls = prior_urls if isinstance(prior_urls, list) else []
+        valid_rows = db.execute("""
+            SELECT stored_path FROM operation_attachments
+            WHERE source_type='inspection' AND source_id=? AND is_deleted=0
+              AND review_status NOT IN ('rejected', 'voided')
+            ORDER BY created_at ASC, id ASC
+        """, (item['id'],)).fetchall()
+        effective_urls = [url for url in prior_urls if url != att.get('stored_path')]
+        for valid_row in valid_rows:
+            if valid_row['stored_path'] and valid_row['stored_path'] not in effective_urls:
+                effective_urls.append(valid_row['stored_path'])
+        db.execute("""UPDATE insp_plan_items
+            SET evidence_status='supplement_required', supplement_required_at=?,
+                supplement_source_attachment_id=?, supplement_reason=?,
+                photo_urls=?, actual_photos=?
+            WHERE id=? AND plan_id=?""", (
+                now, aid, reason, json.dumps(effective_urls, ensure_ascii=False),
+                len(valid_rows), item['id'], item['plan_id']))
+        try:
+            db.execute("""INSERT INTO attachment_void_audits
+                (attachment_id, original_source_type, original_source_id, original_site_id,
+                 original_plan_id, original_item_id, original_item_name, original_site_name,
+                 original_uploader_id, original_uploader_name, original_archive_name,
+                 original_review_status, original_reviewer_id, original_reviewed_at,
+                 original_risk_snapshot, original_state, replacement_item_id,
+                 replacement_plan_id, operator_id, operator_name, reason, voided_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                aid, att.get('source_type') or '', att.get('source_id'), att.get('site_id'),
+                item['plan_id'], item['id'], item['item_name'] or '',
+                att.get('site_name') or '', att.get('uploader_id'),
+                att.get('uploader_name') or att.get('uploader_real_name') or '',
+                att.get('archive_name') or '',
+                att.get('review_status') or '', att.get('reviewer_id'), att.get('reviewed_at'),
+                json.dumps(risk_snapshot, ensure_ascii=False, sort_keys=True),
+                json.dumps(before_state, ensure_ascii=False, sort_keys=True), item['id'], item['plan_id'],
+                g.current_user.get('id'), _current_actor_name(''), reason, now,
+            ))
+        except sqlite3.IntegrityError:
+            audit = db.execute('SELECT id, replacement_item_id FROM attachment_void_audits WHERE attachment_id=?', (aid,)).fetchone()
+            if audit:
+                return jsonify({'success': True, 'idempotent': True, 'status': 'voided',
+                                'attachment_id': aid, 'audit_id': audit['id'],
+                                'replacement_item_id': audit['replacement_item_id']})
+            raise
+
+        if _table_exists(db, 'operation_logs'):
+            db.execute("""INSERT INTO operation_logs
+                (module, action, target_type, target_id, operator, operator_id, details)
+                VALUES (?,?,?,?,?,?,?)""", (
+                'attachment', 'void', 'attachment', aid, _current_actor_name(''), g.current_user.get('id'),
+                json.dumps({'attachment_id': aid, 'item_id': item['id'], 'plan_id': item['plan_id'],
+                            'reason': reason, 'voided_at': now}, ensure_ascii=False, sort_keys=True)))
+        if att.get('uploader_id') and _table_exists(db, 'notifications'):
+            notification_reason = reason if reason.endswith(('。', '！', '？', '!', '?')) else reason + '。'
+            content = (f'{item["item_name"] or "检查项"}的影像已作废：{notification_reason}'
+                       '请补传新的现场影像，补传审核通过前该检查项不会恢复有效闭环。')
+            _upsert_unread_notification(
+                db, att['uploader_id'], 'attachment_void', aid,
+                '影像作废，请补传', content, f'attachment_void:{aid}',
+                json.dumps({'attachment_id': aid, 'site_id': att.get('site_id'),
+                            'plan_id': item['plan_id'], 'item_id': item['id'],
+                            'item_name': item['item_name'] or '', 'reason': reason}, ensure_ascii=False),
+            )
+        db.commit()
+        return jsonify({
+            'success': True, 'status': 'voided', 'attachment_id': aid,
+            'audit_id': db.execute('SELECT id FROM attachment_void_audits WHERE attachment_id=?', (aid,)).fetchone()['id'],
+            'replacement_item_id': item['id'], 'replacement_plan_id': item['plan_id'],
+            'replacement_status': 'supplement_required',
+        })
+
+
 @app.route('/api/attachments/<int:aid>/archive', methods=['POST'])
 def archive_attachment(aid):
     """归档影像资料：标记为已归档，便于长期留存与独立检索"""
@@ -7983,21 +8369,22 @@ def attachment_stats():
                         'by_category': {}, 'by_source': {}, 'by_month': []})
     scope_sql = '' if scope is None else f" AND site_id IN ({','.join('?' * len(scope))})"
     scope_params = [] if scope is None else list(scope)
+    valid_sql = " AND COALESCE(review_status, 'pending') NOT IN ('rejected', 'voided')"
     with get_db() as db:
-        total = db.execute(f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0{scope_sql}", scope_params).fetchone()[0]
-        archived_count = db.execute(f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0 AND archived=1{scope_sql}", scope_params).fetchone()[0]
+        total = db.execute(f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0{valid_sql}{scope_sql}", scope_params).fetchone()[0]
+        archived_count = db.execute(f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0{valid_sql} AND archived=1{scope_sql}", scope_params).fetchone()[0]
         review_pending = db.execute(
-            f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0 AND review_required=1 AND review_status='pending'{scope_sql}",
+            f"SELECT COUNT(*) FROM operation_attachments WHERE is_deleted=0{valid_sql} AND review_required=1 AND review_status='pending'{scope_sql}",
             scope_params,
         ).fetchone()[0]
         by_category = {}
-        for row in db.execute(f"SELECT category, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{scope_sql} GROUP BY category", scope_params):
+        for row in db.execute(f"SELECT category, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{valid_sql}{scope_sql} GROUP BY category", scope_params):
             by_category[row['category']] = row['cnt']
         by_source = {}
-        for row in db.execute(f"SELECT source_type, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{scope_sql} GROUP BY source_type", scope_params):
+        for row in db.execute(f"SELECT source_type, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{valid_sql}{scope_sql} GROUP BY source_type", scope_params):
             by_source[row['source_type']] = row['cnt']
         by_month = []
-        for row in db.execute(f"SELECT substr(created_at,1,7) as ym, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{scope_sql} GROUP BY ym ORDER BY ym DESC LIMIT 12", scope_params):
+        for row in db.execute(f"SELECT substr(created_at,1,7) as ym, COUNT(*) as cnt FROM operation_attachments WHERE is_deleted=0{valid_sql}{scope_sql} GROUP BY ym ORDER BY ym DESC LIMIT 12", scope_params):
             by_month.append({'month': row['ym'], 'count': row['cnt']})
         return jsonify({
             'total': total,
@@ -8101,6 +8488,31 @@ def upload_attachment():
     watermark_text = _clean_text(watermark_text)
 
     with get_db() as db:
+        attachment_source_type = request.form.get('source_type', '') or ''
+        attachment_source_id = request.form.get('source_id', 0, type=int)
+        attachment_site_id = request.form.get('site_id', type=int)
+        inspection_item = None
+        if attachment_source_type == 'inspection':
+            # A multipart caller may select the item, but the server owns the
+            # item/plan/site values written to the attachment record.
+            requested_item_id = request.form.get('item_id', type=int) or attachment_source_id
+            if not requested_item_id:
+                return jsonify({'error': '巡检影像必须绑定具体检查项', 'code': 'INSPECTION_ITEM_REQUIRED'}), 400
+            inspection_item = db.execute(
+                'SELECT id, plan_id, site_id, item_name, category FROM insp_plan_items WHERE id=?',
+                (requested_item_id,),
+            ).fetchone()
+            if not inspection_item:
+                return jsonify({'error': '检查项不存在，不能伪造影像归属', 'code': 'INSPECTION_ITEM_NOT_FOUND'}), 404
+            if attachment_site_id not in (None, inspection_item['site_id']):
+                return jsonify({'error': '影像站点与检查项不一致', 'code': 'INSPECTION_SITE_MISMATCH'}), 400
+            requested_plan_id = request.form.get('plan_id', type=int)
+            if requested_plan_id not in (None, inspection_item['plan_id']):
+                return jsonify({'error': '影像计划与检查项不一致', 'code': 'INSPECTION_PLAN_MISMATCH'}), 400
+            attachment_source_id = inspection_item['id']
+            attachment_site_id = inspection_item['site_id']
+            description = inspection_item['item_name'] or description
+            auto_category = inspection_item['category'] or auto_category or '巡检现场照片'
         db.execute("""INSERT INTO operation_attachments
             (filename, stored_path, file_type, mime_type, file_size, description,
              source_type, source_id, site_id, uploader_id, uploader_name,
@@ -8112,9 +8524,9 @@ def upload_attachment():
              'video' if ext in ('.mp4','.mov') else 'image',
              ext, len(file_data),
              description,
-             request.form.get('source_type',''),
-             request.form.get('source_id', 0, type=int),
-             request.form.get('site_id', type=int),
+             attachment_source_type,
+             attachment_source_id,
+             attachment_site_id,
              g.current_user.get('id'),
              _current_actor_name('未知用户'),
              request.form.get('gps_lat', type=float),
@@ -8123,8 +8535,10 @@ def upload_attachment():
              auto_category,
              watermark_text, rec_cat, match_status, match_conf,
              review_required, req_id))
-        db.commit()
         aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        if inspection_item:
+            _persist_inspection_attachment_link(db, aid, inspection_item)
+        db.commit()
 
     return jsonify({'success': True, 'id': aid, 'url': url,
                    'match': match, 'review_required': review_required})
@@ -9688,7 +10102,15 @@ def v2_get_plan_detail(plan_id):
             ORDER BY pi.site_id, pi.id
         """, (plan_id,)).fetchall()
         result = dict(plan)
-        result['items'] = [dict(it) for it in items]
+        result['items'] = []
+        for raw_item in items:
+            item_payload = dict(raw_item)
+            evidence, effective_evidence = _item_attachment_history(db, raw_item['id'])
+            item_payload['evidence_attachments'] = evidence
+            item_payload['voided_evidence'] = [row for row in evidence if row.get('review_status') == 'voided']
+            item_payload['effective_evidence_count'] = len(effective_evidence)
+            item_payload['effective_evidence_ids'] = [row['id'] for row in effective_evidence]
+            result['items'].append(item_payload)
         result['total_items'] = len(items)
         result['completed_items'] = sum(1 for it in items if it['result'] is not None)
         result['completion_rate'] = round(result['completed_items'] / result['total_items'] * 100, 1) if result['total_items'] > 0 else 0
@@ -10225,6 +10647,7 @@ def v2_update_plan_item(plan_id, item_id):
                             review_required=?, requirement_id=? WHERE id=?""",
                             (_desc, item_id, '', _rec_cat, _match_status, _match_conf,
                              _review_required, _req_id, uploaded['id']))
+                        _persist_inspection_attachment_link(db, uploaded['id'], item)
                         _flag_attachment(db, uploaded['id'], item['site_id'], 'inspection', item_id,
                                          uploaded['gps_lat'], uploaded['gps_lng'], uploaded['taken_at'], commit=False)
                     else:
@@ -10240,6 +10663,7 @@ def v2_update_plan_item(plan_id, item_id):
                              '', _rec_cat, _match_status, _match_conf,
                              _review_required, _req_id))
                         attachment_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                        _persist_inspection_attachment_link(db, attachment_id, item)
                         _flag_attachment(db, attachment_id, item['site_id'], 'inspection', item_id,
                                          None, None, None, commit=False)
         db.commit()
@@ -11675,6 +12099,11 @@ def audit_pending():
                 ORDER BY created_at DESC
             """, (wo_dict['id'],)).fetchall()
             total_photos = len(photo_rows)
+            workorder_attachment_details = []
+            for photo in photo_rows:
+                detail = dict(photo)
+                detail.update(_attachment_status_payload(detail))
+                workorder_attachment_details.append(detail)
             result.append({
                 'source_type': 'workorder_review',
                 'source_label': '工单办结审核',
@@ -11693,7 +12122,7 @@ def audit_pending():
                 'submit_time': wo_dict.get('review_submitted_at', '') or '',
                 'photo_urls': json.dumps([p['stored_path'] for p in photo_rows], ensure_ascii=False),
                 'order_no': wo_dict.get('order_no', ''),
-                'attachment_details': [dict(p) for p in photo_rows],
+                'attachment_details': workorder_attachment_details,
                 'status': wo_dict.get('status', ''),
                 'assignee': wo_dict.get('assignee', ''),
             })
@@ -11791,13 +12220,11 @@ def audit_pending():
                    a.site_id, s.name as site_name, a.source_type, a.source_id,
                    a.created_at as submit_time, a.stored_path, a.filename, a.taken_at,
                    a.is_flagged, a.flag_reason, a.flag_rule, a.capture_source,
+                   a.review_status, a.uploader_id, a.uploader_name,
                    i.id AS item_id, i.item_name, i.plan_id, p.plan_name
             FROM operation_attachments a
             LEFT JOIN sites s ON a.site_id = s.id
-            LEFT JOIN insp_plan_items i ON i.site_id=a.site_id AND (
-                (a.source_type='inspection' AND a.source_id=i.id)
-                OR (NOT (a.source_type='inspection' AND a.source_id>0)
-                    AND i.photo_urls LIKE '%' || a.stored_path || '%'))
+            LEFT JOIN insp_plan_items i ON a.source_type='inspection' AND a.source_id=i.id
             LEFT JOIN insp_plans p ON p.id=i.plan_id
             WHERE a.is_deleted=0 AND a.review_required=1 AND a.review_status='pending'
               AND a.source_type != 'workorder'
@@ -11833,9 +12260,16 @@ def audit_pending():
                         'taken_at': pd.get('taken_at'), 'capture_source': pd.get('capture_source'),
                         'is_flagged': pd.get('is_flagged') or 0,
                         'flag_reason': pd.get('flag_reason') or '', 'flag_rule': pd.get('flag_rule') or '',
-                        'item_id': pd.get('item_id'), 'item_name': pd.get('item_name') or '',
-                        'recognized_category': pd.get('recognized_category') or pd.get('item_name') or '',
-                        'classification_source': photo_extra.get('classification_source') or 'inspection_item',
+                        'item_id': pd.get('item_id'), 'item_name': pd.get('item_name') or '检查项待确认',
+                        'plan_id': pd.get('plan_id'), 'plan_name': pd.get('plan_name') or '',
+                        'site_id': pd.get('site_id'), 'site_name': pd.get('site_name') or '',
+                        'archive_name': f'{pd.get("site_name") or "未关联站点"} · {pd.get("item_name") or "检查项待确认"} · {pd.get("recognized_category") or "影像"} · {pd.get("submit_time") or "时间待确认"}',
+                        'original_filename': pd.get('filename') or '',
+                        'review_status': pd.get('review_status') or 'pending',
+                        'review_status_label': ATTACHMENT_REVIEW_STATUS_LABELS.get(pd.get('review_status') or 'pending', '待审核'),
+                        'risk_label': '风险标记' if pd.get('is_flagged') else '',
+                        'recognized_category': pd.get('recognized_category') or '影像',
+                        'classification_source': photo_extra.get('classification_source') or ('inspection_item' if pd.get('item_id') else 'unlinked_legacy'),
                         'watermark_status': photo_extra.get('ocr_status') or 'unknown',
                     })
                 continue
@@ -11878,10 +12312,17 @@ def audit_pending():
                 'watermark_text': pd.get('watermark_text'), 'taken_at': pd.get('taken_at'),
                 'capture_source': pd.get('capture_source'), 'is_flagged': pd.get('is_flagged') or 0,
                 'flag_reason': pd.get('flag_reason') or '', 'flag_rule': pd.get('flag_rule') or '',
-                'item_id': pd.get('item_id'), 'item_name': pd.get('item_name') or '',
-                'recognized_category': pd.get('recognized_category') or pd.get('item_name') or '',
+                'item_id': pd.get('item_id'), 'item_name': pd.get('item_name') or '检查项待确认',
+                'plan_id': pd.get('plan_id'), 'plan_name': pd.get('plan_name') or '',
+                'site_id': pd.get('site_id'), 'site_name': pd.get('site_name') or '',
+                'archive_name': f'{pd.get("site_name") or "未关联站点"} · {pd.get("item_name") or "检查项待确认"} · {pd.get("recognized_category") or "影像"} · {pd.get("submit_time") or "时间待确认"}',
+                'original_filename': pd.get('filename') or '',
+                'review_status': pd.get('review_status') or 'pending',
+                'review_status_label': ATTACHMENT_REVIEW_STATUS_LABELS.get(pd.get('review_status') or 'pending', '待审核'),
+                'risk_label': '风险标记' if pd.get('is_flagged') else '',
+                'recognized_category': pd.get('recognized_category') or '影像',
                 'classification_source': photo_extra.get('classification_source') or (
-                    'inspection_item' if pd.get('item_id') else 'watermark_ocr'),
+                    'inspection_item' if pd.get('item_id') else 'unlinked_legacy'),
                 'watermark_status': photo_extra.get('ocr_status') or 'unknown',
             })
         for batch in photo_batches.values():
@@ -11923,6 +12364,75 @@ def _table_has_column(db, table, column):
         )
     except sqlite3.OperationalError:
         return False
+
+
+def _sync_replacement_evidence_state(db, attachment, now):
+    """Close an item-level supplement only after a replacement is approved."""
+    if not (_table_exists(db, 'insp_plan_items')
+            and _table_has_column(db, 'insp_plan_items', 'evidence_status')
+            and str(attachment.get('source_type') or '').lower() == 'inspection'
+            and attachment.get('source_id')):
+        return None
+    item = db.execute('SELECT * FROM insp_plan_items WHERE id=?', (attachment['source_id'],)).fetchone()
+    if not item or item['evidence_status'] != 'replacement_submitted':
+        return None
+    pending = db.execute("""SELECT 1 FROM operation_attachments
+        WHERE source_type='inspection' AND source_id=? AND is_deleted=0
+          AND review_required=1 AND review_status='pending'""", (item['id'],)).fetchone()
+    if pending:
+        return None
+    approved = db.execute("""SELECT COUNT(*) AS c FROM operation_attachments
+        WHERE source_type='inspection' AND source_id=? AND is_deleted=0
+          AND review_status='approved'""", (item['id'],)).fetchone()['c']
+    if not approved:
+        return None
+    updates = ["evidence_status='effective'"]
+    params = []
+    if _table_has_column(db, 'insp_plan_items', 'review_status'):
+        updates.append('review_status=2')
+    if _table_has_column(db, 'insp_plan_items', 'reviewer_id'):
+        updates.append('reviewer_id=?')
+        params.append(attachment.get('reviewer_id'))
+    if _table_has_column(db, 'insp_plan_items', 'review_time'):
+        updates.append('review_time=?')
+        params.append(now)
+    if _table_has_column(db, 'insp_plan_items', 'review_comment'):
+        updates.append("review_comment='替代证据审核通过'")
+    if _table_has_column(db, 'insp_plan_items', 'actual_photos'):
+        updates.append('actual_photos=?')
+        params.append(approved)
+    params.append(item['id'])
+    db.execute(f"UPDATE insp_plan_items SET {','.join(updates)} WHERE id=?", params)
+    return item['id']
+
+
+def _keep_replacement_required_after_rejection(db, attachment, reviewer_id, reason, now):
+    """Keep a rejected replacement actionable without rewriting the original completion."""
+    if not (_table_exists(db, 'insp_plan_items')
+            and str(attachment.get('source_type') or '').lower() == 'inspection'
+            and attachment.get('source_id')):
+        return None
+    if not _table_has_column(db, 'insp_plan_items', 'evidence_status'):
+        return None
+    item = db.execute('SELECT * FROM insp_plan_items WHERE id=?', (attachment['source_id'],)).fetchone()
+    if not item or item['evidence_status'] != 'replacement_submitted':
+        return None
+    updates = ["evidence_status='supplement_required'"]
+    params = []
+    if _table_has_column(db, 'insp_plan_items', 'review_status'):
+        updates.append('review_status=1')
+    if _table_has_column(db, 'insp_plan_items', 'reviewer_id'):
+        updates.append('reviewer_id=?')
+        params.append(reviewer_id)
+    if _table_has_column(db, 'insp_plan_items', 'review_time'):
+        updates.append('review_time=?')
+        params.append(now)
+    if _table_has_column(db, 'insp_plan_items', 'review_comment'):
+        updates.append('review_comment=?')
+        params.append(reason or '替代证据未通过审核')
+    params.append(item['id'])
+    db.execute(f"UPDATE insp_plan_items SET {','.join(updates)} WHERE id=?", params)
+    return item['id']
 
 
 def _terminal_plan_vehicle_exists(db, schedule_id):
@@ -12123,8 +12633,22 @@ def _reopen_items_for_rejected_attachment(db, attachment, reviewer_id, reason, n
     stored_path = attachment['stored_path'] or ''
     if not stored_path:
         return []
+    # Production rows have source_type/source_id.  A legacy fixture/database
+    # without those columns may retain the old compatibility path lookup, but
+    # rows with an explicit unlinked source are never classified by filename.
+    has_source_columns = 'source_type' in attachment.keys() and 'source_id' in attachment.keys()
     attachment_source_type = attachment['source_type'] if 'source_type' in attachment.keys() else ''
     attachment_source_id = attachment['source_id'] if 'source_id' in attachment.keys() else 0
+    if has_source_columns and not (
+            attachment_source_type == 'inspection' and attachment_source_id not in (None, '', 0, '0')):
+        return []
+    if has_source_columns:
+        items = db.execute("""SELECT i.id, i.plan_id, i.site_id, i.item_name, p.assignee_id
+            FROM insp_plan_items i JOIN insp_plans p ON p.id=i.plan_id
+            WHERE i.site_id=? AND i.id=?
+              AND COALESCE(i.execution_status, 'active')='active'""",
+            (attachment['site_id'], attachment_source_id)).fetchall()
+        return [(item['id'], reason) for item in items]
     items = db.execute("""SELECT i.id, i.plan_id, i.site_id, i.item_name, p.assignee_id
         FROM insp_plan_items i JOIN insp_plans p ON p.id=i.plan_id
         WHERE i.site_id=? AND (
@@ -12278,22 +12802,48 @@ def api_operation_attachments_review():
             affected_sites.add(att['site_id'])
             attachment_source_type = att['source_type'] if 'source_type' in att.keys() else ''
             attachment_source_id = att['source_id'] if 'source_id' in att.keys() else 0
-            linked_items = db.execute("""SELECT plan_id, site_id FROM insp_plan_items
-                WHERE site_id=? AND (
-                    (?='inspection' AND ?>0 AND id=?)
-                    OR (NOT (?='inspection' AND ?>0) AND photo_urls LIKE ?)
-                )""", (att['site_id'], attachment_source_type, attachment_source_id, attachment_source_id,
-                          attachment_source_type, attachment_source_id, '%' + (att['stored_path'] or '') + '%')).fetchall()
+            if ('source_type' in att.keys() and 'source_id' in att.keys()
+                    and attachment_source_type == 'inspection'
+                    and attachment_source_id not in (None, '', 0, '0')):
+                linked_items = db.execute(
+                    'SELECT plan_id, site_id FROM insp_plan_items WHERE site_id=? AND id=?',
+                    (att['site_id'], attachment_source_id)).fetchall()
+            elif 'source_type' in att.keys() and 'source_id' in att.keys():
+                linked_items = []
+            else:
+                linked_items = db.execute("""SELECT plan_id, site_id FROM insp_plan_items
+                    WHERE site_id=? AND photo_urls LIKE ?""",
+                    (att['site_id'], '%' + (att['stored_path'] or '') + '%')).fetchall()
             affected_inspection_batches.update((row['plan_id'], row['site_id']) for row in linked_items)
             approved_count += 1 if decision == 'approve' else 0
             rejected_count += 1 if decision == 'reject' else 0
+            if decision == 'approve':
+                _sync_replacement_evidence_state(db, dict(att, reviewer_id=reviewer_id), now)
             if decision == 'reject':
-                linked_rejections = _reopen_items_for_rejected_attachment(
-                    db, att, reviewer_id, reject_reason or '现场照片未通过审核', now)
+                rejection_reason = reject_reason or '现场照片未通过审核'
+                replacement_item_id = _keep_replacement_required_after_rejection(
+                    db, dict(att), reviewer_id, rejection_reason, now)
+                linked_rejections = [] if replacement_item_id else _reopen_items_for_rejected_attachment(
+                    db, att, reviewer_id, rejection_reason, now)
                 rejected_item_rows.extend(linked_rejections)
                 # Linked inspection evidence is actionable only through its plan/site
                 # rework package. A per-photo reminder has no executable destination.
                 if not linked_rejections and att['uploader_id']:
+                    if replacement_item_id:
+                        item_row = db.execute(
+                            'SELECT item_name FROM insp_plan_items WHERE id=?',
+                            (replacement_item_id,),
+                        ).fetchone()
+                        item_name = item_row['item_name'] if item_row else '检查项'
+                        _upsert_unread_notification(
+                            db, att['uploader_id'], 'replacement_review', aid,
+                            '替代影像未通过，请补传',
+                            f'{item_name}的替代影像未通过审核：{rejection_reason}。请补传新的现场影像。',
+                            f'replacement_review:{aid}',
+                            json.dumps({'attachment_id': aid, 'item_id': replacement_item_id,
+                                        'item_name': item_name, 'reason': rejection_reason},
+                                       ensure_ascii=False),
+                        )
                     name = att['description'] or att['filename'] or f'照片#{aid}'
                     db.execute(
                         'INSERT INTO notifications (user_id, source_type, source_id, title, content) VALUES (?,?,?,?,?)',
@@ -12320,9 +12870,7 @@ def api_operation_attachments_review():
             if _table_has_column(db, 'operation_attachments', 'review_required'):
                 attachment_conditions.append('a.review_required=1')
             if _table_has_column(db, 'operation_attachments', 'source_type'):
-                attachment_join = """(a.source_type='inspection' AND a.source_id=i.id)
-                    OR (NOT (a.source_type='inspection' AND a.source_id>0)
-                        AND i.photo_urls LIKE '%' || a.stored_path || '%')"""
+                attachment_join = "a.source_type='inspection' AND a.source_id=i.id"
             else:
                 attachment_join = "i.photo_urls LIKE '%' || a.stored_path || '%'"
             pending_attachment = db.execute(f"""SELECT 1 FROM operation_attachments a
@@ -12370,6 +12918,10 @@ def migrate_rejected_photo_rework():
             path = attachment['stored_path'] or ''
             if not path or not _table_has_column(db, 'insp_plan_items', 'rework_required_at'):
                 continue
+            if ('source_type' in attachment.keys() and 'source_id' in attachment.keys()
+                    and not (attachment['source_type'] == 'inspection'
+                             and attachment['source_id'] not in (None, '', 0, '0'))):
+                continue
             pending = db.execute("""SELECT 1 FROM insp_plan_items
                 WHERE site_id=? AND photo_urls LIKE ? AND COALESCE(review_status, 0)!=3
                   AND COALESCE(execution_status, 'active')='active' LIMIT 1""",
@@ -12384,6 +12936,179 @@ def migrate_rejected_photo_rework():
         if migrated:
             db.commit()
     return migrated
+
+
+def _legacy_photo_url_path(value):
+    """Normalize a legacy photo URL to its full, decoded URL path only."""
+    if not isinstance(value, str) or not value.strip():
+        return ''
+    parsed = urlsplit(value.strip())
+    path = (parsed.path or value.strip().split('?', 1)[0].split('#', 1)[0]).replace('\\', '/')
+    if not path.startswith('/'):
+        path = '/' + path
+    return unquote(path)
+
+
+def _backfill_legacy_attachment_item_links(db):
+    """Backfill only unique, JSON-photo_urls based historical associations."""
+    if not (_table_has_column(db, 'insp_plan_items', 'photo_urls')
+            and all(_table_has_column(db, 'operation_attachments', column)
+                    for column in ('stored_path', 'filename', 'site_id', 'plan_id', 'item_id', 'item_name'))):
+        return 0
+    db.execute('''CREATE TABLE IF NOT EXISTS attachment_link_migration_issues (
+        attachment_id INTEGER PRIMARY KEY, reason TEXT NOT NULL,
+        candidate_item_ids TEXT DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    references = {}
+    items_by_id = {}
+    for row in db.execute('SELECT id, plan_id, site_id, item_name, photo_urls FROM insp_plan_items').fetchall():
+        items_by_id[row['id']] = dict(row)
+        try:
+            urls = json.loads(row['photo_urls'] or '[]')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(urls, list):
+            continue
+        for url in urls:
+            key = _legacy_photo_url_path(url)
+            if key:
+                references.setdefault(key, []).append(dict(row))
+    changed = 0
+    rows = db.execute("""SELECT id, stored_path, filename, site_id, plan_id, item_id, item_name
+        FROM operation_attachments WHERE COALESCE(is_deleted, 0)=0""").fetchall()
+    for attachment in rows:
+        key = _legacy_photo_url_path(attachment['stored_path'])
+        matches = {item['id']: item for item in references.get(key, [])
+                   if attachment['site_id'] in (None, 0, item['site_id'])}
+        if not matches:
+            db.execute("""INSERT INTO attachment_link_migration_issues
+                (attachment_id, reason, candidate_item_ids, updated_at) VALUES (?, 'no_unique_url_match', '[]', CURRENT_TIMESTAMP)
+                ON CONFLICT(attachment_id) DO UPDATE SET reason=excluded.reason, candidate_item_ids=excluded.candidate_item_ids, updated_at=excluded.updated_at""", (attachment['id'],))
+            continue
+        if len(matches) != 1:
+            db.execute("""INSERT INTO attachment_link_migration_issues
+                (attachment_id, reason, candidate_item_ids, updated_at) VALUES (?, 'multiple_url_matches', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(attachment_id) DO UPDATE SET reason=excluded.reason, candidate_item_ids=excluded.candidate_item_ids, updated_at=excluded.updated_at""",
+                (attachment['id'], json.dumps(sorted(matches))))
+            continue
+        item = next(iter(matches.values()))
+        existing_item = items_by_id.get(attachment['item_id'])
+        if existing_item:
+            if existing_item['id'] == item['id'] and attachment['plan_id'] == item['plan_id']:
+                continue
+            db.execute("""INSERT INTO attachment_link_migration_issues
+                (attachment_id, reason, candidate_item_ids, updated_at) VALUES (?, 'existing_association_conflict', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(attachment_id) DO UPDATE SET reason=excluded.reason, candidate_item_ids=excluded.candidate_item_ids, updated_at=excluded.updated_at""",
+                (attachment['id'], json.dumps([item['id']])))
+            continue
+        # Never overwrite an existing non-empty contradictory association.
+        if attachment['plan_id'] not in (None, 0, item['plan_id']):
+            db.execute("""INSERT INTO attachment_link_migration_issues
+                (attachment_id, reason, candidate_item_ids, updated_at) VALUES (?, 'existing_association_conflict', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(attachment_id) DO UPDATE SET reason=excluded.reason, candidate_item_ids=excluded.candidate_item_ids, updated_at=excluded.updated_at""",
+                (attachment['id'], json.dumps([item['id']])))
+            continue
+        db.execute("""UPDATE operation_attachments
+            SET plan_id=?, item_id=?, item_name=?, site_id=?
+            WHERE id=? AND COALESCE(item_id, 0)=0
+              AND (plan_id IS NULL OR plan_id=0 OR plan_id=?)""",
+            (item['plan_id'], item['id'], item['item_name'] or '', item['site_id'], attachment['id'], item['plan_id']))
+        changed += db.execute('SELECT changes()').fetchone()[0]
+        if changed:
+            db.execute('DELETE FROM attachment_link_migration_issues WHERE attachment_id=?', (attachment['id'],))
+    return changed
+
+
+def migrate_attachment_evidence_closure():
+    """Additive migration for voided evidence and item-level replacement state."""
+    with get_db() as db:
+        try:
+            attachment_columns = {
+                'archive_name': "TEXT DEFAULT ''",
+                'voided_at': 'TEXT',
+                'voided_by': 'INTEGER',
+                'void_reason': "TEXT DEFAULT ''",
+                'plan_id': 'INTEGER',
+                'item_id': 'INTEGER',
+                'item_name': "TEXT DEFAULT ''",
+            }
+            item_columns = {
+                'evidence_status': "TEXT DEFAULT ''",
+                'supplement_required_at': "TEXT DEFAULT ''",
+                'supplement_source_attachment_id': 'INTEGER',
+                'supplement_reason': "TEXT DEFAULT ''",
+            }
+            for column, column_type in attachment_columns.items():
+                if not _table_has_column(db, 'operation_attachments', column):
+                    db.execute(f'ALTER TABLE operation_attachments ADD COLUMN {column} {column_type}')
+            for column, column_type in item_columns.items():
+                if not _table_has_column(db, 'insp_plan_items', column):
+                    db.execute(f'ALTER TABLE insp_plan_items ADD COLUMN {column} {column_type}')
+            db.execute('''CREATE TABLE IF NOT EXISTS attachment_void_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attachment_id INTEGER NOT NULL UNIQUE,
+                original_source_type TEXT DEFAULT '',
+                original_source_id INTEGER,
+                original_site_id INTEGER,
+                original_plan_id INTEGER,
+                original_item_id INTEGER,
+                original_item_name TEXT DEFAULT '',
+                original_site_name TEXT DEFAULT '',
+                original_uploader_id INTEGER,
+                original_uploader_name TEXT DEFAULT '',
+                original_archive_name TEXT DEFAULT '',
+                original_review_status TEXT DEFAULT '',
+                original_reviewer_id INTEGER,
+                original_reviewed_at TEXT,
+                original_risk_snapshot TEXT DEFAULT '{}',
+                original_state TEXT NOT NULL DEFAULT '{}',
+                replacement_item_id INTEGER,
+                replacement_plan_id INTEGER,
+                replacement_required INTEGER NOT NULL DEFAULT 1,
+                operator_id INTEGER NOT NULL,
+                operator_name TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                voided_at TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )''')
+            for column, column_type in {
+                'original_plan_id': 'INTEGER', 'original_item_id': 'INTEGER',
+                'original_item_name': "TEXT DEFAULT ''", 'original_site_name': "TEXT DEFAULT ''",
+                'original_uploader_id': 'INTEGER', 'original_uploader_name': "TEXT DEFAULT ''",
+                'original_archive_name': "TEXT DEFAULT ''",
+            }.items():
+                if not _table_has_column(db, 'attachment_void_audits', column):
+                    db.execute(f'ALTER TABLE attachment_void_audits ADD COLUMN {column} {column_type}')
+            # Only source_type/source_id is allowed to establish a legacy link.
+            # Filenames, descriptions and photo_urls are deliberately excluded.
+            if (_table_exists(db, 'operation_attachments')
+                    and _table_exists(db, 'insp_plan_items')
+                    and all(_table_has_column(db, 'operation_attachments', column)
+                            for column in ('source_type', 'source_id', 'plan_id', 'item_id', 'item_name'))):
+                db.execute("""UPDATE operation_attachments
+                    SET plan_id=(SELECT i.plan_id FROM insp_plan_items i
+                                 WHERE i.id=operation_attachments.source_id),
+                        item_id=source_id,
+                        item_name=COALESCE((SELECT i.item_name FROM insp_plan_items i
+                                           WHERE i.id=operation_attachments.source_id), '检查项待确认')
+                    WHERE source_type='inspection' AND COALESCE(source_id, 0) != 0
+                      AND EXISTS (SELECT 1 FROM insp_plan_items i
+                                  WHERE i.id=operation_attachments.source_id)""")
+                db.execute("""UPDATE operation_attachments
+                    SET item_name='检查项待确认'
+                    WHERE source_type='inspection' AND COALESCE(source_id, 0)=0
+                      AND COALESCE(item_name, '')=''""")
+                _backfill_legacy_attachment_item_links(db)
+            db.execute('CREATE INDEX IF NOT EXISTS idx_attachment_void_audit_item '
+                       'ON attachment_void_audits(replacement_item_id)')
+            db.execute('CREATE INDEX IF NOT EXISTS idx_attachment_void_audit_site '
+                       'ON attachment_void_audits(original_site_id)')
+            db.commit()
+        except Exception as exc:
+            # Startup migrations are intentionally additive and must not prevent a
+            # legacy read-only database from booting; the write endpoint still
+            # returns a clear server error when its required table is unavailable.
+            print(f'[Migrate] attachment evidence closure skipped: {exc}')
 
 
 @app.route('/api/operation-attachments/reevaluate', methods=['POST'])
@@ -12458,6 +13183,13 @@ def api_attachments_auto_review():
         approved = db.execute(cnt_sql, cparams).fetchone()['c']
         if not dry_run:
             db.execute(upd_sql, uparams)
+            synced_rows = db.execute("""
+                SELECT * FROM operation_attachments
+                WHERE is_deleted=0 AND review_status='approved'
+                  AND reviewer_id=? AND reviewed_at=? AND review_action='auto_pass_normal'
+            """, (reviewer_id, now)).fetchall()
+            for synced in synced_rows:
+                _sync_replacement_evidence_state(db, dict(synced), now)
         remaining = db.execute(flagged_sql, flagged_params).fetchone()['c']
         if not dry_run:
             db.commit()
@@ -12689,6 +13421,7 @@ def _bind_inspection_attachments(db, item, uploader_id, photo_urls):
                        description=?, category=?, recognized_category=?, extra_json=? WHERE id=?""",
                        (item['id'], item_name, category or '巡检现场照片', item_name,
                         json.dumps(extra, ensure_ascii=False), row['id']))
+            _persist_inspection_attachment_link(db, row['id'], item)
 
 def _haversine(lat1, lng1, lat2, lng2):
     """两点球面距离（米）"""
@@ -12868,9 +13601,14 @@ def audit_stats():
             else:
                 photo_scope_sql = ' AND 1=0'
         has_item_photo_urls = _table_has_column(db, 'insp_plan_items', 'photo_urls')
-        photo_join_sql = """LEFT JOIN insp_plan_items i ON i.site_id=a.site_id
+        has_attachment_source = _table_has_column(db, 'operation_attachments', 'source_type') and _table_has_column(db, 'operation_attachments', 'source_id')
+        if has_attachment_source:
+            photo_join_sql = """LEFT JOIN insp_plan_items i ON a.source_type='inspection'
+                AND a.source_id=i.id AND i.site_id=a.site_id"""
+        else:
+            photo_join_sql = """LEFT JOIN insp_plan_items i ON i.site_id=a.site_id
                 AND i.photo_urls LIKE '%' || a.stored_path || '%'""" if has_item_photo_urls else ''
-        plan_expr = 'i.plan_id' if has_item_photo_urls else 'NULL'
+        plan_expr = 'i.plan_id' if (has_item_photo_urls or has_attachment_source) else 'NULL'
         photo_pending = db.execute(f"""SELECT COUNT(*) AS c FROM (
             SELECT a.site_id, COALESCE({plan_expr}, 0) AS plan_id,
                    CASE WHEN {plan_expr} IS NULL THEN COALESCE(a.source_type, 'site') ELSE 'inspection' END AS source_group,
@@ -16754,6 +17492,7 @@ def mobile_site_tasks(site_id):
             if item['result'] is not None:
                 categories[cat]['completed'] += 1
             freq_cn = _FREQ_CN.get(item['frequency'] or '', item['frequency'] or '')
+            evidence, effective_evidence = _item_attachment_history(db, item['id'])
             categories[cat]['items'].append({
                 'item_id': item['id'],
                 'plan_id': item['plan_id'],
@@ -16768,6 +17507,9 @@ def mobile_site_tasks(site_id):
                 'photo_urls': item['photo_urls'],
                 'required_photos': item['required_photos'] if 'required_photos' in item.keys() else 0,
                 'actual_photos': item['actual_photos'] if 'actual_photos' in item.keys() else 0,
+                'evidence_attachments': evidence,
+                'voided_evidence': [row for row in evidence if row.get('review_status') == 'voided'],
+                'effective_evidence_count': len(effective_evidence),
             })
 
         carryover_plan_ids = {
@@ -16842,6 +17584,7 @@ def _mobile_execution_categories(db, plan_id, site_id):
         })
         categories[category]['total'] += 1
         categories[category]['completed'] += item['result'] is not None
+        evidence, effective_evidence = _item_attachment_history(db, item['id'])
         categories[category]['items'].append({
             'item_id': item['id'], 'plan_id': plan_id, 'item_name': item['item_name'],
             'frequency': item['frequency'] or '', 'frequency_cn': _FREQ_CN.get(item['frequency'] or '', item['frequency'] or ''),
@@ -16852,6 +17595,12 @@ def _mobile_execution_categories(db, plan_id, site_id):
             'review_status': item['review_status'] if 'review_status' in item.keys() else 0,
             'review_comment': item['review_comment'] if 'review_comment' in item.keys() else '',
             'rework_required_at': item['rework_required_at'] if 'rework_required_at' in item.keys() else '',
+            'evidence_status': item['evidence_status'] if 'evidence_status' in item.keys() else '',
+            'supplement_required_at': item['supplement_required_at'] if 'supplement_required_at' in item.keys() else '',
+            'supplement_reason': item['supplement_reason'] if 'supplement_reason' in item.keys() else '',
+            'evidence_attachments': evidence,
+            'voided_evidence': [row for row in evidence if row.get('review_status') == 'voided'],
+            'effective_evidence_count': len(effective_evidence),
         })
     return list(categories.values()), total, completed
 
@@ -17490,11 +18239,16 @@ def mobile_submit_item():
         supplement_only = bool(data.get('supplement'))
         existing_result = item['result']
         existing_review_status = int(item['review_status'] or 0) if 'review_status' in item.keys() else 0
+        supplement_required = ('evidence_status' in item.keys()
+                               and item['evidence_status'] == 'supplement_required')
+        supplement_only = supplement_only or supplement_required
         if existing_result is not None:
-            if existing_review_status == 2:
+            if supplement_required:
+                pass
+            elif existing_review_status == 2:
                 return jsonify({'error': '该检查项已通过审核，现场证据已冻结',
                                 'code': 'INSPECTION_ITEM_APPROVED'}), 409
-            if existing_review_status == 1 and supplement_only:
+            elif existing_review_status == 1 and supplement_only:
                 pass
             else:
                 return jsonify({'error': '该检查项已提交审核，请补充证据后等待审核',
@@ -17505,9 +18259,10 @@ def mobile_submit_item():
 
         # 巡检结果必须建立在当日到站打卡之上。离线端会先回放打卡再回放提交，
         # 因而不会阻断弱网闭环；这里仅阻止绕过现场环节的直接提交。
+        business_date = datetime.now().strftime('%Y-%m-%d')
         checkin_sql = """SELECT 1 FROM inspection_checkins
-            WHERE site_id=? AND user_id=? AND date(check_time)=date('now','localtime')"""
-        checkin_params = [item['site_id'], g.current_user['id']]
+            WHERE site_id=? AND user_id=? AND date(check_time)=?"""
+        checkin_params = [item['site_id'], g.current_user['id'], business_date]
         rework_required_at = item['rework_required_at'] if 'rework_required_at' in item.keys() else ''
         is_rework = bool(_table_has_column(db, 'insp_plans', 'rework_of_plan_id') and db.execute(
             'SELECT 1 FROM insp_plans WHERE id=? AND rework_of_plan_id IS NOT NULL',
@@ -17541,8 +18296,15 @@ def mobile_submit_item():
         if not isinstance(existing_photos, list):
             existing_photos = []
         if supplement_only:
-            merged_photos = list(dict.fromkeys(existing_photos + submitted_photos))
-            new_photos = [url for url in merged_photos if url not in existing_photos]
+            existing_keys = {_attachment_storage_path(url) for url in existing_photos}
+            new_photos = []
+            for url in submitted_photos:
+                normalized_url = _attachment_storage_path(url)
+                if not normalized_url or normalized_url in existing_keys:
+                    continue
+                existing_keys.add(normalized_url)
+                new_photos.append(normalized_url)
+            merged_photos = existing_photos + new_photos
             if not new_photos:
                 return jsonify({'error': '请先补充至少一张新的现场照片',
                                 'code': 'INSPECTION_ITEM_NO_NEW_EVIDENCE'}), 409
@@ -17555,8 +18317,24 @@ def mobile_submit_item():
             _bind_inspection_attachments(db, item, g.current_user['id'], new_photos)
             db.execute("UPDATE insp_plan_items SET photo_urls=?, actual_photos=? WHERE id=?",
                        (json.dumps(merged_photos, ensure_ascii=False), len(merged_photos), item_id))
+            supplement_updates = []
+            if 'evidence_status' in item.keys():
+                supplement_updates.append("evidence_status='replacement_submitted'")
+            if 'review_status' in item.keys():
+                supplement_updates.append('review_status=1')
+            if supplement_updates:
+                db.execute(f"UPDATE insp_plan_items SET {','.join(supplement_updates)} WHERE id=?",
+                           (item_id,))
+            for photo in new_photos:
+                stored_path = _attachment_storage_path(photo)
+                if _table_has_column(db, 'operation_attachments', 'review_required'):
+                    db.execute("""UPDATE operation_attachments
+                        SET review_required=1, review_status='pending'
+                        WHERE stored_path=? AND source_type='inspection' AND source_id=?
+                          AND is_deleted=0""", (stored_path, item_id))
             response = {'success': True, 'result': existing_result, 'supplemented': True,
-                        'review_status': existing_review_status, 'added_photos': len(new_photos)}
+                        'review_status': 1, 'evidence_status': 'replacement_submitted',
+                        'added_photos': len(new_photos)}
             _mobile_idempotency_store(db, idempotency_key, 'submit-item', response)
             db.commit()
             return jsonify(response)
@@ -17781,6 +18559,11 @@ def mobile_upload_site_photo():
             return jsonify(cached)
     if not site_id or not image:
         return jsonify({'error': '缺少站点ID或图片数据'}), 400
+    denied = _site_access_denied(site_id, '上传影像')
+    if denied:
+        return denied
+    if plan_id not in (None, '') and item_id in (None, ''):
+        return jsonify({'error': '巡检影像必须同时提供 plan_id 和 item_id', 'code': 'INSPECTION_ITEM_REQUIRED'}), 400
     inspection_item = None
     if item_id:
         with get_db() as db:
@@ -17797,6 +18580,10 @@ def mobile_upload_site_photo():
                 return jsonify({'error': '照片所属检查项不在本人当前可执行任务中'}), 403
             plan_id = inspection_item['plan_id']
             requested_item_name = inspection_item['item_name'] or requested_item_name
+    else:
+        # A generic site photo has no trusted inspection-item name.  Do not let
+        # the client turn a filename or description into a false business link.
+        requested_item_name = ''
     try:
         import base64
         original_data = base64.b64decode(image.split(',')[-1])
@@ -17891,9 +18678,19 @@ def mobile_upload_site_photo():
                  match['review_required'] if match else 0, match['requirement_id'] if match else None,
                  extra_json))
             new_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            if inspection_item:
+                _persist_inspection_attachment_link(db, new_id, inspection_item)
+            if _table_has_column(db, 'operation_attachments', 'archive_name'):
+                archive_row = db.execute(
+                    'SELECT oa.*, s.name AS site_name FROM operation_attachments oa '
+                    'LEFT JOIN sites s ON s.id=oa.site_id WHERE oa.id=?', (new_id,)
+                ).fetchone()
+                if archive_row:
+                    db.execute('UPDATE operation_attachments SET archive_name=? WHERE id=?',
+                               (_attachment_presentation(db, dict(archive_row))['archive_name'], new_id))
             # 影像抽样审核：上传即时标红判定
             _flag_attachment(db, new_id, site_id, source_type, source_id, gps_lat, gps_lng, taken_at,
-                             capture_source=capture_source)
+                             commit=False, capture_source=capture_source)
             risk_reasons = list(watermark_reasons)
             risk_rule = 'watermark' if watermark_reasons else ''
             if duplicate_id:
@@ -17927,6 +18724,10 @@ def mobile_upload_site_photo():
                 'watermark_code': watermark_fields.get('code', ''),
                 'review_required': review_required,
                 'risk_reasons': all_reasons,
+                'plan_id': plan_id,
+                'item_id': inspection_item['id'] if inspection_item else None,
+                'item_name': requested_item_name or '检查项待确认',
+                'association_status': 'linked' if inspection_item else 'unlinked',
             }
             _mobile_idempotency_store(db, idempotency_key, 'upload-site-photo', response)
             db.commit()
@@ -18032,7 +18833,7 @@ def mobile_delete_photo():
     if item_id is None or photo_index is None:
         return jsonify({'error': '缺少参数'}), 400
     with get_db() as db:
-        item = db.execute("SELECT photo_urls FROM insp_plan_items WHERE id=?", (item_id,)).fetchone()
+        item = db.execute("SELECT * FROM insp_plan_items WHERE id=?", (item_id,)).fetchone()
         if not item or not item['photo_urls']:
             return jsonify({'error': '无照片可删除'}), 404
         try:
@@ -18040,6 +18841,27 @@ def mobile_delete_photo():
             if not isinstance(urls, list) or photo_index < 0 or photo_index >= len(urls):
                 return jsonify({'error': '照片索引无效'}), 400
             removed = urls.pop(photo_index)
+            linked = []
+            if _table_exists(db, 'operation_attachments'):
+                linked = db.execute("""
+                    SELECT id, review_status, source_type, source_id
+                    FROM operation_attachments
+                    WHERE stored_path=? AND site_id=? AND is_deleted=0
+                      AND (source_type IN ('inspection', 'site_photo', 'patrol')
+                           OR source_id=?)
+                """, (_attachment_storage_path(removed), item['site_id'], item_id)).fetchall()
+            formal_item = any(
+                key in item.keys() and item[key] not in (None, '', 0)
+                for key in ('result', 'completed_at', 'check_out_time')
+            )
+            formal_item = formal_item or ('review_status' in item.keys() and item['review_status'] in (1, 2, 3))
+            if linked or formal_item:
+                return jsonify({
+                    'error': '正式业务证据不能普通删除，请使用“作废证据并要求补传”流程',
+                    'code': 'ATTACHMENT_VOID_REQUIRED',
+                    'next_step': 'void_attachment',
+                    'item_id': item_id,
+                }), 409
             db.execute("UPDATE insp_plan_items SET photo_urls=? WHERE id=?", (json.dumps(urls), item_id))
             # 尝试删除物理文件
             if isinstance(removed, str) and removed.startswith('/uploads/'):
@@ -18294,14 +19116,15 @@ def api_inspection_photos_site(site_id):
         for req in requirements:
             # 查已上传的照片
             photos = db.execute(
-                '''SELECT id, filename, stored_path, review_status, reviewer_id, reviewed_at, reject_reason
-                   FROM operation_attachments
-                   WHERE site_id=? AND requirement_id=? AND is_deleted=0
+                '''SELECT oa.*
+                   FROM operation_attachments oa
+                   WHERE oa.site_id=? AND oa.requirement_id=? AND oa.is_deleted=0
                      AND source_type='inspection'
-                   ORDER BY created_at DESC''',
+                     AND COALESCE(oa.review_status, 'pending') NOT IN ('rejected', 'voided')
+                   ORDER BY oa.created_at DESC''',
                 (site_id, req['id'])).fetchall()
             item = dict(req)
-            item['photos'] = [dict(p) for p in photos]
+            item['photos'] = [_decorate_attachment(db, p) for p in photos]
             item['uploaded'] = len(photos)
             item['required'] = req['photo_count']
             item['complete'] = len(photos) >= req['photo_count']
@@ -18319,6 +19142,8 @@ def api_inspection_photo_upload():
     data = request.get_json() or {}
     site_id = data.get('site_id')
     requirement_id = data.get('requirement_id')
+    item_id = data.get('item_id')
+    plan_id = data.get('plan_id')
     stored_path = data.get('stored_path', '')
     filename = data.get('filename', '')
     uploader_id = g.current_user.get('id')
@@ -18336,6 +19161,26 @@ def api_inspection_photo_upload():
         return denied
 
     with get_db() as db:
+        linked_item = None
+        if item_id not in (None, '', 0, '0'):
+            linked_item = db.execute(
+                'SELECT id, plan_id, site_id, item_name, category FROM insp_plan_items WHERE id=?',
+                (item_id,),
+            ).fetchone()
+            if not linked_item:
+                return jsonify({'error': '检查项不存在，不能伪造影像归属', 'code': 'INSPECTION_ITEM_NOT_FOUND'}), 404
+            if int(linked_item['site_id']) != int(site_id):
+                return jsonify({'error': '影像站点与检查项不一致', 'code': 'INSPECTION_SITE_MISMATCH'}), 400
+            if plan_id not in (None, '', 0, '0') and int(plan_id) != int(linked_item['plan_id']):
+                return jsonify({'error': '影像计划与检查项不一致', 'code': 'INSPECTION_PLAN_MISMATCH'}), 400
+            source_id = linked_item['id']
+            description = linked_item['item_name'] or description
+            category = linked_item['category'] or category
+        else:
+            # This endpoint is retained for legacy photo-requirement uploads;
+            # those rows are deliberately unlinked until a trusted item binding
+            # occurs, and their presentation says “检查项待确认”.
+            source_id = 0
         # 查需求项是否需审核
         req = db.execute('SELECT review_required FROM photo_requirements WHERE id=?',
                          (requirement_id,)).fetchone()
@@ -18346,16 +19191,18 @@ def api_inspection_photo_upload():
                (filename, stored_path, file_type, source_type, source_id, site_id,
                 uploader_id, uploader_name, gps_lat, gps_lng, taken_at, category, description,
                 requirement_id, review_status)
-               VALUES (?,?,'image','inspection',0,?,?,?,?,?,?,?,?,?,?)''',
-            (filename, stored_path, site_id, uploader_id, uploader_name,
+             VALUES (?,?,'image','inspection',?,?,?,?,?,?,?,?,?,?,?)''',
+            (filename, stored_path, source_id, site_id, uploader_id, uploader_name,
              gps_lat, gps_lng, taken_at, category, description, requirement_id,
              'pending' if review_required else 'approved'))
+        if linked_item:
+            _persist_inspection_attachment_link(db, cur.lastrowid, linked_item)
         db.commit()
         new_id = cur.lastrowid
         # 影像抽样审核：上传即时标红判定
-        _flag_attachment(db, new_id, site_id, 'inspection', 0, gps_lat, gps_lng, taken_at)
+        _flag_attachment(db, new_id, site_id, 'inspection', source_id, gps_lat, gps_lng, taken_at)
         row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (new_id,)).fetchone()
-        return jsonify(dict(row)), 201
+        return jsonify(_decorate_attachment(db, row)), 201
 
 
 # ---------- 2.4 批量审核照片 ----------
@@ -18374,7 +19221,8 @@ def _inspection_attachment_review_scope(db, photo_ids, require_single_site=False
     placeholders = ','.join('?' * len(unique_ids))
     rows = db.execute(f"""
         SELECT id, site_id, uploader_id, uploader_name, description,
-               source_type, review_status
+               filename, stored_path, source_type, source_id, review_status,
+               reviewer_id, reviewed_at
         FROM operation_attachments
         WHERE id IN ({placeholders})
           AND COALESCE(is_deleted, 0)=0
@@ -18446,6 +19294,11 @@ def api_inspection_photos_batch_review():
                    SET review_status=?, reviewer_id=?, reviewed_at=?, reject_reason=?
                    WHERE id=?''',
                 (new_status, reviewer_id, now, reject_reason if action == 'reject' else None, pid))
+            if action == 'approve':
+                _sync_replacement_evidence_state(db, dict(photo, reviewer_id=reviewer_id), now)
+            else:
+                _keep_replacement_required_after_rejection(
+                    db, dict(photo), reviewer_id, reject_reason, now)
             # 驳回时写通知，通知原上传人
             if action == 'reject' and photo:
                 item_name = photo['description'] or f'照片#{pid}'
@@ -18485,6 +19338,12 @@ def api_inspection_photo_review(photo_id):
                SET review_status=?, reviewer_id=?, reviewed_at=?, reject_reason=?
                WHERE id=?''',
             (new_status, reviewer_id, now, reject_reason if action == 'reject' else None, photo_id))
+        photo = photo_map[photo_id]
+        if action == 'approve':
+            _sync_replacement_evidence_state(db, dict(photo, reviewer_id=reviewer_id), now)
+        else:
+            _keep_replacement_required_after_rejection(
+                db, dict(photo), reviewer_id, reject_reason, now)
         db.commit()
         row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (photo_id,)).fetchone()
         if not row:
@@ -18509,7 +19368,7 @@ def api_inspection_photos_check(site_id):
         missing = []
         for req in requirements:
             count = db.execute(
-                "SELECT COUNT(*) as cnt FROM operation_attachments WHERE site_id=? AND requirement_id=? AND is_deleted=0 AND source_type='inspection'",
+                "SELECT COUNT(*) as cnt FROM operation_attachments WHERE site_id=? AND requirement_id=? AND is_deleted=0 AND source_type='inspection' AND COALESCE(review_status, 'pending') NOT IN ('rejected', 'voided')",
                 (site_id, req['id'])).fetchone()['cnt']
             if count < req['photo_count']:
                 missing.append({
@@ -19525,7 +20384,7 @@ def api_vehicle_applications_create():
              work_order_no, int(no_vehicle_required), vehicle_exception_reason))
         db.commit()
         row = db.execute('SELECT * FROM vehicle_applications WHERE id=?', (cur.lastrowid,)).fetchone()
-        return jsonify(dict(row)), 201
+        return jsonify(_decorate_attachment(db, row)), 201
 
 
 @app.route('/api/inspection-v2/rework-plans/<int:plan_id>/resource-request', methods=['POST'])
@@ -19648,7 +20507,7 @@ def api_vehicle_application_approve(app_id):
         row = db.execute('SELECT * FROM vehicle_applications WHERE id=?', (app_id,)).fetchone()
         if not row:
             return jsonify({'error': '申请不存在'}), 404
-        return jsonify(dict(row))
+        return jsonify(_decorate_attachment(db, row))
 
 
 @app.route('/api/vehicle/applications/<int:app_id>/extend', methods=['POST'])
@@ -24042,6 +24901,7 @@ if __name__ == '__main__':
     migrate_alerts_messages()
     migrate_alert_flow()
     migrate_rejected_photo_rework()
+    migrate_attachment_evidence_closure()
     fix_site_river()
     if demo_seed_enabled and os.environ.get('SKIP_BACKFILL') != '1':
         backfill_history(72)

@@ -8,7 +8,7 @@ import {
   SearchOutlined, ReloadOutlined,
   PictureOutlined,
   FileTextOutlined, DownloadOutlined, InboxOutlined, RollbackOutlined, DeleteOutlined,
-  AppstoreOutlined,
+  AppstoreOutlined, StopOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
@@ -21,7 +21,9 @@ import {
 } from '../../services/constants';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  canSubmitAttachmentDelete, hasAdminRole, normalizeDeleteReason,
+  archivePrimaryTitle, archiveSecondaryMeta, archiveStatusLayout, attachmentDeletionDialogMode, attachmentResourceState,
+  canSubmitAttachmentDelete, canVoidAttachment, hasAdminRole, isFormalAttachment, normalizeDeleteReason,
+  voidEligibility,
 } from './attachmentDeletion.js';
 
 const { Text } = Typography;
@@ -105,11 +107,18 @@ const filtersFromParams = (params) => {
 
 // 审核状态标签（仅用 antd 预设色名，主题无关，符合规范 §7）
 const ReviewTag = ({ it }) => {
-  if (!it.review_required) return <Tag color="default">无需审核</Tag>;
+  const { tagStyle } = archiveStatusLayout();
+  const status = it.review_status || 'pending';
   const map = attachmentReviewStatusMap;
-  const color = it.review_status === 'pending' ? 'processing'
-    : it.review_status === 'approved' ? 'green' : 'red';
-  return <Tag color={color}>{map[it.review_status] || it.review_status}</Tag>;
+  const color = status === 'pending' ? 'processing'
+    : status === 'approved' ? 'green'
+      : status === 'voided' ? 'default' : 'red';
+  return (
+    <Space size={[4, 4]} wrap style={{ maxWidth: '100%' }}>
+      <Tag color={color} style={tagStyle}>{it.review_status_label || map[status] || status}</Tag>
+      {it.risk_label && <Tag color="orange" style={tagStyle}>{it.risk_label}</Tag>}
+    </Space>
+  );
 };
 
 export default function ArchivePage() {
@@ -146,6 +155,14 @@ export default function ArchivePage() {
   const [deleteError, setDeleteError] = useState('');
   const [deleteCheckLoading, setDeleteCheckLoading] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
+  const [voidVisible, setVoidVisible] = useState(false);
+  const [voidTarget, setVoidTarget] = useState(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidError, setVoidError] = useState('');
+  const [voidingId, setVoidingId] = useState(null);
+  const [failedImageIds, setFailedImageIds] = useState(() => new Set());
+  const deleteDialogMode = attachmentDeletionDialogMode(deleteTarget);
+  const voidState = voidEligibility(voidTarget, user, Boolean(voidingId));
 
 
   const loadSites = useCallback(async () => {
@@ -280,6 +297,9 @@ export default function ArchivePage() {
 
   // 打开预览
   const handlePreview = (item) => { setPreviewItem(item); setPreviewVisible(true); };
+  const imageFailed = (item) => failedImageIds.has(item.id);
+  const markImageFailed = (item) => setFailedImageIds(ids => new Set([...ids, item.id]));
+  const retryImage = (item) => setFailedImageIds(ids => { const next = new Set(ids); next.delete(item.id); return next; });
 
   const closeDelete = () => {
     if (deletingId) return;
@@ -338,6 +358,50 @@ export default function ArchivePage() {
       message.error(errorMessage);
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const closeVoid = () => {
+    if (voidingId) return;
+    setVoidVisible(false);
+    setVoidTarget(null);
+    setVoidReason('');
+    setVoidError('');
+  };
+
+  const openVoid = (item) => {
+    setVoidTarget(item);
+    setVoidReason('');
+    setVoidError('');
+    setVoidVisible(true);
+  };
+
+  const confirmVoid = async () => {
+    if (!voidTarget || voidingId) return;
+    const reason = normalizeDeleteReason(voidReason);
+    if (!reason) {
+      setVoidError('作废理由不能为空');
+      return;
+    }
+    const targetId = voidTarget.id;
+    setVoidingId(targetId);
+    try {
+      await api.postStrict(`/attachments/${targetId}/void`, { reason });
+      setList(current => current.filter(item => item.id !== targetId));
+      setTotal(current => Math.max(0, current - 1));
+      setSelectedRowKeys(current => current.filter(id => id !== targetId));
+      setPreviewItem(current => current?.id === targetId ? { ...current, review_status: 'voided', review_status_label: '已作废', void_reason: reason } : current);
+      setVoidVisible(false);
+      setVoidTarget(null);
+      setVoidReason('');
+      setVoidError('');
+      message.success('证据已作废，目标检查项已进入待补传');
+      await Promise.allSettled([loadList(page), refreshStats()]);
+    } catch (error) {
+      setVoidError(error.message || '作废失败，请检查权限、状态和站点范围后重试');
+      message.error(error.message || '作废失败，请重试');
+    } finally {
+      setVoidingId(null);
     }
   };
 
@@ -402,30 +466,55 @@ export default function ArchivePage() {
     return filename.replace(/\.[^/.]+$/, '');
   };
 
-  const displayTitle = (it) => {
-    const d = it.description;
-    if (d && !isGarbled(d)) return d;
-    return baseName(it.filename || '');
-  };
+  const displayTitle = (it) => archivePrimaryTitle(it) || (!isGarbled(it.description) && it.description) || baseName(it.filename || '');
 
   const sourceLabel = (t) => attachmentSourceTypeMap[t] || t || '—';
   const catColor = (c) => attachmentCategoryColor[c] || 'default';
+  const itemLabel = (it) => it.item_name || '检查项待确认';
+  const dangerousAction = (it, compact = false) => {
+    if (isFormalAttachment(it)) {
+      if (!canVoidAttachment(it, user)) return null;
+      return (
+        <Tooltip key="void" title="作废证据并要求补传">
+          <Button type="text" danger size="small" icon={<StopOutlined />}
+            aria-label={`作废证据并要求补传 ${it.archive_name || it.filename}`}
+            onClick={() => openVoid(it)}>
+            {compact ? null : '作废并补传'}
+          </Button>
+        </Tooltip>
+      );
+    }
+    if (!isAdmin) return null;
+    return (
+      <Tooltip key="delete" title="移出影像档案">
+        <Button type="text" danger size="small" icon={<DeleteOutlined />}
+          aria-label={`移出影像档案 ${it.filename}`} onClick={() => openDelete(it)}>
+          {compact ? null : '移出档案'}
+        </Button>
+      </Tooltip>
+    );
+  };
 
   // 表格列
   const columns = [
     {
       title: '缩略图', dataIndex: 'stored_path', key: 'thumb', width: 72,
-      render: (url, it) => isImg(it) ? (
-        <Image.PreviewGroup
-          items={[{ src: url, alt: it.filename }]}
-        >
-          <Image src={url} alt={it.filename} style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4 }}
-            preview={false} />
-        </Image.PreviewGroup>
-      ) : <FileTextOutlined style={{ fontSize: 22, color: tokens.colorTextTertiary }} />,
+      render: (url, it) => {
+        const resource = attachmentResourceState(it, imageFailed(it));
+        return <div style={{ width: 48, height: 48, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, background: tokens.colorFillAlter }}>
+          {isImg(it) && !resource.failed
+            ? <img src={url} alt={resource.imageAlt} onError={() => markImageFailed(it)} style={{ width: 48, height: 48, objectFit: 'cover' }} />
+            : <Space direction="vertical" size={0} align="center"><PictureOutlined style={{ fontSize: 18, color: tokens.colorTextTertiary }} /><Text style={{ fontSize: 10 }}>{resource.failed ? '文件不可用' : '文件'}</Text></Space>}
+        </div>;
+      },
     },
-    { title: '文件名', dataIndex: 'filename', key: 'filename', ellipsis: true,
-      render: (v, it) => <Text ellipsis style={{ fontSize: 13 }}>{it.description || v}</Text> },
+    { title: '档案名称 / 原始文件名', dataIndex: 'archive_name', key: 'filename', ellipsis: true,
+      render: (v, it) => (
+        <div style={{ minWidth: 0 }}>
+          <Tooltip title={displayTitle(it)}><Text ellipsis style={{ display: 'block', fontSize: 13 }}>{displayTitle(it)}</Text></Tooltip>
+          <Tooltip title={it.original_filename || it.filename}><Text type="secondary" ellipsis style={{ display: 'block', fontSize: 11 }}>原始：{it.original_filename || it.filename || '-'}</Text></Tooltip>
+        </div>
+      ) },
     {
       title: '属性', key: 'attributes', width: 150,
       render: (_, it) => (
@@ -441,6 +530,8 @@ export default function ArchivePage() {
       render: (_, it) => (
         <div>
           <Text ellipsis style={{ display: 'block', fontSize: 12 }}>{it.site_name || '未关联站点'}</Text>
+          <Text ellipsis style={{ display: 'block', fontSize: 11 }}>检查项：{itemLabel(it)}</Text>
+          {it.plan_id && <Text type="secondary" ellipsis style={{ display: 'block', fontSize: 11 }}>计划：{it.plan_name || `#${it.plan_id}`}</Text>}
           {it.order_no && <Button type="link" size="small" style={{ padding: 0, height: 18, fontSize: 11 }}
             aria-label={`查看关联工单 ${it.order_no}`}
             onClick={() => navigate(`/workorders?search=${encodeURIComponent(it.order_no)}`)}>{it.order_no}</Button>}
@@ -459,26 +550,23 @@ export default function ArchivePage() {
         );
       } },
     {
-      title: '状态', key: 'status', width: 104,
+      title: '状态', key: 'status', width: archiveStatusLayout().statusColumnWidth,
       render: (_, it) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} style={{ width: '100%', minWidth: 0 }}>
           <ReviewTag it={it} />
-          {it.is_flagged ? <Tag color="orange">需复核</Tag> : null}
-          {it.archived ? <Tag color="green">已归档</Tag> : <Tag>未归档</Tag>}
+          {it.archived ? <Tag color="green" style={archiveStatusLayout().tagStyle}>已归档</Tag> : <Tag style={archiveStatusLayout().tagStyle}>未归档</Tag>}
         </Space>
       ),
     },
     {
-      title: '操作', key: 'op', width: isAdmin ? 164 : 64,
+      title: '操作', key: 'op', width: isAdmin ? archiveStatusLayout().actionColumnWidth : 88,
       render: (_, it) => (
-        <Space size={4}>
+        <Space size={4} wrap={false} style={{ whiteSpace: 'nowrap' }}>
           <Button type="link" size="small" aria-label={`预览 ${it.filename}`} onClick={() => handlePreview(it)}>预览</Button>
           {isAdmin && (it.archived
             ? <Button type="link" size="small" aria-label={`取消归档 ${it.filename}`} onClick={() => handleUnarchive(it)}>取消归档</Button>
             : <Button type="link" size="small" aria-label={`归档 ${it.filename}`} onClick={() => openArchive(it)}>归档</Button>)}
-          {isAdmin && <Tooltip title="移出影像档案">
-            <Button type="text" danger size="small" icon={<DeleteOutlined />} aria-label={`移出影像档案 ${it.filename}`} onClick={() => openDelete(it)} />
-          </Tooltip>}
+          {dangerousAction(it, true)}
         </Space>
       ),
     },
@@ -573,7 +661,7 @@ export default function ArchivePage() {
               const img = isImg(item);
               const checked = selectedRowKeys.includes(item.id);
               return (
-                <Col key={item.id} xs={12} sm={8} md={6} lg={4}>
+              <Col key={item.id} xs={24} sm={12} md={8} lg={6}>
                   <Card
                     hoverable size="small"
                     cover={
@@ -595,7 +683,7 @@ export default function ArchivePage() {
                         />}
                         <button
                           type="button"
-                          aria-label={`预览 ${item.filename}`}
+                          aria-label={`打开影像 ${item.filename}`}
                           onClick={() => handlePreview(item)}
                           style={{
                             width: '100%', height: '100%', padding: 0, border: 0,
@@ -603,7 +691,7 @@ export default function ArchivePage() {
                             alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
                           }}
                         >
-                          {img ? (
+                          {img && !imageFailed(item) ? (
                             <>
                               <PictureOutlined
                                 aria-hidden
@@ -611,48 +699,45 @@ export default function ArchivePage() {
                               />
                               <img
                                 src={item.stored_path}
-                                alt={item.filename}
-                                onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                                alt=""
+                                onError={() => markImageFailed(item)}
                                 style={{ width: '100%', height: '100%', objectFit: 'cover', position: 'relative' }}
                               />
                             </>
                           ) : (
-                            <span style={{ fontSize: 48, color: tokens.colorTextQuaternary }}>{item.file_type === 'video' ? '🎬' : '📄'}</span>
+                            <Space direction="vertical" size={4} style={{ color: tokens.colorTextTertiary }}><PictureOutlined style={{ fontSize: 34 }} /><span>{imageFailed(item) ? '文件不可用' : '文件'}</span>{imageFailed(item) && <Button size="small" onClick={(event) => { event.stopPropagation(); retryImage(item); }}>重新加载</Button>}</Space>
                           )}
                         </button>
                       </div>
                     }
                     actions={[
-                      <Button key="view" type="text" size="small" title="查看" aria-label={`预览 ${item.filename}`}
+                      <Button key="view" type="text" size="small" title="查看" aria-label={`预览影像 ${item.filename}`}
                         icon={<SearchOutlined />} onClick={() => handlePreview(item)} />,
-                      <Button key="download" type="text" size="small" title="下载" aria-label={`下载 ${item.filename}`}
-                        icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')} />,
+                      <Button key="download" type="text" size="small" title={imageFailed(item) ? '文件不可用' : '下载'} aria-label={`下载 ${item.filename}`}
+                        disabled={imageFailed(item)} icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')} />,
                       isAdmin && (item.archived
                         ? <Button key="unarchive" type="text" size="small" title="取消归档" aria-label={`取消归档 ${item.filename}`}
                             icon={<RollbackOutlined />} onClick={() => handleUnarchive(item)} />
                         : <Button key="archive" type="text" size="small" title="归档" aria-label={`归档 ${item.filename}`}
                             icon={<InboxOutlined />} onClick={() => openArchive(item)} />),
-                      isAdmin && <Button key="delete" type="text" danger size="small" title="移出影像档案" aria-label={`移出影像档案 ${item.filename}`}
-                        icon={<DeleteOutlined />} onClick={() => openDelete(item)} />,
+                      dangerousAction(item, true),
                     ].filter(Boolean)}
                   >
                     <Card.Meta
                       title={
-                        <Tooltip title={item.description && !isGarbled(item.description) ? item.description : item.filename}>
+                        <Tooltip title={displayTitle(item)}>
                           <Text ellipsis style={{ fontSize: 13, maxWidth: '100%' }}>{displayTitle(item)}</Text>
                         </Tooltip>
                       }
                       description={
                         <div>
-                          <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginBottom: 2 }}>
-                            <span>{recordTimeOf(item).label} {recordTimeOf(item).value?.slice(0, 10)}</span>
-                            {item.uploader_name && <span> · {item.uploader_name}</span>}
-                            {item.site_name && <span> · {item.site_name}</span>}
+                          <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginBottom: 4 }}>
+                            <span>{archiveSecondaryMeta(item).join(' · ')}</span>
                           </div>
                           <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginTop: 2 }}>
-                            {item.category && <Tag color={catColor(item.category)} style={{ fontSize: 11 }}>{attachmentCategoryMap[item.category] || item.category}</Tag>}
-                            <span>{sourceLabel(item.source_type)} · {fmtSize(item.file_size)}</span>
+                            <ReviewTag it={item} /><span> {fmtSize(item.file_size)}</span>
                           </div>
+                          <Tooltip title={item.original_filename || item.filename}><Text type="secondary" ellipsis style={{ display: 'block', fontSize: 11 }}>原始：{item.original_filename || item.filename || '-'}</Text></Tooltip>
                         </div>
                       }
                     />
@@ -664,6 +749,7 @@ export default function ArchivePage() {
         ) : (
           <WorkspaceTable rowKey="id" dataSource={list} columns={columns} loading={loading}
             rowSelection={rowSelection}
+            scroll={{ x: archiveStatusLayout().tableMinWidth, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }}
             emptyType={listError ? 'error' : Object.values(appliedFilters).some(Boolean) ? 'filtered' : 'empty'}
             onRefresh={() => loadList(page)}
             pagination={total > 100 ? {
@@ -688,7 +774,7 @@ export default function ArchivePage() {
 
       {/* 预览弹窗 */}
       <Modal
-        title={previewItem?.description || previewItem?.filename || '附件预览'}
+        title={previewItem?.archive_name || previewItem?.description || previewItem?.filename || '附件预览'}
         open={previewVisible}
         onCancel={() => { setPreviewVisible(false); setPreviewItem(null); }}
         footer={previewItem ? (
@@ -697,7 +783,7 @@ export default function ArchivePage() {
             {isAdmin && (previewItem.archived
               ? <Button icon={<RollbackOutlined />} onClick={() => { setPreviewVisible(false); handleUnarchive(previewItem); }}>取消归档</Button>
               : <Button icon={<InboxOutlined />} onClick={() => { setPreviewVisible(false); openArchive(previewItem); }}>归档</Button>)}
-            {isAdmin && <Button danger icon={<DeleteOutlined />} onClick={() => { setPreviewVisible(false); openDelete(previewItem); }}>移出影像档案</Button>}
+            {dangerousAction(previewItem)}
           </Space>
         ) : null}
         width={800}
@@ -715,12 +801,15 @@ export default function ArchivePage() {
             )}
             <Card size="small" title="详细信息">
               <Row gutter={[16, 8]}>
-                <Col span={12}><Text type="secondary">文件名：</Text><Text>{previewItem.filename}</Text></Col>
+                <Col span={24}><Text type="secondary">档案名称：</Text><Text copyable>{previewItem.archive_name || itemLabel(previewItem)}</Text></Col>
+                <Col span={12}><Text type="secondary">原始文件名：</Text><Text copyable>{previewItem.original_filename || previewItem.filename}</Text></Col>
                 <Col span={12}><Text type="secondary">文件大小：</Text><Text>{fmtSize(previewItem.file_size)}</Text></Col>
                 <Col span={12}><Text type="secondary">分类：</Text><Tag color={catColor(previewItem.category)}>{attachmentCategoryMap[previewItem.category] || previewItem.category || '未分类'}</Tag></Col>
                 <Col span={12}><Text type="secondary">来源：</Text><Text>{sourceLabel(previewItem.source_type)}</Text></Col>
                 <Col span={12}><Text type="secondary">采集方式：</Text><Text>{captureSourceMap[previewItem.capture_source] || previewItem.capture_source || '来源未记录'}</Text></Col>
                 <Col span={12}><Text type="secondary">关联站点：</Text><Text>{previewItem.site_name || '-'}</Text></Col>
+                <Col span={12}><Text type="secondary">计划：</Text><Text>{previewItem.plan_name || (previewItem.plan_id ? `#${previewItem.plan_id}` : '-')}</Text></Col>
+                <Col span={12}><Text type="secondary">检查项：</Text><Text>{itemLabel(previewItem)}{previewItem.item_id ? `（#${previewItem.item_id}）` : ''}</Text></Col>
                 <Col span={12}><Text type="secondary">拍摄时间：</Text><Text>{hasVerifiedCaptureTime(previewItem) ? previewItem.taken_at : '未核实（历史记录仅能确认上传时间）'}</Text></Col>
                 <Col span={12}><Text type="secondary">上传人：</Text><Text>{uploaderOf(previewItem)}</Text></Col>
                 <Col span={12}><Text type="secondary">审核状态：</Text><ReviewTag it={previewItem} /></Col>
@@ -747,9 +836,12 @@ export default function ArchivePage() {
                     {previewItem.order_no} · 查看关联工单
                   </Button></Col>
                 ) : null}
-                {previewItem.is_flagged ? (
-                  <Col span={24}><Text type="secondary">复核原因：</Text><Text type="warning">{previewItem.flag_reason || '系统判定需人工复核'}</Text></Col>
+                {previewItem.risk_label || previewItem.is_flagged ? (
+                  <Col span={24}><Text type="secondary">风险提示：</Text><Text type="warning">{previewItem.risk_label || previewItem.flag_reason || '风险标记'}</Text></Col>
                 ) : null}
+                {previewItem.review_status === 'voided' && (
+                  <Col span={24}><Alert type="warning" showIcon message={`已作废：${previewItem.void_reason || '未记录原因'}。当前不计为有效证据。`} /></Col>
+                )}
               </Row>
             </Card>
           </div>
@@ -760,54 +852,123 @@ export default function ArchivePage() {
         title={<Space><DeleteOutlined />移出影像档案</Space>}
         open={deleteVisible}
         onCancel={closeDelete}
-        onOk={confirmDelete}
-        okText="确认删除"
-        cancelText="取消"
-        confirmLoading={Boolean(deletingId)}
-        okButtonProps={{
-          danger: true,
-          disabled: deleteCheckLoading || !canSubmitAttachmentDelete(deleteTarget, deleteReason, Boolean(deletingId)),
-        }}
+        footer={(
+          <Space wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Button onClick={closeDelete} disabled={Boolean(deletingId)}>取消</Button>
+            {deleteDialogMode === 'void' && canVoidAttachment(deleteTarget, user) && (
+              <Button danger icon={<StopOutlined />} onClick={() => { closeDelete(); openVoid(deleteTarget); }}>
+                作废证据并要求补传
+              </Button>
+            )}
+            {deleteDialogMode === 'ordinary' && (
+              <Button danger icon={<DeleteOutlined />} loading={Boolean(deletingId)}
+                disabled={!canSubmitAttachmentDelete(deleteTarget, deleteReason, Boolean(deletingId))}
+                onClick={confirmDelete}>
+                确认移出档案
+              </Button>
+            )}
+          </Space>
+        )}
         closable={!deletingId}
         maskClosable={!deletingId}
+        width="min(600px, calc(100vw - 24px))"
+        styles={{ body: { maxHeight: 'calc(100vh - 190px)', overflowY: 'auto', padding: 16 } }}
         destroyOnHidden
       >
         {deleteTarget && (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Descriptions size="small" column={1} bordered>
-              <Descriptions.Item label="文件名">{deleteTarget.filename || '-'}</Descriptions.Item>
-              <Descriptions.Item label="站点">{deleteTarget.site_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="来源">{sourceLabel(deleteTarget.source_type)}</Descriptions.Item>
-              <Descriptions.Item label="上传人 / 时间">
-                {uploaderOf(deleteTarget)} / {deleteTarget.created_at || deleteTarget.taken_at || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="影响">
-                {deleteCheckLoading ? '正在读取服务端删除资格和影响...' : (deleteTarget.impact || deleteTarget.delete_check_error || '-')}
-              </Descriptions.Item>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+            <Descriptions size="small" column={1} bordered labelStyle={{ width: 92, whiteSpace: 'nowrap' }}>
+              <Descriptions.Item label="档案名称"><Text style={{ wordBreak: 'break-word' }}>{deleteTarget.archive_name || itemLabel(deleteTarget)}</Text></Descriptions.Item>
+              <Descriptions.Item label="原始文件名"><Text style={{ wordBreak: 'break-all' }}>{deleteTarget.original_filename || deleteTarget.filename || '-'}</Text></Descriptions.Item>
+              <Descriptions.Item label="站点 / 检查项">{deleteTarget.site_name || '-'} / {itemLabel(deleteTarget)}{deleteTarget.item_id ? `（#${deleteTarget.item_id}）` : ''}</Descriptions.Item>
+              <Descriptions.Item label="计划 / 来源">{deleteTarget.plan_name || (deleteTarget.plan_id ? `#${deleteTarget.plan_id}` : '-')} / {sourceLabel(deleteTarget.source_type)}</Descriptions.Item>
+              <Descriptions.Item label="上传人 / 时间">{uploaderOf(deleteTarget)} / {deleteTarget.created_at || deleteTarget.taken_at || '-'}</Descriptions.Item>
             </Descriptions>
-            {deleteTarget.block_reason && (
-              <Alert type="error" showIcon message={deleteTarget.block_reason} />
+            <section>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>影响</Text>
+              <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.55, color: tokens.colorTextSecondary }}>
+                {deleteCheckLoading ? '正在读取服务端删除资格和影响...' : (deleteTarget.impact || deleteTarget.delete_check_error || '-')}
+              </div>
+            </section>
+            {deleteDialogMode === 'void' && (
+              <Alert type="warning" showIcon message="这是正式业务证据，普通删除已禁用。请使用“作废证据并要求补传”，原文件与审核历史会保留。" description={deleteTarget.block_reason} />
             )}
-            {!deleteTarget.block_reason && !deleteCheckLoading && (
-              <Alert
-                type="warning"
-                showIcon
-                message="仅移出影像档案，不会删除物理文件、业务记录或消息历史。"
-              />
+            {deleteDialogMode === 'blocked' && (
+              <Alert type="error" showIcon message="服务端已阻止普通删除" description={deleteTarget.block_reason || deleteTarget.delete_check_error || '当前影像不能删除。'} />
+            )}
+            {deleteDialogMode === 'ordinary' && (
+              <>
+                <Alert type="warning" showIcon message="仅移出影像档案，不会删除物理文件、业务记录或消息历史。" />
+                <section>
+                  <Text strong style={{ display: 'block', marginBottom: 8 }}>删除原因</Text>
+                  <Input.TextArea
+                    rows={4}
+                    value={deleteReason}
+                    onChange={event => setDeleteReason(event.target.value)}
+                    placeholder="请填写删除原因（必填），例如：测试误传，未绑定正式业务"
+                    maxLength={200}
+                    showCount
+                    aria-label="删除原因"
+                    aria-required="true"
+                    disabled={Boolean(deletingId)}
+                    style={{ resize: 'none', display: 'block', width: '100%' }}
+                  />
+                </section>
+              </>
             )}
             {deleteError && <Alert type="error" showIcon message={deleteError} />}
-            <Input.TextArea
-              rows={3}
-              value={deleteReason}
-              onChange={event => setDeleteReason(event.target.value)}
-              placeholder="请填写删除原因（必填），例如：测试误传，未绑定正式业务"
-              maxLength={200}
-              showCount
-              aria-label="删除原因"
-              aria-required="true"
-              disabled={Boolean(deletingId)}
-            />
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        title={<Space><StopOutlined />作废证据并要求补传</Space>}
+        open={voidVisible}
+        onCancel={closeVoid}
+        footer={(
+          <Space wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Button onClick={closeVoid} disabled={Boolean(voidingId)}>取消</Button>
+            <Button danger type="primary" icon={<StopOutlined />} loading={Boolean(voidingId)}
+              disabled={!voidState.allowed || !normalizeDeleteReason(voidReason)}
+              onClick={confirmVoid}>
+              确认作废并要求补传
+            </Button>
           </Space>
+        )}
+        closable={!voidingId}
+        maskClosable={!voidingId}
+        width="min(600px, calc(100vw - 24px))"
+        styles={{ body: { maxHeight: 'calc(100vh - 190px)', overflowY: 'auto', padding: 16 } }}
+        destroyOnHidden
+      >
+        {voidTarget && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
+            <Alert type="warning" showIcon message="作废后原文件和审核记录永久保留；当前证据不再计入有效统计，目标检查项进入待补传。" />
+            <Descriptions size="small" column={1} bordered labelStyle={{ width: 92, whiteSpace: 'nowrap' }}>
+              <Descriptions.Item label="文件 / 档案"><Text style={{ wordBreak: 'break-word' }}>{voidTarget.archive_name || itemLabel(voidTarget)}</Text><br /><Text type="secondary" style={{ wordBreak: 'break-all' }}>原始：{voidTarget.original_filename || voidTarget.filename || '-'}</Text></Descriptions.Item>
+              <Descriptions.Item label="站点 / 检查项">{voidTarget.site_name || '-'} / {itemLabel(voidTarget)}{voidTarget.item_id ? `（#${voidTarget.item_id}）` : ''}</Descriptions.Item>
+              <Descriptions.Item label="来源 / 计划">{sourceLabel(voidTarget.source_type)} / {voidTarget.plan_name || (voidTarget.plan_id ? `#${voidTarget.plan_id}` : '-')}</Descriptions.Item>
+              <Descriptions.Item label="上传人 / 时间">{uploaderOf(voidTarget)} / {voidTarget.created_at || voidTarget.taken_at || '-'}</Descriptions.Item>
+              <Descriptions.Item label="影响">该检查项仅补传，不重置整站点、不要求重复到站；原完成事件和审核历史保留。</Descriptions.Item>
+            </Descriptions>
+            <section>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>作废理由</Text>
+              <Input.TextArea
+                rows={4}
+                value={voidReason}
+                onChange={event => { setVoidReason(event.target.value); setVoidError(''); }}
+                placeholder="请填写作废理由（必填）"
+                maxLength={500}
+                showCount
+                aria-label="作废理由"
+                aria-required="true"
+                disabled={Boolean(voidingId)}
+                style={{ resize: 'none', display: 'block', width: '100%' }}
+              />
+            </section>
+            {!voidState.allowed && <Alert type="info" showIcon message={voidState.reason} />}
+            {voidError && <Alert type="error" showIcon message={voidError} />}
+          </div>
         )}
       </Modal>
 

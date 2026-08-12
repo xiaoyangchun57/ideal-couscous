@@ -317,6 +317,7 @@ export const attachmentReviewStatusMap = {
   pending: '待审核',
   approved: '已通过',
   rejected: '已驳回',
+  voided: '已作废',
 };
 export const ATTACHMENT_REVIEW_STATUS_OPTIONS = Object.keys(attachmentReviewStatusMap).map(k => ({
   value: k,

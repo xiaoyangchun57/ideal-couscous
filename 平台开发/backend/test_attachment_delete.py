@@ -162,7 +162,7 @@ class AttachmentDeleteTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404, missing.json)
 
     def test_formal_evidence_is_blocked_by_server_owned_links(self):
-        for attachment_id in (11, 12, 13):
+        for attachment_id in (11, 12):
             check = self.client.get(
                 f'/api/attachments/{attachment_id}/delete-check',
                 headers=self.headers('admin-token'),
@@ -196,7 +196,7 @@ class AttachmentDeleteTest(unittest.TestCase):
                 (15, 'TEST_DELETE_REPORT.jpg', '/uploads/TEST_DELETE_REPORT.jpg',
                  'manual_report', 300, 1, 2, 'Operator', 0, 'pending', '2026-08-11 09:05:00')""")
 
-        for attachment_id in (14, 15):
+        for attachment_id in (15,):
             check = self.client.get(
                 f'/api/attachments/{attachment_id}/delete-check',
                 headers=self.headers('admin-token'),
@@ -209,6 +209,18 @@ class AttachmentDeleteTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 409, response.json)
             self.assertEqual(response.json['error'], app_module.ATTACHMENT_DELETE_BLOCKED_MESSAGE)
+
+    def test_unbound_test_media_source_id_zero_or_null_is_ordinary_even_with_shared_path(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (id, filename, stored_path, source_type, source_id, site_id, uploader_id, uploader_name, review_status)
+                VALUES (16, 'TEST_DELETE_NULL.jpg', '/uploads/TEST_DELETE_FORMAL.jpg', 'test', NULL, 1, 2, 'Operator', 'approved')""")
+        for attachment_id in (13, 16):
+            check = self.client.get(f'/api/attachments/{attachment_id}/delete-check', headers=self.headers('admin-token'))
+            self.assertEqual(check.status_code, 200, check.json)
+            self.assertTrue(check.json['can_delete'], check.json)
+            response = self.client.delete(f'/api/attachments/{attachment_id}', headers=self.headers('admin-token'), json={'reason': 'unbound test media'})
+            self.assertEqual(response.status_code, 200, response.json)
 
     def test_test_media_soft_delete_updates_views_notifications_and_audit(self):
         before_stats = self.client.get('/api/attachments/stats', headers=self.headers('admin-token'))

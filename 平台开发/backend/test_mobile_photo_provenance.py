@@ -69,6 +69,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT, stored_path TEXT, file_type TEXT, mime_type TEXT,
                     file_size INTEGER, description TEXT, source_type TEXT, source_id INTEGER,
+                    plan_id INTEGER, item_id INTEGER, item_name TEXT DEFAULT '',
                     site_id INTEGER, uploader_id INTEGER, uploader_name TEXT,
                     gps_lat REAL, gps_lng REAL, taken_at TEXT, created_at TEXT,
                     category TEXT, capture_source TEXT, sha256_hash TEXT,
@@ -145,9 +146,10 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.json)
         with app_module.get_db() as db:
-            row = db.execute("""SELECT source_type,source_id,description,category,
-                       recognized_category,extra_json FROM operation_attachments""").fetchone()
+            row = db.execute("""SELECT source_type,source_id,plan_id,item_id,item_name,
+                       description,category,recognized_category,extra_json FROM operation_attachments""").fetchone()
         self.assertEqual((row['source_type'], row['source_id']), ('inspection', 100))
+        self.assertEqual((row['plan_id'], row['item_id'], row['item_name']), (10, 100, '浊度仪表读数'))
         self.assertEqual(row['description'], '浊度仪表读数')
         self.assertEqual(row['category'], '设备检查')
         self.assertEqual(row['recognized_category'], '浊度仪表读数')
@@ -193,6 +195,33 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json['taken_at'], '2026-08-03 15:30:00')
         self.assertAlmostEqual(response.json['gps_lat'], 28.071303)
+
+    def test_flag_evaluation_failure_does_not_rollback_uploaded_attachment(self):
+        original = app_module._evaluate_attachment_flag
+
+        def fail_flag_evaluation(*_args, **_kwargs):
+            raise RuntimeError('TEST_UI_MEDIA_FIX_flag_failure')
+
+        app_module._evaluate_attachment_flag = fail_flag_evaluation
+        try:
+            response = self.upload(
+                jpeg_with_capture_time('yellow'),
+                capture_source='camera',
+                taken_at='2026-08-03 15:31:00',
+                gps_lat=28.071303,
+                gps_lng=115.539684,
+            )
+        finally:
+            app_module._evaluate_attachment_flag = original
+
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            row = db.execute(
+                'SELECT id, stored_path FROM operation_attachments WHERE id=?',
+                (response.json['id'],),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row['stored_path'], response.json['url'])
 
     def test_absolute_client_url_normalizes_to_stored_upload_path(self):
         self.assertEqual(

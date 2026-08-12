@@ -31,6 +31,7 @@ App({
     sites: [],
     selSiteId: null,   // 首页/巡检站间跳转的临时选中站点
     selPlanId: null,   // 排程详情跳入现场页时的临时预选执行包
+    selItemId: null,   // 补传通知精确定位的检查项
     baseUrl: '',        // 运行时可由开发者工具注入，缺省读 config
     refreshNotificationBadge,
     notificationBadgeTimer: null

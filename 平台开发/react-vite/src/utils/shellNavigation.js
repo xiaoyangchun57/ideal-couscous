@@ -56,6 +56,22 @@ function notificationPayload(item) {
   }
 }
 
+function positivePayloadId(payload, key) {
+  const value = Number(payload?.[key]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function attachmentSupplementTarget(item, roles) {
+  if (!hasAnyRole(roles, ['admin', 'operator'])) return null;
+  const payload = notificationPayload(item);
+  const planId = positivePayloadId(payload, 'plan_id');
+  const itemId = positivePayloadId(payload, 'item_id');
+  const siteId = positivePayloadId(payload, 'site_id');
+  if (!planId || !itemId || !siteId) return null;
+  const params = new URLSearchParams({ rework_plan: String(planId), focus_item: String(itemId), site_id: String(siteId), supplement: '1' });
+  return `/plan-schedules?${params.toString()}`;
+}
+
 export function getNotificationTarget(item, roles) {
   const sourceId = item?.source_id;
   switch (item?.source_type) {
@@ -83,6 +99,9 @@ export function getNotificationTarget(item, roles) {
       return hasAnyRole(roles, ['admin', 'operator'])
         ? (hasIdentifier(sourceId) ? `/plan-schedules?rework_plan=${encodeURIComponent(sourceId)}` : '/plan-schedules')
         : null;
+    case 'attachment_void':
+    case 'replacement_review':
+      return attachmentSupplementTarget(item, roles);
     case 'photo_review':
       return hasAnyRole(roles, ['admin', 'reviewer'])
         ? buildAuditTargetPath('photo', 'photo', sourceId, item.source_type)

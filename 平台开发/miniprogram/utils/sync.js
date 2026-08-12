@@ -7,7 +7,7 @@ let localFlushPromise = null;
 
 async function flushLocalOpsInternal() {
   const pending = localStore.getPending();
-  const summary = { synced: 0, remaining: 0, rejected: [] };
+  const summary = { synced: 0, remaining: 0, rejected: [], results: [] };
   if (!pending.length) return summary;
   // 按创建时间顺序回放，保证闭环完整（先打卡/照片，后提交）
   const ordered = pending.slice().sort((a, b) => a.createdAt - b.createdAt);
@@ -45,12 +45,13 @@ async function flushLocalOpsInternal() {
           delete payload.localPhotos;
           delete payload.localPhotoMeta;
         }
-        await api.submitItem(payload);
+        const response = await api.submitItem(payload);
         (op.data.localPhotos || []).forEach((filePath) => {
           wx.removeSavedFile({ filePath, fail() {} });
         });
         localStore.markSynced(op.id);
         summary.synced += 1;
+        summary.results.push({ id: op.id, type: op.type, response });
         api.trackEvent('inspection.item.synced', { site_id: op.data.siteId, item_id: op.data.item_id, operation_id: op.id, offline: true });
       } else if (op.type === 'checkin') {
         await api.checkIn(op.data, true);

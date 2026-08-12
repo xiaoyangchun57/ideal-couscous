@@ -43,6 +43,14 @@ assert.match(imageTarget.page, /target_attachment_ids=101%2C102/);
 assert.equal(resolveNotificationTarget({ source_type: 'parts_request' }).kind, 'invalid');
 assert.equal(resolveNotificationTarget({ source_type: 'unknown', source_id: 1 }).kind, 'invalid');
 
+const voidTarget = resolveNotificationTarget({
+  source_type: 'attachment_void', source_id: 10,
+  payload_json: JSON.stringify({ plan_id: 990201, item_id: 990301, site_id: 990101 })
+});
+assert.deepEqual(voidTarget, { kind: 'tab', page: '/pages/inspection/inspection', planId: 990201, itemId: 990301, siteId: 990101 });
+assert.equal(resolveNotificationTarget({ source_type: 'attachment_void', source_id: 10,
+  payload_json: JSON.stringify({ plan_id: 990201, item_id: 0, site_id: 990101 }) }).kind, 'invalid');
+
 const groups = [{ items: [
   { source_type: 'inspection_batch', id: 'insp_batch_8_9', site_id: 9, item_ids: [88] },
   { source_type: 'inspection_batch', id: 'insp_batch_10_11', site_id: 11 },

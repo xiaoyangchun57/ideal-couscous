@@ -32,6 +32,11 @@ function notificationPayload(notification) {
   }
 }
 
+function positivePayloadId(payload, key) {
+  const value = Number(payload && payload[key]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 const REVIEW_TARGETS = {
   inspection_review: 'inspection_batch',
   inspection_review_batch: 'inspection_batch',
@@ -71,6 +76,14 @@ function resolveNotificationTarget(notification) {
   }
   if (sourceType === 'inspection' || sourceType === 'inspection_rework') {
     return { kind: 'tab', page: '/pages/inspection/inspection', planId: sourceId };
+  }
+  if (sourceType === 'attachment_void' || sourceType === 'replacement_review') {
+    const payload = notificationPayload(notification);
+    const planId = positivePayloadId(payload, 'plan_id');
+    const itemId = positivePayloadId(payload, 'item_id');
+    const siteId = positivePayloadId(payload, 'site_id');
+    if (!planId || !itemId || !siteId) return invalidTarget('补传通知缺少可信计划、检查项或站点标识，无法精确定位。');
+    return { kind: 'tab', page: '/pages/inspection/inspection', planId, itemId, siteId };
   }
   if (sourceType === 'reagent_qc') {
     return { kind: 'tab', page: '/pages/inspection/inspection', siteId: sourceId };

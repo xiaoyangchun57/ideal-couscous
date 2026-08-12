@@ -103,6 +103,7 @@ export default function PlanSchedulesPage() {
   const [favoriteStart, setFavoriteStart] = useState(null);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [favoritesError, setFavoritesError] = useState('');
+  const [supplementTarget, setSupplementTarget] = useState(null);
 
 
   const load = useCallback(async () => {
@@ -299,6 +300,8 @@ export default function PlanSchedulesPage() {
 
   useEffect(() => {
     const reworkPlanId = searchParams.get('rework_plan');
+    const focusItemId = Number(searchParams.get('focus_item'));
+    const focusSiteId = Number(searchParams.get('site_id'));
     if (!reworkPlanId) return undefined;
     let cancelled = false;
     resolveReworkScheduleId(
@@ -307,6 +310,21 @@ export default function PlanSchedulesPage() {
     ).then(scheduleId => {
       if (cancelled) return;
       if (!scheduleId) {
+        if (Number.isInteger(focusItemId) && focusItemId > 0 && Number.isInteger(focusSiteId) && focusSiteId > 0) {
+          api.getStrict(`/inspection-v2/plans/${reworkPlanId}`).then((plan) => {
+            if (cancelled) return;
+            const item = (plan?.items || []).find(candidate => Number(candidate.id) === focusItemId
+              && Number(candidate.site_id) === focusSiteId);
+            if (!item) {
+              message.error('补传通知对应的检查项不存在或当前账号无权查看');
+              return;
+            }
+            setSupplementTarget({ planId: Number(reworkPlanId), itemId: focusItemId, siteId: focusSiteId, itemName: item.item_name || `检查项 #${focusItemId}` });
+          }).catch(() => {
+            if (!cancelled) message.error('补传通知对应的计划不存在或当前账号无权查看');
+          });
+          return;
+        }
         message.error('整改执行包未关联巡检排程，无法打开计划详情');
         return;
       }
@@ -586,6 +604,9 @@ export default function PlanSchedulesPage() {
     >
       {recommendationsError && <Alert type="warning" showIcon message={recommendationsError} action={<Button size="small" onClick={load}>重试</Button>} />}
       {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={load}>重试</Button>} />}
+      {supplementTarget && <Alert type="warning" showIcon
+        message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
+        description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
 
       {(draftRecommendations.length > 0 || followUpRecommendations.length > 0) && (
         <Alert

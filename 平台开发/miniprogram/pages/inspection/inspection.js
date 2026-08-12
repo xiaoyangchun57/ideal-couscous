@@ -8,7 +8,7 @@ const { queueCount, flushQueue } = require('../../utils/request.js');
 const localStore = require('../../utils/localStore.js');
 const { flushLocalOps } = require('../../utils/sync.js');
 const { selectExecutionSite, photoRequirement } = require('../../utils/executionState.js');
-const { hasInspectionFieldRecord } = require('../../utils/inspectionSubmissionState.js');
+const { hasInspectionFieldRecord, resolveLocalSubmitFlush } = require('../../utils/inspectionSubmissionState.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 const { buildCheckinPayload, reworkResourcePresentation } = require('../../utils/reworkFlow.js');
 
@@ -43,6 +43,8 @@ function photoIdempotencyKey(siteId, path, index) {
 }
 
 function inspectionItemStatus(item, syncPending) {
+  if (item.evidence_status === 'supplement_required') return { label: '需补传', code: 'supplement' };
+  if (item.evidence_status === 'replacement_submitted') return { label: '补传待审核', code: 'supplement_review' };
   if (syncPending) return { label: '待同步', code: 'sync' };
   const reviewStatus = Number(item.review_status || 0);
   if (reviewStatus === 3) return { label: '待整改', code: 'rework' };
@@ -79,6 +81,7 @@ Page({
     responsibleSites: getSites(),
     currentPackage: null,
     selectedPlanId: null,
+    focusedItemId: null,
     sites: [],
     selSite: null,
     selSiteId: null,
@@ -138,6 +141,7 @@ Page({
       const packages = (res.packages || []).map(decoratePackageResources);
       const preferredSiteId = app.globalData.selSiteId;
       const preferredPlanId = app.globalData.selPlanId || this.data.selectedPlanId;
+      const preferredItemId = app.globalData.selItemId;
       const selection = selectExecutionSite(packages, preferredPlanId, preferredSiteId);
       const currentPackage = selection.currentPackage;
       const sites = currentPackage ? currentPackage.sites || [] : [];
@@ -145,8 +149,9 @@ Page({
       const selSiteId = selected ? selected.site_id : null;
       app.globalData.selSiteId = null;
       app.globalData.selPlanId = null;
+      app.globalData.selItemId = null;
       const tripReady = this.isTripReady(currentPackage);
-      this.setData({ packages, currentPackage, selectedPlanId: currentPackage ? currentPackage.plan_id : null, executionError: '',
+      this.setData({ packages, currentPackage, selectedPlanId: currentPackage ? currentPackage.plan_id : null, focusedItemId: preferredItemId || null, executionError: '',
         sites: sites.map(s => Object.assign({}, s, { id: s.site_id })), selSiteId, loaded: true,
         tripReady, tripExpanded: currentPackage ? !tripReady : false,
         selSite: currentPackage ? this.data.selSite : null, site: currentPackage ? this.data.site : null,
@@ -448,6 +453,7 @@ Page({
           photosMap[it.item_id] = arr;
         }));
         // 巡检结果枚举集中映射（§6.8：禁止 wxml 硬编码中文枚举）
+        const focusedItemId = app.globalData.selItemId || this.data.focusedItemId;
         const decorated = (res.categories || []).map(cat => ({
           ...cat,
           // 接口给出的业务展示名优先；旧接口或新增分类则保留原有名称，不能笼统显示“未分类”。
@@ -459,7 +465,7 @@ Page({
               sync_pending: true,
             }) : Object.assign({}, it, { sync_pending: false });
             const status = inspectionItemStatus(merged, merged.sync_pending);
-            return Object.assign({}, merged, { result_cn: status.label, status_code: status.code });
+            return Object.assign({}, merged, { result_cn: status.label, status_code: status.code, focused: Number(merged.item_id) === Number(focusedItemId) });
           })
         }));
         const localCompleted = decorated.reduce((count, cat) => count + (cat.items || [])
@@ -470,6 +476,7 @@ Page({
           site: selectedSite,
           selSite: selectedSite,
           categories: decorated,
+          focusedItemId: focusedItemId || null,
           total: res.total || 0,
           completed: localCompleted,
           completionPercent: res.total ? Math.round(localCompleted * 100 / res.total) : 0,
@@ -825,7 +832,8 @@ Page({
     (this.data.categories || []).forEach(cat => (cat.items || []).forEach(it => { if (it.item_id === id) target = it; }));
     if (!target) return;
     const reviewStatus = Number(target.review_status || 0);
-    if (target.result && reviewStatus === 2) {
+    const supplementRequired = target.evidence_status === 'supplement_required';
+    if (target.result && reviewStatus === 2 && !supplementRequired) {
       wx.showToast({ title: '该检查项已通过审核，不能再次上传或提交', icon: 'none' });
       return;
     }
@@ -842,7 +850,7 @@ Page({
     try { photos = target.photo_urls ? JSON.parse(target.photo_urls) : []; } catch (e) { photos = []; }
     const requiredPhotos = target.required_photos || 0;
     this.setData({
-      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: rejectedLocalPhotos, localPhotoMeta: rejectedPhotoMeta, requiredPhotos, originalPhotoCount: photos.length, supplementOnly: !!(target.result && reviewStatus === 1), photoInfo: photoRequirement(requiredPhotos, photos.length, rejectedLocalPhotos.length) }
+      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', photos: photos.map(resolveUploadUrl), localPhotos: rejectedLocalPhotos, localPhotoMeta: rejectedPhotoMeta, requiredPhotos, originalPhotoCount: photos.length, supplementOnly: !!(target.result && reviewStatus === 1) || supplementRequired, voidedEvidenceCount: (target.voided_evidence || []).length, photoInfo: photoRequirement(requiredPhotos, photos.length, rejectedLocalPhotos.length) }
     });
   },
 
@@ -947,7 +955,7 @@ Page({
     wx.previewImage({ urls: this.data.sheet.photos.concat(this.data.sheet.localPhotos), current: src });
   },
 
-  updateItemResult(itemId, result, photos, syncPending = false, reviewStatus) {
+  updateItemResult(itemId, result, photos, syncPending = false, reviewStatus, evidenceStatus) {
     const categories = this.data.categories.map(cat => {
       return {
         ...cat,
@@ -956,6 +964,7 @@ Page({
           const merged = Object.assign({}, it, {
             result,
             review_status: reviewStatus === undefined ? it.review_status : reviewStatus,
+            evidence_status: evidenceStatus === undefined ? it.evidence_status : evidenceStatus,
             sync_pending: syncPending,
           });
           const status = inspectionItemStatus(merged, syncPending);
@@ -977,7 +986,7 @@ Page({
   onSubmitItem() {
     const s = this.data.sheet;
     if (!s.item || this._submittingItem) return;
-    if (Number(s.item.review_status || 0) === 2) {
+    if (Number(s.item.review_status || 0) === 2 && s.item.evidence_status !== 'supplement_required') {
       wx.showToast({ title: '该检查项已通过审核，不能再次提交', icon: 'none' });
       return;
     }
@@ -1037,10 +1046,14 @@ Page({
       const opId = localStore.addOp('submit', payload);
       api.trackEvent('inspection.item.queued', { site_id: this.data.selSiteId, item_id: s.item.item_id, plan_id: s.item.plan_id, operation_id: opId, offline: localPhotos.length > 0 });
       const submitPromise = localPhotos.length
-        ? flushLocalOps().then(() => {
+        ? flushLocalOps().then((summary) => {
             const stillPending = localStore.getPending().some(op => op.id === opId);
-            if (stillPending) return Promise.reject(new Error('等待同步'));
-            return { success: true };
+            const outcome = resolveLocalSubmitFlush(summary, opId, stillPending);
+            if (outcome.status === 'rejected') {
+              return Promise.reject(Object.assign(new Error(outcome.error), { submissionRejected: true }));
+            }
+            if (outcome.status === 'pending') return Promise.reject(new Error('等待同步'));
+            return outcome.response;
           })
         : api.submitItem(payload);
       submitPromise
@@ -1050,7 +1063,17 @@ Page({
           if (localPhotos.length && this.data.selSiteId) this.loadTasks(this.data.selSiteId);
           wx.showToast({ title: res && res.order_no ? '异常已转工单' : '已提交', icon: 'success' });
         })
-        .catch(() => {
+        .catch((error) => {
+          if (error && error.submissionRejected) {
+            this._submittingItem = false;
+            this.setData({ submitting: false });
+            wx.showModal({
+              title: '提交未完成',
+              content: error.message || '服务器拒绝了本次提交，请按提示修正后重试',
+              showCancel: false
+            });
+            return;
+          }
           // 离线/弱网：实体已本地留存，联网后静默同步
           this._afterSubmit(s, true);
           wx.showToast({ title: '已本地保存，联网自动同步', icon: 'none' });
@@ -1069,7 +1092,7 @@ Page({
     }
     const progress = this.updateItemResult(
       s.item.item_id, s.result, s.photos.concat(s.localPhotos), syncPending,
-      response && response.review_status
+      response && response.review_status, response && response.evidence_status
     );
     this.setData({ syncCount: pendingSyncCount() });
     if (!syncPending) {

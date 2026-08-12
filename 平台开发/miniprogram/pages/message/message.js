@@ -121,6 +121,7 @@ Page({
     }
     if (target.kind === 'tab') {
       if (target.planId) getApp().globalData.selPlanId = Number(target.planId) || target.planId;
+      if (target.itemId) getApp().globalData.selItemId = Number(target.itemId) || target.itemId;
       if (target.siteId) getApp().globalData.selSiteId = Number(target.siteId) || target.siteId;
       wx.switchTab({ url: target.page });
       return;

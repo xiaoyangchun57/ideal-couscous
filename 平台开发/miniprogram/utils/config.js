@@ -5,7 +5,7 @@
 // 开发者工具用于本地回归，真机预览和正式版始终访问线上后端。
 // 这样本地模拟数据不会与线上数据混淆，也不会把 127.0.0.1 带入真机版本。
 const USE_LOCAL_API_IN_DEVTOOLS = true;
-const LOCAL_API_BASE_URL = 'http://127.0.0.1:5000';
+const LOCAL_API_BASE_URL = 'http://127.0.0.1:5020';
 
 // 微信开发者工具在不同版本中可能报告 devtools、windows 或 mac。
 // 真机只会报告 ios/android，因此桌面平台可以安全地视为本地开发工具。

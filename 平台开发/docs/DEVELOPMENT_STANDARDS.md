@@ -2,7 +2,7 @@
 
 - r3 product review is returned. `release-20260810-cross-module-freeze`, `release-20260810-cross-module-freeze-r2`, and `release-20260810-cross-module-freeze-r3` are historical rejection targets and must not move; `release-20260811-cross-module-freeze-r4` is the only candidate allowed by `deploy/release-candidates.json`.
 - The deletion contract is server-owned: one-item soft delete only, no physical file deletion or batch deletion, admin role-set required, explicit `source_type=test` with no business id, all stored inspection/workorder/manual-report links checked server-side, fixed 409 evidence rejection, complete audit snapshot, idempotent repeat, and only `{ reason }` sent by the client.
-- Final local automation was green: backend 240 tests; miniprogram Node 11; syntax aggregate 117 JS/Python files; React test:api 35; lint/build; backend py_compile; and diff check all exit 0. Exact timestamps, counts, commands, and the expected unbound-port exit 1 are in `docs/RELEASE_TEST_HANDOFF.md`.
+- Final r5 local automation was green: backend 249 tests; miniprogram Node 11 test files; syntax aggregate 122 JS/Python files; React test:api 39 tests; lint/build; backend py_compile (75 files); candidate guard; and diff check all exit 0. Exact results and product real UI acceptance are in `docs/RELEASE_TEST_HANDOFF.md`.
 - The first syntax command was an invocation error (missing `--node-root`/`--python-root`, exit 2), then the required aggregate command passed exit 0. This distinction must remain visible in handoff evidence.
 - No real UI result may be inferred from these automated/API checks. All r4-affected Web notification/routing, plan executor, image deletion, risk-gate, refresh-consistency, and WeChat rapid-click scenarios are explicitly `未验证` pending product-manager UI re-test.
 - Browser initialization stopped after the exact error `failed to write kernel assets: 系统找不到指定的路径。 (os error 3)`; no external browser fallback was used. WeChat official recovery stopped after two attempts (25730 fallback report, then 36992 `EEXIST`); no second IDE or retry was started.
@@ -78,5 +78,5 @@
 - React `test:api`：23:26:34-23:26:35，`31 passed`，exit 0；lint：23:26:42-23:26:45，exit 0；build：23:26:53-23:26:57，exit 0。
 - backend 全量 `py_compile`：23:27:06-23:27:12，`66 files`，exit 0；`git diff --check`：23:27:21，exit 0，仅 LF→CRLF 警告。
 - `backend/test_api.py` 在服务运行中于 23:27:32 exit 0，读取 37 个站点；停止服务后于 23:27:47-23:27:50 exit 1，WinError 10061，反向失败符合预期。
-- 实际微信工具证据：复用 `36992/9420`，审核返回 `executor_name=万松`、`requester_name=万松`；不存在计划失败恢复、风险影像取消门禁、消息空/失败/旧数据状态均已验证。Web 仅确认计划列表/弹窗执行人 `万松`；`spare_part_request` 通知定位/处理状态、Web 风险影像门禁、Web 消息状态和截图均未覆盖。
+- 历史工具/API 状态记录（不作为 r4 UI 证据）：复用 `36992/9420` 时读取到 `executor_name=万松`、`requester_name=万松`，并观察到不存在计划失败恢复、风险影像取消门禁、消息空/失败/旧数据状态；r4 Web 计划执行人、备件通知、风险门禁、影像删除及微信快速连点仍均为 `未验证`，不可写为通过。
 - 最终测试后停止本轮后端/Vite 和挂起自动化脚本，保留用户已有微信开发者工具；未推送、未部署、未操作线上数据库或线上容器。

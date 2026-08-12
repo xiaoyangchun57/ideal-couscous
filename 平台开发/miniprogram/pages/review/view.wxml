@@ -110,10 +110,13 @@
                   <image class="review-photo" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
                   <view class="photo-select" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">{{photo.selectedForReject ? '已选驳回' : '选择驳回'}}</view>
                   <text class="photo-meta photo-item-name">检查项：{{photo.itemLabel}}</text>
+                  <text class="photo-meta" wx:if="{{photo.archiveName}}">档案名称：{{photo.archiveName}}</text>
+                  <text class="photo-meta" wx:if="{{photo.originalFilename}}">原始文件名：{{photo.originalFilename}}</text>
+                  <text class="photo-meta">主状态：{{photo.primaryStatusLabel}}</text>
                   <text class="photo-meta">自动归类：{{photo.categoryLabel}}（{{photo.classificationLabel}}）</text>
                   <text class="photo-meta">水印核验：{{photo.watermarkStatusLabel}}</text>
                   <text class="photo-watermark" wx:if="{{photo.watermark_text}}">识别文字：{{photo.watermark_text}}</text>
-                  <text class="photo-risk" wx:if="{{photo.flag_reason}}">{{photo.flag_reason}}</text>
+                  <text class="photo-risk" wx:if="{{photo.riskLabel || photo.flag_reason}}">{{photo.riskLabel || photo.flag_reason}}</text>
                 </view>
               </view>
             </block>

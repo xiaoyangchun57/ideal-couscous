@@ -248,6 +248,45 @@ class InspectionReviewReworkTest(unittest.TestCase):
         })
         self.assertEqual(same.status_code, 409, same.json)
 
+    def test_voided_approved_item_accepts_server_required_replacement(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
+            db.execute("""UPDATE insp_plan_items
+                SET review_status=2, evidence_status='supplement_required'
+                WHERE id=100""")
+
+        replacement = self.client.post(
+            '/api/mobile/submit-item',
+            headers=self.headers('operator-token'),
+            json={
+                'item_id': 100,
+                'plan_id': 10,
+                'result': 'normal',
+                'supplement': True,
+                'photo_urls': json.dumps([
+                    'http://127.0.0.1:5020/uploads/inspection/reading.jpg?display=1',
+                    'http://127.0.0.1:5020/uploads/inspection/replacement.jpg',
+                ]),
+            },
+        )
+
+        self.assertEqual(replacement.status_code, 200, replacement.json)
+        self.assertEqual(replacement.json['added_photos'], 1)
+        self.assertEqual(
+            (replacement.json['review_status'], replacement.json['evidence_status']),
+            (1, 'replacement_submitted'),
+        )
+        with app_module.get_db() as db:
+            item = db.execute(
+                'SELECT review_status, evidence_status, photo_urls FROM insp_plan_items WHERE id=100'
+            ).fetchone()
+        self.assertEqual((item['review_status'], item['evidence_status']), (1, 'replacement_submitted'))
+        self.assertEqual(json.loads(item['photo_urls']), [
+            '/uploads/inspection/reading.jpg',
+            '/uploads/inspection/replacement.jpg',
+        ])
+
     def test_approved_item_is_frozen(self):
         self.assertEqual(self.submit().status_code, 200)
         with app_module.get_db() as db:

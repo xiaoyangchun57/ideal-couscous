@@ -85,9 +85,13 @@ function decorateItem(item) {
   }[item.source_type] || '驳回';
   const reviewPhotos = details.map(detail => Object.assign({}, detail, {
     url: resolveUploadUrl(detail.stored_path),
-    itemLabel: detail.item_name || detail.description || '未关联检查项',
-    categoryLabel: detail.recognized_category || detail.item_name || '待人工归类',
-    classificationLabel: detail.classification_source === 'inspection_item' ? '按检查项自动归类' : '按水印文字自动归类',
+    itemLabel: detail.item_name || '检查项待确认',
+    categoryLabel: detail.recognized_category || '影像待归类',
+    classificationLabel: detail.classification_source === 'inspection_item' ? '按检查项自动归类' : '未可靠关联，不猜测',
+    archiveName: detail.archive_name || '',
+    originalFilename: detail.original_filename || detail.filename || '',
+    primaryStatusLabel: detail.review_status_label || '待审核',
+    riskLabel: detail.risk_label || (detail.is_flagged ? '风险标记' : ''),
     watermarkStatusLabel: watermarkStatusLabel(detail.watermark_status, detail.capture_source),
     selectedForReject: false
   }));
