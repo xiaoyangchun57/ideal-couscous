@@ -2,6 +2,7 @@ const api = require('../../services/api.js');
 const { getUser, getSites } = require('../../utils/auth.js');
 const { todayStr } = require('../../utils/util.js');
 const maps = require('../../services/maps.js');
+const { homeSummary, homeSite, homeSiteSelection } = require('../../utils/homeTaskState.js');
 
 const app = getApp();
 
@@ -41,12 +42,7 @@ Page({
   load(done) {
     api.myToday()
       .then(res => {
-        const summary4 = res.summary ? {
-          sites: res.summary.total_sites || 0,
-          pending: res.summary.pending_items || 0,
-          workorders: res.summary.pending_workorders || 0,
-          alerts: (res.summary.pending_alerts || 0) + (res.summary.abnormal_items || 0)
-        } : null;
+        const summary4 = homeSummary(res.summary);
         const workPackage = res.work_package || null;
         const planEntrySummary = workPackage && workPackage.has_plan
           ? `今日作业 ${workPackage.sites.length} 个站点${workPackage.readiness.departure_confirmed ? ' · 已准备' : ` · ${workPackage.readiness.departure_pending_count} 项待确认`}`
@@ -54,7 +50,7 @@ Page({
         this.setData({
           loaded: true,
           summary4,
-          sites: res.sites || [],
+          sites: (res.sites || []).map(homeSite),
           workorders: (res.workorders || []).map(maps.workorderCn),
           alerts: (res.alerts || []).map(a => Object.assign({}, a, { level_cls: maps.alertLevelCls(a.level) })),
           workPackage,
@@ -76,7 +72,11 @@ Page({
 
   onSiteTap(e) {
     const id = e.currentTarget.dataset.id;
-    app.globalData.selSiteId = id;
+    const site = (this.data.sites || []).find(item => String(item.site_id) === String(id));
+    const target = homeSiteSelection(site || { site_id: id });
+    app.globalData.selSiteId = target.siteId;
+    app.globalData.selPlanId = target.planId;
+    app.globalData.selItemId = target.itemId;
     api.trackEvent('inspection.station_opened', { site_id: id, entry: 'home' });
     wx.switchTab({ url: '/pages/inspection/inspection' });
   },

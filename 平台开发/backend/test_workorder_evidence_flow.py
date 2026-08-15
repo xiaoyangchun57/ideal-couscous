@@ -6,7 +6,9 @@ import sys
 import tempfile
 import unittest
 import base64
+from datetime import datetime
 from contextlib import contextmanager
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -17,7 +19,9 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         temp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         temp.close()
         self.db_path = temp.name
+        self.upload_dir = tempfile.mkdtemp()
         self.original_get_db = app_module.get_db
+        self.original_upload_dir = app_module.UPLOAD_DIR
         self.original_tokens = dict(app_module._tokens)
         self.original_cache = dict(app_module._site_ids_cache)
 
@@ -28,21 +32,27 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             try:
                 yield db
                 db.commit()
+            except Exception:
+                db.rollback()
+                raise
             finally:
                 db.close()
 
         app_module.get_db = temporary_db
+        app_module.UPLOAD_DIR = self.upload_dir
         app_module._tokens.clear()
         app_module._site_ids_cache.clear()
         app_module._tokens.update({
             'admin-token': {'id': 1, 'role': 'admin', 'real_name': '管理员'},
             'manager-token': {'id': 3, 'role': 'manager', 'real_name': '运维主管'},
-            'operator-token': {'id': 2, 'role': 'operator', 'real_name': '现场运维'},
+            'operator-token': {'id': 2, 'role': 'operator', 'real_name': '现场运维', 'username': 'operator'},
+            'operator-username-token': {'id': 2, 'role': 'operator', 'username': 'operator'},
             'other-operator-token': {'id': 4, 'role': 'operator', 'real_name': '其他运维'},
         })
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, username TEXT, role TEXT, openid TEXT DEFAULT '');
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
                 CREATE TABLE photo_requirements (
@@ -51,7 +61,7 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER, title TEXT,
-                    description TEXT, event_type TEXT, level TEXT, status TEXT, images TEXT,
+                    description TEXT, source TEXT DEFAULT 'manual', event_type TEXT, level TEXT, status TEXT, images TEXT,
                     assignee TEXT, created_at TEXT, related_alert_id INTEGER, used_parts TEXT,
                     resolved_at TEXT, check_in_time TEXT, remark TEXT, review_submitted_at TEXT
                 );
@@ -72,6 +82,9 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     evidence_evaluation_id INTEGER
                 );
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
+                CREATE TABLE inspection_checkins (
+                    site_id INTEGER, user_id INTEGER, check_time TEXT
+                );
                 CREATE TABLE notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
                     source_id TEXT, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
@@ -87,8 +100,16 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 INSERT INTO users (id, real_name, username, role) VALUES (2, '现场运维', 'operator', 'operator');
                 INSERT INTO users (id, real_name, username, role) VALUES (3, '运维主管', 'manager', 'manager');
                 INSERT INTO users (id, real_name, username, role) VALUES (4, '其他运维', 'other', 'operator');
+                INSERT INTO users (id, real_name, username, role) VALUES (5, '未授权运维', 'unauthorized', 'operator');
+                INSERT INTO user_roles VALUES (1, 'admin');
+                INSERT INTO user_roles VALUES (2, 'operator');
+                INSERT INTO user_roles VALUES (3, 'admin');
+                INSERT INTO user_roles VALUES (4, 'operator');
+                INSERT INTO user_roles VALUES (5, 'operator');
                 INSERT INTO user_sites VALUES (2, 1);
+                INSERT INTO user_sites VALUES (4, 1);
                 INSERT INTO sites VALUES (1, '测试站', 28.68, 115.73);
+                INSERT INTO sites VALUES (2, '其他站', 28.69, 115.74);
                 INSERT INTO work_orders
                     (id, order_no, site_id, title, description, event_type, level, status,
                      images, assignee, created_at)
@@ -99,11 +120,14 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
 
     def tearDown(self):
         app_module.get_db = self.original_get_db
+        app_module.UPLOAD_DIR = self.original_upload_dir
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
         app_module._site_ids_cache.clear()
         app_module._site_ids_cache.update(self.original_cache)
         os.unlink(self.db_path)
+        import shutil
+        shutil.rmtree(self.upload_dir)
 
     @staticmethod
     def headers(token):
@@ -157,6 +181,15 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
 
     def test_evidence_append_delete_reject_resubmit_and_approve(self):
         # 同一秒内连续上传的三张影像必须保留三条附件和三条 images 缓存记录。
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+            for suffix in ('a', 'b', 'c'):
+                db.execute("""INSERT INTO operation_attachments
+                    (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                     review_status,evidence_qualification,evidence_basis)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (f'{suffix}.jpg', f'/uploads/workorder_photos/{suffix}.jpg', 'image',
+                     'workorder', 1, 1, 2, 'pending', 'qualified', 'camera_session'))
         with app_module.app.test_request_context('/', headers=self.headers('operator-token')):
             from flask import g
             g.current_user = app_module._tokens['operator-token']
@@ -309,24 +342,105 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(approved.status_code, 409, approved.json)
         self.assertEqual(approved.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
 
+    def test_site_checkin_satisfies_workorder_gate_and_replay_is_idempotent(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO inspection_checkins VALUES (1,2,datetime('now','localtime'))")
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 taken_at,review_status,evidence_qualification,evidence_basis)
+                VALUES ('site-checkin.jpg','/uploads/site-checkin.jpg','image','workorder',1,1,2,
+                        datetime('now','localtime'),'pending','qualified','camera_session')""")
+            db.execute("UPDATE work_orders SET images='[\"/uploads/site-checkin.jpg\"]' WHERE id=1")
+
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'),
+            json={'client': 'mobile', 'resolution_note': '现场处置完成'})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'reviewing')
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE inspection_checkins SET check_time=datetime('now','localtime','-2 day')")
+            before_events = db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0]
+            before_notifications = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+        replay = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'),
+            json={'client': 'mobile', 'resolution_note': '重复提交'})
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['already_submitted'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0], before_events)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], before_notifications)
+
     def test_operator_cannot_change_another_assignees_workorder(self):
         response = self.client.put('/api/workorders/WO-TEST-001/status',
                                    headers=self.headers('other-operator-token'),
                                    json={'status': 'accepted'})
         self.assertEqual(response.status_code, 403, response.json)
 
-    def test_workorder_evidence_lifecycle_freezes_after_close_and_allows_review_supplement(self):
+    def test_admin_cannot_act_as_field_assignee_and_denials_have_no_side_effects(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 taken_at,review_status,evidence_qualification,evidence_basis)
+                VALUES ('owner.jpg','/uploads/owner.jpg','image','workorder',1,1,2,
+                        datetime('now','localtime'),'pending','qualified','camera_session')""")
+            db.execute("UPDATE work_orders SET images='[\"/uploads/owner.jpg\"]' WHERE id=1")
+            before_order = dict(db.execute(
+                "SELECT status,images,check_in_time,remark,review_submitted_at FROM work_orders WHERE id=1"
+            ).fetchone())
+            before_attachments = [dict(row) for row in db.execute(
+                'SELECT id,stored_path,is_deleted,review_status FROM operation_attachments ORDER BY id'
+            )]
+            before_events = db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0]
+            before_notifications = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+
+        upload = self.client.post('/api/workorders/WO-TEST-001/photos',
+                                  headers=self.headers('admin-token'),
+                                  json={'image': base64.b64encode(b'admin-upload' * 32).decode('ascii')})
+        self.assertEqual(upload.status_code, 403, upload.json)
+        mobile_upload = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                         headers=self.headers('admin-token'),
+                                         json={'image': base64.b64encode(b'admin-mobile-upload' * 32).decode('ascii'),
+                                               '_idempotency_key': 'admin-mobile-upload'})
+        self.assertEqual(mobile_upload.status_code, 403, mobile_upload.json)
+        deleted = self.client.post('/api/mobile/workorder/WO-TEST-001/image/delete',
+                                   headers=self.headers('admin-token'),
+                                   json={'url': '/uploads/owner.jpg'})
+        self.assertEqual(deleted.status_code, 403, deleted.json)
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+                                     headers=self.headers('admin-token'),
+                                     json={'client': 'web', 'resolution_note': '管理员代提交'})
+        self.assertEqual(submitted.status_code, 403, submitted.json)
+
+        with app_module.get_db() as db:
+            after_order = dict(db.execute(
+                "SELECT status,images,check_in_time,remark,review_submitted_at FROM work_orders WHERE id=1"
+            ).fetchone())
+            after_attachments = [dict(row) for row in db.execute(
+                'SELECT id,stored_path,is_deleted,review_status FROM operation_attachments ORDER BY id'
+            )]
+            self.assertEqual(after_order, before_order)
+            self.assertEqual(after_attachments, before_attachments)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0], before_events)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], before_notifications)
+
+    def test_username_assignee_can_operate_when_real_name_is_not_in_session(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET assignee='operator', status='in_progress' WHERE id=1")
+        response = self.client.put('/api/workorders/WO-TEST-001/status',
+                                   headers=self.headers('operator-username-token'),
+                                   json={'status': 'accepted'})
+        self.assertEqual(response.status_code, 200, response.json)
+
+    def test_workorder_evidence_lifecycle_freezes_during_review_and_after_close(self):
         encoded = base64.b64encode(b'new-evidence' * 32).decode('ascii')
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
             db.commit()
         supplemental = self.client.post('/api/workorders/WO-TEST-001/photos',
                                         headers=self.headers('operator-token'), json={'image': encoded})
-        self.assertEqual(supplemental.status_code, 200, supplemental.json)
-        locked_delete = self.client.post('/api/workorders/WO-TEST-001/photos',
-                                         headers=self.headers('operator-token'),
-                                         json={'delete_url': supplemental.json['url']})
-        self.assertEqual(locked_delete.status_code, 409, locked_delete.json)
+        self.assertEqual(supplemental.status_code, 409, supplemental.json)
+        self.assertEqual(supplemental.json['code'], 'WORKORDER_NOT_IN_PROGRESS')
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET status='closed' WHERE order_no='WO-TEST-001'")
             db.commit()
@@ -334,6 +448,285 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                                   headers=self.headers('operator-token'), json={'image': encoded})
         self.assertEqual(frozen.status_code, 409, frozen.json)
         self.assertEqual(frozen.json['code'], 'WORKORDER_CLOSED')
+
+    def test_upload_failures_leave_no_attachment_cache_or_orphan_file(self):
+        before_files = [
+            os.path.join(root, name)
+            for root, _, names in os.walk(self.upload_dir) for name in names
+        ]
+        with mock.patch.object(app_module, '_flag_attachment', side_effect=RuntimeError('injected flag failure')):
+            web = self.client.post('/api/workorders/WO-TEST-001/photos',
+                headers=self.headers('operator-token'),
+                json={'image': base64.b64encode(b'web-failure' * 32).decode('ascii')})
+        self.assertEqual(web.status_code, 500)
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+        with mock.patch.object(app_module, '_record_attachment_evaluation', side_effect=RuntimeError('injected evaluation failure')):
+            mobile = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                headers=self.headers('operator-token'),
+                json={'image': base64.b64encode(b'mobile-failure' * 32).decode('ascii'),
+                      '_idempotency_key': 'mobile-failure'})
+        self.assertEqual(mobile.status_code, 500, mobile.json)
+
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments WHERE source_type='workorder' AND source_id=1"
+            ).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT images FROM work_orders WHERE order_no='WO-TEST-001'"
+            ).fetchone()['images'], '[]')
+        after_files = [
+            os.path.join(root, name)
+            for root, _, names in os.walk(self.upload_dir) for name in names
+        ]
+        self.assertEqual(after_files, before_files)
+
+    def test_mobile_photo_replay_is_idempotent_and_key_cannot_change_payload(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+            db.execute("""CREATE TABLE photo_capture_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE, user_id INTEGER,
+                site_id INTEGER, plan_id INTEGER, item_id INTEGER, work_order_id INTEGER,
+                issued_at TEXT, expires_at TEXT, used_at TEXT, attachment_id INTEGER,
+                capture_source TEXT, rework_required_at TEXT)""")
+            db.execute("""CREATE TABLE mobile_idempotency (
+                idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT)""")
+            db.execute("""INSERT INTO photo_capture_sessions
+                (token_hash,user_id,site_id,work_order_id,issued_at,expires_at,capture_source)
+                VALUES (hex(randomblob(16)),2,1,1,datetime('now','localtime'),
+                        datetime('now','localtime','+15 minute'),'camera')""")
+            session = db.execute('SELECT id,token_hash FROM photo_capture_sessions').fetchone()
+        # Patch token lookup only to avoid deriving the one-way token hash in this unit fixture.
+        original = app_module._capture_session_row
+        def session_row(db, token, **kwargs):
+            row = db.execute('SELECT * FROM photo_capture_sessions WHERE id=?', (session['id'],)).fetchone()
+            return dict(row) if row and not row['used_at'] else None
+        payload = {
+            'image': base64.b64encode(b'idempotent-mobile-photo' * 32).decode('ascii'),
+            '_idempotency_key': 'stable-photo-1', 'capture_source': 'camera',
+            'capture_session': 'fixture-token', 'taken_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'gps_lat': 28.68, 'gps_lng': 115.73,
+        }
+        with mock.patch.object(app_module, '_capture_session_row', side_effect=session_row):
+            first = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                     headers=self.headers('operator-token'), json=payload)
+            second = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                      headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertEqual(first.json['url'], second.json['url'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operation_attachments WHERE source_type='workorder'").fetchone()[0], 1)
+            self.assertEqual(len(json.loads(db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'])), 1)
+        changed = dict(payload, image=base64.b64encode(b'different-photo' * 32).decode('ascii'))
+        reused = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                  headers=self.headers('operator-token'), json=changed)
+        self.assertEqual((reused.status_code, reused.json['code']), (409, 'IDEMPOTENCY_KEY_REUSED'))
+
+    def test_batch_link_rejects_mixed_ownership_without_partial_write(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification)
+                VALUES ('owned.jpg','/uploads/owned.jpg','image','site_photo',0,1,2,'pending','qualified')""")
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification)
+                VALUES ('other.jpg','/uploads/other.jpg','image','site_photo',0,1,4,'pending','qualified')""")
+        response = self.client.post('/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'),
+            json={'photos': ['/uploads/owned.jpg', '/uploads/other.jpg']})
+        self.assertEqual(response.status_code, 409, response.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'], '[]')
+            rows = db.execute("SELECT source_type,source_id FROM operation_attachments ORDER BY id").fetchall()
+            self.assertEqual([(row['source_type'], row['source_id']) for row in rows],
+                             [('site_photo', 0), ('site_photo', 0)])
+
+    def test_batch_link_rejects_unassigned_qualified_photo_without_side_effects(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification,evidence_basis)
+                VALUES ('legacy.jpg','/uploads/legacy.jpg','image','site_photo',0,1,2,
+                        'pending','qualified','camera_session')""")
+            before = {
+                'images': db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'],
+                'attachments': [tuple(row) for row in db.execute(
+                    "SELECT id,source_type,source_id,review_status,is_deleted FROM operation_attachments")],
+                'events': db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+            }
+
+        response = self.client.post('/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'), json={'photos': ['/uploads/legacy.jpg']})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (409, 'WORKORDER_PHOTO_FORBIDDEN'))
+        with app_module.get_db() as db:
+            after = {
+                'images': db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'],
+                'attachments': [tuple(row) for row in db.execute(
+                    "SELECT id,source_type,source_id,review_status,is_deleted FROM operation_attachments")],
+                'events': db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+            }
+        self.assertEqual(after, before)
+
+    def test_existing_workorder_photo_list_is_idempotent(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification,evidence_basis)
+                VALUES ('current.jpg','/uploads/current.jpg','image','workorder',1,1,2,
+                        'pending','qualified','camera_session')""")
+        first = self.client.post('/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'), json={'photos': ['/uploads/current.jpg']})
+        second = self.client.post('/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'), json={'photos': ['/uploads/current.jpg']})
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        with app_module.get_db() as db:
+            self.assertEqual(json.loads(db.execute(
+                "SELECT images FROM work_orders WHERE id=1").fetchone()['images']),
+                ['/uploads/current.jpg'])
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 1)
+
+    def test_old_photo_list_requires_current_checkin_without_side_effects(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification,evidence_basis)
+                VALUES ('current.jpg','/uploads/current.jpg','image','workorder',1,1,2,
+                        'pending','qualified','camera_session')""")
+            before = (
+                db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'],
+                [tuple(row) for row in db.execute(
+                    "SELECT id,source_type,source_id,review_status,is_deleted FROM operation_attachments")],
+                db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+            )
+        response = self.client.post('/api/workorders/WO-TEST-001/photos',
+            headers=self.headers('operator-token'), json={'photos': ['/uploads/current.jpg']})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (409, 'WORKORDER_CHECKIN_REQUIRED'))
+        with app_module.get_db() as db:
+            after = (
+                db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'],
+                [tuple(row) for row in db.execute(
+                    "SELECT id,source_type,source_id,review_status,is_deleted FROM operation_attachments")],
+                db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+            )
+        self.assertEqual(after, before)
+
+    def test_client_images_fields_are_read_only_without_side_effects(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+
+        cases = [
+            ('put', '/api/workorders/WO-TEST-001/status',
+             {'status': 'accepted', 'images': '["../../README.md"]'}),
+            ('post', '/api/workorders/WO-TEST-001/submit-review',
+             {'resolution_note': '伪造照片列表', 'images': '["../../README.md"]'}),
+        ]
+        for method, url, payload in cases:
+            with self.subTest(url=url):
+                with app_module.get_db() as db:
+                    before = (
+                        tuple(db.execute("SELECT status,images FROM work_orders WHERE id=1").fetchone()),
+                        db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+                        db.execute("SELECT COUNT(*) FROM notifications").fetchone()[0],
+                    )
+                response = getattr(self.client, method)(
+                    url, headers=self.headers('operator-token'), json=payload)
+                self.assertEqual((response.status_code, response.json['code']),
+                                 (400, 'WORKORDER_IMAGES_READ_ONLY'))
+                with app_module.get_db() as db:
+                    after = (
+                        tuple(db.execute("SELECT status,images FROM work_orders WHERE id=1").fetchone()),
+                        db.execute("SELECT COUNT(*) FROM timeline_events").fetchone()[0],
+                        db.execute("SELECT COUNT(*) FROM notifications").fetchone()[0],
+                    )
+                self.assertEqual(after, before)
+
+    def test_delete_rejects_untrusted_paths_and_preserves_everything(self):
+        owned_path = '/uploads/workorder_photos/owned.jpg'
+        physical = os.path.join(self.upload_dir, 'workorder_photos', 'owned.jpg')
+        os.makedirs(os.path.dirname(physical), exist_ok=True)
+        with open(physical, 'wb') as handle:
+            handle.write(b'owned-photo')
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET images=? WHERE id=1", (json.dumps([owned_path]),))
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification)
+                VALUES ('owned.jpg',?,'image','workorder',1,1,2,'pending','qualified')""",
+                (owned_path,))
+            db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification)
+                VALUES ('other.jpg','/uploads/other.jpg','image','workorder',999,1,2,
+                        'pending','qualified')""")
+
+        invalid_urls = [
+            '../../README.md',
+            'C:/Windows/win.ini',
+            'https://ops.hhyc-tec.cn/uploads/workorder_photos/owned.jpg',
+            owned_path + '?download=1',
+            '/uploads/other.jpg',
+        ]
+        for url in invalid_urls:
+            with self.subTest(url=url):
+                response = self.client.post('/api/mobile/workorder/WO-TEST-001/image/delete',
+                    headers=self.headers('operator-token'), json={'url': url})
+                self.assertIn(response.status_code, (400, 404), response.json)
+                with app_module.get_db() as db:
+                    self.assertEqual(json.loads(db.execute(
+                        "SELECT images FROM work_orders WHERE id=1").fetchone()['images']),
+                        [owned_path])
+                    self.assertEqual(db.execute(
+                        "SELECT is_deleted FROM operation_attachments WHERE source_id=1"
+                    ).fetchone()['is_deleted'], 0)
+                self.assertTrue(os.path.exists(physical))
+
+        deleted = self.client.post('/api/mobile/workorder/WO-TEST-001/image/delete',
+            headers=self.headers('operator-token'), json={'url': owned_path})
+        self.assertEqual(deleted.status_code, 200, deleted.json)
+        with app_module.get_db() as db:
+            self.assertEqual(json.loads(db.execute(
+                "SELECT images FROM work_orders WHERE id=1").fetchone()['images']), [])
+            self.assertEqual(db.execute(
+                "SELECT is_deleted FROM operation_attachments WHERE source_id=1"
+            ).fetchone()['is_deleted'], 1)
+        self.assertFalse(os.path.exists(physical))
+
+    def test_stale_direct_checkin_cannot_open_any_workorder_field_gate(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime','-1 day') WHERE id=1")
+        listing = self.client.get('/api/workorders', headers=self.headers('operator-token'))
+        self.assertEqual(listing.status_code, 200, listing.json)
+        self.assertFalse(listing.json[0]['checked_in'])
+        capture = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001', 'capture_source': 'camera',
+                'gps_lat': 28.68, 'gps_lng': 115.73,
+            })
+        self.assertEqual((capture.status_code, capture.json['code']), (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+        upload = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json={
+                'image': base64.b64encode(b'stale-checkin-photo' * 32).decode('ascii'),
+                '_idempotency_key': 'stale-checkin-photo',
+            })
+        self.assertEqual((upload.status_code, upload.json['code']), (409, 'WORKORDER_CHECKIN_REQUIRED'))
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={
+                'client': 'mobile', 'resolution_note': '不应提交',
+            })
+        self.assertEqual((submitted.status_code, submitted.json['code']),
+                         (409, 'WORKORDER_CHECKIN_REQUIRED'))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'in_progress')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 0)
 
 
 if __name__ == '__main__':

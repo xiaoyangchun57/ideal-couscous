@@ -49,6 +49,39 @@ export function archiveStatusLayout() {
   };
 }
 
+export function archiveHistoryStatus(target, statusMap = {}) {
+  if (Number(target?.is_deleted || 0) === 1) {
+    return { label: '已移出', color: 'default', reason: target?.delete_reason || '' };
+  }
+  let materialRole = '';
+  try {
+    materialRole = JSON.parse(target?.extra_json || '{}').material_role || '';
+  } catch {
+    materialRole = '';
+  }
+  if (materialRole === 'supplement') {
+    return {
+      label: '补充材料',
+      color: 'warning',
+      reason: target?.evidence_reason || '该记录仅作为补充材料，不进入业务审核，也不计入当前有效档案。',
+    };
+  }
+  if (target?.review_status === 'approved'
+      && target?.evidence_qualification !== 'qualified') {
+    return {
+      label: '来源未通过当前规则',
+      color: 'warning',
+      reason: target?.evidence_reason || '该记录的来源未通过当前证据规则。',
+    };
+  }
+  const status = statusMap[target?.review_status]
+    || { label: target?.review_status_label || '待所属业务审核', color: 'processing' };
+  const reason = target?.review_status === 'voided'
+    ? (target?.void_reason || target?.reject_reason || target?.evidence_reason || '')
+    : (target?.reject_reason || target?.evidence_reason || '');
+  return { ...status, reason };
+}
+
 export function voidEligibility(target, user, submitting = false) {
   if (submitting) return { allowed: false, reason: '正在提交作废请求' };
   if (!hasReviewerRole(user)) return { allowed: false, reason: '当前账号没有影像管理权限' };

@@ -66,6 +66,12 @@ class InspectionReviewReworkTest(unittest.TestCase):
                 );
                 CREATE TABLE inspection_template_items (id INTEGER PRIMARY KEY, template_id INTEGER, item_name TEXT, need_review INTEGER);
                 CREATE TABLE mobile_idempotency (idempotency_key TEXT, endpoint TEXT, response_json TEXT);
+                CREATE TABLE photo_capture_sessions (
+                    id INTEGER PRIMARY KEY, token_hash TEXT, user_id INTEGER, site_id INTEGER,
+                    plan_id INTEGER, item_id INTEGER, work_order_id INTEGER, issued_at TEXT,
+                    expires_at TEXT, used_at TEXT, attachment_id INTEGER,
+                    rework_required_at TEXT, capture_source TEXT
+                );
                 CREATE TABLE inspection_checkins (id INTEGER PRIMARY KEY, site_id INTEGER, user_id INTEGER, check_time TEXT);
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
                 CREATE TABLE notifications (
@@ -138,6 +144,20 @@ class InspectionReviewReworkTest(unittest.TestCase):
         self.assertEqual((plan['status'], plan['completion_rate']), ('completed', 100))
 
         self.seed_evidence('/uploads/inspection/reading-retake.jpg')
+        with app_module.get_db() as db:
+            required_at = db.execute(
+                'SELECT rework_required_at FROM insp_plan_items WHERE id=100').fetchone()['rework_required_at']
+            attachment_id = db.execute(
+                "SELECT id FROM operation_attachments WHERE stored_path='/uploads/inspection/reading-retake.jpg'"
+            ).fetchone()['id']
+            db.execute("""UPDATE operation_attachments
+                SET source_type='inspection',source_id=100 WHERE id=?""", (attachment_id,))
+            db.execute("""INSERT INTO photo_capture_sessions
+                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source)
+                VALUES (1,'retake',2,1,10,100,datetime('now','localtime'),
+                        datetime('now','localtime','+15 minute'),datetime('now','localtime'),
+                        ?,?,'camera')""", (attachment_id, required_at))
         resubmitted = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
             'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
             'photo_urls': json.dumps(['/uploads/inspection/reading.jpg',
@@ -163,8 +183,41 @@ class InspectionReviewReworkTest(unittest.TestCase):
         self.assertEqual((plan['status'], plan['completion_rate']), ('completed', 100))
         self.assertEqual((notification['user_id'], notification['source_type']), (2, 'inspection_rework'))
 
-    def test_rejected_field_photo_reopens_its_item_and_requires_a_new_checkin(self):
+    def test_rejected_field_photo_preserves_original_visit_and_sibling_item(self):
         self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
+            db.execute("UPDATE insp_plan_items SET check_out_time='2026-08-07 10:00:00' WHERE id=100")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,template_id,item_name,result,execution_status,required_photos,
+                 actual_photos,review_status,photo_urls,remark,check_out_time)
+                VALUES (101,10,1,7,'站房环境','normal','active',1,1,2,
+                        '[\"/uploads/inspection/environment.jpg\"]','正常','2026-08-07 10:00:00')""")
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,
+                 source_type,source_id,evidence_qualification)
+                VALUES (220,'/uploads/inspection/reading.jpg',1,2,'仪表读数','reading.jpg',
+                        'pending','inspection',100,'qualified')""")
+            original_checkins = db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0]
+        rejected = self.client.post(
+            '/api/operation-attachments/review', headers=self.headers('admin-token'), json={
+                'attachment_ids': [220], 'action': 'reject', 'reject_reason': '画面模糊',
+            })
+        self.assertEqual(rejected.status_code, 200, rejected.json)
+        with app_module.get_db() as db:
+            rows = {row['id']: row for row in db.execute("""SELECT id,result,review_status,
+                evidence_status,check_out_time,rework_required_at FROM insp_plan_items
+                WHERE id IN (100,101)""").fetchall()}
+            plan = db.execute('SELECT status,completion_rate FROM insp_plans WHERE id=10').fetchone()
+            current_checkins = db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0]
+        self.assertEqual((rows[100]['result'], rows[100]['review_status'], rows[100]['evidence_status']),
+                         ('normal', 3, 'supplement_required'))
+        self.assertEqual(rows[100]['check_out_time'], '2026-08-07 10:00:00')
+        self.assertTrue(rows[100]['rework_required_at'])
+        self.assertEqual((rows[101]['result'], rows[101]['review_status'], rows[101]['check_out_time']),
+                         ('normal', 2, '2026-08-07 10:00:00'))
+        self.assertEqual((plan['status'], plan['completion_rate']), ('completed', 100))
+        self.assertEqual(current_checkins, original_checkins)
 
     def test_selective_photo_review_rejects_selected_and_approves_the_rest(self):
         self.assertEqual(self.submit().status_code, 200)
@@ -308,9 +361,23 @@ class InspectionReviewReworkTest(unittest.TestCase):
         self.assertEqual(self.submit().status_code, 200)
         with app_module.get_db() as db:
             db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
-            db.execute("UPDATE insp_plan_items SET review_status=3, evidence_status='supplement_required' WHERE id=100")
+            db.execute("""UPDATE insp_plan_items SET review_status=3,
+                evidence_status='supplement_required',
+                rework_required_at=datetime('now','localtime') WHERE id=100""")
             db.execute("UPDATE operation_attachments SET review_status='rejected', reject_reason='旧照片需重拍' WHERE source_type='inspection' AND source_id=100")
         self.seed_evidence('/uploads/inspection/replacement-next.jpg')
+        with app_module.get_db() as db:
+            item = db.execute('SELECT rework_required_at FROM insp_plan_items WHERE id=100').fetchone()
+            attachment = db.execute("""SELECT id FROM operation_attachments
+                WHERE stored_path='/uploads/inspection/replacement-next.jpg'""").fetchone()
+            db.execute("""UPDATE operation_attachments SET source_type='inspection',source_id=100
+                WHERE id=?""", (attachment['id'],))
+            db.execute("""INSERT INTO photo_capture_sessions
+                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source)
+                VALUES (2,'next-cycle',2,1,10,100,datetime('now','localtime'),
+                        datetime('now','localtime','+15 minute'),datetime('now','localtime'),
+                        ?,?,'camera')""", (attachment['id'], item['rework_required_at']))
 
         replacement = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
             'item_id': 100,
@@ -333,6 +400,94 @@ class InspectionReviewReworkTest(unittest.TestCase):
             '/uploads/inspection/replacement-next.jpg': 'pending',
         })
         self.assertEqual((item['review_status'], item['evidence_status']), (1, 'replacement_submitted'))
+
+    def test_retake_cycle_mismatch_has_zero_submission_side_effects(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
+            db.execute("""UPDATE insp_plan_items SET review_status=3,
+                evidence_status='supplement_required', rework_required_at='2026-08-14 10:00:00',
+                check_out_time='2026-08-14 09:00:00' WHERE id=100""")
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,
+                 source_type,source_id,evidence_qualification)
+                VALUES (230,'/uploads/inspection/wrong-cycle.jpg',1,2,'仪表读数',
+                        'wrong-cycle.jpg','pending','inspection',100,'qualified')""")
+            db.execute("""INSERT INTO photo_capture_sessions
+                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source)
+                VALUES (3,'old-cycle',2,1,10,100,'2026-08-14 09:15:00',
+                        '2026-08-14 09:30:00','2026-08-14 09:16:00',230,
+                        '2026-08-14 09:10:00','camera')""")
+            before_item = tuple(db.execute("""SELECT result,review_status,evidence_status,
+                rework_required_at,check_out_time,photo_urls,actual_photos
+                FROM insp_plan_items WHERE id=100""").fetchone())
+            before_attachment = tuple(db.execute("""SELECT source_type,source_id,review_status,
+                evidence_qualification FROM operation_attachments WHERE id=230""").fetchone())
+            before_session = tuple(db.execute("""SELECT used_at,attachment_id,rework_required_at
+                FROM photo_capture_sessions WHERE id=3""").fetchone())
+
+        response = self.client.post('/api/mobile/submit-item',
+                                    headers=self.headers('operator-token'), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps(['/uploads/inspection/wrong-cycle.jpg']),
+        })
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'RETAKE_EVIDENCE_CYCLE_MISMATCH')
+        with app_module.get_db() as db:
+            after_item = tuple(db.execute("""SELECT result,review_status,evidence_status,
+                rework_required_at,check_out_time,photo_urls,actual_photos
+                FROM insp_plan_items WHERE id=100""").fetchone())
+            after_attachment = tuple(db.execute("""SELECT source_type,source_id,review_status,
+                evidence_qualification FROM operation_attachments WHERE id=230""").fetchone())
+            after_session = tuple(db.execute("""SELECT used_at,attachment_id,rework_required_at
+                FROM photo_capture_sessions WHERE id=3""").fetchone())
+        self.assertEqual(after_item, before_item)
+        self.assertEqual(after_attachment, before_attachment)
+        self.assertEqual(after_session, before_session)
+
+    def test_rejecting_a_replacement_advances_cycle_and_invalidates_prior_authorization(self):
+        self.assertEqual(self.submit().status_code, 200)
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
+            db.execute("""UPDATE insp_plan_items SET review_status=1,
+                evidence_status='replacement_submitted',
+                rework_required_at='2026-08-13 08:00:00',
+                check_out_time='2026-08-13 07:30:00' WHERE id=100""")
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,
+                 source_type,source_id,evidence_qualification)
+                VALUES (240,'/uploads/inspection/replacement-cycle-one.jpg',1,2,'仪表读数',
+                        'replacement-cycle-one.jpg','pending','inspection',100,'qualified')""")
+            db.execute("""INSERT INTO photo_capture_sessions
+                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source)
+                VALUES (4,?,2,1,10,100,datetime('now','localtime'),
+                        datetime('now','localtime','+15 minute'),NULL,NULL,
+                        '2026-08-13 08:00:00','camera')""",
+                (app_module._hash_token('prior-cycle-token'),))
+
+        response = self.client.post('/api/operation-attachments/review',
+                                    headers=self.headers('admin-token'), json={
+            'attachment_ids': [240], 'action': 'reject', 'reject_reason': '仍然模糊',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            item = db.execute("""SELECT result,review_status,evidence_status,
+                rework_required_at,check_out_time FROM insp_plan_items WHERE id=100""").fetchone()
+            attachment = db.execute(
+                'SELECT review_status,reject_reason FROM operation_attachments WHERE id=240'
+            ).fetchone()
+            stale_session = app_module._capture_session_row(
+                db, 'prior-cycle-token', user_id=2, site_id=1, plan_id=10, item_id=100,
+                capture_source='camera', rework_required_at=item['rework_required_at'])
+        self.assertEqual((item['result'], item['review_status'], item['evidence_status']),
+                         ('normal', 3, 'supplement_required'))
+        self.assertNotEqual(item['rework_required_at'], '2026-08-13 08:00:00')
+        self.assertEqual(item['check_out_time'], '2026-08-13 07:30:00')
+        self.assertEqual((attachment['review_status'], attachment['reject_reason']),
+                         ('rejected', '仍然模糊'))
+        self.assertIsNone(stale_session)
 
     def test_approved_item_is_frozen(self):
         self.assertEqual(self.submit().status_code, 200)

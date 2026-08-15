@@ -57,6 +57,7 @@
 .site-card-foot { margin-top: 24rpx; padding-left: 14rpx; display: flex; align-items: baseline; }
 .site-card-num { font-size: 40rpx; font-weight: 500; color: var(--brand); }
 .site-card-unit { font-size: 22rpx; color: var(--text-3); margin-left: 8rpx; }
+.site-card-summary { color: var(--brand); font-size: 26rpx; font-weight: 500; }
 
 .responsible-section { margin: 16rpx 24rpx 0; }
 .responsible-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12rpx; }

@@ -20,7 +20,7 @@ export function TableLongText({ value, lines = 2, empty = '-' }) {
   );
 }
 
-export function WorkspaceEmpty({ type = 'empty', onRefresh, description }) {
+export function WorkspaceEmpty({ type = 'empty', onRefresh, description, children }) {
   const descriptions = {
     empty: '当前没有业务记录',
     filtered: '没有符合当前条件的记录',
@@ -30,7 +30,7 @@ export function WorkspaceEmpty({ type = 'empty', onRefresh, description }) {
   return (
     <div className="workspace-empty" style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description || descriptions[type]}>
-        {onRefresh && <Button icon={<ReloadOutlined />} onClick={onRefresh}>刷新</Button>}
+        {(children || onRefresh) && <Space wrap>{children}{onRefresh && <Button icon={<ReloadOutlined />} onClick={onRefresh}>刷新</Button>}</Space>}
       </Empty>
     </div>
   );
@@ -90,11 +90,11 @@ export function ToolbarMeta({ label, children }) {
   );
 }
 
-export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, emptyType, onRefresh, pagination = false, scroll, ...rest }) {
+export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, emptyType, onRefresh, pagination = false, scroll, fillHeight = false, ...rest }) {
   const { tokens } = useTheme();
   const hasRows = dataSource.length > 0;
   return (
-    <Card className="workspace-table" aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
+    <Card className={`workspace-table${fillHeight ? ' workspace-table--fill' : ''}`} aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
       <span className="sr-only" role="status" aria-live="polite">
         {loading ? '正在加载列表' : `列表已更新，共 ${dataSource.length} 条记录`}
       </span>

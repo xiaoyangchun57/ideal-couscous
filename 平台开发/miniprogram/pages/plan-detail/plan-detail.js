@@ -252,13 +252,13 @@ Page({
       content: '提交后将进入审批流程，确认提交？',
       success: (r) => {
         if (!r.confirm) return;
-        api.submitPlanSchedule(this.scheduleId)
+        api.submitPlanSchedule(this.scheduleId, this.data.detail && this.data.detail.version)
           .then(() => {
             wx.showToast({ title: '已提交审批', icon: 'success' });
             this.load();
           })
           .catch(err => {
-            wx.showToast({ title: (err && err.message) || '提交失败', icon: 'none' });
+            wx.showToast({ title: (err && (err.error || err.message)) || '提交失败', icon: 'none' });
           });
       }
     });

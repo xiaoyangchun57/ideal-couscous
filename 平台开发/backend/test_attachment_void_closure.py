@@ -49,7 +49,9 @@ class AttachmentVoidClosureTest(unittest.TestCase):
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT, UNIQUE(user_id, role));
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER, UNIQUE(user_id, site_id));
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, code TEXT);
-                CREATE TABLE work_orders (id INTEGER PRIMARY KEY, order_no TEXT);
+                CREATE TABLE work_orders (
+                    id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER
+                );
                 CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, plan_name TEXT, status TEXT,
                     assignee_id INTEGER, completion_rate REAL DEFAULT 100);
                 CREATE TABLE insp_plan_items (

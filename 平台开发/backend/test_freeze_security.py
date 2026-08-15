@@ -192,7 +192,8 @@ class FreezeSecurityTest(unittest.TestCase):
         upload = self.status('operator-none', 'post', '/api/inspection/photos/upload', json={
             'site_id': 1, 'requirement_id': 100,
         })
-        self.assertEqual(upload.status_code, 403)
+        self.assertEqual(upload.status_code, 410)
+        self.assertEqual(upload.json['code'], 'INSPECTION_PHOTO_UPLOAD_RETIRED')
         self.assertEqual(self.status('operator-none', 'post', '/api/inspection/photos/10/review', json={}).status_code, 403)
         self.assertEqual(self.status('operator-none', 'post', '/api/inspection/photos/batch-review', json={
             'photo_ids': [10],
@@ -201,9 +202,11 @@ class FreezeSecurityTest(unittest.TestCase):
     def test_operator_and_reviewer_site_scope_and_admin_access(self):
         self.assertEqual(self.status('operator-1', 'get', '/api/inspection/photos/1').status_code, 200)
         self.assertEqual(self.status('operator-1', 'get', '/api/inspection/photos/2').status_code, 403)
-        self.assertEqual(self.status('operator-1', 'post', '/api/inspection/photos/upload', json={
+        retired = self.status('operator-1', 'post', '/api/inspection/photos/upload', json={
             'site_id': 2, 'requirement_id': 100,
-        }).status_code, 403)
+        })
+        self.assertEqual(retired.status_code, 410)
+        self.assertEqual(retired.json['code'], 'INSPECTION_PHOTO_UPLOAD_RETIRED')
         self.assertEqual(self.status('reviewer-1', 'post', '/api/inspection/photos/upload', json={
             'site_id': 1, 'requirement_id': 100,
         }).status_code, 403)

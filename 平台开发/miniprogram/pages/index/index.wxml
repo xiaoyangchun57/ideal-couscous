@@ -14,8 +14,8 @@
     </view>
     <view class="stat-divider"></view>
     <view class="stat">
-      <text class="stat-num {{summary4.pending ? 'stat-brand' : ''}}">{{summary4.pending}}</text>
-      <text class="stat-label">待检</text>
+      <text class="stat-num {{summary4.todo ? 'stat-brand' : ''}}">{{summary4.todo}}</text>
+      <text class="stat-label">待办</text>
     </view>
     <view class="stat-divider"></view>
     <view class="stat">
@@ -78,9 +78,9 @@
     <view class="review-entry-r">巡检质控 · 工单 · 备件 · 用车 ›</view>
   </view>
 
-  <!-- 待检站点 -->
+  <!-- 待办站点 -->
   <view class="section">
-    <view class="section-title">待检站点<text class="section-more" bindtap="goInspection">全部巡检 ›</text></view>
+    <view class="section-title">待办站点<text class="section-more" bindtap="goInspection">全部巡检 ›</text></view>
   </view>
   <scroll-view wx:if="{{sites.length}}" scroll-x class="site-scroll" enhanced show-scrollbar="{{false}}">
     <view class="site-card" wx:for="{{sites}}" wx:key="site_id" bindtap="onSiteTap" data-id="{{item.site_id}}">
@@ -91,14 +91,13 @@
         <text class="site-carryover" wx:if="{{item.has_carryover}}">昨日未完成 · 需补检 {{item.carryover_items}} 项</text>
       </view>
       <view class="site-card-foot">
-        <text class="site-card-num">{{item.pending_items}}</text>
-        <text class="site-card-unit">项待检</text>
+        <text class="site-card-summary">{{item.todo_text}}</text>
       </view>
     </view>
   </scroll-view>
   <view class="empty" wx:elif="{{loaded}}">
     <view class="empty-circle"></view>
-    <text class="empty-tx">今日无待检站点</text>
+    <text class="empty-tx">今日无待办站点</text>
   </view>
 
   <view class="responsible-section" wx:if="{{loaded && !sites.length && responsibleSites.length}}">

@@ -32,7 +32,7 @@ function workorderCn(w) {
     status_cls: WORKORDER_STATUS_CLS[w.status] || 'gray',
     level_cls: WORKORDER_LEVEL_CLS[w.level] || 'gray',
     source_cn: s != null ? s : '其他来源',
-    checked_in: !!w.check_in_time,
+    checked_in: !!(w.checked_in || w.effective_check_in_time || w.check_in_time),
     images_arr: imagesArr.map(resolveUploadUrl),
     has_images: imagesArr.length > 0
   });

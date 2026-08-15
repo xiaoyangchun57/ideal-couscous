@@ -122,7 +122,9 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
             db.close()
         self.assertEqual(states, {1: 'pending', 2: 'pending', 3: 'pending'})
 
-    def test_legacy_unlinked_upload_does_not_trust_client_capture_time(self):
+    def test_legacy_upload_registration_is_retired_without_writes(self):
+        with app_module.get_db() as db:
+            before = db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0]
         response = self.client.post(
             '/api/inspection/photos/upload',
             headers={'Authorization': 'Bearer operator-token'},
@@ -139,15 +141,11 @@ class AttachmentAutoReviewRouteTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 201)
-        self.assertIsNone(response.json['taken_at'])
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(response.json['code'], 'INSPECTION_PHOTO_UPLOAD_RETIRED')
         with app_module.get_db() as db:
-            row = db.execute(
-                'SELECT source_id,review_required,extra_json FROM operation_attachments '
-                'WHERE id=?', (response.json['id'],)).fetchone()
-        self.assertEqual((row['source_id'], row['review_required']), (0, 0))
-        self.assertEqual(json.loads(row['extra_json'])['material_role'], 'supplement')
-        self.assertEqual(response.json['is_flagged'], 0)
+            after = db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0]
+        self.assertEqual(after, before)
 
 
 if __name__ == '__main__':

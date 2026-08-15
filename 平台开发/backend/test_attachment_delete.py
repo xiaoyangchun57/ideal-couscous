@@ -53,7 +53,7 @@ class AttachmentDeleteTest(unittest.TestCase):
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, status TEXT, submitted_at TEXT);
                 CREATE TABLE insp_plan_items (
-                    id INTEGER PRIMARY KEY, plan_id INTEGER, photo_urls TEXT,
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER NOT NULL, photo_urls TEXT,
                     review_status INTEGER DEFAULT 0, submitted_at TEXT,
                     execution_status TEXT DEFAULT 'active'
                 );
@@ -62,7 +62,7 @@ class AttachmentDeleteTest(unittest.TestCase):
                     images TEXT, site_id INTEGER
                 );
                 CREATE TABLE manual_reports (
-                    id INTEGER PRIMARY KEY, status TEXT, order_no TEXT
+                    id INTEGER PRIMARY KEY, site_id INTEGER, status TEXT, order_no TEXT
                 );
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY, filename TEXT, stored_path TEXT,
@@ -74,6 +74,7 @@ class AttachmentDeleteTest(unittest.TestCase):
                     taken_at TEXT, category TEXT DEFAULT '', is_deleted INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP, archived INTEGER DEFAULT 0,
                     archived_at TEXT, archived_by INTEGER, archive_reason TEXT DEFAULT '',
+                    extra_json TEXT DEFAULT '',
                     review_required INTEGER DEFAULT 0, review_status TEXT DEFAULT 'pending',
                     reviewer_id INTEGER, reviewed_at TEXT, reject_reason TEXT DEFAULT '',
                     capture_source TEXT DEFAULT '', deleted_at TEXT, deleted_by INTEGER,
@@ -106,8 +107,10 @@ class AttachmentDeleteTest(unittest.TestCase):
                 INSERT INTO user_sites VALUES (2, 1), (4, 1);
                 INSERT INTO sites VALUES (1, 'Test Station');
                 INSERT INTO insp_plans VALUES (100, 'submitted', '2026-08-11 10:00:00');
-                INSERT INTO insp_plan_items VALUES
-                    (101, 100, '/uploads/TEST_DELETE_FORMAL.jpg', 1, '2026-08-11 10:00:00', 'active');
+                INSERT INTO insp_plan_items
+                    (id, plan_id, site_id, photo_urls, review_status, submitted_at, execution_status)
+                VALUES
+                    (101, 100, 1, '/uploads/TEST_DELETE_FORMAL.jpg', 1, '2026-08-11 10:00:00', 'active');
                 INSERT INTO work_orders VALUES
                     (50, 'WO-TEST-001', 'reviewing', '/uploads/TEST_DELETE_WORKORDER.jpg', 1);
                 INSERT INTO operation_attachments
@@ -184,9 +187,10 @@ class AttachmentDeleteTest(unittest.TestCase):
         with app_module.get_db() as db:
             db.execute("INSERT INTO insp_plans (id, status, submitted_at) VALUES (200, 'draft', NULL)")
             db.execute("""INSERT INTO insp_plan_items
-                (id, plan_id, photo_urls, review_status, submitted_at, execution_status)
-                VALUES (201, 200, '/uploads/TEST_DELETE_PENDING.jpg', 1, NULL, 'active')""")
-            db.execute("INSERT INTO manual_reports (id, status, order_no) VALUES (300, 'dispatched', 'MR-300')")
+                (id, plan_id, site_id, photo_urls, review_status, submitted_at, execution_status)
+                VALUES (201, 200, 1, '/uploads/TEST_DELETE_PENDING.jpg', 1, NULL, 'active')""")
+            db.execute("""INSERT INTO manual_reports (id, site_id, status, order_no)
+                VALUES (300, 1, 'dispatched', 'MR-300')""")
             db.execute("""INSERT INTO operation_attachments
                 (id, filename, stored_path, source_type, source_id, site_id,
                  uploader_id, uploader_name, review_required, review_status, created_at)
@@ -224,7 +228,8 @@ class AttachmentDeleteTest(unittest.TestCase):
 
     def test_test_media_soft_delete_updates_views_notifications_and_audit(self):
         before_stats = self.client.get('/api/attachments/stats', headers=self.headers('admin-token'))
-        self.assertEqual(before_stats.json['total'], 4)
+        self.assertEqual(before_stats.json['all_records'], 4)
+        self.assertEqual(before_stats.json['total'], 0)
         self.assertEqual(before_stats.json['review_pending'], 1)
         before_notice = self.client.get('/api/notifications?status=unread', headers=self.headers('admin-token'))
         self.assertEqual(before_notice.json['unread_count'], 0, before_notice.json)
@@ -240,7 +245,8 @@ class AttachmentDeleteTest(unittest.TestCase):
         self.assertEqual(listing.status_code, 200, listing.json)
         self.assertNotIn(10, [item['id'] for item in listing.json['items']])
         after_stats = self.client.get('/api/attachments/stats', headers=self.headers('admin-token'))
-        self.assertEqual(after_stats.json['total'], 3)
+        self.assertEqual(after_stats.json['all_records'], 3)
+        self.assertEqual(after_stats.json['total'], 0)
         self.assertEqual(after_stats.json['review_pending'], 0)
         after_notice = self.client.get('/api/notifications?status=unread', headers=self.headers('admin-token'))
         self.assertEqual(after_notice.json['unread_count'], 0, after_notice.json)

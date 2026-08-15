@@ -2,8 +2,11 @@ const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
-const { chooseInspectionPhotos, fileToBase64, captureFlushedPhoto } = require('../../utils/photos.js');
-const { resolveUploadUrl } = require('../../utils/url.js');
+const {
+  chooseInspectionPhotos, fileToBase64, captureFlushedPhoto,
+  isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
+} = require('../../utils/photos.js');
+const { resolveUploadUrl, uploadStoragePath } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 
@@ -31,7 +34,7 @@ Page({
       { key: 'reviewing', label: '审核中' },
       { key: 'closed', label: '已完成' }
     ],
-    sheet: { open: false, item: null }, isAdmin: false, canWrite: false, acting: false,
+    sheet: { open: false, item: null }, isAdmin: false, acting: false,
     resolutionNote: '',
     online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
@@ -52,8 +55,7 @@ Page({
     const u = getUser() || {};
     const roles = u.roles || [u.role || ''];
     this.setData({
-      isAdmin: roles.includes('admin'),
-      canWrite: roles.includes('admin') || roles.includes('operator')
+      isAdmin: roles.includes('admin')
     });
     this.refreshSyncState();
     this.load();
@@ -201,7 +203,7 @@ Page({
     if (!item) return;
     const remain = 6 - (item.images_arr ? item.images_arr.length : 0);
     if (remain <= 0) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
-    requestLocation()
+    requestLocation().catch(error => { throw Object.assign({}, error || {}, { capturePhase: 'location' }); })
       .then(gps => api.createPhotoCaptureSession({
         site_id: item.site_id, order_no: item.order_no,
         gps_lat: gps.lat, gps_lng: gps.lng,
@@ -210,12 +212,17 @@ Page({
       .then(({ paths, session, gps }) => {
         if (!paths.length) return;
         wx.showLoading({ title: '上传中' });
-        const tasks = paths.map(p => fileToBase64(p).then(b64 => api.uploadWorkorderImage(
-          item.order_no, b64, {
+        const tasks = paths.map((p, index) => {
+          const localId = String(p || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(-24);
+          const idempotencyKey = 'workorder_photo_' + item.order_no + '_' + Date.now()
+            + '_' + index + '_' + localId;
+          return fileToBase64(p).then(b64 => api.uploadWorkorderImage(
+          item.order_no, b64, idempotencyKey, {
             capture_source: 'camera', capture_session: session.capture_session, taken_at: nowStr(),
             ...(gps ? { gps_lat: gps.lat, gps_lng: gps.lng } : {}),
           }
-        ).then(r => resolveUploadUrl(r.url))));
+        ).then(r => resolveUploadUrl(r.url)));
+        });
         Promise.allSettled(tasks).then(results => {
           wx.hideLoading();
           const urls = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
@@ -225,10 +232,26 @@ Page({
           }
           if (results.some(r => r.status === 'rejected')) {
             this.setData({ syncCount: queueCount() });
-            wx.showToast({ title: queueCount() ? '部分影像待同步' : '部分上传失败', icon: 'none' });
+            const firstFailure = results.find(r => r.status === 'rejected');
+            const message = queueCount() ? '部分影像待同步'
+              : photoCaptureErrorMessage(firstFailure && firstFailure.reason);
+            wx.showToast({ title: message, icon: 'none' });
           }
         }).catch(() => wx.hideLoading());
-      }).catch(() => {});
+      }).catch((error) => {
+        wx.hideLoading();
+        if (isPhotoSelectionCancelled(error)) return;
+        const locationFailure = error && error.capturePhase === 'location';
+        const openSettings = locationFailure
+          ? shouldOpenLocationSettings(error) : shouldOpenCameraSettings(error);
+        wx.showModal({
+          title: locationFailure ? '无法获取位置' : '现场拍摄未启动',
+          content: locationFailure ? locationErrorMessage(error) : photoCaptureErrorMessage(error),
+          showCancel: false,
+          confirmText: openSettings ? '去设置' : '知道了',
+          success: () => { if (openSettings) wx.openSetting({}); },
+        });
+      });
   },
 
   onPreviewImage(e) {
@@ -246,7 +269,13 @@ Page({
       success: (res) => {
         if (!res.confirm) return;
         wx.showLoading({ title: '删除中' });
-        api.deleteWorkorderImage(item.order_no, src)
+        const storedPath = uploadStoragePath(src);
+        if (!storedPath) {
+          wx.hideLoading();
+          wx.showToast({ title: '影像地址无效，请刷新后重试', icon: 'none' });
+          return;
+        }
+        api.deleteWorkorderImage(item.order_no, storedPath)
           .then(() => {
             wx.hideLoading();
             const arr = (this.data.sheet.item.images_arr || []).filter(url => url !== src);

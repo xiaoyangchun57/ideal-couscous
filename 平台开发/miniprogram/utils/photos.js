@@ -33,6 +33,77 @@ function chooseInspectionPhotos(maxCount, captureSource) {
   });
 }
 
+function isPhotoSelectionCancelled(error) {
+  const text = String((error && (error.errMsg || error.message)) || '');
+  return /cancel/i.test(text);
+}
+
+function photoCaptureErrorMessage(error) {
+  if (error && error.error) return error.error;
+  const text = String((error && (error.errMsg || error.message)) || '');
+  if (/auth deny|auth denied|permission denied/i.test(text)) {
+    return '相机权限未开启，请在小程序设置中允许使用相机后重试。';
+  }
+  if (/camera|chooseMedia/i.test(text)) {
+    return '未能打开相机，请确认系统相机可用并允许微信使用相机。';
+  }
+  return '无法发起现场拍摄，请按提示确认到站状态、定位和网络后重试。';
+}
+
+function shouldOpenCameraSettings(error) {
+  const text = String((error && (error.errMsg || error.message)) || '');
+  return /auth deny|auth denied|permission denied/i.test(text);
+}
+
+function requestCaptureSessionWithLocation(requestLocationFn, createSessionFn) {
+  return requestLocationFn()
+    .catch(error => {
+      throw Object.assign({}, error || {}, { capturePhase: 'location' });
+    })
+    .then(gps => createSessionFn(gps));
+}
+
+function captureSourceNeedsLocationSession(captureSource) {
+  return captureSource === 'camera';
+}
+
+function collectInspectionPhotoUploadResults(results) {
+  const summary = { urls: [], localPaths: [], localMetadata: [], issues: [] };
+  (Array.isArray(results) ? results : []).forEach((result, index) => {
+    if (result && result.status === 'fulfilled') {
+      const value = result.value || {};
+      if (value.url) summary.urls.push(value.url);
+      else if (value.localPath) {
+        summary.localPaths.push(value.localPath);
+        summary.localMetadata.push(value.metadata || {});
+      } else if (value.rejected) {
+        summary.issues.push({ kind: 'rejected', index, value });
+      }
+    } else {
+      summary.issues.push({
+        kind: 'failed',
+        index,
+        error: (result && result.reason) || { error: '照片上传失败' },
+      });
+    }
+  });
+  return summary;
+}
+
+function processPhotoUploadIssues(issues, promptIssue, retainSupplement) {
+  return (Array.isArray(issues) ? issues : []).reduce((chain, issue) => chain
+    .then(() => Promise.resolve(promptIssue(issue)))
+    .then(choice => {
+      const canKeep = issue.kind === 'rejected'
+        && issue.value && issue.value.rejected
+        && issue.value.rejected.can_keep_as_supplement;
+      if (choice === 'supplement' && canKeep) {
+        return Promise.resolve(retainSupplement(issue.value));
+      }
+      return undefined;
+    }), Promise.resolve());
+}
+
 function compressOne(path) {
   return new Promise((resolve) => {
     wx.compressImage({
@@ -85,4 +156,9 @@ function captureFlushedPhoto(task, resp) {
   }
 }
 
-module.exports = { chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto };
+module.exports = {
+  chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto,
+  isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
+  requestCaptureSessionWithLocation, captureSourceNeedsLocationSession,
+  collectInspectionPhotoUploadResults, processPhotoUploadIssues,
+};

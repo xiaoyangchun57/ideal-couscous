@@ -256,11 +256,70 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 VALUES (56,'supplement.jpg','/uploads/supplement.jpg','inspection',10,1,2,'approved',
                  '2026-08-10 09:00:00','2026-08-12 09:00:00','qualified','exif','通过',
                  '{"material_role":"supplement"}')""")
+            db.executemany("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,plan_id,item_id,site_id,uploader_id,
+                 review_status,taken_at,created_at,evidence_qualification,evidence_basis,evidence_reason)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [
+                (57,'orphan.jpg','/uploads/orphan.jpg','inspection',999,20,10,1,2,
+                 'approved','2026-08-10 09:10:00','2026-08-12 09:10:00','qualified','exif','通过'),
+                (58,'cross-site.jpg','/uploads/cross-site.jpg','inspection',10,20,10,2,2,
+                 'approved','2026-08-10 09:20:00','2026-08-12 09:20:00','qualified','exif','通过'),
+            ])
         capture = self.client.get('/api/attachments?current_archive=1&date_from=2026-08-10&date_to=2026-08-10',
                                   headers=self.headers())
         self.assertEqual(capture.status_code, 200, capture.json)
         self.assertEqual((capture.json['total'], capture.json['evidence_issue_count']), (1, 0))
         self.assertEqual([row['id'] for row in capture.json['items']], [51])
+        history = self.client.get('/api/attachments?history_archive=1&include_voided=1',
+                                  headers=self.headers())
+        self.assertTrue({57, 58}.issubset({row['id'] for row in history.json['items']}))
+
+    def test_actionable_evidence_issue_excludes_terminal_and_supplement_rows(self):
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,site_id,uploader_id,review_status,
+                 created_at,evidence_qualification,evidence_reason,extra_json,is_deleted)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", [
+                (81,'actionable.jpg','/uploads/actionable.jpg','inspection',10,1,2,'pending',
+                 '2026-08-12 11:00:00','ineligible','缺少可信拍摄时间','{}',0),
+                (82,'superseded.jpg','/uploads/old.jpg','inspection',10,1,2,'superseded',
+                 '2026-08-12 11:01:00','ineligible','已被替换','{}',0),
+                (83,'supplement.jpg','/uploads/supplement-pending.jpg','inspection',10,1,2,'pending',
+                 '2026-08-12 11:02:00','ineligible','补充材料',
+                 '{"material_role":"supplement"}',0),
+                (84,'deleted.jpg','/uploads/deleted-issue.jpg','inspection',10,1,2,'pending',
+                 '2026-08-12 11:03:00','ineligible','已移出','{}',1),
+            ])
+
+        listing = self.client.get('/api/attachments?evidence_issue=1', headers=self.headers())
+        stats = self.client.get('/api/attachments/stats', headers=self.headers())
+        self.assertEqual(listing.status_code, 200, listing.json)
+        self.assertEqual(stats.status_code, 200, stats.json)
+        self.assertEqual([row['id'] for row in listing.json['items']], [81])
+        self.assertEqual(listing.json['evidence_issue_count'], 1)
+        self.assertEqual(stats.json['evidence_issues'], 1)
+
+    def test_workorder_current_archive_requires_real_same_site_order(self):
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,site_id,uploader_id,review_status,
+                 taken_at,created_at,evidence_qualification,evidence_basis,evidence_reason)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", [
+                (61,'workorder.jpg','/uploads/workorder.jpg','workorder',30,1,2,'approved',
+                 '2026-08-10 10:00:00','2026-08-12 10:00:00','qualified','exif','通过'),
+                (62,'missing-order.jpg','/uploads/missing-order.jpg','workorder',999,1,2,'approved',
+                 '2026-08-10 10:01:00','2026-08-12 10:01:00','qualified','exif','通过'),
+                (63,'cross-order.jpg','/uploads/cross-order.jpg','workorder',30,2,2,'approved',
+                 '2026-08-10 10:02:00','2026-08-12 10:02:00','qualified','exif','通过'),
+            ])
+
+        current = self.client.get('/api/attachments?current_archive=1', headers=self.headers())
+        history = self.client.get('/api/attachments?history_archive=1&include_voided=1',
+                                  headers=self.headers())
+        stats = self.client.get('/api/attachments/stats', headers=self.headers())
+        self.assertEqual([row['id'] for row in current.json['items']], [61])
+        self.assertEqual({row['id'] for row in history.json['items']}, {62, 63})
+        self.assertEqual(stats.json['total'], current.json['total'])
 
     def test_business_history_keeps_rows_hidden_from_current_archive(self):
         with app_module.get_db() as db:
@@ -277,16 +336,34 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 (74,'supplement.jpg','/uploads/supplement-history.jpg','inspection',10,10,'浊度仪检查',1,2,
                  'pending',None,'2026-08-12 10:11:00','ineligible','unknown',
                  '{"material_role":"supplement"}'),
+                (75,'null-status.jpg','/uploads/null-status.jpg','inspection',10,10,'浊度仪检查',1,2,
+                 None,None,'2026-08-12 10:12:00','review','unknown','{}'),
+                (76,'superseded.jpg','/uploads/superseded.jpg','inspection',10,10,'浊度仪检查',1,2,
+                 'superseded','2026-08-12 10:13:00','2026-08-12 10:14:00','qualified','camera_session','{}'),
             ])
+            db.execute("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,item_id,item_name,site_id,uploader_id,
+                 review_status,taken_at,created_at,evidence_qualification,evidence_basis,extra_json,is_deleted)
+                VALUES (77,'deleted.jpg','/uploads/deleted.jpg','inspection',10,10,'浊度仪检查',1,2,
+                 'approved','2026-08-12 10:15:00','2026-08-12 10:16:00','qualified','camera_session','{}',1)""")
 
             history, effective = app_module._item_attachment_history(db, 10)
 
-        self.assertEqual([row['id'] for row in history], [71, 72, 73, 74])
+        self.assertEqual([row['id'] for row in history], [71, 72, 73, 74, 75, 76])
         self.assertEqual([row['id'] for row in effective], [71])
 
         archive = self.client.get('/api/attachments?current_archive=1', headers=self.headers())
         self.assertEqual(archive.status_code, 200, archive.json)
         self.assertEqual([row['id'] for row in archive.json['items']], [71])
+
+        history_archive = self.client.get(
+            '/api/attachments?history_archive=1&include_voided=1', headers=self.headers())
+        self.assertEqual(history_archive.status_code, 200, history_archive.json)
+        self.assertEqual({row['id'] for row in history_archive.json['items']}, {72, 73, 74, 75, 76, 77})
+        current_ids = {row['id'] for row in archive.json['items']}
+        history_ids = {row['id'] for row in history_archive.json['items']}
+        self.assertTrue(current_ids.isdisjoint(history_ids))
+        self.assertEqual(current_ids | history_ids, {71, 72, 73, 74, 75, 76, 77})
 
     def test_manual_review_writes_are_retired_without_side_effects(self):
         image_path = os.path.join(self.upload_dir, 'manual.jpg')

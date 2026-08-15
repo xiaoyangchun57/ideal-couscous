@@ -8,4 +8,12 @@ function resolveUploadUrl(path) {
   return CONFIG.BASE_URL + path;
 }
 
-module.exports = { resolveUploadUrl };
+function uploadStoragePath(url) {
+  if (typeof url !== 'string' || !url) return '';
+  if (url.startsWith('/uploads/')) return url;
+  const prefix = CONFIG.BASE_URL.replace(/\/$/, '');
+  if (url.startsWith(prefix + '/uploads/')) return url.slice(prefix.length);
+  return '';
+}
+
+module.exports = { resolveUploadUrl, uploadStoragePath };

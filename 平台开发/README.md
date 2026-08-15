@@ -28,7 +28,7 @@ npm.cmd run dev
 
 ### 微信小程序
 
-在微信开发者工具中打开 `miniprogram` 目录。该目录包含受版本控制的 `app.json` 和 `project.config.json`。桌面开发者工具会由 `miniprogram/utils/config.js` 使用 `http://127.0.0.1:5000`；真机预览和正式版本使用已配置的 HTTPS 地址。不要将本地地址带入真机或正式版本。
+在微信开发者工具中打开仓库根目录（即本 README 所在的“平台开发”目录），不要直接打开 `miniprogram` 子目录。根目录 `project.config.json` 通过 `miniprogramRoot` 指向小程序源码，是开发、真机调试、体验版和上传的唯一项目入口。开发者工具与真机默认使用线上 HTTPS API；只有在开发者工具中显式设置本地 API 覆盖时才连接本地后端，真机不会使用该覆盖。
 
 ## 验收入口
 
@@ -38,7 +38,7 @@ npm.cmd run dev
 python -m pytest backend -q --ignore=backend/test_api.py
 cd react-vite; npm.cmd run test:api
 cd react-vite; npm.cmd run build
-node --test miniprogram/tests/executionState.test.js miniprogram/tests/inspectionSubmissionState.test.js miniprogram/tests/inspectionReviewDecision.test.js miniprogram/tests/reworkFlow.test.js miniprogram/tests/notificationTarget.test.js miniprogram/tests/pagedList.test.js miniprogram/tests/vehicleScope.test.js
+node --test miniprogram/tests/*.test.js
 ```
 
 `backend/test_api.py` 是依赖本地 5000 端口的服务集成测试，不纳入上述 pytest 收集。完整交接要求见 `docs/RELEASE_TEST_HANDOFF.md`，开发约束见 `docs/DEVELOPMENT_STANDARDS.md`。

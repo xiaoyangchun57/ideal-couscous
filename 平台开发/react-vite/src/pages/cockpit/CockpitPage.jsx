@@ -55,14 +55,21 @@ import { getThresholds, classifyMetric } from '../../services/thresholds';
 import { statusColors } from '../../theme/tokens';
 import { relativeTimeStr, truncate } from '../../utils/helpers';
 import OperationsTodayView from './OperationsTodayView';
+import { buildMonitoringDeviceIndex, devicesForSite } from './cockpitDevices';
 import './CockpitPage.css';
 
 const { Text, Title } = Typography;
 const { Search } = Input;
 
 const stationIconMap = {
-  water_quality: '/icons/stations/雨量站.svg',
+  water_quality: '/icons/stations/water-quality.svg',
 };
+
+const markerImageHtml = (svgUrl, size, style = '') => `
+  <span style="position:relative;display:inline-flex;width:${size}px;height:${size}px;align-items:center;justify-content:center;">
+    <span aria-hidden="true" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;border-radius:50%;background:#e5484d;color:#fff;font:700 ${Math.max(8, Math.round(size * 0.34))}px/1 sans-serif;">WQ</span>
+    <img src="${svgUrl}" alt="" onerror="this.style.display='none';this.previousElementSibling.style.display='flex';" style="width:100%;height:100%;object-fit:contain;${style}" />
+  </span>`;
 
 // ---------------------------------------------------------------------------
 // CSS-in-JS style tag for map-specific styles
@@ -74,6 +81,21 @@ const cockpitStyles = `
     height: 100%;
     background: #0a1628;
     font-family: inherit;
+  }
+  .cockpit-map .leaflet-popup-content-wrapper {
+    background: var(--cockpit-popup-background);
+    color: var(--cockpit-popup-color);
+    border: 1px solid var(--cockpit-popup-border);
+    border-radius: 10px;
+    backdrop-filter: blur(12px);
+    box-shadow: var(--cockpit-popup-shadow);
+  }
+  .cockpit-map .leaflet-popup-tip {
+    background: var(--cockpit-popup-background);
+    border: 1px solid var(--cockpit-popup-border);
+  }
+  .cockpit-map .leaflet-popup-close-button {
+    color: var(--cockpit-popup-close-color);
   }
   .cockpit-map .leaflet-control-zoom {
     border: none !important;
@@ -344,7 +366,7 @@ function createMarkerIcon(type, markerStatus) {
       iconAnchor: [iconSize / 2, iconSize / 2],
       popupAnchor: [0, -iconSize / 2 - 4],
       html: `<div style="width:${iconSize}px;height:${iconSize}px;opacity:0.55;filter:grayscale(1);">
-        <img src="${svgUrl}" style="width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.25));" />
+        ${markerImageHtml(svgUrl, iconSize, 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.25));')}
       </div>`,
     });
   }
@@ -360,7 +382,7 @@ function createMarkerIcon(type, markerStatus) {
       popupAnchor: [0, -containerSize / 2 - 4],
       html: `<div style="position:relative;width:${containerSize}px;height:${containerSize}px;display:flex;align-items:center;justify-content:center;">
         <div style="position:absolute;inset:0;border-radius:50%;background:${glowColor};animation:markerBreatheBig 2s ease-in-out infinite;--glow-color:${glowColor};pointer-events:none;"></div>
-        <img src="${svgUrl}" style="width:${iconSize}px;height:${iconSize}px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.6));" />
+        <span style="position:relative;z-index:1;">${markerImageHtml(svgUrl, iconSize, 'filter:drop-shadow(0 2px 4px rgba(0,0,0,0.6));')}</span>
       </div>`,
     });
   }
@@ -372,7 +394,7 @@ function createMarkerIcon(type, markerStatus) {
     iconAnchor: [iconSize / 2, iconSize / 2],
     popupAnchor: [0, -iconSize / 2 - 4],
     html: `<div style="width:${iconSize}px;height:${iconSize}px;">
-      <img src="${svgUrl}" style="width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.4));" />
+      ${markerImageHtml(svgUrl, iconSize, 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.4));')}
     </div>`,
   });
 }
@@ -420,60 +442,68 @@ function SiteMonitoringView() {
 
   const [lastRefresh, setLastRefresh] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const pinStorageKey = useMemo(() => `water_ops_pinned_sites_${user?.id || user?.username || 'anonymous'}`, [user]);
   const [pinnedSites, setPinnedSites] = useState(new Set());
   const [mapResetKey, setMapResetKey] = useState(0);
 
   // Map reference and popup control
   const mapRef = useRef(null);
   const markersRef = useRef(new Map()); // Store marker instances by site ID
+  const clusterRef = useRef(null);
   const [popupOpenSiteId, setPopupOpenSiteId] = useState(null);
+  const popupRequestRef = useRef(0);
+  const dataRequestRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(pinStorageKey) || '[]');
+      setPinnedSites(new Set(Array.isArray(stored) ? stored.map(Number).filter(Number.isFinite) : []));
+    } catch {
+      setPinnedSites(new Set());
+    }
+  }, [pinStorageKey]);
 
   // After fly-to completes, programmatically open the popup for the target site
   useEffect(() => {
     if (!flyTarget || !popupOpenSiteId || !mapRef.current) return;
     const map = mapRef.current;
-    let retryCount = 0;
-    const maxRetries = 5;
-
-    // Try to open popup, with retry if marker is not ready yet
+    const requestId = popupRequestRef.current;
+    let cancelled = false;
+    const timers = new Set();
+    const schedule = (callback, delay) => {
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        callback();
+      }, delay);
+      timers.add(timer);
+    };
     const openPopupForSite = () => {
+      if (cancelled || requestId !== popupRequestRef.current) return false;
       const marker = markersRef.current.get(popupOpenSiteId);
-      if (marker) {
-        marker.openPopup();
+      if (!marker) return false;
+      const cluster = clusterRef.current;
+      if (cluster?.zoomToShowLayer) {
+        cluster.zoomToShowLayer(marker, () => {
+          if (!cancelled && requestId === popupRequestRef.current) marker.openPopup();
+        });
         return true;
       }
-      return false;
+      if (!map.hasLayer(marker)) return false;
+      marker.openPopup();
+      return true;
     };
 
-    // Listen for moveend event (fires after fly-to completes)
     const onMoveEnd = () => {
-      // Try to open popup, retry if marker not ready
-      const tryOpen = () => {
-        if (!openPopupForSite() && retryCount < maxRetries) {
-          retryCount++;
-          setTimeout(tryOpen, 200);
-        }
-      };
-      setTimeout(tryOpen, 200);
+      schedule(openPopupForSite, 80);
     };
 
-    map.on('moveend', onMoveEnd);
-
-    // Also try after a delay in case map is already at position
-    setTimeout(() => {
-      if (!openPopupForSite()) {
-        const tryOpen = () => {
-          if (!openPopupForSite() && retryCount < maxRetries) {
-            retryCount++;
-            setTimeout(tryOpen, 200);
-          }
-        };
-        tryOpen();
-      }
-    }, 1000);
+    map.once('moveend', onMoveEnd);
+    schedule(openPopupForSite, 450);
 
     return () => {
       map.off('moveend', onMoveEnd);
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
     };
   }, [flyTarget, popupOpenSiteId]);
 
@@ -482,65 +512,23 @@ function SiteMonitoringView() {
     injectStyles();
   }, []);
 
-  // Apply theme styles to Leaflet popup wrappers via MutationObserver
-  // (Leaflet renders popups in separate panes, CSS vars don't propagate)
-  useEffect(() => {
-    const applyPopupTheme = () => {
-      const bg = isDark ? 'rgba(12,28,52,0.92)' : 'rgba(255,255,255,0.96)';
-      const color = isDark ? '#d0e8ff' : tokens.colorText;
-      const border = isDark ? 'rgba(0,200,180,0.2)' : 'rgba(0,0,0,0.1)';
-      const shadow = isDark ? '0 4px 20px rgba(0,0,0,0.4)' : '0 4px 20px rgba(0,0,0,0.12)';
-      const closeColor = isDark ? '#6db8d8' : tokens.colorTextTertiary;
-
-      document.querySelectorAll('.leaflet-popup-content-wrapper').forEach((el) => {
-        el.style.background = bg;
-        el.style.color = color;
-        el.style.borderRadius = '10px';
-        el.style.border = `1px solid ${border}`;
-        el.style.backdropFilter = 'blur(12px)';
-        el.style.boxShadow = shadow;
-      });
-      document.querySelectorAll('.leaflet-popup-tip').forEach((el) => {
-        el.style.background = bg;
-        el.style.border = `1px solid ${border}`;
-      });
-      document.querySelectorAll('.leaflet-popup-close-button').forEach((el) => {
-        el.style.color = closeColor;
-      });
-    };
-
-    // Apply immediately
-    applyPopupTheme();
-
-    // Watch for new popup elements being added to DOM
-    const observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (mutation.addedNodes.length > 0) {
-          applyPopupTheme();
-          break;
-        }
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    return () => observer.disconnect();
-  }, [isDark, tokens]);
-
   // ---- Data Loading ----
   const fetchData = useCallback(async () => {
+    const requestId = ++dataRequestRef.current;
     setRefreshing(true);
     setError(null);
     try {
       // Fetch all data sources in parallel（阈值作为色阶数据源，一并加载）
       const [[summary, sitesData, devicesData, healthData], thresholdsData] = await Promise.all([
         Promise.all([
-          api.get('/dashboard/summary'),
-          api.get('/sites'),
-          api.get('/devices'),
-          api.get('/data/health?period=' + healthPeriod),
+          api.getStrict('/dashboard/summary'),
+          api.getStrict('/sites'),
+          api.getStrict('/devices/monitoring-summary'),
+          api.getStrict('/data/health?period=' + healthPeriod),
         ]),
         getThresholds(),
       ]);
+      if (requestId !== dataRequestRef.current) return;
       setThresholds(Array.isArray(thresholdsData) ? thresholdsData : []);
 
       // Sites: /api/sites returns a plain array of site objects
@@ -565,11 +553,14 @@ function SiteMonitoringView() {
 
       setLastRefresh(new Date());
     } catch (err) {
-      console.error('CockpitPage data load error:', err);
-      setError(err.message || '数据加载失败');
+      if (requestId === dataRequestRef.current) {
+        setError(err.message || '数据加载失败');
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === dataRequestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [healthPeriod]);
 
@@ -584,29 +575,36 @@ function SiteMonitoringView() {
     const ids = new Set();
     alerts
       .filter((a) => a.status !== 'resolved')
-      .forEach((a) => ids.add(a.site_id));
+      .forEach((a) => ids.add(Number(a.site_id)));
     return ids;
   }, [alerts]);
 
-  // 站点级最近数据时间映射（基于该站点设备的 max last_data_time）
-  const siteLastTimeMap = useMemo(() => {
-    const m = {};
-    sites.forEach(s => {
-      const sd = devices.filter(d => d.site_id === s.id || d.site_code === s.code);
-      m[s.id] = sd.length ? Math.max(...sd.map(d => d.last_data_time ? new Date(d.last_data_time).getTime() : 0)) : 0;
-    });
-    return m;
-  }, [sites, devices]);
+  const monitoredDevicesBySite = useMemo(() => {
+    return buildMonitoringDeviceIndex(devices);
+  }, [devices]);
+
+  const getMonitoredSiteDevices = useCallback(
+    (site) => devicesForSite(monitoredDevicesBySite, site),
+    [monitoredDevicesBySite],
+  );
+
+  const siteLastTimeMap = useMemo(() => Object.fromEntries(sites.map((site) => {
+    const siteDevices = getMonitoredSiteDevices(site);
+    const latest = siteDevices.length
+      ? Math.max(...siteDevices.map(device => device.last_data_time ? new Date(device.last_data_time).getTime() : 0))
+      : 0;
+    return [site.id, latest];
+  })), [sites, getMonitoredSiteDevices]);
 
   // Real alerts and confirmed device-offline records are actionable. A site
   // without telemetry is intentionally kept neutral until a real event exists.
   const getSiteMarkerStatus = useCallback((site) => {
-    const siteDevices = devices.filter((device) => device.site_id === site.id || device.site_code === site.code);
-    if (alertSiteIds.has(site.id)) return 'anomaly';
-    if (site.status === 'offline' || siteDevices.some((device) => device.status === 'offline')) return 'offline';
-    if (siteDevices.length === 0 || siteDevices.every((device) => !device.last_data_time)) return 'no_data';
+    const siteDevices = getMonitoredSiteDevices(site);
+    if (alertSiteIds.has(Number(site.id))) return 'anomaly';
+    if (siteDevices.some((device) => device.status === 'offline')) return 'offline';
+    if (siteDevices.length === 0) return 'no_data';
     return 'normal';
-  }, [devices, alertSiteIds]);
+  }, [getMonitoredSiteDevices, alertSiteIds]);
 
   const filteredSites = useMemo(() => {
     let result = sites;
@@ -629,6 +627,8 @@ function SiteMonitoringView() {
     }
     // 排序：告警站点置顶（红灯 > 黄灯 > 绿灯），同状态按名称排序
     const sorted = [...result].sort((a, b) => {
+      const pinDifference = Number(pinnedSites.has(b.id)) - Number(pinnedSites.has(a.id));
+      if (pinDifference) return pinDifference;
       const getPriority = (site) => {
         const s = getSiteMarkerStatus(site);
         if (s === 'anomaly') return 0;
@@ -650,18 +650,16 @@ function SiteMonitoringView() {
   }, [dataHealth]);
 
   const deviceStats = useMemo(() => {
-    const monitoredDevices = devices.filter((device) => Number(device.monitoring_enabled) === 1);
-    const total = monitoredDevices.length;
+    const total = devices.length;
     const now = Date.now();
     const DAY = 86400000; // 24h in ms
-    const withData = monitoredDevices.filter((d) => {
+    const withData = devices.filter((d) => {
       if (!d.last_data_time) return false;
       const t = new Date(d.last_data_time).getTime();
       return !isNaN(t) && (now - t) < DAY;
     }).length;
     const noData = total - withData;
     return {
-      assetTotal: devices.length,
       total,
       withData,
       noData,
@@ -677,6 +675,17 @@ function SiteMonitoringView() {
     return alerts.filter((a) => a.status !== 'resolved');
   }, [alerts]);
 
+  const activeAlertsBySite = useMemo(() => {
+    const grouped = new Map();
+    activeAlerts.forEach((alert) => {
+      const siteId = Number(alert.site_id);
+      const current = grouped.get(siteId);
+      if (current) current.push(alert);
+      else grouped.set(siteId, [alert]);
+    });
+    return grouped;
+  }, [activeAlerts]);
+
   // Filter alerts by station type for the right panel
   const filteredAlerts = useMemo(() => {
     if (typeFilter === FILTER_ALL) return activeAlerts;
@@ -684,69 +693,14 @@ function SiteMonitoringView() {
     const matchingSiteIds = new Set(
       sites.filter((s) => s.type === typeFilter).map((s) => s.id)
     );
-    return activeAlerts.filter((a) => matchingSiteIds.has(a.site_id));
+    return activeAlerts.filter((a) => matchingSiteIds.has(Number(a.site_id)));
   }, [activeAlerts, typeFilter, sites]);
-
-  // Pre-compute data trends for all sites (top-level, not inside map)
-  const siteDataTrends = useMemo(() => {
-    const trends = {};
-    sites.forEach((site) => {
-      if (site.latest_value != null) {
-        const base = parseFloat(site.latest_value);
-        if (!isNaN(base)) {
-          // Use site code as seed for deterministic mock data
-          const seed = (site.code || site.id || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-          trends[site.id] = Array.from({ length: 24 }, (_, i) => {
-            const variation = Math.sin(seed + i) * base * 0.08;
-            return { time: `${String(i).padStart(2, '0')}:00`, value: base + variation };
-          });
-        }
-      }
-    });
-    return trends;
-  }, [sites]);
-
-  // Pure function to render SVG trend chart (no hooks)
-  const renderTrendChart = (dataTrend) => {
-    if (!dataTrend || dataTrend.length === 0) return null;
-    const width = 280;
-    const height = 80;
-    const padding = 20;
-    const values = dataTrend.map((d) => d.value);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const range = max - min || 1;
-
-    const points = dataTrend.map((d, i) => {
-      const x = padding + (i / (dataTrend.length - 1)) * (width - padding * 2);
-      const y = height - padding - ((d.value - min) / range) * (height - padding * 2);
-      return `${x},${y}`;
-    }).join(' ');
-
-    return (
-      <svg width={width} height={height} style={{ display: 'block', margin: '8px auto' }}>
-        <line x1={padding} y1={padding} x2={width - padding} y2={padding} stroke={isDark ? 'rgba(0,200,180,0.1)' : 'rgba(0,0,0,0.06)'} strokeDasharray="2,2" />
-        <line x1={padding} y1={height / 2} x2={width - padding} y2={height / 2} stroke={isDark ? 'rgba(0,200,180,0.1)' : 'rgba(0,0,0,0.06)'} strokeDasharray="2,2" />
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke={isDark ? 'rgba(0,200,180,0.1)' : 'rgba(0,0,0,0.06)'} strokeDasharray="2,2" />
-        <text x={4} y={padding + 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">{max.toFixed(1)}</text>
-        <text x={4} y={height / 2 + 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">{((max + min) / 2).toFixed(1)}</text>
-        <text x={4} y={height - padding + 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">{min.toFixed(1)}</text>
-        <polyline points={points} fill="none" stroke={isDark ? '#00c9a7' : tokens.colorPrimary} strokeWidth="2" />
-        {dataTrend.map((d, i) => {
-          const x = padding + (i / (dataTrend.length - 1)) * (width - padding * 2);
-          const y = height - padding - ((d.value - min) / range) * (height - padding * 2);
-          return <circle key={i} cx={x} cy={y} r="2" fill={isDark ? '#00c9a7' : tokens.colorPrimary} />;
-        })}
-        <text x={padding} y={height - 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">00:00</text>
-        <text x={width / 2 - 10} y={height - 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">12:00</text>
-        <text x={width - padding - 20} y={height - 4} fill={isDark ? '#4a8aaa' : tokens.colorTextTertiary} fontSize="9">23:00</text>
-      </svg>
-    );
-  };
 
   // ---- Event handlers ----
   const handleSiteClick = useCallback((site) => {
     if (site.lat && site.lng) {
+      popupRequestRef.current += 1;
+      mapRef.current?.closePopup();
       setFlyTarget([site.lat, site.lng]);
       setPopupOpenSiteId(site.id);
     }
@@ -760,9 +714,14 @@ function SiteMonitoringView() {
       } else {
         next.add(siteId);
       }
+      try {
+        localStorage.setItem(pinStorageKey, JSON.stringify([...next]));
+      } catch {
+        // The in-memory state remains usable when browser storage is unavailable.
+      }
       return next;
     });
-  }, []);
+  }, [pinStorageKey]);
 
   const handleSearch = useCallback((value) => {
     setSearchText(value);
@@ -770,6 +729,9 @@ function SiteMonitoringView() {
 
   const handleLocateAll = useCallback(() => {
     setFlyTarget(null);
+    setPopupOpenSiteId(null);
+    popupRequestRef.current += 1;
+    mapRef.current?.closePopup();
     setTypeFilter(FILTER_ALL);
     setSearchText('');
     setMapResetKey((k) => k + 1);
@@ -796,44 +758,13 @@ function SiteMonitoringView() {
   };
 
   // ---- Marker rendering ----
-  // Status priority for deduplication: actionable states first, neutral last.
-  const statusPriority = { anomaly: 4, offline: 3, pending: 2, normal: 1, no_data: 0 };
-
   const markers = useMemo(() => {
-    const sitesWithCoords = filteredSites.filter((s) => s.lat && s.lng);
-
-    // Group sites by location (rounded to 5 decimal places ~1m precision)
-    const locationGroups = new Map();
-    sitesWithCoords.forEach((site) => {
-      const locKey = `${site.lat.toFixed(5)},${site.lng.toFixed(5)}`;
-      if (!locationGroups.has(locKey)) {
-        locationGroups.set(locKey, []);
-      }
-      locationGroups.get(locKey).push(site);
-    });
-
-    // For each location group, keep only the site with highest priority status
-    const deduplicatedSites = [];
-    locationGroups.forEach((sites) => {
-      if (sites.length === 1) {
-        deduplicatedSites.push(sites[0]);
-      } else {
-        // Sort by marker status priority (highest first)
-        const sorted = sites.sort((a, b) => {
-          const aStatus = getSiteMarkerStatus(a);
-          const bStatus = getSiteMarkerStatus(b);
-          return statusPriority[bStatus] - statusPriority[aStatus];
-        });
-        deduplicatedSites.push(sorted[0]);
-      }
-    });
-
-    return deduplicatedSites.map((site) => {
+    return filteredSites.filter((site) => site.lat && site.lng).map((site) => {
       const markerStatus = getSiteMarkerStatus(site);
       const icon = createMarkerIcon(site.type, markerStatus);
       return { site, icon, markerStatus, key: site.id || site.code };
     });
-  }, [filteredSites, alertSiteIds, getSiteMarkerStatus]);
+  }, [filteredSites, getSiteMarkerStatus]);
 
   // ---- Render: loading state ----
   if (loading) {
@@ -897,7 +828,14 @@ function SiteMonitoringView() {
 
   // ---- Main render ----
   return (
-    <div className="cockpit-map" style={{ position: 'relative', width: '100%', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+    <div className="cockpit-map" style={{
+      position: 'relative', width: '100%', flex: 1, minHeight: 0, overflow: 'hidden',
+      '--cockpit-popup-background': isDark ? 'rgba(12,28,52,0.92)' : 'rgba(255,255,255,0.96)',
+      '--cockpit-popup-color': isDark ? '#d0e8ff' : tokens.colorText,
+      '--cockpit-popup-border': isDark ? 'rgba(0,200,180,0.2)' : 'rgba(0,0,0,0.1)',
+      '--cockpit-popup-shadow': isDark ? '0 4px 20px rgba(0,0,0,0.4)' : '0 4px 20px rgba(0,0,0,0.12)',
+      '--cockpit-popup-close-color': isDark ? '#6db8d8' : tokens.colorTextTertiary,
+    }}>
       {/* ===== Full-screen Leaflet Map ===== */}
       <MapContainer
         center={DEFAULT_CENTER}
@@ -916,6 +854,7 @@ function SiteMonitoringView() {
         {flyTarget && <MapFlyTo position={flyTarget} zoom={15} />}
 
         <MarkerClusterGroup
+          ref={clusterRef}
           chunkedLoading
           showCoverageOnHover={false}
           spiderfyOnMaxZoom
@@ -931,9 +870,8 @@ function SiteMonitoringView() {
           }}
         >
           {markers.map(({ site, icon, markerStatus, key }) => {
-          const siteDevices = devices.filter((d) => d.site_id === site.id || d.site_code === site.code);
-          const siteAlerts = alerts.filter((a) => a.site_id === site.id && a.status !== 'resolved');
-          const dataTrend = siteDataTrends[site.id] || [];
+          const siteDevices = getMonitoredSiteDevices(site);
+          const siteAlerts = activeAlertsBySite.get(Number(site.id)) || [];
 
           // Get latest data time from site's devices
           const maxDeviceTime = Math.max(...siteDevices.map(d => d.last_data_time ? new Date(d.last_data_time).getTime() : 0));
@@ -952,8 +890,21 @@ function SiteMonitoringView() {
                   markersRef.current.delete(site.id);
                 }
               }}
+              eventHandlers={{
+                click: () => {
+                  popupRequestRef.current += 1;
+                  mapRef.current?.closePopup();
+                  setPopupOpenSiteId(site.id);
+                  setFlyTarget([site.lat, site.lng]);
+                },
+              }}
             >
-              <Popup maxWidth={420} minWidth={400}>
+              {Number(popupOpenSiteId) === Number(site.id) && <Popup maxWidth={420} minWidth={400} eventHandlers={{ remove: () => {
+                if (Number(popupOpenSiteId) !== Number(site.id)) return;
+                popupRequestRef.current += 1;
+                setPopupOpenSiteId(null);
+                setFlyTarget(null);
+              } }}>
                 <div style={{ minWidth: 380, fontSize: 13, lineHeight: 1.6 }}>
                   {/* Header */}
                   <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 10, color: isDark ? '#d0e8ff' : tokens.colorText, borderBottom: `1px solid ${isDark ? 'rgba(0,200,180,0.2)' : 'rgba(0,0,0,0.1)'}`, paddingBottom: 8 }}>
@@ -1025,14 +976,6 @@ function SiteMonitoringView() {
                     </div>
                   )}
 
-                  {/* Data Trend Chart */}
-                  {dataTrend.length > 0 && (
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ fontSize: 12, color: isDark ? '#4a8aaa' : tokens.colorTextSecondary, marginBottom: 6, fontWeight: 500, textAlign: 'center' }}>24小时数据趋势</div>
-                      {renderTrendChart(dataTrend)}
-                    </div>
-                  )}
-
                   {/* Alert Summary - Clickable, navigates to alerts filtered by site */}
                   {(() => {
                     // For offline sites with no DB alerts, show a synthetic offline alert
@@ -1100,7 +1043,7 @@ function SiteMonitoringView() {
                     </Button>
                   </div>
                 </div>
-              </Popup>
+              </Popup>}
             </Marker>
           );
           })}
@@ -1519,11 +1462,18 @@ function SiteMonitoringView() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {Object.entries(stationTypeMap).map(([key, label]) => (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <img
-                    src={stationIconMap[key] || stationIconMap.water_quality}
-                    alt={label}
-                    style={{ width: 14, height: 14, objectFit: 'contain' }}
-                  />
+                  <span style={{ position: 'relative', width: 14, height: 14, flexShrink: 0 }}>
+                    <span aria-hidden="true" className="cockpit-station-icon-fallback" style={{ display: 'none', position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center', borderRadius: '50%', background: '#e5484d', color: '#fff', fontSize: 6, fontWeight: 700 }}>WQ</span>
+                    <img
+                      src={stationIconMap[key] || stationIconMap.water_quality}
+                      alt={label}
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none';
+                        event.currentTarget.previousElementSibling.style.display = 'flex';
+                      }}
+                      style={{ width: 14, height: 14, objectFit: 'contain' }}
+                    />
+                  </span>
                   <Text style={{ fontSize: 10, color: tokens.colorText }}>{label}</Text>
                 </div>
               ))}
@@ -1802,30 +1752,25 @@ function SiteMonitoringView() {
                         gap: '8px 12px',
                       }}
                     >
-                      <button
-                        type="button"
-                        aria-label={`查看设备台账，共 ${deviceStats.assetTotal} 台资产`}
-                        onClick={() => navigate('/equipment')}
-                        style={{ cursor: 'pointer', border: 0, padding: 0, background: 'transparent', textAlign: 'left', color: 'inherit' }}
-                      >
+                      <div>
                         <Statistic
-                          title="资产总数"
-                          value={deviceStats.assetTotal}
+                          title="监测设备"
+                          value={deviceStats.total}
                           valueStyle={{ fontSize: 20, fontWeight: 700, color: tokens.colorText, fontFamily: 'monospace' }}
                           prefix={<ApiOutlined style={{ fontSize: 14 }} />}
                         />
-                      </button>
-                      <div style={{ cursor: 'pointer' }}>
+                      </div>
+                      <div>
                         <Statistic
-                          title="采集设备有数据"
+                          title="24小时活跃"
                           value={deviceStats.withData}
                           valueStyle={{ fontSize: 20, fontWeight: 700, color: tokens.colorSuccess, fontFamily: 'monospace' }}
                           prefix={<CheckCircleOutlined style={{ fontSize: 14 }} />}
                         />
                       </div>
-                      <div style={{ cursor: 'pointer' }}>
+                      <div>
                         <Statistic
-                          title="采集设备未上报"
+                          title="超过24小时未更新"
                           value={deviceStats.noData}
                           valueStyle={{
                             fontSize: 20, fontWeight: 700,

@@ -4,26 +4,29 @@ const api = require('../../services/api.js');
 const { chooseAndCompress, fileToBase64 } = require('../../utils/photos.js');
 const { todayStr } = require('../../utils/util.js');
 const { myVehicleQuery, activeUseFromRows } = require('../../utils/vehicleScope.js');
+const { canReview, loadReviewTodoCount } = require('../../utils/reviewAccess.js');
 
 const app = getApp();
 
 Page({
-  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, reviewTodo: 0, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
+  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: 0, reviewTodo: 0, canReview: false, partsRequests: [], partsSheet: { open: false }, partsIssueSheet: { open: false, request: null, quantity: 1, submitting: false }, partsOrderSheet: { open: false, request: null, supplier: '', tracking_no: '', submitting: false }, partsFulfillSheet: { open: false, request: null, supplier: '', actual_amount: '', receipt_no: '', destination: 'direct_use', old_part_disposition: '', evidence_urls: [], uploading: false, submitting: false }, activeVehicleUse: null, returnSheet: { open: false, mileage: '', remarks: '', blocked: false, submitting: false } },
 
   onShow() {
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
     const u = getUser() || {};
+    const reviewAllowed = canReview(u);
     this.setData({
       realName: u.real_name || '运维人员',
       roleCn: maps.map(maps.ROLE, u.role, '运维人员'),
       phone: u.phone || '未绑定',
-      sitesCount: (getSites() || []).length
+      sitesCount: (getSites() || []).length,
+      canReview: reviewAllowed,
     });
     api.unreadCount()
       .then(r => this.setData({ unread: (r && r.count) || 0 }))
       .catch(() => {});
-    api.auditPending()
-      .then(rows => this.setData({ reviewTodo: Array.isArray(rows) ? rows.length : 0 }))
+    loadReviewTodoCount(u, api.auditPending)
+      .then(count => this.setData({ reviewTodo: count }))
       .catch(() => this.setData({ reviewTodo: 0 }));
     api.myPartsRequests().then(rows => {
       const routeLabels = { stock: '库存领用', local_purchase: '附近急购', vendor_order: '厂家订购' };

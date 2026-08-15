@@ -101,10 +101,10 @@ const api = {
     request('/api/mobile/delete-photo', 'POST', { item_id: itemId, photo_index: photoIndex }),
 
   // 工单处置影像上传（追加到工单 images，移动端流程卡控用）
-  uploadWorkorderImage: (orderNo, image, metadata) =>
+  uploadWorkorderImage: (orderNo, image, idempotencyKey, metadata) =>
     request('/api/mobile/workorder/' + orderNo + '/image', 'POST', {
-      ...(metadata || {}), image
-    }),
+      ...(metadata || {}), image, _idempotency_key: idempotencyKey || ''
+    }, { queue: false, timeout: 30000, retry: 1 }),
 
   deleteWorkorderImage: (orderNo, url) =>
     request('/api/mobile/workorder/' + orderNo + '/image/delete', 'POST', { url }),
@@ -259,7 +259,8 @@ const api = {
     request('/api/plan-schedule-favorites/' + id + '/draft', 'POST', { period_start: periodStart }),
 
   // 提交排程审批
-  submitPlanSchedule: (id) => request('/api/plan-schedules/' + id + '/submit', 'POST', {}),
+  submitPlanSchedule: (id, version) =>
+    request('/api/plan-schedules/' + id + '/submit', 'POST', { version }),
   approvePlanSchedule: (id) => request('/api/plan-schedules/' + id + '/approve', 'POST', {}),
   rejectPlanSchedule: (id, reason) => request('/api/plan-schedules/' + id + '/reject', 'POST', { reason: reason || '' }),
 

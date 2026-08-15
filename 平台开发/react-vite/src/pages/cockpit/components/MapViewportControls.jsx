@@ -31,7 +31,7 @@ export function MapFlyTo({ position, zoom = 15 }) {
   const map = useMap();
 
   useEffect(() => {
-    if (position) map.flyTo(position, zoom, { duration: 1.2 });
+    if (position) map.flyTo(position, zoom, { duration: 0.35 });
   }, [map, position, zoom]);
 
   return null;

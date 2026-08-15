@@ -1174,7 +1174,7 @@ export default function SitesPage() {
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
-          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} />
+          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight />
       )}
 
       {/* ---- Archive Modal ---- */}

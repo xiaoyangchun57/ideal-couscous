@@ -35,6 +35,7 @@ global.wx = {
   getStorageSync: (key) => storage[key],
   setStorageSync: (key, value) => { storage[key] = value; },
 };
+storage.user = { id: 2 };
 const localStore = require('../utils/localStore.js');
 const firstOperationId = localStore.addOp('submit', { item_id: 10, plan_id: 20, result: 'normal' });
 const duplicateOperationId = localStore.addOp('submit', { item_id: 10, plan_id: 20, result: 'normal' });

@@ -2,12 +2,17 @@ const api = require('../../services/api.js');
 const { RESULT, INSPECTION_CATEGORY, linkedWorkorderCn, map } = require('../../services/maps.js');
 const { getSites, getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
-const { chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto } = require('../../utils/photos.js');
+const {
+  chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto,
+  isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
+  requestCaptureSessionWithLocation, captureSourceNeedsLocationSession,
+  collectInspectionPhotoUploadResults, processPhotoUploadIssues,
+} = require('../../utils/photos.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const localStore = require('../../utils/localStore.js');
 const { flushLocalOps } = require('../../utils/sync.js');
-const { selectExecutionSite, photoRequirement } = require('../../utils/executionState.js');
+const { selectExecutionSite, photoRequirement, inspectionPhotoProgress } = require('../../utils/executionState.js');
 const { hasInspectionFieldRecord, resolveLocalSubmitFlush } = require('../../utils/inspectionSubmissionState.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 const { buildCheckinPayload, reworkResourcePresentation } = require('../../utils/reworkFlow.js');
@@ -443,7 +448,7 @@ Page({
     api.executionSiteTasks(planId, siteId)
       .then(res => {
         const packageSite = ((this.data.currentPackage && this.data.currentPackage.sites) || []).find(s => s.site_id === siteId) || {};
-        const selectedSite = Object.assign({}, res.site || {}, {
+        const selectedSite = Object.assign({}, packageSite, res.site || {}, {
           linked_workorders: (packageSite.linked_workorders || []).map(linkedWorkorderCn)
         });
         const photosMap = {};
@@ -482,15 +487,7 @@ Page({
           completionPercent: res.total ? Math.round(localCompleted * 100 / res.total) : 0,
           abnormalCount,
           loaded: true,
-          photoProgress: (() => {
-            let req = 0, taken = 0;
-            (res.categories || []).forEach(cat => (cat.items || []).forEach(it => {
-              req += (it.required_photos || 0);
-              let arr = []; try { arr = it.photo_urls ? JSON.parse(it.photo_urls) : []; } catch(e) {}
-              taken += arr.length;
-            }));
-            return { req, taken, missing: Math.max(0, req - taken) };
-          })()
+          photoProgress: inspectionPhotoProgress(res.categories)
         });
         this.refreshStationStage(siteId);
         this.loadReagents(siteId);
@@ -644,6 +641,7 @@ Page({
 
   hasSiteCheckIn(siteId) {
     if (localStore.getSiteCheckIn(siteId)) return true;
+    if (this.data.site && this.data.site.id === siteId && this.data.site.checked_in) return true;
     return (this.data.sites || []).some(s => s.id === siteId && s.checked_in);
   },
 
@@ -764,8 +762,11 @@ Page({
       api.checkIn(payload, true)
         .then(() => {
           localStore.markSynced(opId);
-          this.refreshStationStage(site.id);
-          this.setData({ syncCount: pendingSyncCount() });
+          const sites = (this.data.sites || []).map(item => item.id === site.id
+            ? Object.assign({}, item, { checked_in: true }) : item);
+          const checkedSite = Object.assign({}, this.data.site, { checked_in: true });
+          this.setData({ sites, site: checkedSite, selSite: checkedSite, syncCount: pendingSyncCount() },
+            () => this.refreshStationStage(site.id));
           wx.showToast({ title: '打卡成功', icon: 'success' });
         })
         .catch((error) => {
@@ -854,20 +855,22 @@ Page({
     const captureSource = e && e.currentTarget.dataset.source === 'camera'
       ? 'camera' : 'watermark_album';
     let verifiedLocation = null;
-    const sessionTask = captureSource === 'camera'
-      ? requestLocation().then(gps => {
+    const sessionTask = captureSourceNeedsLocationSession(captureSource)
+      ? requestCaptureSessionWithLocation(requestLocation, gps => {
           verifiedLocation = gps;
           return api.createPhotoCaptureSession({
             site_id: this.data.selSiteId,
             plan_id: sheet.item.plan_id,
             item_id: sheet.item.item_id,
+            capture_source: captureSource,
             gps_lat: gps.lat,
             gps_lng: gps.lng,
           });
         })
       : Promise.resolve(null);
     sessionTask.then(session => chooseInspectionPhotos(
-      captureSource === 'camera' ? 1 : 6 - sheet.photos.length - sheet.localPhotos.length, captureSource
+      captureSource === 'camera' ? 1 : 6 - sheet.photos.length - sheet.localPhotos.length,
+      captureSource
     ).then(paths => ({ paths, session })))
       .then(({ paths, session }) => {
         if (!paths || !paths.length) return;
@@ -880,8 +883,8 @@ Page({
           item_name: sheet.item.item_name,
         };
         if (captureSource === 'camera') {
-          metadata.taken_at = nowStr();
           metadata.capture_session = session && session.capture_session;
+          metadata.taken_at = nowStr();
           metadata.gps_lat = verifiedLocation.lat;
           metadata.gps_lng = verifiedLocation.lng;
         }
@@ -894,25 +897,20 @@ Page({
               .then(result => result.accepted_for_review === false
                 ? { rejected: result, path: p, image: b64, metadata: photoMetadata, idempotencyKey }
                 : { url: resolveUploadUrl(result.url) }))
-            .catch(() => persistFile(p).then(saved => ({ localPath: saved, metadata: photoMetadata })));
+            .catch(error => {
+              if (!isTransientSyncError(error)) throw error;
+              return persistFile(p).then(saved => ({ localPath: saved, metadata: photoMetadata }));
+            });
         });
         return Promise.allSettled(tasks);
       })
       .then(results => {
         if (!Array.isArray(results)) return;
         wx.hideLoading();
-        const urls = [];
-        const locals = [];
-        const localMeta = [];
-        const rejected = [];
-        results.forEach(r => {
-          if (r.status === 'fulfilled') {
-            const v = r.value;
-            if (v && v.url) urls.push(v.url);
-            else if (v && v.localPath) { locals.push(v.localPath); localMeta.push(v.metadata || {}); }
-            else if (v && v.rejected) rejected.push(v);
-          }
-        });
+        const uploadResult = collectInspectionPhotoUploadResults(results);
+        const urls = uploadResult.urls;
+        const locals = uploadResult.localPaths;
+        const localMeta = uploadResult.localMetadata;
         const allRemote = sheet.photos.concat(urls);
         const allLocal = sheet.localPhotos.concat(locals);
         const allLocalMeta = (sheet.localPhotoMeta || []).concat(localMeta);
@@ -924,33 +922,58 @@ Page({
         });
         api.trackEvent('inspection.photo.captured', { site_id: this.data.selSiteId, item_id: sheet.item.item_id, source: captureSource, offline: locals.length > 0 });
         this.setData({ syncCount: pendingSyncCount() });
-        if (rejected.length) {
-          const failed = rejected[0];
-          const canKeep = !!failed.rejected.can_keep_as_supplement;
+        const promptIssue = issue => new Promise(resolve => {
+          if (issue.kind === 'failed') {
+            wx.showModal({
+              title: `第${issue.index + 1}张照片未上传`,
+              content: photoCaptureErrorMessage(issue.error),
+              showCancel: false,
+              success: () => resolve('acknowledged'),
+              fail: () => resolve('acknowledged'),
+            });
+            return;
+          }
+          const failedPhoto = issue.value;
+          const canKeep = !!failedPhoto.rejected.can_keep_as_supplement;
           wx.showModal({
             title: captureSource === 'camera' ? '现场照片未通过校验' : '无法作为必需现场照片',
-            content: `${failed.rejected.reason || '无法确认拍摄信息'}。${failed.rejected.next_action || '请重新拍摄或重新选择。'}`,
+            content: `${failedPhoto.rejected.reason || '无法确认拍摄信息'}。${failedPhoto.rejected.next_action || '请重新拍摄或重新选择。'}`,
             confirmText: captureSource === 'camera' ? '重新拍摄' : '重新选择',
             showCancel: canKeep,
             cancelText: '保留为附件',
-            success: modalResult => {
-              if (modalResult.cancel && canKeep) {
-                const keepKey = `${failed.idempotencyKey}:supplement`;
-                api.uploadSitePhoto(this.data.selSiteId, failed.image, keepKey,
-                  Object.assign({}, failed.metadata, {
-                    _idempotency_key: keepKey,
-                    keep_as_supplement: true,
-                  })).then(() => wx.showToast({ title: '已保留为补充附件', icon: 'none' }))
-                  .catch(() => wx.showToast({ title: '附件保留失败，请重试', icon: 'none' }));
-              }
-            }
+            success: modalResult => resolve(modalResult.cancel && canKeep ? 'supplement' : 'retry'),
+            fail: () => resolve('retry'),
           });
-        } else if (locals.length && !urls.length) wx.showToast({ title: '照片已本地保存，联网同步', icon: 'none' });
-        else if (locals.length) wx.showToast({ title: '部分已本地保存', icon: 'none' });
+        });
+        const retainSupplement = failedPhoto => {
+          const keepKey = `${failedPhoto.idempotencyKey}:supplement`;
+          return api.uploadSitePhoto(this.data.selSiteId, failedPhoto.image, keepKey,
+            Object.assign({}, failedPhoto.metadata, {
+              _idempotency_key: keepKey,
+              keep_as_supplement: true,
+            })).then(() => wx.showToast({ title: '已保留为补充附件', icon: 'none' }))
+            .catch(() => wx.showToast({ title: '附件保留失败，请重试', icon: 'none' }));
+        };
+        return processPhotoUploadIssues(uploadResult.issues, promptIssue, retainSupplement)
+          .then(() => {
+            if (locals.length && !urls.length) wx.showToast({ title: '照片已本地保存，联网同步', icon: 'none' });
+            else if (locals.length) wx.showToast({ title: '部分已本地保存', icon: 'none' });
+          });
       })
       .catch(err => {
         wx.hideLoading();
-        wx.showToast({ title: (err && err.error) || '无法发起拍摄，请检查定位后重试', icon: 'none' });
+        if (isPhotoSelectionCancelled(err)) return;
+        const locationFailure = err && err.capturePhase === 'location';
+        const openSettings = locationFailure
+          ? shouldOpenLocationSettings(err) : shouldOpenCameraSettings(err);
+        wx.showModal({
+          title: locationFailure ? '无法获取位置'
+            : (captureSource === 'camera' ? '现场拍摄未启动' : '照片选择未完成'),
+          content: locationFailure ? locationErrorMessage(err) : photoCaptureErrorMessage(err),
+          showCancel: false,
+          confirmText: openSettings ? '去设置' : '知道了',
+          success: () => { if (openSettings) wx.openSetting({}); },
+        });
       });
   },
 

@@ -8,7 +8,7 @@ Before deployment:
 1. Verify the exact release candidate before registration or deployment:
    `python deploy/verify_release_candidate.py --tag <candidate-tag>`.
    The guard accepts only tags listed in `deploy/release-candidates.json`;
-   r1/r2/r3 are historical and must be rejected. This check does not create
+   every tag in `historical_tags` must be rejected. This check does not create
    or move a Git tag.
 2. Keep the Cloudflare CNAME for `ops.hhyc-tec.cn` pointed at the ESA CNAME.
 3. In ESA, keep the enabled origin rule for `ops.hhyc-tec.cn`: HTTP,

@@ -35,6 +35,7 @@ class CockpitOperationsTodayTest(unittest.TestCase):
         app_module._tokens.update({
             'admin-token': {'id': 1, 'role': 'admin', 'real_name': '管理员'},
             'operator-token': {'id': 2, 'role': 'operator', 'real_name': '甲运维'},
+            'secondary-admin-token': {'id': 6, 'role': 'operator', 'real_name': '双角色人员'},
         })
         today = datetime.now().strftime('%Y-%m-%d')
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -73,7 +74,7 @@ class CockpitOperationsTodayTest(unittest.TestCase):
                 (3, '乙运维', 'operator', 'active'),
                 (4, '丙运维', 'operator', 'active'),
                 (5, '丁运维', 'operator', 'active'),
-                (6, '双角色人员', 'admin', 'active'),
+                (6, '双角色人员', 'operator', 'active'),
                 (7, '测试用户', 'operator', 'active'),
                 (8, '停用运维', 'operator', 'inactive'),
             ])
@@ -147,6 +148,15 @@ class CockpitOperationsTodayTest(unittest.TestCase):
         response = self.client.get('/api/cockpit/operations-today', headers=self.headers('operator-token'))
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual([row['real_name'] for row in response.json['people']], ['甲运维'])
+
+    def test_secondary_admin_role_sees_team_scope(self):
+        response = self.client.get(
+            '/api/cockpit/operations-today', headers=self.headers('secondary-admin-token'))
+        self.assertEqual(response.status_code, 200, response.json)
+        names = {row['real_name'] for row in response.json['people']}
+        self.assertIn('甲运维', names)
+        self.assertIn('乙运维', names)
+        self.assertIn('双角色人员', names)
 
 
 if __name__ == '__main__':

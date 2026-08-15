@@ -1,5 +1,5 @@
 // 统一请求层：Bearer 鉴权 + 超时 + 指数退避重试 + 弱网失败队列
-const { getToken, clear } = require('./auth.js');
+const { getToken, getUser, clear } = require('./auth.js');
 const CONFIG = require('./config.js');
 
 const FAIL_QUEUE_KEY = 'fail_queue';
@@ -9,11 +9,30 @@ function buildUrl(path) {
   return CONFIG.BASE_URL + path;
 }
 
-function getQueue() {
+function currentOwnerUserId() {
+  const user = getUser() || {};
+  return user.id == null ? '' : String(user.id);
+}
+
+function getAllQueue() {
   try { return wx.getStorageSync(FAIL_QUEUE_KEY) || []; } catch (e) { return []; }
 }
-function saveQueue(q) {
-  try { wx.setStorageSync(FAIL_QUEUE_KEY, q); } catch (e) {}
+
+function belongsToOwner(task, ownerUserId) {
+  return !!ownerUserId && task && task.ownerUserId != null
+    && String(task.ownerUserId) === String(ownerUserId);
+}
+
+function getQueue(ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  return getAllQueue().filter(task => belongsToOwner(task, owner));
+}
+function saveQueue(q, ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  if (!owner) return;
+  const others = getAllQueue().filter(task => !belongsToOwner(task, owner));
+  const owned = (q || []).map(task => Object.assign({}, task, { ownerUserId: owner }));
+  try { wx.setStorageSync(FAIL_QUEUE_KEY, others.concat(owned)); } catch (e) {}
 }
 function queueCount() {
   return getQueue().length;
@@ -27,7 +46,8 @@ function taskSignature(task) {
 // 复用主请求的鉴权/重试/401 跳转逻辑；成功即丢弃，失败按状态码决定保留与否
 function flushQueue(onResolve) {
   if (flushing) return flushing;
-  const q = getQueue();
+  const ownerUserId = currentOwnerUserId();
+  const q = getQueue(ownerUserId);
   if (!q.length) return Promise.resolve({ synced: 0, remaining: 0, rejected: [] });
   const remain = [];
   const rejected = [];
@@ -51,8 +71,8 @@ function flushQueue(onResolve) {
     // Keep requests added while this snapshot was replaying; otherwise a weak-network
     // operation created during the flush would be overwritten by the old snapshot.
     const original = new Set(q.map(taskSignature));
-    const additions = getQueue().filter(task => !original.has(taskSignature(task)));
-    saveQueue(remain.concat(additions));
+    const additions = getQueue(ownerUserId).filter(task => !original.has(taskSignature(task)));
+    saveQueue(remain.concat(additions), ownerUserId);
     return {
       synced: results.filter(item => item.synced).length,
       remaining: remain.length + additions.length,
@@ -99,17 +119,20 @@ function request(path, method, data, options) {
           } else {
             // 写类请求进入失败队列，待网络恢复自动重传
             if (options.queue !== false && (method === 'POST' || method === 'PUT' || method === 'DELETE')) {
-              const q = getQueue();
-              // 幂等去重：同一写请求（同 url+方法+数据）已在队列则不重复入队，防弱网重复提交
-              const sig = method + ':' + path + ':' + JSON.stringify(data || null);
-              const exists = q.some(t => (t.method + ':' + t.url + ':' + JSON.stringify(t.data || null)) === sig);
-              if (!exists) {
-                q.push({ url: path, method: method, data: data, ts: Date.now() });
-                saveQueue(q);
+              const ownerUserId = currentOwnerUserId();
+              if (ownerUserId) {
+                const q = getQueue(ownerUserId);
+                // 幂等去重：同一写请求（同 url+方法+数据）已在队列则不重复入队，防弱网重复提交
+                const sig = method + ':' + path + ':' + JSON.stringify(data || null);
+                const exists = q.some(t => (t.method + ':' + t.url + ':' + JSON.stringify(t.data || null)) === sig);
+                if (!exists) {
+                  q.push({ url: path, method: method, data: data, ts: Date.now(), ownerUserId });
+                  saveQueue(q, ownerUserId);
+                }
+                // 让调用页区分「业务失败」与「已安全落入离线队列」。
+                // 仍 reject，避免页面将尚未同步的操作误呈现为已完成。
+                err = Object.assign(err || {}, { queued: true });
               }
-              // 让调用页区分「业务失败」与「已安全落入离线队列」。
-              // 仍 reject，避免页面将尚未同步的操作误呈现为已完成。
-              err = Object.assign(err || {}, { queued: true });
             }
             reject(err);
           }
@@ -120,4 +143,4 @@ function request(path, method, data, options) {
   });
 }
 
-module.exports = { request, flushQueue, getQueue, saveQueue, queueCount };
+module.exports = { request, flushQueue, getQueue, saveQueue, queueCount, getAllQueue, currentOwnerUserId };

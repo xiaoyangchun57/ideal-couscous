@@ -18,9 +18,12 @@ class LinkedWorkorderEscalationTest(unittest.TestCase):
         self.db.execute('''CREATE TABLE work_orders (
             order_no TEXT PRIMARY KEY, site_id INTEGER, title TEXT, level TEXT,
             status TEXT, source TEXT, event_type TEXT, related_alert_id INTEGER,
-            created_at TEXT
+            created_at TEXT, assignee TEXT DEFAULT '', check_in_time TEXT
         )''')
-        self.db.executemany('INSERT INTO work_orders VALUES (?,?,?,?,?,?,?,?,?)', [
+        self.db.executemany('''INSERT INTO work_orders
+            (order_no, site_id, title, level, status, source, event_type,
+             related_alert_id, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?)''', [
             ('WO-AUTO', 1, '[自动] 设备离线', 'normal', 'pending', 'auto', 'device_status', 9, '2026-07-27 08:00:00'),
             ('AL-ESC', 1, '【告警升级】设备状态：设备离线', 'urgent', 'in_progress', 'escalation', 'device_status', 9, '2026-07-27 09:00:00'),
             ('WO-OTHER', 1, '[自动] 数据延迟', 'normal', 'pending', 'auto', 'data_gap', 10, '2026-07-27 08:30:00'),

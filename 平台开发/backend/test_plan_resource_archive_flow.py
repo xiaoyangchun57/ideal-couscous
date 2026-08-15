@@ -385,6 +385,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
 
         response = self.client.put('/api/plan-schedules/{}'.format(schedule_id),
                                    headers=self.headers('manager-token'), json={
+                                       'version': 1,
                                        'plan_data': {self.day(): {'sites': [2]}},
                                    })
 
@@ -398,11 +399,90 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         before = self.side_effect_snapshot(schedule_id)
 
         response = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
-                                    headers=self.headers('manager-token'))
+                                    headers=self.headers('manager-token'), json={'version': 1})
 
         self.assertEqual((response.status_code, response.json.get('code')),
                          (403, 'PLAN_EXECUTION_SITE_FORBIDDEN'))
         self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+    def test_submit_requires_version_and_stale_version_have_zero_side_effects(self):
+        schedule_id = 55
+        self.add_scope_failure_schedule(schedule_id, 'draft', site_id=1)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET vehicle_days=? WHERE id=?",
+                       (json.dumps({self.day(): 1}), schedule_id))
+        before = self.side_effect_snapshot(schedule_id)
+
+        missing = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
+                                   headers=self.headers('manager-token'), json={})
+        self.assertEqual((missing.status_code, missing.json.get('code')),
+                         (409, 'PLAN_VERSION_REQUIRED'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+        stale = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
+                                 headers=self.headers('manager-token'), json={'version': 0})
+        self.assertEqual((stale.status_code, stale.json.get('code')),
+                         (409, 'PLAN_VERSION_CONFLICT'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+
+    def test_empty_draft_saves_and_prunes_orphan_vehicle_day_but_cannot_submit(self):
+        schedule_id = 56
+        self.add_scope_failure_schedule(schedule_id, 'draft', site_id=1)
+        before_events = None
+        with self.db() as db:
+            before_events = db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=?', (schedule_id,)
+            ).fetchone()[0]
+
+        saved = self.client.put('/api/plan-schedules/{}'.format(schedule_id),
+                                headers=self.headers('manager-token'), json={
+                                    'version': 1,
+                                    'plan_data': {},
+                                    'vehicle_days': {self.day(): 1},
+                                })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['vehicle_days'], {})
+        self.assertEqual(saved.json['pruned_vehicle_dates'], [self.day()])
+        self.assertGreater(saved.json['draft_issue_count'], 0)
+        with self.db() as db:
+            row = db.execute(
+                'SELECT plan_data,vehicle_days,status,version FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone()
+            self.assertEqual((json.loads(row['plan_data']), json.loads(row['vehicle_days'])), ({}, {}))
+            self.assertEqual((row['status'], row['version']), ('draft', 2))
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=?', (schedule_id,)
+            ).fetchone()[0], before_events + 1)
+
+        before_submit = self.side_effect_snapshot(schedule_id)
+        submitted = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
+                                     headers=self.headers('manager-token'), json={'version': 2})
+        self.assertEqual(submitted.status_code, 400, submitted.json)
+        self.assertIn('至少安排一个巡检日期和站点', submitted.json.get('error', ''))
+        self.assert_side_effect_snapshot_unchanged(before_submit, self.side_effect_snapshot(schedule_id))
+
+    def test_shortened_period_prunes_out_of_range_plan_and_vehicle_days(self):
+        schedule_id = 57
+        first_day = self.day()
+        second_day = (datetime.strptime(first_day, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        self.add_scope_failure_schedule(schedule_id, 'draft', site_id=1)
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules SET period_end=?, plan_data=?, vehicle_days=?
+                WHERE id=?""", (
+                second_day,
+                json.dumps({first_day: {'sites': [1]}, second_day: {'sites': [1]}}),
+                json.dumps({first_day: 1, second_day: 1}), schedule_id))
+
+        response = self.client.put('/api/plan-schedules/{}'.format(schedule_id),
+                                   headers=self.headers('manager-token'), json={
+                                       'version': 1,
+                                       'period_end': first_day,
+                                   })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['period_end'], first_day)
+        self.assertEqual(set(response.json['plan_data']), {first_day})
+        self.assertEqual(response.json['vehicle_days'], {first_day: 1})
+        self.assertEqual(response.json['pruned_vehicle_dates'], [second_day])
 
     def test_approval_scope_failure_keeps_every_plan_resource_table_unchanged(self):
         schedule_id = 53

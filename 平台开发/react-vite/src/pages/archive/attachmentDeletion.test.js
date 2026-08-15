@@ -8,6 +8,7 @@ import {
   archiveStatusLayout,
   archivePrimaryTitle,
   archiveSecondaryMeta,
+  archiveHistoryStatus,
   hasAdminRole,
   hasReviewerRole,
   isFormalAttachment,
@@ -65,6 +66,35 @@ test('archive status layout contains risk history without consuming the action c
   assert.equal(layout.tableMinWidth, 1180);
   assert.equal(layout.tagStyle.whiteSpace, 'normal');
   assert.equal(layout.tagStyle.overflowWrap, 'anywhere');
+});
+
+test('history status keeps soft deletion and null review status visible', () => {
+  assert.deepEqual(archiveHistoryStatus({
+    is_deleted: 1, review_status: 'approved', delete_reason: '测试资料清理',
+  }), { label: '已移出', color: 'default', reason: '测试资料清理' });
+  assert.deepEqual(archiveHistoryStatus({ review_status: null }),
+    { label: '待所属业务审核', color: 'processing', reason: '' });
+  assert.equal(archiveHistoryStatus({
+    review_status: 'voided', void_reason: '错误证据', reject_reason: '旧驳回原因',
+  }, { voided: { label: '已作废', color: 'default' } }).reason, '错误证据');
+  assert.equal(archiveHistoryStatus({
+    review_status: 'rejected', reject_reason: '内容不清晰', evidence_reason: '来源原因',
+  }, { rejected: { label: '已驳回', color: 'error' } }).reason, '内容不清晰');
+  assert.equal(archiveHistoryStatus({
+    review_status: 'approved', evidence_qualification: 'ineligible', evidence_reason: '无法确认拍摄时间',
+  }).reason, '无法确认拍摄时间');
+  assert.match(archiveHistoryStatus({
+    review_status: 'approved', evidence_qualification: 'qualified',
+    extra_json: JSON.stringify({ material_role: 'supplement' }),
+  }).reason, /补充材料/);
+  for (const reviewStatus of ['pending', null]) {
+    const supplement = archiveHistoryStatus({
+      review_status: reviewStatus,
+      extra_json: JSON.stringify({ material_role: 'supplement' }),
+    });
+    assert.equal(supplement.label, '补充材料');
+    assert.match(supplement.reason, /不进入业务审核/);
+  }
 });
 
 test('delete dialog never offers a reason field for a server-blocked formal record', () => {

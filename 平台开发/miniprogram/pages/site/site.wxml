@@ -12,18 +12,18 @@
   <view class="task-status {{site.task_state === 'carryover' ? 'task-status-carryover' : (site.can_check_in ? 'task-status-ready' : 'task-status-blocked')}}">
     <view class="task-status-copy">
       <text class="task-status-title">{{site.task_state === 'carryover' ? '逾期结转任务' : (site.can_check_in ? '今日可执行任务' : '当前无可执行任务')}}</text>
-      <text class="task-status-desc">{{site.task_state === 'carryover' ? '结转任务已获原计划批准，到站后可打卡并继续巡检' : (site.can_check_in ? '到站打卡后即可开始现场巡检' : site.checkin_block_reason)}}</text>
+      <text class="task-status-desc">{{site.checked_in ? '已完成到站打卡，可继续处理本站任务' : (site.task_state === 'carryover' ? '结转任务已获原计划批准，到站后可继续巡检' : (site.can_check_in ? '到站打卡后即可开始现场巡检' : site.checkin_block_reason))}}</text>
     </view>
     <text class="task-status-count" wx:if="{{site.task_state === 'carryover'}}">{{site.carryover_items}} 项待检</text>
   </view>
 
   <view class="rework-status" wx:if="{{site.rework_count > 0}}">
     <text class="rework-status-title">影像补拍待整改 · {{site.rework_count}} 项</text>
-    <text class="rework-status-desc">{{site.rework_reason || '现场照片未通过审核，请重新到站打卡后在巡检页面补拍提交。'}}</text>
+    <text class="rework-status-desc">{{site.rework_reason || '现场照片未通过审核，请在巡检页面补拍并重新提交该检查项。'}}</text>
   </view>
 
   <view class="ops">
-    <button class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.can_check_in ? (site.has_carryover ? '到站打卡并补检' : '到站打卡') : '暂不可打卡'}}</button>
+    <button class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.checked_in ? '已完成到站打卡' : (site.can_check_in ? (site.has_carryover ? '到站打卡并继续' : '到站打卡') : '暂不可打卡')}}</button>
     <view class="secondary-ops">
       <button class="btn-ghost op-btn" bindtap="onNavigate">导航到站</button>
       <button wx:if="{{site.can_calibrate}}" class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>

@@ -1,7 +1,20 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const configPath = require.resolve('../utils/config.js');
+
+test('repository root is the only WeChat project entry', () => {
+  const root = path.resolve(__dirname, '..', '..');
+  const rootProject = JSON.parse(fs.readFileSync(path.join(root, 'project.config.json'), 'utf8'));
+  assert.equal(rootProject.miniprogramRoot, 'miniprogram/');
+  assert.equal(rootProject.libVersion, '3.17.0');
+  assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.legacy.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'project.private.config.json')), true);
+  assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.private.config.json')), true);
+});
 
 function loadConfig(platform, override) {
   const storage = {};

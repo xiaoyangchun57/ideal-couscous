@@ -6,7 +6,8 @@ const api = require('../services/api.js');
 let localFlushPromise = null;
 
 async function flushLocalOpsInternal() {
-  const pending = localStore.getPending();
+  const ownerUserId = localStore.currentOwnerUserId();
+  const pending = localStore.getPending(ownerUserId);
   const summary = { synced: 0, remaining: 0, rejected: [], results: [] };
   if (!pending.length) return summary;
   // 按创建时间顺序回放，保证闭环完整（先打卡/照片，后提交）
@@ -49,13 +50,13 @@ async function flushLocalOpsInternal() {
         (op.data.localPhotos || []).forEach((filePath) => {
           wx.removeSavedFile({ filePath, fail() {} });
         });
-        localStore.markSynced(op.id);
+        localStore.markSynced(op.id, ownerUserId);
         summary.synced += 1;
         summary.results.push({ id: op.id, type: op.type, response });
         api.trackEvent('inspection.item.synced', { site_id: op.data.siteId, item_id: op.data.item_id, operation_id: op.id, offline: true });
       } else if (op.type === 'checkin') {
         await api.checkIn(op.data, true);
-        localStore.markSynced(op.id);
+        localStore.markSynced(op.id, ownerUserId);
         summary.synced += 1;
         api.trackEvent('inspection.checkin.synced', { site_id: op.data.site_id, operation_id: op.id, offline: true });
       }
@@ -66,13 +67,13 @@ async function flushLocalOpsInternal() {
         // 业务拒绝不会因重试而改变（例如超出 500m），移出队列并把原因交给页面展示。
         // Keep rejected entities and local photos for retry after the operator
         // fixes a prerequisite such as a required re-check-in.
-        localStore.markRejected(op.id, e.error || '服务器拒绝了该操作');
+        localStore.markRejected(op.id, e.error || '服务器拒绝了该操作', ownerUserId);
         summary.rejected.push({ id: op.id, type: op.type, error: e.error || '服务器拒绝了该操作' });
       }
       // 网络/服务端错误留待下次同步；不中断其余实体回放
     }
   }
-  summary.remaining = localStore.getPending().length;
+  summary.remaining = localStore.getPending(ownerUserId).length;
   return summary;
 }
 

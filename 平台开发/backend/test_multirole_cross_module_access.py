@@ -50,6 +50,8 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
         with memory_db() as db:
             db.executescript('''
                 CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, role TEXT);
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
+                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, status TEXT, related_alert_id INTEGER,
@@ -88,6 +90,8 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
                 INSERT INTO users VALUES (1,'dual role','operator');
                 INSERT INTO users VALUES (2,'operator','operator');
                 INSERT INTO users VALUES (3,'owner','operator');
+                INSERT INTO user_roles VALUES (1,'operator'), (1,'admin'), (2,'operator'), (3,'operator');
+                INSERT INTO sites VALUES (1,'site one',NULL,NULL), (2,'site two',NULL,NULL);
                 INSERT INTO user_sites VALUES (1,1), (2,1), (3,2);
 
                 INSERT INTO work_orders
@@ -123,15 +127,15 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
     def headers(token):
         return {'Authorization': f'Bearer {token}'}
 
-    def test_secondary_admin_can_operate_another_users_workorder(self):
+    def test_secondary_admin_cannot_perform_field_workorder_actions(self):
         response = self.client.put('/api/workorders/WO-CROSS-1/status',
                                    headers=self.headers('secondary-admin-token'),
                                    json={'status': 'accepted'})
-        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.status_code, 403, response.json)
         with self.memory_db() as db:
             self.assertEqual(db.execute(
                 "SELECT status FROM work_orders WHERE order_no='WO-CROSS-1'"
-            ).fetchone()['status'], 'accepted')
+            ).fetchone()['status'], 'pending')
 
     def test_operator_cannot_operate_another_users_workorder(self):
         response = self.client.put('/api/workorders/WO-CROSS-1/status',
@@ -166,15 +170,57 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual({row['id'] for row in response.json}, {1, 2})
 
+    def test_secondary_admin_is_included_in_plan_approvers(self):
+        with self.memory_db() as db:
+            self.assertEqual(app_module._ps_approver_ids(db), [1])
+
     def test_secondary_admin_can_update_another_users_draft(self):
         response = self.client.put('/api/plan-schedules/2',
                                    headers=self.headers('secondary-admin-token'),
-                                   json={'remarks': 'managed by secondary admin'})
+                                   json={'version': 1, 'remarks': 'managed by secondary admin'})
         self.assertEqual(response.status_code, 200, response.json)
         with self.memory_db() as db:
             self.assertEqual(db.execute(
                 'SELECT remarks FROM plan_schedules WHERE id=2'
             ).fetchone()['remarks'], 'managed by secondary admin')
+
+    def test_plan_update_rejects_stale_version_without_side_effects(self):
+        first = self.client.put('/api/plan-schedules/2',
+                                headers=self.headers('secondary-admin-token'),
+                                json={'version': 1, 'remarks': 'first edit'})
+        self.assertEqual((first.status_code, first.json['version']), (200, 2))
+        stale = self.client.put('/api/plan-schedules/2',
+                                headers=self.headers('secondary-admin-token'),
+                                json={'version': 1, 'remarks': 'stale edit'})
+        self.assertEqual((stale.status_code, stale.json.get('code')),
+                         (409, 'PLAN_VERSION_CONFLICT'))
+        with self.memory_db() as db:
+            row = db.execute('SELECT remarks,version FROM plan_schedules WHERE id=2').fetchone()
+            self.assertEqual((row['remarks'], row['version']), ('first edit', 2))
+            events = db.execute(
+                "SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=2 AND event_type='updated'"
+            ).fetchone()[0]
+            self.assertEqual(events, 1)
+
+    def test_plan_update_requires_version_without_side_effects(self):
+        with self.memory_db() as db:
+            before = tuple(db.execute(
+                'SELECT remarks,status,version FROM plan_schedules WHERE id=2'
+            ).fetchone())
+        response = self.client.put('/api/plan-schedules/2',
+                                   headers=self.headers('secondary-admin-token'),
+                                   json={'remarks': 'missing version'})
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (409, 'PLAN_VERSION_REQUIRED'))
+        with self.memory_db() as db:
+            after = tuple(db.execute(
+                'SELECT remarks,status,version FROM plan_schedules WHERE id=2'
+            ).fetchone())
+            event_count = db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=2'
+            ).fetchone()[0]
+        self.assertEqual(after, before)
+        self.assertEqual(event_count, 0)
 
     def test_operator_plan_list_and_update_stay_personal(self):
         listed = self.client.get('/api/plan-schedules', headers=self.headers('operator-token'))

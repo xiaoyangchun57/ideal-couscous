@@ -1,15 +1,15 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty,
-  Drawer, Descriptions, Alert, Input, Tooltip, Badge, DatePicker,
+  Drawer, Descriptions, Alert, Input, InputNumber, Tooltip, Badge, DatePicker,
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
   CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
   MobileOutlined,
   StarOutlined, FolderOpenOutlined, DeleteOutlined,
-  ClearOutlined,
+  ClearOutlined, EditOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { api } from '../../services/api';
@@ -104,57 +104,82 @@ export default function PlanSchedulesPage() {
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [favoritesError, setFavoritesError] = useState('');
   const [supplementTarget, setSupplementTarget] = useState(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editDraft, setEditDraft] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
+  const [editValidation, setEditValidation] = useState(null);
+  const [editSites, setEditSites] = useState([]);
+  const [editVehicles, setEditVehicles] = useState([]);
+  const [editParts, setEditParts] = useState([]);
+  const [editResourcesReady, setEditResourcesReady] = useState(false);
+  const [newScheduleDate, setNewScheduleDate] = useState(null);
+  const listRequestRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  const editorRequestRef = useRef(0);
+  const mountedRef = useRef(true);
 
-
-  const load = useCallback(async () => {
+  const loadList = useCallback(async () => {
+    const requestId = ++listRequestRef.current;
     setLoading(true);
+    setLoadError('');
     try {
       const params = [];
       if (statusFilter) params.push(`status=${statusFilter}`);
       if (typeFilter) params.push(`schedule_type=${typeFilter}`);
       if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const [rowsResult, overviewResult, recommendationResult, followUpResult] = await Promise.allSettled([
-        api.getStrict('/plan-schedules' + (params.length ? '?' + params.join('&') : '')),
-        canApprove ? api.getStrict('/plan-schedules/overview') : Promise.resolve(null),
-        api.getStrict('/plan-schedules/draft-recommendations'),
-        api.getStrict('/plan-schedules/follow-up-recommendations'),
-      ]);
-      if (rowsResult.status === 'fulfilled') {
-        setList(Array.isArray(rowsResult.value) ? rowsResult.value : []);
-        setLoadError('');
-      } else {
-        setLoadError(rowsResult.reason?.message || '计划列表加载失败');
-      }
-      if (overviewResult.status === 'fulfilled') {
-        setTeamOverview(overviewResult.value);
-        setTeamOverviewError('');
-      } else {
-        setTeamOverviewError(overviewResult.reason?.message || '团队概览加载失败');
-      }
-      if (recommendationResult.status === 'fulfilled' && followUpResult.status === 'fulfilled') {
-        setDraftRecommendations(recommendationResult.value?.recommendations || []);
-        setFollowUpRecommendations(followUpResult.value?.recommendations || []);
-        setRecommendationsError('');
-      } else {
-        setRecommendationsError('排程建议加载失败，当前建议数量不完整');
+      const rows = await api.getStrict('/plan-schedules' + (params.length ? '?' + params.join('&') : ''));
+      if (mountedRef.current && requestId === listRequestRef.current) {
+        setList(Array.isArray(rows) ? rows : []);
       }
     } catch (error) {
-      setLoadError(error.message || '计划列表加载失败');
+      if (mountedRef.current && requestId === listRequestRef.current) {
+        setLoadError(error.message || '计划列表加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current && requestId === listRequestRef.current) setLoading(false);
     }
-  }, [statusFilter, typeFilter, attentionFilter, canApprove]);
+  }, [statusFilter, typeFilter, attentionFilter]);
+
+  const loadOverview = useCallback(async () => {
+    if (!canApprove) return;
+    try {
+      setTeamOverview(await api.getStrict('/plan-schedules/overview'));
+      setTeamOverviewError('');
+    } catch (error) {
+      setTeamOverviewError(error?.message || '团队概览加载失败');
+    }
+  }, [canApprove]);
+
+  const loadRecommendations = useCallback(async () => {
+    const [draftResult, followUpResult] = await Promise.allSettled([
+      api.getStrict('/plan-schedules/draft-recommendations'),
+      api.getStrict('/plan-schedules/follow-up-recommendations'),
+    ]);
+    if (!mountedRef.current) return;
+    if (draftResult.status === 'fulfilled') setDraftRecommendations(draftResult.value?.recommendations || []);
+    if (followUpResult.status === 'fulfilled') setFollowUpRecommendations(followUpResult.value?.recommendations || []);
+    setRecommendationsError(draftResult.status === 'fulfilled' && followUpResult.status === 'fulfilled'
+      ? '' : '排程建议加载失败，当前建议数量不完整');
+  }, []);
+
+  const refreshAll = useCallback(() => {
+    loadList();
+    loadOverview();
+    loadRecommendations();
+  }, [loadList, loadOverview, loadRecommendations]);
 
   const createRecommendedDraft = async (item) => {
     setRecommendationLoading(true);
     try {
-      await api.postStrict('/plan-schedules/draft-recommendations', {
+      const created = await api.postStrict('/plan-schedules/draft-recommendations', {
         user_id: item.user_id,
         schedule_type: item.schedule_type,
         period_start: item.period_start,
       });
       message.success('已生成待确认草稿；尚未派发执行任务或占用资源');
-      load();
+      refreshAll();
+      if (created?.schedule?.id) openDetail(created.schedule.id);
     } catch (error) {
       message.error(error?.message || '生成草稿失败，请刷新后重试');
     } finally {
@@ -165,13 +190,14 @@ export default function PlanSchedulesPage() {
   const createFollowUpDraft = async (item) => {
     setFollowUpLoading(true);
     try {
-      await api.postStrict('/plan-schedules/follow-up-recommendations', {
+      const created = await api.postStrict('/plan-schedules/follow-up-recommendations', {
         user_id: item.user_id,
         site_id: item.site_id,
         anomaly_type: item.anomaly_type,
       });
       message.success('已生成复查草稿；仍需确认资源并提交审批');
-      load();
+      refreshAll();
+      if (created?.schedule?.id) openDetail(created.schedule.id);
     } catch (error) {
       message.error(error?.message || '生成复查草稿失败，请刷新后重试');
     } finally {
@@ -215,10 +241,11 @@ export default function PlanSchedulesPage() {
     if (!favoriteId || !favoriteStart) { message.warning('请选择常用计划和新周期开始日期'); return; }
     setFavoriteLoading(true);
     try {
-      await api.postStrict(`/plan-schedule-favorites/${favoriteId}/draft`, { period_start: favoriteStart.format('YYYY-MM-DD') });
+      const created = await api.postStrict(`/plan-schedule-favorites/${favoriteId}/draft`, { period_start: favoriteStart.format('YYYY-MM-DD') });
       message.success('已从常用计划生成可编辑草稿');
       setFavoritesOpen(false);
-      load();
+      refreshAll();
+      if (created?.schedule?.id) openDetail(created.schedule.id);
     } catch (error) { message.error(error.message || '生成草稿失败'); }
     finally { setFavoriteLoading(false); }
   };
@@ -239,7 +266,17 @@ export default function PlanSchedulesPage() {
     } catch (error) { message.error(error.message || '删除收藏失败'); setFavoriteLoading(false); }
   };
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      listRequestRef.current += 1;
+      detailRequestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => { loadList(); }, [loadList]);
+  useEffect(() => { loadOverview(); loadRecommendations(); }, [loadOverview, loadRecommendations]);
 
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
@@ -262,6 +299,7 @@ export default function PlanSchedulesPage() {
 
   // 打开详情：计划详情 + 智能建议 + 校验结果（审批决策支撑三件套）
   const openDetail = useCallback(async (id) => {
+    const requestId = ++detailRequestRef.current;
     setDrawerOpen(true);
     setDetailLoading(true);
     setDetail(null);
@@ -270,10 +308,12 @@ export default function PlanSchedulesPage() {
     setRouteDay(null);
     try {
       const det = await api.getStrict(`/plan-schedules/${id}`);
+      if (!mountedRef.current || requestId !== detailRequestRef.current) return;
       setDetail(det);
       const siteIds = Object.keys(det?.site_map || {});
       if (siteIds.length > 0) {
         const sug = await api.getStrict(`/plan-schedules/suggestions?site_ids=${siteIds.join(',')}`);
+        if (!mountedRef.current || requestId !== detailRequestRef.current) return;
         setSuggestions(sug);
       }
       const val = await api.postStrict('/plan-schedules/validate', {
@@ -285,13 +325,187 @@ export default function PlanSchedulesPage() {
         vehicle_days: det?.vehicle_days || {},
         exclude_schedule_id: det?.id,
       });
+      if (!mountedRef.current || requestId !== detailRequestRef.current) return;
       setValidation(val);
     } catch (error) {
-      message.error(error.message || '计划详情加载失败');
+      if (mountedRef.current && requestId === detailRequestRef.current) {
+        message.error(error.message || '计划详情加载失败');
+      }
     } finally {
-      setDetailLoading(false);
+      if (mountedRef.current && requestId === detailRequestRef.current) setDetailLoading(false);
     }
+  }, [message]);
+
+  const openEditor = useCallback(async (schedule = detail) => {
+    if (!schedule) return;
+    const requestId = ++editorRequestRef.current;
+    setEditOpen(true);
+    setEditSaving(true);
+    setEditError('');
+    setEditValidation(null);
+    setEditResourcesReady(false);
+    setNewScheduleDate(null);
+    setEditDraft({
+      id: schedule.id,
+      version: Number(schedule.version || 1),
+      user_id: schedule.user_id,
+      schedule_type: schedule.schedule_type,
+      period_start: schedule.period_start,
+      period_end: schedule.period_end,
+      plan_data: JSON.parse(JSON.stringify(schedule.plan_data || {})),
+      vehicle_days: { ...(schedule.vehicle_days || {}) },
+      spare_parts: (schedule.spare_parts || []).map(part => ({ ...part })),
+      work_order_ids: [...(schedule.work_order_ids || [])],
+      remarks: schedule.remarks || '',
+      coverage_exception_reason: schedule.coverage_exception_reason || '',
+      vehicle_exception_reason: schedule.vehicle_exception_reason || '',
+    });
+    try {
+      const requests = [api.getStrict('/sites'), api.getStrict('/vehicles'), api.getStrict('/parts/inventory')];
+      if (canApprove) {
+        requests.push(api.getStrict(`/users/${schedule.user_id}/sites`));
+      }
+      const [siteRows, vehicleRows, partRows, scopeResult] = await Promise.all(requests);
+      if (!mountedRef.current || requestId !== editorRequestRef.current) return;
+      const authorizedIds = scopeResult?.site_ids ? new Set(scopeResult.site_ids.map(Number)) : null;
+      setEditSites((Array.isArray(siteRows) ? siteRows : siteRows?.sites || [])
+        .filter(site => !authorizedIds || authorizedIds.has(Number(site.id))));
+      setEditVehicles((Array.isArray(vehicleRows) ? vehicleRows : []).filter(vehicle => vehicle.status !== 'retired'));
+      setEditParts(Array.isArray(partRows) ? partRows : []);
+      setEditResourcesReady(true);
+    } catch (error) {
+      if (mountedRef.current && requestId === editorRequestRef.current) {
+        setEditError(error?.message || '编辑所需的站点和资源加载失败');
+      }
+    } finally {
+      if (mountedRef.current && requestId === editorRequestRef.current) setEditSaving(false);
+    }
+  }, [canApprove, detail, user?.id]);
+
+  const updateEditDay = useCallback((date, patch) => {
+    setEditDraft(current => current ? {
+      ...current,
+      plan_data: {
+        ...current.plan_data,
+        [date]: { ...(current.plan_data?.[date] || { sites: [], notes: '' }), ...patch },
+      },
+    } : current);
   }, []);
+
+  const removeEditDay = useCallback((date) => {
+    setEditDraft(current => {
+      if (!current) return current;
+      const planData = { ...current.plan_data };
+      const vehicleDays = { ...current.vehicle_days };
+      delete planData[date];
+      delete vehicleDays[date];
+      return { ...current, plan_data: planData, vehicle_days: vehicleDays };
+    });
+  }, []);
+
+  const addEditDay = useCallback(() => {
+    if (!editDraft || !newScheduleDate) return;
+    const date = newScheduleDate.format('YYYY-MM-DD');
+    if (date < editDraft.period_start || date > editDraft.period_end) {
+      setEditError('安排日期必须位于计划周期内');
+      return;
+    }
+    updateEditDay(date, {});
+    setNewScheduleDate(null);
+    setEditError('');
+  }, [editDraft, newScheduleDate, updateEditDay]);
+
+  const setEditVehicle = useCallback((date, vehicleId) => {
+    setEditDraft(current => {
+      if (!current) return current;
+      const vehicleDays = { ...current.vehicle_days };
+      if (vehicleId) vehicleDays[date] = vehicleId;
+      else delete vehicleDays[date];
+      return { ...current, vehicle_days: vehicleDays };
+    });
+  }, []);
+
+  const updateEditPart = useCallback((index, patch) => {
+    setEditDraft(current => current ? {
+      ...current,
+      spare_parts: current.spare_parts.map((part, partIndex) => partIndex === index ? { ...part, ...patch } : part),
+    } : current);
+  }, []);
+
+  const removeEditPart = useCallback((index) => {
+    setEditDraft(current => current ? {
+      ...current,
+      spare_parts: current.spare_parts.filter((_, partIndex) => partIndex !== index),
+    } : current);
+  }, []);
+
+  const addEditPart = useCallback(() => {
+    const selected = new Set((editDraft?.spare_parts || []).map(part => Number(part.part_id)));
+    const available = editParts.find(part => !selected.has(Number(part.id)));
+    if (!available) {
+      setEditError(editParts.length ? '可用备件均已加入计划' : '暂无可用备件');
+      return;
+    }
+    setEditDraft(current => current ? {
+      ...current,
+      spare_parts: [...current.spare_parts, {
+        part_id: Number(available.id), part_name: available.part_name, quantity: 1,
+      }],
+    } : current);
+    setEditError('');
+  }, [editDraft?.spare_parts, editParts]);
+
+  const saveEdit = useCallback(async (submitAfterSave = false) => {
+    if (!editDraft || editSaving || !editResourcesReady) return;
+    const normalizedPlan = Object.fromEntries(Object.entries(editDraft.plan_data || {})
+      .filter(([, day]) => Array.isArray(day?.sites) && day.sites.length > 0)
+      .map(([date, day]) => [date, { sites: [...new Set(day.sites.map(Number))], notes: String(day.notes || '').trim() }]));
+    const plannedDates = new Set(Object.keys(normalizedPlan));
+    const normalizedVehicleDays = Object.fromEntries(Object.entries(editDraft.vehicle_days || {})
+      .filter(([date, vehicleId]) => plannedDates.has(date) && vehicleId));
+    const payload = { ...editDraft, plan_data: normalizedPlan, vehicle_days: normalizedVehicleDays };
+    setEditSaving(true);
+    setEditError('');
+    try {
+      const validationResult = await api.postStrict('/plan-schedules/validate', {
+        ...payload,
+        exclude_schedule_id: payload.id,
+      });
+      setEditValidation(validationResult);
+      if (submitAfterSave && validationResult?.errors?.length) {
+        setEditError(validationResult.errors.join('；'));
+        return;
+      }
+      const saved = await api.putStrict(`/plan-schedules/${payload.id}`, payload);
+      setEditDraft(current => current ? {
+        ...current,
+        version: saved.version,
+        plan_data: normalizedPlan,
+        vehicle_days: saved.vehicle_days || normalizedVehicleDays,
+      } : current);
+      if (submitAfterSave) {
+        try {
+          await api.postStrict(`/plan-schedules/${payload.id}/submit`, { version: saved.version });
+        } catch (error) {
+          setEditError(`草稿已保存，但提交失败：${error?.message || '请检查计划内容后重试'}`);
+          refreshAll();
+          await openDetail(payload.id);
+          return;
+        }
+      }
+      const issueCount = Number(saved?.draft_issue_count || 0);
+      message.success(submitAfterSave
+        ? '计划已保存并提交审批'
+        : issueCount > 0 ? `草稿已保存，仍有 ${issueCount} 项待完善` : '计划草稿已保存');
+      setEditOpen(false);
+      refreshAll();
+      await openDetail(payload.id);
+    } catch (error) {
+      setEditError(error?.message || '计划保存失败，请稍后重试');
+    } finally {
+      setEditSaving(false);
+    }
+  }, [editDraft, editResourcesReady, editSaving, message, openDetail, refreshAll]);
 
   useEffect(() => {
     const scheduleId = Number(searchParams.get('schedule'));
@@ -344,7 +558,7 @@ export default function PlanSchedulesPage() {
       const result = await api.postStrict(`/insp-plans/${task.id}/overdue-action`, { action, reason });
       message.success(action === 'remind' ? '已发送逾期催办' : `已异常关闭，取消 ${result.cancelled_items || 0} 个未完成检查项`);
       setExecutionGuide(null);
-      load();
+      refreshAll();
       if (detail?.id) openDetail(detail.id);
       return true;
     } catch (error) {
@@ -382,7 +596,7 @@ export default function PlanSchedulesPage() {
       } else {
         message.success(`审批通过：已生成${res.plans_created || 0}个巡检任务、锁定${res.vehicle_locked || 0}天用车、记录${res.parts_planned || 0}类备件需求（现场领用时扣库）`);
       }
-      load();
+      refreshAll();
       openDetail(id);
     } catch (error) { message.error(error.message || '审批失败'); } finally {
       setActing(false);
@@ -397,7 +611,7 @@ export default function PlanSchedulesPage() {
       message.success(res.rolled_back ? '已驳回变更，恢复原计划' : '已退回，排程人将收到通知');
       setRejectOpen(false);
       setRejectReason('');
-      load();
+      refreshAll();
       openDetail(detail.id);
     } catch (error) { message.error(error.message || '退回失败'); } finally {
       setActing(false);
@@ -602,8 +816,8 @@ export default function PlanSchedulesPage() {
         { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
       ]}
     >
-      {recommendationsError && <Alert type="warning" showIcon message={recommendationsError} action={<Button size="small" onClick={load}>重试</Button>} />}
-      {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={load}>重试</Button>} />}
+      {recommendationsError && <Alert type="warning" showIcon message={recommendationsError} action={<Button size="small" onClick={loadRecommendations}>重试</Button>} />}
+      {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
       {supplementTarget && <Alert type="warning" showIcon
         message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
         description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
@@ -675,7 +889,7 @@ export default function PlanSchedulesPage() {
           {(statusFilter || typeFilter || attentionFilter) && (
             <Button icon={<ClearOutlined />} onClick={resetFilters}>重置筛选</Button>
           )}
-          <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>
         </Space>}>
           <FilterField label="计划状态">
             <Select allowClear placeholder="全部状态" style={{ width: filterSmallSelectWidth }} value={statusFilter} onChange={(value) => updateFilter('status', value)}
@@ -688,13 +902,13 @@ export default function PlanSchedulesPage() {
           {attentionFilter && <ToolbarMeta label="关注条件"><Tag closable onClose={() => updateFilter('attention', undefined)}>{ATTENTION_MAP[attentionFilter]}</Tag></ToolbarMeta>}
         </WorkspaceToolbar>
 
-        {loadError && !loading ? <WorkspaceEmpty type="error" description="巡检计划加载失败，当前不能判断是否暂无计划。" onRefresh={load} /> : <WorkspaceTable
+        {loadError && !loading ? <WorkspaceEmpty type="error" description="巡检计划加载失败，当前不能判断是否暂无计划。" onRefresh={loadList} /> : <WorkspaceTable
           rowKey="id"
           dataSource={list}
           loading={loading}
           columns={columns}
           emptyType={statusFilter || typeFilter || attentionFilter ? 'filtered' : 'empty'}
-          onRefresh={load}
+          onRefresh={loadList}
           onRow={r => ({ onClick: () => openDetail(r.id), style: { cursor: 'pointer' } })}
         />}
       </section>
@@ -702,8 +916,16 @@ export default function PlanSchedulesPage() {
       {/* 详情抽屉：审批决策支撑（风险预警 + 站点情况 + 行程 + 资源 + 任务） */}
       <Drawer
         title={detail ? `${detail.user_name || ''}的${TYPE_MAP[detail.schedule_type] || '巡检'}计划（${detail.period_start} ~ ${detail.period_end}）` : '计划详情'}
-        open={drawerOpen} onClose={() => setDrawerOpen(false)} width={680} destroyOnHidden
-        footer={detail && canApprove && (detail.status === 'submitted' || detail.status === 'change_submitted') ? (
+        open={drawerOpen} onClose={() => {
+          detailRequestRef.current += 1;
+          setDrawerOpen(false);
+        }} width={680} destroyOnHidden
+        footer={detail && ['draft', 'rejected', 'modifying'].includes(detail.status)
+          && (Number(detail.user_id) === Number(user?.id) || canApprove) ? (
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(detail)}>编辑计划</Button>
+          </div>
+        ) : detail && canApprove && (detail.status === 'submitted' || detail.status === 'change_submitted') ? (
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <Button danger icon={<CloseOutlined />} onClick={() => setRejectOpen(true)} loading={acting}>退回</Button>
             <Button type="primary" icon={<CheckOutlined />} onClick={() => onApprove(detail.id)} loading={acting}>审批通过</Button>
@@ -930,6 +1152,118 @@ export default function PlanSchedulesPage() {
           </div>
         )}
       </Drawer>
+
+      <Modal
+        open={editOpen}
+        title={editDraft ? `编辑${TYPE_MAP[editDraft.schedule_type] || '巡检'}计划 · ${editDraft.period_start} ~ ${editDraft.period_end}` : '编辑巡检计划'}
+        width={860}
+        destroyOnHidden
+        maskClosable={false}
+        onCancel={() => { if (!editSaving) setEditOpen(false); }}
+        footer={[
+          <Button key="cancel" disabled={editSaving} onClick={() => setEditOpen(false)}>取消</Button>,
+          <Button key="save" loading={editSaving} disabled={!editDraft || !editResourcesReady} onClick={() => saveEdit(false)}>保存草稿</Button>,
+          <Button key="submit" type="primary" loading={editSaving} disabled={!editDraft || !editResourcesReady} onClick={() => saveEdit(true)}>保存并提交</Button>,
+        ]}
+      >
+        {editError && <Alert type="error" showIcon message={editError} style={{ marginBottom: 12 }} />}
+        {editValidation?.warnings?.length > 0 && (
+          <Alert type="warning" showIcon message="计划可保存，但提交前需确认以下事项"
+            description={editValidation.warnings.join('；')} style={{ marginBottom: 12 }} />
+        )}
+        {!editDraft ? <div style={{ padding: 32, textAlign: 'center' }}>加载中…</div> : (
+          <div className="plan-edit-form">
+            <div className="plan-edit-form__row">
+              <div>
+                <Text type="secondary">添加安排日期</Text>
+                <Space.Compact style={{ width: '100%', marginTop: 6 }}>
+                  <DatePicker value={newScheduleDate} onChange={setNewScheduleDate} style={{ flex: 1 }}
+                    minDate={dayjs(editDraft.period_start)} maxDate={dayjs(editDraft.period_end)} />
+                  <Button icon={<PlusOutlined />} disabled={!newScheduleDate} onClick={addEditDay}>添加</Button>
+                </Space.Compact>
+              </div>
+              <div>
+                <Text type="secondary">无需用车说明</Text>
+                <Input value={editDraft.vehicle_exception_reason} style={{ marginTop: 6 }}
+                  placeholder="有巡检日期未安排车辆时必填"
+                  onChange={event => setEditDraft(current => ({ ...current, vehicle_exception_reason: event.target.value }))} />
+              </div>
+            </div>
+
+            <div className="plan-edit-days">
+              {Object.keys(editDraft.plan_data || {}).sort().map(date => {
+                const day = editDraft.plan_data[date] || { sites: [], notes: '' };
+                return <div className="plan-edit-day" key={date}>
+                  <div className="plan-edit-day__header">
+                    <Space><Text strong>{date}</Text><Tag>{weekdayOf(date)}</Tag></Space>
+                    <Button type="text" danger icon={<DeleteOutlined />} aria-label={`删除${date}安排`} onClick={() => removeEditDay(date)} />
+                  </div>
+                  <div className="plan-edit-form__row">
+                    <div>
+                      <Text type="secondary">站点</Text>
+                      <Select mode="multiple" showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
+                        value={day.sites || []} placeholder="选择当日巡检站点"
+                        onChange={sites => updateEditDay(date, { sites })}
+                        options={editSites.map(site => ({ value: Number(site.id), label: site.name }))} />
+                    </div>
+                    <div>
+                      <Text type="secondary">车辆</Text>
+                      <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
+                        value={editDraft.vehicle_days?.[date]} placeholder="选择车辆或填写无需用车说明"
+                        onChange={vehicleId => setEditVehicle(date, vehicleId)}
+                        options={editVehicles.map(vehicle => ({
+                          value: Number(vehicle.id),
+                          label: `${vehicle.plate_no || `车辆 #${vehicle.id}`}${vehicle.dispatchable === false ? ` · ${vehicle.dispatch_block_reason || '不可调度'}` : ''}`,
+                          disabled: vehicle.dispatchable === false,
+                        }))} />
+                    </div>
+                  </div>
+                  <Input value={day.notes || ''} placeholder="当日备注（可选）" maxLength={200}
+                    onChange={event => updateEditDay(date, { notes: event.target.value })} />
+                </div>;
+              })}
+              {!Object.keys(editDraft.plan_data || {}).length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未添加安排日期" />}
+            </div>
+
+            <div>
+              <div className="plan-edit-section-heading">
+                <Text strong>备件需求</Text>
+                <Button size="small" icon={<PlusOutlined />} onClick={addEditPart}>添加备件</Button>
+              </div>
+              <div className="plan-edit-parts">
+                {(editDraft.spare_parts || []).map((part, index) => (
+                  <Space.Compact key={`${part.part_id}-${index}`} block>
+                    <Select showSearch optionFilterProp="label" style={{ flex: 1 }} value={Number(part.part_id)}
+                      onChange={partId => {
+                        const selected = editParts.find(item => Number(item.id) === Number(partId));
+                        updateEditPart(index, { part_id: Number(partId), part_name: selected?.part_name || '' });
+                      }}
+                      options={editParts.map(item => ({ value: Number(item.id), label: `${item.part_name}（库存 ${item.quantity ?? 0}${item.unit || ''}）` }))} />
+                    <InputNumber min={1} max={9999} precision={0} value={Number(part.quantity || 1)}
+                      addonAfter={editParts.find(item => Number(item.id) === Number(part.part_id))?.unit || '件'}
+                      onChange={quantity => updateEditPart(index, { quantity: Number(quantity || 1) })} />
+                    <Button danger icon={<DeleteOutlined />} aria-label={`移除备件${index + 1}`} onClick={() => removeEditPart(index)} />
+                  </Space.Compact>
+                ))}
+                {!editDraft.spare_parts?.length && <Text type="secondary">无备件需求</Text>}
+              </div>
+            </div>
+
+            <div>
+              <Text type="secondary">计划备注</Text>
+              <Input.TextArea rows={3} maxLength={500} showCount style={{ marginTop: 6 }}
+                value={editDraft.remarks}
+                onChange={event => setEditDraft(current => ({ ...current, remarks: event.target.value }))} />
+            </div>
+            <div>
+              <Text type="secondary">周巡检漏站例外说明</Text>
+              <Input value={editDraft.coverage_exception_reason} style={{ marginTop: 6 }}
+                placeholder="周巡检未覆盖全部负责站点时，提交前必填"
+                onChange={event => setEditDraft(current => ({ ...current, coverage_exception_reason: event.target.value }))} />
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* 退回原因弹窗 */}
       <Modal open={rejectOpen} title="退回计划" okText="确认退回" cancelText="取消"

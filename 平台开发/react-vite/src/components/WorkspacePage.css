@@ -22,18 +22,30 @@
 .workspace-toolbar-meta { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px; color: var(--ant-color-text-secondary); font-size: 12px; line-height: 16px; }
 .workspace-toolbar-meta__label { min-height: 16px; }
 .workspace-toolbar-meta__value { min-height: 32px; display: inline-flex; align-items: center; color: var(--ant-color-text); font-size: 14px; white-space: nowrap; }
-.archive-toolbar .workspace-toolbar__filters { display: grid; grid-template-columns: 1.35fr 1fr 1fr 1fr; width: 100%; }
+.archive-toolbar .workspace-toolbar__filters { display: grid; grid-template-columns: minmax(200px, 1.35fr) repeat(3, minmax(150px, 1fr)); width: 100%; }
 .archive-toolbar .workspace-filter-field,
 .archive-toolbar .workspace-filter-field > .ant-input-affix-wrapper,
 .archive-toolbar .workspace-filter-field > .ant-input-group-wrapper,
 .archive-toolbar .workspace-filter-field > .ant-select,
 .archive-toolbar .workspace-filter-field > .ant-picker { width: 100% !important; min-width: 0; }
-.archive-toolbar .archive-date-filters { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.archive-toolbar .workspace-toolbar__actions { margin-left: 0; }
 .workspace-table { flex: 1; min-height: 0; border-radius: 8px; box-shadow: none; overflow: hidden; }
 .workspace-table > .ant-card-body { height: 100%; display: flex; min-height: 0; flex-direction: column; }
 .workspace-table .workspace-empty { flex: 1; }
 .workspace-table .ant-table-body { overscroll-behavior: contain; overflow-y: auto !important; }
 .workspace-table .ant-table-thead > tr > th { white-space: nowrap; }
+.workspace-table--fill .ant-table-wrapper,
+.workspace-table--fill .ant-spin-nested-loading,
+.workspace-table--fill .ant-spin-container,
+.workspace-table--fill .ant-table,
+.workspace-table--fill .ant-table-container { min-height: 0; height: 100%; }
+.workspace-table--fill .ant-table-wrapper,
+.workspace-table--fill .ant-spin-nested-loading,
+.workspace-table--fill .ant-spin-container,
+.workspace-table--fill .ant-table { display: flex; flex: 1; flex-direction: column; }
+.workspace-table--fill .ant-table-container { display: flex; flex: 1; flex-direction: column; }
+.workspace-table--fill .ant-table-body { flex: 1; min-height: 0; max-height: none !important; }
+.ant-modal-confirm-content .workorder-confirm-textarea.ant-input-textarea-show-count { margin-bottom: 20px; }
 .workspace-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .workspace-section:last-child { margin-bottom: 0; }
 .workspace-tabs { min-height: 0; flex: 1; display: flex; flex-direction: column; }

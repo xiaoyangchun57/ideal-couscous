@@ -3,10 +3,27 @@
 // 确保断网时也能走完「打卡→拍照→提交」闭环，且 App 重启后实体仍在，联网后静默同步。
 const KEY = 'local_insp_ops';
 const { isPendingInspectionSubmit } = require('./inspectionSubmissionState.js');
+const { getUser } = require('./auth.js');
 
-function read() {
+function currentOwnerUserId() {
+  const user = getUser() || {};
+  return user.id == null ? '' : String(user.id);
+}
+
+function readAll() {
   try { return wx.getStorageSync(KEY) || []; } catch (e) { return []; }
 }
+
+function belongsToOwner(operation, ownerUserId) {
+  return !!ownerUserId && operation && operation.ownerUserId != null
+    && String(operation.ownerUserId) === String(ownerUserId);
+}
+
+function read(ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  return readAll().filter((operation) => belongsToOwner(operation, owner));
+}
+
 function write(list) {
   try { wx.setStorageSync(KEY, list); } catch (e) {}
 }
@@ -14,18 +31,22 @@ function write(list) {
 // type: 'checkin' | 'submit'
 // data: 业务载荷（submit 内置 localPhotos 本地路径数组、siteId）
 function addOp(type, data) {
-  const list = read();
+  const ownerUserId = currentOwnerUserId();
+  if (!ownerUserId) return null;
+  const list = readAll();
   if (type === 'checkin') {
     const existing = list.find((operation) => operation.type === 'checkin'
+      && belongsToOwner(operation, ownerUserId)
       && operation.syncStatus === 'pending'
-      && operation.data.site_id === data.site_id);
+      && String(operation.data.site_id) === String(data.site_id));
     if (existing) {
       data._idempotency_key = existing.id;
       return existing.id;
     }
   }
   if (type === 'submit') {
-    const existing = list.find((operation) => isPendingInspectionSubmit([operation], data.item_id, data.plan_id));
+    const existing = list.find((operation) => belongsToOwner(operation, ownerUserId)
+      && isPendingInspectionSubmit([operation], data.item_id, data.plan_id));
     if (existing) {
       data._idempotency_key = existing.id;
       return existing.id;
@@ -35,6 +56,7 @@ function addOp(type, data) {
     id: 'op_' + Date.now() + '_' + Math.floor(Math.random() * 1e4),
     type: type,
     data: data,
+    ownerUserId,
     syncStatus: 'pending',
     createdAt: Date.now(),
   };
@@ -46,19 +68,21 @@ function addOp(type, data) {
   return op.id;
 }
 
-function getPending() {
-  return read().filter((o) => o.syncStatus === 'pending');
+function getPending(ownerUserId) {
+  return read(ownerUserId).filter((o) => o.syncStatus === 'pending');
 }
 
-function markSynced(id) {
-  const list = read();
-  const o = list.find((x) => x.id === id);
+function markSynced(id, ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  const list = readAll();
+  const o = list.find((x) => x.id === id && belongsToOwner(x, owner));
   if (o) { o.syncStatus = 'synced'; write(list); }
 }
 
-function markRejected(id, error) {
-  const list = read();
-  const o = list.find((x) => x.id === id);
+function markRejected(id, error, ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  const list = readAll();
+  const o = list.find((x) => x.id === id && belongsToOwner(x, owner));
   if (o) {
     o.syncStatus = 'rejected';
     o.syncError = error || '服务器拒绝了该操作';
@@ -67,8 +91,9 @@ function markRejected(id, error) {
   }
 }
 
-function removeOp(id) {
-  write(read().filter((x) => x.id !== id));
+function removeOp(id, ownerUserId) {
+  const owner = ownerUserId == null ? currentOwnerUserId() : String(ownerUserId);
+  write(readAll().filter((x) => x.id !== id || !belongsToOwner(x, owner)));
 }
 
 function queueCount() {
@@ -77,12 +102,15 @@ function queueCount() {
 
 // 取某站点尚未同步的本地打卡，供闭环状态判断
 function getLocalCheckIn(siteId) {
-  return read().find((o) => o.type === 'checkin' && o.data.site_id === siteId && o.syncStatus === 'pending') || null;
+  return read().find((o) => o.type === 'checkin'
+    && String(o.data.site_id) === String(siteId) && o.syncStatus === 'pending') || null;
 }
 
 function getSiteCheckIn(siteId) {
   return read()
-    .filter((o) => o.type === 'checkin' && o.data.site_id === siteId && o.syncStatus !== 'rejected')
+    .filter((o) => o.type === 'checkin'
+      && String(o.data.site_id) === String(siteId)
+      && o.syncStatus === 'pending')
     .sort((a, b) => b.createdAt - a.createdAt)[0] || null;
 }
 
@@ -99,8 +127,10 @@ function getRejectedSubmit(itemId, planId) {
 }
 
 function clearRejectedSubmit(itemId, planId) {
-  const list = read();
+  const owner = currentOwnerUserId();
+  const list = readAll();
   const removed = list.filter((operation) => operation.type === 'submit'
+    && belongsToOwner(operation, owner)
     && operation.syncStatus === 'rejected'
     && String(operation.data.item_id) === String(itemId)
     && String(operation.data.plan_id) === String(planId));
@@ -110,5 +140,6 @@ function clearRejectedSubmit(itemId, planId) {
 
 module.exports = {
   addOp, getPending, markSynced, markRejected, removeOp, queueCount,
-  getLocalCheckIn, getSiteCheckIn, getPendingSubmit, getRejectedSubmit, clearRejectedSubmit, read, write, KEY
+  getLocalCheckIn, getSiteCheckIn, getPendingSubmit, getRejectedSubmit, clearRejectedSubmit,
+  read, readAll, write, currentOwnerUserId, KEY
 };

@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   App, Button, Card, Col, DatePicker, Descriptions, Image, Input, Modal,
-  Row, Segmented, Select, Space, Spin, Typography,
+  Row, Segmented, Select, Space, Spin, Tag, Typography,
 } from 'antd';
 import {
   AppstoreOutlined, DownloadOutlined, FileTextOutlined, PictureOutlined,
   ReloadOutlined, SearchOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import WorkspacePage, {
   FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
 } from '../../components/WorkspacePage';
 import { api } from '../../services/api';
+import { archiveHistoryStatus } from './attachmentDeletion';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -35,6 +36,13 @@ const SOURCE_LABELS = {
 
 const CAPTURE_LABELS = {
   camera: '小程序现场拍摄', watermark_album: '水印相册', web_upload: '网页补充',
+};
+
+const HISTORY_STATUS = {
+  pending: { label: '待所属业务审核', color: 'processing' },
+  rejected: { label: '已驳回', color: 'error' },
+  voided: { label: '已作废', color: 'default' },
+  superseded: { label: '已替换', color: 'default' },
 };
 
 const emptyFilters = { keyword: '', site_id: undefined, business_type: undefined, date_range: null };
@@ -69,8 +77,13 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function historyStatus(item) {
+  return archiveHistoryStatus(item, HISTORY_STATUS);
+}
+
 export default function ArchivePage() {
   const { message } = App.useApp();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
   const [applied, setApplied] = useState(() => filtersFromParams(searchParams));
@@ -81,14 +94,32 @@ export default function ArchivePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [view, setView] = useState(() => searchParams.get('view') === 'grid' ? 'grid' : 'table');
+  const [archiveMode, setArchiveMode] = useState(() => searchParams.get('scope') === 'history' ? 'history' : 'current');
   const [detail, setDetail] = useState(null);
+  const requestRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    requestRef.current += 1;
+  }, []);
 
   useEffect(() => {
     api.getStrict('/sites').then(data => setSites(Array.isArray(data) ? data : []))
       .catch(() => setSites([]));
   }, []);
 
-  const writeUrl = useCallback((nextFilters, nextView = view) => {
+  useEffect(() => {
+    const nextFilters = filtersFromParams(searchParams);
+    setFilters(nextFilters);
+    setApplied(nextFilters);
+    setView(searchParams.get('view') === 'grid' ? 'grid' : 'table');
+    setArchiveMode(searchParams.get('scope') === 'history' ? 'history' : 'current');
+    setPage(1);
+    setDetail(null);
+  }, [searchParams]);
+
+  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode) => {
     const params = new URLSearchParams();
     if (nextFilters.keyword) params.set('keyword', nextFilters.keyword);
     if (nextFilters.site_id) params.set('site_id', nextFilters.site_id);
@@ -98,14 +129,16 @@ export default function ArchivePage() {
       params.set('date_to', nextFilters.date_range[1].format('YYYY-MM-DD'));
     }
     if (nextView === 'grid') params.set('view', 'grid');
+    if (nextMode === 'history') params.set('scope', 'history');
     setSearchParams(params, { replace: true });
-  }, [setSearchParams, view]);
+  }, [archiveMode, setSearchParams, view]);
 
   const load = useCallback(async (nextPage = 1) => {
+    const requestId = ++requestRef.current;
     setLoading(true);
-    const params = new URLSearchParams({
-      page: String(nextPage), limit: '100', current_archive: '1',
-    });
+    const params = new URLSearchParams({ page: String(nextPage), limit: '100' });
+    if (archiveMode === 'current') params.set('current_archive', '1');
+    else { params.set('history_archive', '1'); params.set('include_voided', '1'); }
     if (applied.keyword) params.set('keyword', applied.keyword);
     if (applied.site_id) params.set('site_id', applied.site_id);
     if (applied.business_type) params.set('business_type', applied.business_type);
@@ -115,16 +148,19 @@ export default function ArchivePage() {
     }
     try {
       const data = await api.getStrict(`/attachments?${params.toString()}`);
+      if (!mountedRef.current || requestId !== requestRef.current) return;
       setItems(data.items || []);
       setTotal(data.total || 0);
       setPage(nextPage);
       setError('');
     } catch (requestError) {
-      setError(requestError.message || '正式影像加载失败');
+      if (mountedRef.current && requestId === requestRef.current) {
+        setError(requestError.message || '影像档案加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current && requestId === requestRef.current) setLoading(false);
     }
-  }, [applied]);
+  }, [applied, archiveMode]);
 
   useEffect(() => { load(1); }, [load]);
 
@@ -166,19 +202,31 @@ export default function ArchivePage() {
       title: '来源', width: 150,
       render: (_, item) => CAPTURE_LABELS[item.capture_source] || item.capture_source || '未记录',
     },
+    ...(archiveMode === 'history' ? [{
+      title: '记录状态', width: 130,
+      render: (_, item) => { const status = historyStatus(item); return <Tag color={status.color}>{status.label}</Tag>; },
+    }] : []),
     {
       title: '操作', width: 120,
       render: (_, item) => <Space><Button type="link" size="small" onClick={() => setDetail(item)}>详情</Button>
         <Button type="link" size="small" onClick={() => window.open(item.stored_path, '_blank')}>下载</Button></Space>,
     },
-  ], []);
+  ], [archiveMode]);
+
+  const emptyActions = <Space wrap>
+    <Button onClick={() => navigate('/audit?tab=inspection')}>前往巡检质控</Button>
+    <Button onClick={() => navigate('/audit?tab=workorder')}>前往工单审核</Button>
+  </Space>;
 
   return (
-    <WorkspacePage title="正式影像档案" subtitle="仅展示当前有效、来源可信且内容审核通过的影像">
-      <WorkspaceToolbar layout="stacked" actions={<>
+    <WorkspacePage title="影像档案" subtitle="集中查询巡检与工单等业务留存的影像记录">
+      <WorkspaceToolbar className="archive-toolbar" actions={<>
+        <Segmented value={archiveMode} onChange={(nextMode) => {
+          setArchiveMode(nextMode); setPage(1); setDetail(null); writeUrl(applied, view, nextMode);
+        }} options={[{ value: 'current', label: '当前档案' }, { value: 'history', label: '历史记录' }]} />
         <Button type="primary" icon={<SearchOutlined />} onClick={applyFilters}>查询</Button>
         <Button icon={<ReloadOutlined />} onClick={resetFilters}>重置</Button>
-        <Segmented value={view} onChange={(next) => { setView(next); writeUrl(applied, next); }}
+        <Segmented value={view} onChange={(next) => { setView(next); writeUrl(applied, next, archiveMode); }}
           options={[{ value: 'table', icon: <FileTextOutlined />, label: '表格' },
             { value: 'grid', icon: <AppstoreOutlined />, label: '网格' }]} />
       </>}>
@@ -199,12 +247,17 @@ export default function ArchivePage() {
 
       {error && <WorkspaceEmpty type="error" description={error} onRefresh={() => load(page)} />}
       {!error && <Spin spinning={loading}>
-        {view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
+        {!loading && items.length === 0 ? <WorkspaceEmpty
+          type={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
+          description={archiveMode === 'current'
+            ? '当前没有已完成业务审核且仍有效的影像；巡检照片在巡检质控审核，工单照片随工单审核。'
+            : '当前没有驳回、作废、替换、待审或补充材料记录。'}
+          onRefresh={() => load(1)}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
           loading={loading} emptyType={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
           onRefresh={() => load(page)} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
           pagination={total > 100 ? { current: page, pageSize: 100, total, showSizeChanger: false,
             showTotal: value => `共 ${value} 条`, onChange: load } : false} /> :
-          items.length ? <Row gutter={[12, 12]}>{items.map(item => <Col key={item.id} xs={24} sm={12} md={8} lg={6}>
+          <Row gutter={[12, 12]}>{items.map(item => <Col key={item.id} xs={24} sm={12} md={8} lg={6}>
             <Card size="small" hoverable cover={<button type="button" onClick={() => setDetail(item)}
               style={{ width: '100%', height: 170, padding: 0, border: 0, overflow: 'hidden', cursor: 'pointer' }}>
               <img src={item.stored_path} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -212,9 +265,12 @@ export default function ArchivePage() {
               <Button key="detail" type="text" icon={<PictureOutlined />} onClick={() => setDetail(item)}>详情</Button>,
               <Button key="download" type="text" icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')}>下载</Button>,
             ]}>
-              <Card.Meta title={displayTitle(item)} description={`${item.site_name || '未关联站点'} · ${item.taken_at || '-'}`} />
+              <Card.Meta title={displayTitle(item)} description={<Space direction="vertical" size={2}>
+                <span>{item.site_name || '未关联站点'} · {item.taken_at || '-'}</span>
+                {archiveMode === 'history' && (() => { const status = historyStatus(item); return <Tag color={status.color}>{status.label}</Tag>; })()}
+              </Space>} />
             </Card>
-          </Col>)}</Row> : <WorkspaceEmpty type={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'} onRefresh={() => load(1)} />}
+          </Col>)}</Row>}
       </Spin>}
 
       <Modal title={detail ? displayTitle(detail) : '影像详情'} open={Boolean(detail)}
@@ -236,8 +292,11 @@ export default function ArchivePage() {
             <Descriptions.Item label="检查项">{itemLabel(detail)}</Descriptions.Item>
             <Descriptions.Item label="关联计划">{detail.plan_name || (detail.plan_id ? `#${detail.plan_id}` : '-')}</Descriptions.Item>
             <Descriptions.Item label="上传人">{detail.uploader_name || detail.uploader_real_name || '-'}</Descriptions.Item>
-            <Descriptions.Item label="内容审核">已通过{detail.reviewed_at ? ` · ${detail.reviewed_at}` : ''}</Descriptions.Item>
+            <Descriptions.Item label="记录状态">{archiveMode === 'current' ? '当前有效' : historyStatus(detail).label}</Descriptions.Item>
             <Descriptions.Item label="文件大小">{formatSize(detail.file_size)}</Descriptions.Item>
+            {archiveMode === 'history' && <Descriptions.Item label="历史原因" span={2}>
+              {historyStatus(detail).reason || '未记录具体原因'}
+            </Descriptions.Item>}
             <Descriptions.Item label="原始文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
           </Descriptions>
         </>}

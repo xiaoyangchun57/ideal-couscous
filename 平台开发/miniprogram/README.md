@@ -1,0 +1,6 @@
+# 小程序项目入口
+
+微信开发者工具只导入本目录的上一级“平台开发”目录。上一级 `project.config.json` 通过
+`miniprogramRoot: "miniprogram/"` 指向本目录，是开发、真机调试、预览和上传的唯一入口。
+
+`project.private.config.json` 是本机私有设置，不参与项目入口判断。

@@ -60,6 +60,7 @@ function periodRange(type) {
 Page({
   data: {
     editId: null,
+    version: null,
     scheduleType: 'weekly',
     scheduleTypeOptions: ['周检', '月检', '季检', '年检'],
     typeKeys: ['weekly', 'monthly', 'quarterly', 'yearly'],
@@ -193,6 +194,7 @@ Page({
         this.setData({
           loaded: true,
           editId: res.id,
+          version: Number(res.version || 1),
           scheduleType: res.schedule_type || 'weekly',
           periodStart: start,
           periodEnd: end,
@@ -333,7 +335,7 @@ Page({
   // 构建请求体
   buildPayload(submit) {
     const { scheduleType, periodStart, periodEnd, days, remarks, coverageExceptionReason,
-      noVehicleRequired, vehicleExceptionReason, selectedParts, suggestions } = this.data;
+      noVehicleRequired, vehicleExceptionReason, selectedParts, suggestions, version } = this.data;
     const planData = {};
     const vehicleDays = {};
     days.forEach(d => {
@@ -360,7 +362,8 @@ Page({
       remarks: remarks,
       coverage_exception_reason: coverageExceptionReason,
       vehicle_exception_reason: noVehicleRequired ? vehicleExceptionReason.trim() : '',
-      submit: !!submit
+      submit: !!submit,
+      ...(this.data.editId ? { version } : {})
     };
   },
 
@@ -427,7 +430,10 @@ Page({
         // 创建或更新
         if (this.data.editId) {
           return api.updatePlanSchedule(this.data.editId, payload)
-            .then(() => api.submitPlanSchedule(this.data.editId));
+            .then(saved => {
+              this.setData({ version: saved.version });
+              return api.submitPlanSchedule(this.data.editId, saved.version);
+            });
         }
         return api.createPlanSchedule(payload);
       })
@@ -437,7 +443,7 @@ Page({
       })
       .catch(err => {
         if (err === 'blocked' || err === 'cancel') return;
-        wx.showToast({ title: (err && err.message) || '提交失败', icon: 'none' });
+        wx.showToast({ title: (err && (err.error || err.message)) || '提交失败', icon: 'none' });
       })
       .finally(() => this.setData({ submitting: false }));
   },
@@ -450,12 +456,14 @@ Page({
     const p = this.data.editId
       ? api.updatePlanSchedule(this.data.editId, payload)
       : api.createPlanSchedule(payload);
-    p.then(() => {
-      wx.showToast({ title: '已保存草稿', icon: 'success' });
+    p.then(saved => {
+      if (this.data.editId && saved && saved.version) this.setData({ version: saved.version });
+      const issueCount = Number(saved && saved.draft_issue_count || 0);
+      wx.showToast({ title: issueCount ? `已保存，${issueCount}项待完善` : '已保存草稿', icon: 'none' });
       setTimeout(() => wx.navigateBack(), 1000);
     })
     .catch(err => {
-      wx.showToast({ title: (err && err.message) || '保存失败', icon: 'none' });
+      wx.showToast({ title: (err && (err.error || err.message)) || '保存失败', icon: 'none' });
     })
     .finally(() => this.setData({ submitting: false }));
   }

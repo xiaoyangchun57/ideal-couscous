@@ -1,53 +1,71 @@
-# r5 final release gate (2026-08-12)
+# r7 final release gate (2026-08-15)
 
-Candidate: `release-20260811-cross-module-freeze-r5`
+Target candidate tag: `release-20260815-cross-module-freeze-r7`
 
-This is the sole deployment candidate produced from the product-approved local development workspace. It does not authorize push, deployment, or any online database/container operation. Historical r1-r4 tags remain unchanged.
+The product-approved development workspace has passed the final automated gate for r7. This document records release readiness evidence only; it does not claim that an immutable commit, annotated tag, source package, push, or deployment already exists.
 
-## Product real UI acceptance
-
-Product review passed all four image-evidence corrections:
-
-- Dialog layout passed at 1440x900 and 1024x768. Long filenames wrap without overlapping the content or footer actions.
-- Attachment attribution is consistent in list, detail, review, and void confirmation: `#102 -> item #7012`, `#101 -> item #7013`, and `#96 -> item #7014`.
-- Approved risk evidence has one current state, `approved`, with the historical note "曾触发风险/人工已核对" instead of a conflicting current "需复核" state.
-- The void/supplement/re-review closure passed: original attachment `#990401` is `voided` with `is_deleted=0`; replacement `#990406` is `approved`; item `#990301` is `effective`; the reason, target, original file, and audit history remain traceable.
-
-WeChat real UI also passed notification targeting, target-item highlighting, supplement upload, re-review, restoration to effective, and rapid-click single-dialog/cancel/failure-lock-release behavior through the existing IDE automation endpoint.
-
-## Final full test gate
-
-All commands ran against the local development workspace. Runtime-only UI fixtures (`test_api.py`, `test_ui_media_fixture.py`, and `test_ui_media_add_ordinary.py`) were excluded from the backend unittest discovery because they require external services or create isolated UI data.
+## Final automated gate
 
 | Check | Result | Exit |
 | --- | --- | ---: |
-| Backend full unittest | 249 tests, OK (2026-08-12 10:22:00-10:22:46 +08:00) | 0 |
-| Miniprogram Node tests | all 11 test files passed | 0 |
-| Miniprogram/backend syntax aggregator | 122 files passed | 0 |
-| React `test:api` | 39/39 passed | 0 |
-| React lint | ESLint passed (10:25:45-10:25:47 +08:00) | 0 |
-| React production build | Vite build passed, 1742 modules transformed (10:25:52-10:25:56 +08:00) | 0 |
-| Backend Python compile | 75 Python files passed (10:24:59-10:25:09 +08:00) | 0 |
-| Candidate guard tests | 2/2 passed; r1-r4 rejected and r5 accepted | 0 |
-| `git diff --check` | no whitespace errors; line-ending warnings only | 0 |
+| Backend unittest discover | 310/310 passed | 0 |
+| Miniprogram Node tests | 32/32 passed | 0 |
+| React `test:api` | 41/41 passed | 0 |
+| React cockpit tests | 2/2 passed | 0 |
+| React lint | PASS | 0 |
+| React production build | PASS; 1741 modules transformed | 0 |
+| Python/JavaScript syntax aggregate | 136 files passed | 0 |
+| Backup script tests | 3/3 passed | 0 |
+| Candidate guard | 2/2 passed; r1-r6 rejected and r7 accepted | 0 |
+| `git diff --check` | No whitespace errors; LF-to-CRLF warnings only | 0 |
 
-The `TEST_MEDIA_FIX_notification_failure` stack trace emitted during backend tests is the intentional failure-injection path used to verify transaction rollback; the suite completed successfully.
+The backend logs for `TEST_MEDIA_FIX_notification_failure` and the work-order attachment flagging HTTP 500 are intentional failure-injection paths. Their rollback assertions passed and the full backend suite completed successfully.
 
-## Candidate guard
+## Product UI status
 
-`deploy/release-candidates.json` accepts only `release-20260811-cross-module-freeze-r5`. These historical tags are explicitly rejected and must not be moved or deployed:
+Current-candidate business UI: **NOT RUN**.
 
-- `release-20260810-cross-module-freeze`
-- `release-20260810-cross-module-freeze-r2`
-- `release-20260810-cross-module-freeze-r3`
-- `release-20260811-cross-module-freeze-r4`
+Product explicitly authorized skipping the remaining real UI regression and proceeding to release preparation so that actual users can test after deployment. Historical UI results are not reused as r7 evidence. Residual product risk remains in:
 
-## Package boundary
+- miniprogram return-to-site rework and evidence resubmission;
+- miniprogram login and notification-badge refresh;
+- the seven Web correction groups on the complete r7 candidate.
 
-The source package is generated with `git archive` from the annotated r5 tag, with explicit path exclusions for the two historically tracked WeChat IDE private configuration files. It contains only committed source and excludes isolated databases, test uploads/evidence, automation caches/scripts, temporary UI fixtures/config, `.git`, root-level untracked IDE configuration, `平台开发/project.private.config.json`, and `平台开发/miniprogram/project.private.config.json`.
+These boundaries must be monitored through the limited online smoke check and actual-user feedback; they are not recorded as PASS here.
 
-## Residual boundary
+## Candidate guard and identity
 
-`stats.total=13` and the default list count `18` intentionally represent different sets: statistics count effective evidence, while the default list also retains five rejected audit records and excludes voided records. This is not a calculation defect. The label "影像总数" can later be renamed to "有效影像" or paired with a list-count value; this is a non-blocking P2 wording improvement.
+`deploy/release-candidates.json` accepts only `release-20260815-cross-module-freeze-r7`. All entries in `historical_tags`, covering r1 through r6, must be rejected and must not be moved, reused, or deployed as the current candidate.
 
-Deployment must still independently confirm the production domain, certificate, backup, migration, and rollback configuration. No push, deployment, or online operation was performed by this release gate.
+The immutable commit, annotated r7 tag, and tag-derived source package will be generated together only after this document is included in the candidate commit. Their commit IDs, tag object and peeled commit, package path, size, and SHA256 must be recorded from the generated artifacts; no unknown values are asserted in advance.
+
+## Production read-only precheck
+
+- `https://ops.hhyc-tec.cn/api/health` returned HTTP 200.
+- The current r6 container is running and healthy.
+- The TLS certificate is valid through 2026-10-28.
+- The filesystem containing `/opt` has 9.6 GB available.
+- The current production release record is r6.
+
+This was a read-only precheck. r7 has not been deployed.
+
+## Backup blocker
+
+`water-monitor-backup.timer` failed on August 13, 14, and 15 because the installed script used the stale default `/opt/water-monitor-current` while the running Compose project used a different release working directory. The repository backup script now discovers and validates the active Compose working directory when `APP_DIR` is not explicitly supplied; its 3/3 isolated tests passed.
+
+Before deployment:
+
+1. Install the corrected backup script from the candidate.
+2. Produce a fresh database snapshot and uploads archive.
+3. Verify the generated SHA256 values and confirm the backup artifacts are readable.
+4. Stop the deployment immediately if script installation, backup creation, or verification fails.
+
+The prior failed timer runs are not valid deployment backups.
+
+## Package and rollback boundary
+
+The source package must be generated from the annotated r7 tag and contain committed source only. It must exclude private IDE configuration, isolated databases and uploads, UI evidence, automation caches or scripts, logs, temporary fixtures, and other untracked artifacts.
+
+Keep the r6 release directory, image, and verified pre-r7 data backup available throughout deployment. If r7 health checks, database integrity checks, or the public smoke test fails, immediately return to r6 and restore data only when the failure requires it.
+
+No push, deployment, online database write, or production container change was performed by this release gate.

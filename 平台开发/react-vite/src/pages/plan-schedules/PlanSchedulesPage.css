@@ -38,9 +38,44 @@
   overflow-x: auto;
 }
 
+.plan-edit-form,
+.plan-edit-days,
+.plan-edit-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plan-edit-form__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.plan-edit-day {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--ant-color-border);
+  border-radius: 6px;
+}
+
+.plan-edit-day__header,
+.plan-edit-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 @media (max-width: 760px) {
   .plan-attention-strip {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .plan-edit-form__row {
+    grid-template-columns: 1fr;
   }
 }

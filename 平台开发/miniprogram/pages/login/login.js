@@ -1,5 +1,8 @@
 const api = require('../../services/api.js');
 const { setAuth } = require('../../utils/auth.js');
+const { completeLoginSession } = require('../../utils/loginCompletion.js');
+
+const app = getApp();
 
 Page({
   data: {
@@ -16,11 +19,18 @@ Page({
   onConfirmPassword(e) { this.setData({ confirmPassword: e.detail.value, error: '' }); },
 
   completeLogin(token, user, sites) {
-    setAuth(token, user, sites);
-    wx.login({
-      success: (lres) => { if (lres.code) api.bindOpenId(lres.code).catch(() => {}); }
-    });
-    wx.reLaunch({ url: '/pages/index/index' });
+    completeLoginSession({
+      setAuth,
+      bindWechat: () => wx.login({
+        success: (lres) => { if (lres.code) api.bindOpenId(lres.code).catch(() => {}); }
+      }),
+      refreshBadge: () => {
+        if (app.globalData.refreshNotificationBadge) {
+          app.globalData.refreshNotificationBadge();
+        }
+      },
+      navigateHome: () => wx.reLaunch({ url: '/pages/index/index' }),
+    }, token, user, sites);
   },
 
   onLogin() {

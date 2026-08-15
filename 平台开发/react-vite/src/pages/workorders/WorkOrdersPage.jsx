@@ -7,13 +7,14 @@ import {
 } from 'antd';
 import {
   PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined,
-  EditOutlined, ExclamationCircleOutlined,
+  ExclamationCircleOutlined,
   FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
   InboxOutlined, SwapOutlined, CheckOutlined, AuditOutlined,
   UploadOutlined, DownloadOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
+import { useAuth } from '../../hooks/useAuth';
 import {
   orderStatusMap, orderLevelMap, orderSourceMap, orderStatusBadge, orderLevelBadge,
 } from '../../services/constants';
@@ -32,6 +33,9 @@ const manualSourceOptions = [
 
 export default function WorkOrdersPage() {
   const { tokens, isDark } = useTheme();
+  const { user } = useAuth();
+  const userRoles = user?.roles?.length ? user.roles : [user?.role];
+  const canReview = userRoles.some((role) => role === 'admin' || role === 'reviewer');
   const { modal, message } = App.useApp();  // 使用实例方法，避免Tracking Prevention阻断
   // 语义状态色统一走 statusColors（禁硬编码 hex），半透明背景用 alpha 后缀派生
   const purpleColor = statusColors.purple[isDark ? 'dark' : 'light'];
@@ -74,7 +78,6 @@ export default function WorkOrdersPage() {
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
   const [modalLoading, setModalLoading] = useState(false);
-  const [editingOrder, setEditingOrder] = useState(null);
 
   // View drawer state
   const [viewOpen, setViewOpen] = useState(false);
@@ -96,6 +99,7 @@ export default function WorkOrdersPage() {
   const [recycleLoading, setRecycleLoading] = useState(false);
   const [recycleForm] = Form.useForm();
   const [devices, setDevices] = useState([]);
+  const canOperateOrder = useCallback((order) => order?.can_operate === true, []);
 
   // 拉取工单列表
   const fetchOrders = useCallback(async () => {
@@ -296,7 +300,6 @@ export default function WorkOrdersPage() {
   };
 
   const handleCreate = () => {
-    setEditingOrder(null);
     form.resetFields();
     setModalOpen(true);
   };
@@ -396,6 +399,10 @@ export default function WorkOrdersPage() {
 
   const handleDeletePhoto = useCallback(async (url) => {
     if (!viewingOrder) return;
+    if (!canOperateOrder(viewingOrder)) {
+      message.error('仅工单负责人可修改现场照片');
+      return;
+    }
     modal.confirm({
       title: '删除照片',
       icon: <ExclamationCircleOutlined />,
@@ -421,42 +428,19 @@ export default function WorkOrdersPage() {
         }
       },
     });
-  }, [viewingOrder, fetchOrders]);
-
-  const handleEdit = (record) => {
-    console.log('[DEBUG] handleEdit clicked:', record?.order_no);
-    setEditingOrder(record);
-    form.setFieldsValue({
-      title: record.title,
-      level: record.level,
-      source: record.source,
-      site_id: record.site_name || record.site_id,
-      assignee: record.assignee,
-      description: record.description,
-    });
-    setModalOpen(true);
-  };
+  }, [viewingOrder, fetchOrders, canOperateOrder, message, modal]);
 
   const handleModalOk = async () => {
     try {
       const values = await form.validateFields();
       setModalLoading(true);
-      let result;
-      if (editingOrder) {
-        result = await api.put(`/workorders/${editingOrder.order_no}/status`, {
-          ...values,
-          status: values.status || editingOrder.status,
-        });
-      } else {
-        result = await api.post('/workorders', values);
-      }
+      const result = await api.post('/workorders', values);
       if (result && !result.error) {
-        message.success(editingOrder ? '工单已更新' : '工单已创建');
+        message.success('工单已创建');
         setModalOpen(false);
-        setEditingOrder(null);
         fetchOrders();
       } else {
-        message.error(result?.error || (editingOrder ? '更新失败' : '创建失败'));
+        message.error(result?.error || '创建失败');
       }
     } catch {
       // validation error, do nothing
@@ -474,7 +458,7 @@ export default function WorkOrdersPage() {
       icon: <ExclamationCircleOutlined />,
       content: newStatus === 'reviewing' ? <div>
         <Text>提交后审核员将根据现场处置说明和影像判断是否办结。</Text>
-        <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} maxLength={500} showCount
+        <Input.TextArea className="workorder-confirm-textarea" autoSize={{ minRows: 3, maxRows: 5 }} maxLength={500} showCount
           placeholder="请填写做了什么、现场结果和仍需关注的事项"
           onChange={(event) => { resolutionNote = event.target.value; }} style={{ marginTop: 12 }} />
       </div> : `确认将工单 ${record.order_no} ${label}？`,
@@ -485,14 +469,19 @@ export default function WorkOrdersPage() {
           message.error('请填写现场处置说明');
           return Promise.reject(new Error('resolution note required'));
         }
-        const result = newStatus === 'reviewing'
-          ? await api.postStrict(`/workorders/${record.order_no}/submit-review`, { client: 'web', resolution_note: resolutionNote.trim() })
-          : await api.put(`/workorders/${record.order_no}/status`, { status: newStatus });
-        if (result && !result.error) {
-          message.success(`工单已${label}`);
-          fetchOrders();
-        } else {
-          message.error(result?.error || '操作失败');
+        try {
+          const result = newStatus === 'reviewing'
+            ? await api.postStrict(`/workorders/${record.order_no}/submit-review`, { client: 'web', resolution_note: resolutionNote.trim() })
+            : await api.put(`/workorders/${record.order_no}/status`, { status: newStatus });
+          if (result && !result.error) {
+            message.success(`工单已${label}`);
+            fetchOrders();
+            return;
+          }
+          throw new Error(result?.error || '操作失败');
+        } catch (error) {
+          message.error(error?.message || '操作失败，请稍后重试');
+          return Promise.reject(error);
         }
       },
     });
@@ -605,8 +594,8 @@ export default function WorkOrdersPage() {
         let primaryAction = null;
         let returnAction = null;
 
-        // Status transition actions
-        if (s === 'pending') {
+        // 现场状态流转只对工单实际负责人开放；审核保持独立职责。
+        if (canOperateOrder(record) && s === 'pending') {
           primaryAction = {
             key: 'accept',
             label: '受理',
@@ -614,7 +603,7 @@ export default function WorkOrdersPage() {
             onClick: () => handleStatusTransition(record, 'accepted', '受理'),
           };
         }
-        if (s === 'accepted') {
+        if (canOperateOrder(record) && s === 'accepted') {
           primaryAction = {
             key: 'start',
             label: '开始处置',
@@ -622,7 +611,7 @@ export default function WorkOrdersPage() {
             onClick: () => handleStatusTransition(record, 'in_progress', '开始处置'),
           };
         }
-        if (s === 'dispatched') {
+        if (canOperateOrder(record) && s === 'dispatched') {
           primaryAction = {
             key: 'start',
             label: '开始处置',
@@ -630,7 +619,7 @@ export default function WorkOrdersPage() {
             onClick: () => handleStatusTransition(record, 'in_progress', '开始处置'),
           };
         }
-        if (s === 'in_progress') {
+        if (canOperateOrder(record) && s === 'in_progress') {
           primaryAction = {
             key: 'complete',
             label: '提交审核',
@@ -644,7 +633,7 @@ export default function WorkOrdersPage() {
             onClick: () => handleStatusTransition(record, 'accepted', '退回受理'),
           };
         }
-        if (s === 'reviewing') {
+        if (canReview && s === 'reviewing') {
           primaryAction = {
             key: 'review',
             label: '前往审核',
@@ -670,12 +659,6 @@ export default function WorkOrdersPage() {
               <Tooltip title={returnAction.label}>
                 <Button type="text" size="small" icon={returnAction.icon} aria-label={`${record.order_no} ${returnAction.label}`}
                   onClick={returnAction.onClick} />
-              </Tooltip>
-            )}
-            {s !== 'closed' && s !== 'reviewing' && (
-              <Tooltip title="编辑工单">
-                <Button type="text" size="small" icon={<EditOutlined />} aria-label={`编辑工单 ${record.order_no}`}
-                  onClick={() => handleEdit(record)} />
               </Tooltip>
             )}
           </Space>
@@ -722,14 +705,14 @@ export default function WorkOrdersPage() {
         : <WorkspaceTable columns={columns} dataSource={filteredOrders} rowKey={(r) => r.order_no || r.id}
             loading={loading} emptyType={(search || assigneeFilter || levelFilter || statusFilter) ? 'filtered' : 'empty'} onRefresh={fetchOrders} />}
 
-      {/* Create/Edit Modal */}
+      {/* Create Modal */}
       <Modal
-        title={editingOrder ? '编辑工单' : '新建工单'}
+        title="新建工单"
         open={modalOpen}
         onOk={handleModalOk}
-        onCancel={() => { setModalOpen(false); setEditingOrder(null); }}
+        onCancel={() => setModalOpen(false)}
         confirmLoading={modalLoading}
-        okText={editingOrder ? '保存' : '创建'}
+        okText="创建"
         cancelText="取消"
         width={560}
         destroyOnHidden
@@ -753,11 +736,6 @@ export default function WorkOrdersPage() {
               </Form.Item>
             </Col>
           </Row>
-          {editingOrder && (
-            <Form.Item name="status" label="状态">
-              <Select placeholder="请选择状态" options={statusOptions} />
-            </Form.Item>
-          )}
           <Form.Item name="site_id" label="站点">
             <Select placeholder="请选择站点" allowClear showSearch
               filterOption={(input, option) => (option.label || '').toLowerCase().includes(input.toLowerCase())}
@@ -837,7 +815,7 @@ export default function WorkOrdersPage() {
                                 style={{ objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border-color)' }}
                                 preview={{ mask: '预览' }}
                               />
-                              {!['reviewing', 'closed'].includes(viewingOrder.status) && <button
+                              {canOperateOrder(viewingOrder) && viewingOrder.status === 'in_progress' && <button
                                 type="button"
                                 aria-label={`删除照片 ${i + 1}`}
                                 onClick={() => handleDeletePhoto(url)}
@@ -947,7 +925,7 @@ export default function WorkOrdersPage() {
             )}
 
             {/* 独立上传处置照片 */}
-            {viewingOrder && ['pending', 'accepted', 'dispatched', 'in_progress'].includes(viewingOrder.status) && (
+            {viewingOrder && canOperateOrder(viewingOrder) && viewingOrder.status === 'in_progress' && (
               <div style={{ marginTop: 20, padding: '12px', borderRadius: 8, background: tokens.colorFillSecondary }}>
                 <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>
                   <UploadOutlined /> 上传处置照片
@@ -989,9 +967,12 @@ export default function WorkOrdersPage() {
                         }
                         fetchOrders();
                       } else {
-                        onError && onError(new Error(data?.error || '上传失败'));
+                        const uploadError = new Error(data?.error || '上传失败');
+                        message.error(uploadError.message);
+                        onError && onError(uploadError);
                       }
                     } catch (e) {
+                      message.error(e?.message || '上传失败，请稍后重试');
                       onError && onError(e);
                     }
                   }}
@@ -1002,7 +983,7 @@ export default function WorkOrdersPage() {
             )}
 
             {/* 操作按钮：从工单发起备件申请/设备回收 */}
-            {['in_progress', 'dispatched', 'accepted'].includes(viewingOrder.status) && (
+            {canOperateOrder(viewingOrder) && ['in_progress', 'dispatched', 'accepted'].includes(viewingOrder.status) && (
               <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${tokens.colorBorder}` }}>
                 <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 10 }}>关联操作</Text>
                 <Space size={8} wrap>

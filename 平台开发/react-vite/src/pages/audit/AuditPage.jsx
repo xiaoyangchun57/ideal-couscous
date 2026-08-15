@@ -41,8 +41,13 @@ const { TextArea } = Input;
 
 // 轻量指标卡
 function AuditEmptyState({ title, onRefresh, error }) {
+  const emptyDescription = title === '巡检质控'
+    ? '当前没有待审核的巡检检查项；巡检照片随检查项提交后在这里审核。'
+    : title === '工单审核'
+      ? '当前没有待审核工单；工单处置照片随工单提交后在这里审核。'
+      : `${title}当前没有待处理事项`;
   return <WorkspaceEmpty type={error ? 'error' : 'empty'} onRefresh={onRefresh}
-    description={error ? `${title}加载失败，当前不能判断是否没有待处理事项。` : `${title}当前没有待处理事项`} />;
+    description={error ? `${title}加载失败，当前不能判断是否没有待处理事项。` : emptyDescription} />;
 }
 
 function auditItemKey(item) {
