@@ -1,10 +1,12 @@
-# r7 final release gate (2026-08-15)
+# r8 final release gate (2026-08-15)
 
-Target candidate tag: `release-20260815-cross-module-freeze-r7`
+Target candidate tag: `release-20260815-cross-module-freeze-r8`
 
-The product-approved development workspace has passed the final automated gate for r7. This document records release readiness evidence only; it does not claim that an immutable commit, annotated tag, source package, push, or deployment already exists.
+r8 is the only current release candidate. r7 is immutable historical evidence and must not be moved, deleted, reused, or described as deployed. This document records the r7 pre-switch failure, the minimal r8 packaging correction, and the completed r8 automated gate. It does not claim that an immutable r8 commit, tag, package, or deployment already exists.
 
-## Final automated gate
+## r8 final automated gate
+
+After whitelist staging, the complete r8 candidate passed:
 
 | Check | Result | Exit |
 | --- | --- | ---: |
@@ -15,57 +17,55 @@ The product-approved development workspace has passed the final automated gate f
 | React lint | PASS | 0 |
 | React production build | PASS; 1741 modules transformed | 0 |
 | Python/JavaScript syntax aggregate | 136 files passed | 0 |
-| Backup script tests | 3/3 passed | 0 |
-| Candidate guard | 2/2 passed; r1-r6 rejected and r7 accepted | 0 |
-| `git diff --check` | No whitespace errors; LF-to-CRLF warnings only | 0 |
+| Backup and candidate-archive tests | 4/4 passed, including raw LF tar-entry verification | 0 |
+| Candidate guard | 2/2 passed; r1-r7 rejected and r8 accepted | 0 |
+| `git diff --cached --check` | No whitespace errors | 0 |
 
-The backend logs for `TEST_MEDIA_FIX_notification_failure` and the work-order attachment flagging HTTP 500 are intentional failure-injection paths. Their rollback assertions passed and the full backend suite completed successfully.
+The backend logs for `TEST_MEDIA_FIX_notification_failure` and the work-order attachment flagging HTTP 500 are intentional failure-injection paths. Their rollback assertions passed and the complete backend suite finished successfully.
+
+## r7 pre-switch failure
+
+Production execution stopped safely before r6 was stopped. The r7 tag and index blob for `deploy/backup-water-monitor.sh` are LF, but Windows `git archive <tag>:平台开发` produced a CRLF shell entry because the archived subtree did not contain an explicit shell EOL attribute. The uploaded server tar entry and extracted file retained those CRLF bytes; SCP did not transform them. The installed script therefore failed at its shebang with `/usr/bin/env: 'bash\r': No such file or directory`.
+
+r6 was never stopped and remained running and healthy. r7 was not deployed.
+
+Operations converted only the installed server backup tool to LF and successfully ran the backup service. The resulting artifacts are:
+
+- `water.db-20260815-113306`
+- `uploads-20260815-113306.tar.gz`
+
+Both SHA256 checks passed. This was an operational recovery and does not change the r7 tag or repository history.
+
+## Minimal r8 correction
+
+- `平台开发/.gitattributes` defines `*.sh text eol=lf` inside the exact subtree used as the archive root.
+- `deploy/backup-water-monitor.sh` has no logic change.
+- The backup regression builds a tree from the current Git index with `git write-tree`, archives `<tree>:平台开发` to memory, and verifies that the archived backup script starts with the exact LF shebang and contains no carriage-return bytes. This regression passed after whitelist staging.
+- The release manifest accepts only r8; r1 through r7 are historical and rejected.
+
+The archive regression depends on the candidate files being present in the index. Development did not stage files merely to run it; product staged the six-file whitelist and ran the regression before the r8 commit.
 
 ## Product UI status
 
 Current-candidate business UI: **NOT RUN**.
 
-Product explicitly authorized skipping the remaining real UI regression and proceeding to release preparation so that actual users can test after deployment. Historical UI results are not reused as r7 evidence. Residual product risk remains in:
+Product explicitly authorized skipping the remaining real UI regression so actual users can test after deployment. Historical UI results are not reused as r8 evidence. Residual risk remains in miniprogram return-to-site rework, login and notification badges, and the seven Web correction groups.
 
-- miniprogram return-to-site rework and evidence resubmission;
-- miniprogram login and notification-badge refresh;
-- the seven Web correction groups on the complete r7 candidate.
+## Candidate identity and freeze boundary
 
-These boundaries must be monitored through the limited online smoke check and actual-user feedback; they are not recorded as PASS here.
+`deploy/release-candidates.json` accepts only `release-20260815-cross-module-freeze-r8`. All `historical_tags`, covering r1 through r7, must be rejected.
 
-## Candidate guard and identity
+The archive regression and complete r8 automated gate have passed. The immutable commit, annotated r8 tag, and tag-derived source package may now be generated together. Their commit IDs, tag object and peeled commit, package path, size, and SHA256 must be recorded from the generated artifacts; no unknown values are asserted in advance.
 
-`deploy/release-candidates.json` accepts only `release-20260815-cross-module-freeze-r7`. All entries in `historical_tags`, covering r1 through r6, must be rejected and must not be moved, reused, or deployed as the current candidate.
+## Production state and rollback
 
-The immutable commit, annotated r7 tag, and tag-derived source package will be generated together only after this document is included in the candidate commit. Their commit IDs, tag object and peeled commit, package path, size, and SHA256 must be recorded from the generated artifacts; no unknown values are asserted in advance.
-
-## Production read-only precheck
-
-- `https://ops.hhyc-tec.cn/api/health` returned HTTP 200.
-- The current r6 container is running and healthy.
+- `https://ops.hhyc-tec.cn/api/health` returned HTTP 200 during the read-only precheck.
+- The current r6 container remains running and healthy.
 - The TLS certificate is valid through 2026-10-28.
-- The filesystem containing `/opt` has 9.6 GB available.
-- The current production release record is r6.
+- The filesystem containing `/opt` had 9.6 GB available.
+- The current production release record remains r6.
+- The 11:33 database and uploads backups listed above have verified SHA256 values.
 
-This was a read-only precheck. r7 has not been deployed.
+r8 must still be packaged from the new annotated tag and deployed. Keep the r6 release directory, image, and verified pre-r8 backups available throughout deployment. If r8 health checks, database integrity checks, or the public smoke test fails, immediately return to r6 and restore data only when required.
 
-## Backup blocker
-
-`water-monitor-backup.timer` failed on August 13, 14, and 15 because the installed script used the stale default `/opt/water-monitor-current` while the running Compose project used a different release working directory. The repository backup script now discovers and validates the active Compose working directory when `APP_DIR` is not explicitly supplied; its 3/3 isolated tests passed.
-
-Before deployment:
-
-1. Install the corrected backup script from the candidate.
-2. Produce a fresh database snapshot and uploads archive.
-3. Verify the generated SHA256 values and confirm the backup artifacts are readable.
-4. Stop the deployment immediately if script installation, backup creation, or verification fails.
-
-The prior failed timer runs are not valid deployment backups.
-
-## Package and rollback boundary
-
-The source package must be generated from the annotated r7 tag and contain committed source only. It must exclude private IDE configuration, isolated databases and uploads, UI evidence, automation caches or scripts, logs, temporary fixtures, and other untracked artifacts.
-
-Keep the r6 release directory, image, and verified pre-r7 data backup available throughout deployment. If r7 health checks, database integrity checks, or the public smoke test fails, immediately return to r6 and restore data only when the failure requires it.
-
-No push, deployment, online database write, or production container change was performed by this release gate.
+No commit, tag, package, push, deployment, online database write, production container change, or server operation was performed while collecting this gate evidence.

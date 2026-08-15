@@ -1,11 +1,15 @@
+import io
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PROJECT_ROOT.parent
 SCRIPT_PATH = Path(__file__).with_name('backup-water-monitor.sh')
 
 
@@ -112,6 +116,24 @@ class BackupWaterMonitorScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Cannot discover APP_DIR from running container', result.stderr)
         self.assertFalse((self.root / 'backups').exists())
+
+    def test_candidate_archive_preserves_lf_shebang(self):
+        tree = subprocess.run(
+            ['git', 'write-tree'], cwd=REPOSITORY_ROOT,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+        )
+        self.assertEqual(tree.returncode, 0, tree.stderr)
+        archive = subprocess.run(
+            ['git', 'archive', f'{tree.stdout.strip()}:{PROJECT_ROOT.name}'],
+            cwd=REPOSITORY_ROOT, capture_output=True,
+        )
+        self.assertEqual(archive.returncode, 0, archive.stderr.decode('utf-8', errors='replace'))
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode='r:') as bundle:
+            member = bundle.extractfile('deploy/backup-water-monitor.sh')
+            self.assertIsNotNone(member)
+            script = member.read()
+        self.assertEqual(script.splitlines(keepends=True)[0], b'#!/usr/bin/env bash\n')
+        self.assertNotIn(b'\r', script)
 
 
 if __name__ == '__main__':
