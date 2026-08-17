@@ -573,11 +573,17 @@ def migrate_plan_schedules():
         for col_sql in [
             "ALTER TABLE insp_plans ADD COLUMN plan_schedule_id INTEGER",
             "ALTER TABLE plan_schedules ADD COLUMN previous_vehicle_days TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_vehicle_id INTEGER",
             "ALTER TABLE plan_schedules ADD COLUMN previous_spare_parts TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN previous_work_order_ids TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN previous_remarks TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_period_start TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_period_end TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_coverage_exception_reason TEXT",
+            "ALTER TABLE plan_schedules ADD COLUMN previous_vehicle_exception_reason TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN coverage_exception_reason TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN vehicle_exception_reason TEXT DEFAULT ''",
+            "ALTER TABLE plan_schedules ADD COLUMN vehicle_id INTEGER",
             "ALTER TABLE plan_schedules ADD COLUMN validation_snapshot TEXT",
             "ALTER TABLE plan_schedules ADD COLUMN field_status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE plan_schedules ADD COLUMN field_completed_at TIMESTAMP",
@@ -1809,6 +1815,8 @@ def init_db():
             "ALTER TABLE insp_plan_items ADD COLUMN part_consumed TEXT DEFAULT ''",
             # insp_plan_items 拍照清单 + 审核字段（历史库外手动添加，此处补入迁移保证重建库不缺列）
             "ALTER TABLE insp_plan_items ADD COLUMN required_photos INTEGER DEFAULT 0",
+            "ALTER TABLE insp_plan_items ADD COLUMN need_review INTEGER DEFAULT NULL",
+            "ALTER TABLE insp_plan_items ADD COLUMN inspection_standard TEXT DEFAULT NULL",
             "ALTER TABLE insp_plan_items ADD COLUMN actual_photos INTEGER DEFAULT 0",
             "ALTER TABLE insp_plan_items ADD COLUMN review_status INTEGER DEFAULT 0",
             "ALTER TABLE insp_plan_items ADD COLUMN review_comment TEXT DEFAULT ''",
@@ -9818,7 +9826,95 @@ def review_maintenance_plan(plan_id):
 
 # --- 方案模板 CRUD ---
 
+def _inspection_admin_endpoint(func):
+    """Protect template/config writes while retaining the legacy route shape."""
+    from functools import wraps
+    @wraps(func)
+    def guarded(*args, **kwargs):
+        denied = require_admin()
+        return denied if denied else func(*args, **kwargs)
+    return guarded
+
+def _inspection_template_has_history(db, template_id):
+    """Templates and items become historical snapshots once used by a plan."""
+    checks = (
+        ('inspection_schedules', 'template_id=?'),
+        ('insp_plan_items', 'template_id=?'),
+    )
+    return any(_table_exists(db, table) and db.execute(
+        f"SELECT 1 FROM {table} WHERE {where} LIMIT 1", (template_id,)).fetchone()
+        for table, where in checks)
+
+def _inspection_item_has_history(db, template_id, item_id):
+    if _table_exists(db, 'inspection_schedules') and db.execute(
+        "SELECT 1 FROM inspection_schedules WHERE template_id=? AND template_item_id=? LIMIT 1",
+        (template_id, item_id)).fetchone():
+        return True
+    return _inspection_template_has_history(db, template_id)
+
+
+def _inspection_item_values(data, *, default_sort_order=None, require_name=False):
+    """Normalize editable template-item fields without changing generated snapshots."""
+    data = data if isinstance(data, dict) else {}
+    values = {}
+    if require_name or 'item_name' in data:
+        item_name = data.get('item_name', '')
+        if not isinstance(item_name, str) or not item_name.strip():
+            raise ValueError('检查项名称不能为空')
+        values['item_name'] = item_name.strip()
+    for key in ('category', 'frequency_level', 'inspection_standard'):
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str):
+                raise ValueError(f'{key} 格式无效')
+            values[key] = value.strip()
+    for key in ('photo_required', 'need_review'):
+        if key in data:
+            value = data[key]
+            if isinstance(value, bool):
+                values[key] = 1 if value else 0
+            elif isinstance(value, int) and value in (0, 1):
+                values[key] = value
+            else:
+                raise ValueError(f'{key} 格式无效')
+    if 'max_photos' in data:
+        value = data['max_photos']
+        if isinstance(value, bool):
+            raise ValueError('max_photos 格式无效')
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('max_photos 格式无效')
+        if value < 0 or str(value) != str(data['max_photos']).strip():
+            raise ValueError('max_photos 格式无效')
+        values['max_photos'] = value
+    if 'sort_order' in data or default_sort_order is not None:
+        value = data.get('sort_order', default_sort_order)
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('排序参数无效')
+        if value < 0:
+            raise ValueError('排序参数无效')
+        values['sort_order'] = value
+    return values
+
+
+def _inspection_item_insert(db, template_id, values):
+    columns = {'template_id': template_id}
+    available = {row['name'] for row in db.execute('PRAGMA table_info(inspection_template_items)').fetchall()}
+    for key, value in values.items():
+        if key in available:
+            columns[key] = value
+    names = list(columns)
+    placeholders = ','.join('?' for _ in names)
+    cursor = db.execute(
+        f"INSERT INTO inspection_template_items ({','.join(names)}) VALUES ({placeholders})",
+        [columns[name] for name in names])
+    return cursor.lastrowid
+
 @app.route('/api/inspection-v2/templates')
+@login_required
 def v2_get_templates():
     """获取方案模板列表"""
     category = request.args.get('category', '')
@@ -9833,6 +9929,8 @@ def v2_get_templates():
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/inspection-v2/templates', methods=['POST'])
+@login_required
+@_inspection_admin_endpoint
 def v2_create_template():
     """创建方案模板"""
     data = request.get_json(silent=True) or {}
@@ -9843,20 +9941,28 @@ def v2_create_template():
     items = data.get('items', [])
     if not name or not category:
         return jsonify({'error': '模板名称和分类不能为空'}), 400
+    if not isinstance(items, list):
+        return jsonify({'error': 'items 格式无效', 'code': 'INSPECTION_ITEM_INVALID'}), 400
     with get_db() as db:
         db.execute("INSERT INTO inspection_templates (template_name,category,frequency,description) VALUES (?,?,?,?)",
                    (name, category, frequency, desc))
         tid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
         for i, item in enumerate(items):
-            db.execute("""
-                INSERT INTO inspection_template_items (template_id,item_name,category,frequency_level,photo_required,sort_order)
-                VALUES (?,?,?,?,?,?)
-            """, (tid, item.get('item_name',''), item.get('category',''), item.get('frequency_level','mid'),
-                  1 if item.get('photo_required') else 0, i+1))
+            try:
+                values = _inspection_item_values(
+                    {**item, 'sort_order': item.get('sort_order', i + 1)},
+                    default_sort_order=i + 1, require_name=True)
+            except (TypeError, ValueError) as exc:
+                db.rollback()
+                return jsonify({'error': str(exc), 'code': 'INSPECTION_ITEM_INVALID'}), 400
+            values.setdefault('frequency_level', 'mid')
+            _inspection_item_insert(db, tid, values)
         db.commit()
         return jsonify({'id': tid, 'success': True})
 
 @app.route('/api/inspection-v2/templates/<int:tid>', methods=['PUT'])
+@login_required
+@_inspection_admin_endpoint
 def v2_update_template(tid):
     """更新方案模板"""
     data = request.get_json(silent=True) or {}
@@ -9875,21 +9981,39 @@ def v2_update_template(tid):
             db.execute(f"UPDATE inspection_templates SET {','.join(fields)} WHERE id=?", params)
         # 如果提供了items，全量替换
         if 'items' in data:
+            if _inspection_template_has_history(db, tid):
+                return jsonify({'error': '模板已用于历史计划，不能整体替换检查项', 'code': 'INSPECTION_TEMPLATE_IN_USE'}), 409
             db.execute("DELETE FROM inspection_template_items WHERE template_id=?", (tid,))
+            if not isinstance(data['items'], list):
+                db.rollback()
+                return jsonify({'error': 'items 格式无效', 'code': 'INSPECTION_ITEM_INVALID'}), 400
             for i, item in enumerate(data['items']):
-                db.execute("""
-                    INSERT INTO inspection_template_items (template_id,item_name,category,frequency_level,photo_required,sort_order)
-                    VALUES (?,?,?,?,?,?)
-                """, (tid, item.get('item_name',''), item.get('category',''), item.get('frequency_level','mid'),
-                      1 if item.get('photo_required') else 0, i+1))
+                try:
+                    values = _inspection_item_values(
+                        {**item, 'sort_order': item.get('sort_order', i + 1)},
+                        default_sort_order=i + 1, require_name=True)
+                except (TypeError, ValueError) as exc:
+                    db.rollback()
+                    return jsonify({'error': str(exc), 'code': 'INSPECTION_ITEM_INVALID'}), 400
+                values.setdefault('frequency_level', 'mid')
+                _inspection_item_insert(db, tid, values)
         db.commit()
         return jsonify({'success': True})
 
 @app.route('/api/inspection-v2/templates/<int:tid>', methods=['DELETE'])
+@login_required
+@_inspection_admin_endpoint
 def v2_delete_template(tid):
     """删除方案模板"""
     with get_db() as db:
         # 删除关联的配置、排程、检查项
+        tpl = db.execute("SELECT id FROM inspection_templates WHERE id=?", (tid,)).fetchone()
+        if not tpl:
+            return jsonify({'error': '模板不存在', 'code': 'INSPECTION_TEMPLATE_NOT_FOUND'}), 404
+        if (_inspection_template_has_history(db, tid) or
+                db.execute("SELECT 1 FROM inspection_configs WHERE template_id=? LIMIT 1", (tid,)).fetchone()):
+            return jsonify({'error': '模板已在配置或历史计划中使用，不能删除',
+                            'code': 'INSPECTION_TEMPLATE_IN_USE'}), 409
         db.execute("DELETE FROM inspection_template_items WHERE template_id=?", (tid,))
         db.execute("DELETE FROM inspection_configs WHERE template_id=?", (tid,))
         db.execute("DELETE FROM inspection_schedules WHERE template_id=?", (tid,))
@@ -9898,6 +10022,7 @@ def v2_delete_template(tid):
         return jsonify({'success': True})
 
 @app.route('/api/inspection-v2/templates/<int:tid>/items')
+@login_required
 def v2_get_template_items(tid):
     """获取模板检查项列表"""
     with get_db() as db:
@@ -9905,36 +10030,56 @@ def v2_get_template_items(tid):
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/inspection-v2/templates/<int:tid>/items', methods=['POST'])
+@login_required
+@_inspection_admin_endpoint
 def v2_add_template_item(tid):
     """添加模板检查项"""
     data = request.get_json(silent=True) or {}
-    item_name = data.get('item_name', '').strip()
+    item_name = data.get('item_name', '')
+    if not isinstance(item_name, str):
+        return jsonify({'error': '检查项名称格式无效', 'code': 'INSPECTION_ITEM_INVALID'}), 400
+    item_name = item_name.strip()
     if not item_name:
         return jsonify({'error': '检查项名称不能为空'}), 400
     with get_db() as db:
+        template = db.execute("SELECT id FROM inspection_templates WHERE id=?", (tid,)).fetchone()
+        if not template:
+            return jsonify({'error': '模板不存在', 'code': 'INSPECTION_TEMPLATE_NOT_FOUND'}), 404
         max_sort = db.execute("SELECT MAX(sort_order) FROM inspection_template_items WHERE template_id=?", (tid,)).fetchone()[0] or 0
-        db.execute("""
-            INSERT INTO inspection_template_items (template_id,item_name,category,frequency_level,photo_required,sort_order)
-            VALUES (?,?,?,?,?,?)
-        """, (tid, item_name, data.get('category',''), data.get('frequency_level','mid'),
-              1 if data.get('photo_required') else 0, max_sort + 1))
+        try:
+            values = _inspection_item_values(
+                {**data, 'sort_order': data.get('sort_order', max_sort + 1)},
+                default_sort_order=max_sort + 1, require_name=True)
+        except (TypeError, ValueError) as exc:
+            code = 'INSPECTION_ITEM_SORT_INVALID' if '排序' in str(exc) else 'INSPECTION_ITEM_INVALID'
+            return jsonify({'error': str(exc), 'code': code}), 400
+        values.setdefault('frequency_level', 'mid')
+        _inspection_item_insert(db, tid, values)
         db.commit()
         return jsonify({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0], 'success': True})
 
 @app.route('/api/inspection-v2/templates/<int:tid>/items/<int:item_id>', methods=['PUT'])
+@login_required
+@_inspection_admin_endpoint
 def v2_update_template_item(tid, item_id):
     """更新模板检查项"""
     data = request.get_json(silent=True) or {}
     with get_db() as db:
         fields = []
         params = []
-        for key in ('item_name', 'category', 'frequency_level', 'sort_order'):
-            if key in data:
+        item = db.execute("SELECT id FROM inspection_template_items WHERE id=? AND template_id=?", (item_id, tid)).fetchone()
+        if not item:
+            return jsonify({'error': '检查项不存在'}), 404
+        try:
+            values = _inspection_item_values(data)
+        except (TypeError, ValueError) as exc:
+            code = 'INSPECTION_ITEM_SORT_INVALID' if '排序' in str(exc) else 'INSPECTION_ITEM_INVALID'
+            return jsonify({'error': str(exc), 'code': code}), 400
+        available = {row['name'] for row in db.execute('PRAGMA table_info(inspection_template_items)').fetchall()}
+        for key, value in values.items():
+            if key in available:
                 fields.append(f"{key}=?")
-                params.append(data[key])
-        if 'photo_required' in data:
-            fields.append("photo_required=?")
-            params.append(1 if data['photo_required'] else 0)
+                params.append(value)
         if fields:
             params.append(item_id)
             db.execute(f"UPDATE inspection_template_items SET {','.join(fields)} WHERE id=? AND template_id=?", params + [tid])
@@ -9942,9 +10087,17 @@ def v2_update_template_item(tid, item_id):
         return jsonify({'success': True})
 
 @app.route('/api/inspection-v2/templates/<int:tid>/items/<int:item_id>', methods=['DELETE'])
+@login_required
+@_inspection_admin_endpoint
 def v2_delete_template_item(tid, item_id):
     """删除模板检查项"""
     with get_db() as db:
+        item = db.execute("SELECT id FROM inspection_template_items WHERE id=? AND template_id=?", (item_id, tid)).fetchone()
+        if not item:
+            return jsonify({'error': '检查项不存在', 'code': 'INSPECTION_ITEM_NOT_FOUND'}), 404
+        if _inspection_item_has_history(db, tid, item_id):
+            return jsonify({'error': '检查项已在历史计划中使用，不能删除',
+                            'code': 'INSPECTION_ITEM_IN_USE'}), 409
         db.execute("DELETE FROM inspection_template_items WHERE id=? AND template_id=?", (item_id, tid))
         db.commit()
         return jsonify({'success': True})
@@ -9952,6 +10105,7 @@ def v2_delete_template_item(tid, item_id):
 # --- 巡检配置 CRUD + 匹配引擎 ---
 
 @app.route('/api/inspection-v2/configs')
+@login_required
 def v2_get_configs():
     """获取巡检配置列表"""
     site_type = request.args.get('site_type', '')
@@ -9972,6 +10126,8 @@ def v2_get_configs():
         return jsonify([dict(r) for r in rows])
 
 @app.route('/api/inspection-v2/configs', methods=['POST'])
+@login_required
+@_inspection_admin_endpoint
 def v2_create_config():
     """创建巡检配置规则"""
     data = request.get_json(silent=True) or {}
@@ -9981,6 +10137,9 @@ def v2_create_config():
         return jsonify({'error': '站点类型和模板不能为空'}), 400
     with get_db() as db:
         # 检查是否已存在相同配置
+        template = db.execute("SELECT id FROM inspection_templates WHERE id=?", (template_id,)).fetchone()
+        if not template:
+            return jsonify({'error': '模板不存在', 'code': 'INSPECTION_TEMPLATE_NOT_FOUND'}), 404
         existing = db.execute("SELECT id FROM inspection_configs WHERE site_type=? AND template_id=?",
                               (site_type, template_id)).fetchone()
         if existing:
@@ -9989,15 +10148,24 @@ def v2_create_config():
             INSERT INTO inspection_configs (site_type,device_types,template_id,is_active,remark)
             VALUES (?,?,?,?,?)
         """, (site_type, _json.dumps(data.get('device_types', []), ensure_ascii=False),
-              template_id, 1, data.get('remark', '')))
+              template_id, 1 if data.get('is_active', True) else 0, data.get('remark', '')))
         db.commit()
         return jsonify({'id': db.execute("SELECT last_insert_rowid()").fetchone()[0], 'success': True})
 
 @app.route('/api/inspection-v2/configs/<int:cid>', methods=['PUT'])
+@login_required
+@_inspection_admin_endpoint
 def v2_update_config(cid):
     """更新巡检配置"""
     data = request.get_json(silent=True) or {}
     with get_db() as db:
+        config = db.execute("SELECT id FROM inspection_configs WHERE id=?", (cid,)).fetchone()
+        if not config:
+            return jsonify({'error': '配置不存在', 'code': 'INSPECTION_CONFIG_NOT_FOUND'}), 404
+        if 'template_id' in data:
+            template = db.execute("SELECT id FROM inspection_templates WHERE id=?", (data['template_id'],)).fetchone()
+            if not template:
+                return jsonify({'error': '模板不存在', 'code': 'INSPECTION_TEMPLATE_NOT_FOUND'}), 404
         fields = []
         params = []
         for key in ('site_type', 'is_active', 'remark'):
@@ -10017,65 +10185,69 @@ def v2_update_config(cid):
         return jsonify({'success': True})
 
 @app.route('/api/inspection-v2/configs/<int:cid>', methods=['DELETE'])
+@login_required
+@_inspection_admin_endpoint
 def v2_delete_config(cid):
     """删除巡检配置"""
     with get_db() as db:
+        config = db.execute("SELECT id, template_id FROM inspection_configs WHERE id=?", (cid,)).fetchone()
+        if not config:
+            return jsonify({'error': '配置不存在', 'code': 'INSPECTION_CONFIG_NOT_FOUND'}), 404
+        if _inspection_template_has_history(db, config['template_id']):
+            return jsonify({'error': '配置所关联的模板已用于历史计划，不能删除',
+                            'code': 'INSPECTION_CONFIG_IN_USE'}), 409
         db.execute("DELETE FROM inspection_configs WHERE id=?", (cid,))
         db.commit()
         return jsonify({'success': True})
 
 @app.route('/api/inspection-v2/configs/match')
+@login_required
 def v2_match_configs():
-    """匹配引擎：给定站点，返回适配的所有模板+检查项"""
+    """Return the same site/frequency item set used by plan validation."""
     site_id = request.args.get('site_id', type=int)
+    schedule_type = request.args.get('schedule_type', '')
     if not site_id:
         return jsonify({'error': '缺少site_id参数'}), 400
+    if schedule_type not in ('weekly', 'monthly', 'quarterly', 'yearly'):
+        return jsonify({'error': 'schedule_type参数无效',
+                        'code': 'PLAN_SCHEDULE_TYPE_INVALID'}), 400
     with get_db() as db:
         site = db.execute("SELECT id, type, name FROM sites WHERE id=?", (site_id,)).fetchone()
         if not site:
             return jsonify({'error': '站点不存在'}), 404
-        # 获取站点设备类型
-        dev_types = [r['device_type'] for r in db.execute(
-            "SELECT DISTINCT device_type FROM device_shadows WHERE site_id=?", (site_id,)).fetchall()]
-        # 查找匹配的配置
-        configs = db.execute("""
-            SELECT ic.*, it.template_name, it.category, it.frequency, it.description
-            FROM inspection_configs ic
-            JOIN inspection_templates it ON ic.template_id = it.id
-            WHERE ic.site_type=? AND ic.is_active=1
-            ORDER BY it.sort_order
-        """, (site['type'],)).fetchall()
+        if not _has_any_role(g.current_user, 'admin') and not db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=? LIMIT 1',
+                (g.current_user['id'], site_id)).fetchone():
+            return jsonify({'error': '无权配置该站点的检查项',
+                            'code': 'PLAN_EXECUTION_SITE_FORBIDDEN'}), 403
+        items = _ps_site_template_items(db, site_id, schedule_type)
+        template_ids = sorted({int(item['template_id']) for item in items if item.get('template_id')})
+        template_map = {}
+        if template_ids:
+            placeholders = ','.join('?' for _ in template_ids)
+            template_map = {int(row['id']): dict(row) for row in db.execute(
+                f"SELECT id, template_name, category, frequency, description "
+                f"FROM inspection_templates WHERE id IN ({placeholders})", template_ids).fetchall()}
         result = []
-        for cfg in configs:
-            # 设备类型过滤（如果配置指定了device_types）
-            cfg_dev = cfg['device_types']
-            if cfg_dev and cfg_dev != '[]' and cfg_dev != '':
-                try:
-                    required = _json.loads(cfg_dev)
-                    if required and not any(d in dev_types for d in required):
-                        continue
-                except:
-                    pass
-            # 获取模板检查项
-            items = db.execute("""
-                SELECT * FROM inspection_template_items WHERE template_id=? ORDER BY sort_order
-            """, (cfg['template_id'],)).fetchall()
+        for template_id in template_ids:
+            template = template_map.get(template_id, {})
             result.append({
-                'config_id': cfg['id'],
-                'template_id': cfg['template_id'],
-                'template_name': cfg['template_name'],
-                'category': cfg['category'],
-                'frequency': cfg['frequency'],
-                'description': cfg['description'],
-                'items': [dict(it) for it in items],
+                'template_id': template_id,
+                'template_name': template.get('template_name', ''),
+                'category': template.get('category', ''),
+                'frequency': template.get('frequency', schedule_type),
+                'description': template.get('description', ''),
+                'items': [item for item in items if int(item.get('template_id') or 0) == template_id],
             })
         return jsonify({
             'site_id': site_id,
             'site_name': site['name'],
             'site_type': site['type'],
-            'device_types': dev_types,
+            'schedule_type': schedule_type,
+            'device_types': sorted(_ps_site_device_types(db, site_id)),
+            'items': items,
             'matched_templates': result,
-            'total_items': sum(len(t['items']) for t in result),
+            'total_items': len(items),
         })
 
 # --- 排程管理 ---
@@ -11063,8 +11235,13 @@ def v2_update_plan_item(plan_id, item_id):
                 fields.append(f"{key}=?")
                 params.append(data[key])
 
-        # 根据模板判断是否需要审核
-        if item['schedule_id']:
+        # New generated items carry an immutable review snapshot. Legacy rows
+        # without one retain the historical schedule/template fallback.
+        snapshot_need_review = item['need_review'] if 'need_review' in item.keys() else None
+        if snapshot_need_review is not None:
+            fields.append("review_status=?")
+            params.append(1 if int(snapshot_need_review) else 2)
+        elif item['schedule_id']:
             sch = db.execute("""
                 SELECT t.id as template_id FROM inspection_schedules s
                 JOIN inspection_templates t ON s.template_id = t.id
@@ -12961,7 +13138,7 @@ def _terminal_plan_vehicle_exists(db, schedule_id):
         clause = " AND rework_plan_id IS NULL" if _table_has_column(db, 'vehicle_applications', 'rework_plan_id') else ''
         return bool(db.execute(f"""SELECT 1 FROM vehicle_applications
             WHERE reason LIKE ? AND status IN ('returned','archived'){clause} LIMIT 1""",
-            (f'%巡检计划#{schedule_id}%',)).fetchone())
+            (_ps_vehicle_reason_like(schedule_id),)).fetchone())
     except sqlite3.OperationalError:
         return False
 
@@ -17925,6 +18102,63 @@ def import_sites():
         'errors': [],
     })
 
+@app.route('/api/sites', methods=['POST'])
+@login_required
+def create_site():
+    """Create one water-quality site and assign its responsible operator atomically."""
+    denied = require_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code') or '').strip()
+    name = str(data.get('name') or '').strip()
+    manager_id = data.get('manager_id', data.get('assignee_id'))
+    if not code or not name or manager_id in (None, ''):
+        return jsonify({'error': '请填写站点编码、站点名称和负责人', 'code': 'SITE_REQUIRED_FIELDS'}), 400
+    try:
+        manager_id = int(manager_id)
+    except (TypeError, ValueError):
+        return jsonify({'error': '负责人无效', 'code': 'SITE_MANAGER_INVALID'}), 400
+    if not 1 <= len(code) <= 80 or not 1 <= len(name) <= 120:
+        return jsonify({'error': '站点编码或名称长度无效', 'code': 'SITE_FIELD_INVALID'}), 400
+    try:
+        lat = float(data.get('gps_lat'))
+        lng = float(data.get('gps_lng'))
+    except (TypeError, ValueError):
+        return jsonify({'error': '请填写有效的经纬度', 'code': 'SITE_COORDINATES_REQUIRED'}), 400
+    if not -90 <= lat <= 90 or not -180 <= lng <= 180:
+        return jsonify({'error': '经纬度超出有效范围', 'code': 'SITE_COORDINATES_INVALID'}), 400
+    with get_db() as db:
+        manager = db.execute("SELECT id, real_name, phone, status, role FROM users WHERE id=?", (manager_id,)).fetchone()
+        if not manager or manager['status'] != 'active':
+            return jsonify({'error': '负责人不存在或已停用', 'code': 'SITE_MANAGER_UNAVAILABLE'}), 409
+        manager_roles = {
+            str(row['role'] or '').strip()
+            for row in db.execute('SELECT role FROM user_roles WHERE user_id=?', (manager_id,)).fetchall()
+        }
+        if manager['role']:
+            manager_roles.add(str(manager['role']).strip())
+        if 'operator' not in manager_roles:
+            return jsonify({'error': '负责人不是可执行运维人员', 'code': 'SITE_MANAGER_ROLE_INVALID'}), 409
+        if db.execute("SELECT 1 FROM sites WHERE code=?", (code,)).fetchone():
+            return jsonify({'error': '站点编码已存在', 'code': 'SITE_CODE_EXISTS'}), 409
+        try:
+            cur = db.execute("""INSERT INTO sites
+                (code,name,type,gps_lat,gps_lng,district,address,river,manager,phone,status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+                code, name, 'water_quality', lat, lng,
+                str(data.get('district') or '').strip(), str(data.get('address') or '').strip(),
+                str(data.get('river') or '').strip(), manager['real_name'] or '', manager['phone'] or '',
+                'normal'))
+            site_id = cur.lastrowid
+            db.execute("INSERT INTO user_sites (user_id,site_id) VALUES (?,?)", (manager_id, site_id))
+            db.commit()
+        except sqlite3.IntegrityError:
+            db.rollback()
+            return jsonify({'error': '站点编码已存在或负责人授权写入失败', 'code': 'SITE_CREATE_CONFLICT'}), 409
+        row = db.execute("SELECT * FROM sites WHERE id=?", (site_id,)).fetchone()
+    return jsonify({'success': True, 'site': dict(row), 'manager_id': manager_id}), 201
+
 @app.route('/api/sites/data-sources', methods=['GET'])
 @login_required
 def list_data_sources():
@@ -17987,8 +18221,12 @@ def test_data_source(ds_id):
     }), 501
 
 @app.route('/api/sites/template', methods=['GET'])
+@login_required
 def download_site_template():
     """下载站点导入CSV模板"""
+    denied = require_admin()
+    if denied:
+        return denied
     import csv as csv_mod, io
     output = io.StringIO()
     writer = csv_mod.writer(output)
@@ -18557,6 +18795,7 @@ def mobile_site_tasks(site_id):
                 'calibration_values': item['calibration_values'],
                 'photo_urls': item['photo_urls'],
                 'required_photos': item['required_photos'] if 'required_photos' in item.keys() else 0,
+                'inspection_standard': item['inspection_standard'] if 'inspection_standard' in item.keys() else '',
                 'actual_photos': item['actual_photos'] if 'actual_photos' in item.keys() else 0,
                 'evidence_attachments': evidence,
                 'voided_evidence': [row for row in evidence if row.get('review_status') == 'voided'],
@@ -18642,6 +18881,7 @@ def _mobile_execution_categories(db, plan_id, site_id):
             'result': item['result'], 'remark': item['remark'], 'check_time': item['check_time'],
             'calibrator': item['calibrator'], 'calibration_values': item['calibration_values'],
             'photo_urls': item['photo_urls'], 'required_photos': item['required_photos'] if 'required_photos' in item.keys() else 0,
+            'inspection_standard': item['inspection_standard'] if 'inspection_standard' in item.keys() else '',
             'actual_photos': item['actual_photos'] if 'actual_photos' in item.keys() else 0,
             'review_status': item['review_status'] if 'review_status' in item.keys() else 0,
             'review_comment': item['review_comment'] if 'review_comment' in item.keys() else '',
@@ -18802,7 +19042,7 @@ def mobile_today_execution():
                   AND date(va.start_at)<=? AND date(va.end_at)>=?
                   AND va.status='approved' AND va.reason LIKE ? ORDER BY va.id DESC LIMIT 1""",
                 (vehicle_id, user['id'], work_date, work_date,
-                 f'%计划#{p["plan_schedule_id"]}%')).fetchone() if vehicle_id else None
+                 _ps_vehicle_reason_like(p["plan_schedule_id"]))).fetchone() if vehicle_id else None
             application_state = _vehicle_plan_application_state(db, vehicle_application) \
                 if vehicle_application else None
             vehicle_use = db.execute("""SELECT r.*, va.applicant_id, va.end_at, va.reason,
@@ -19586,9 +19826,10 @@ def mobile_submit_item():
         updates = ["result=?", "check_time=?", "completed_at=?"]
         params = [result, now, now]
         # 现场执行链按模板决定是否进入巡检质控；此前该链路未写 review_status，导致管理员看不到待审项。
-        need_review = 0
+        snapshot_need_review = item['need_review'] if 'need_review' in item.keys() else None
+        need_review = int(snapshot_need_review or 0) if snapshot_need_review is not None else 0
         template_id = item['template_id'] if 'template_id' in item.keys() else None
-        if template_id:
+        if snapshot_need_review is None and template_id:
             try:
                 template_item = db.execute("""SELECT need_review FROM inspection_template_items
                     WHERE template_id=? AND item_name=? ORDER BY id LIMIT 1""",
@@ -21431,6 +21672,7 @@ def _vehicle_plan_use_state(db, use_row):
     row = dict(use_row or {})
     schedule_id = _vehicle_application_schedule_id(db, row)
     is_plan_trip = bool(schedule_id)
+    plan_vehicle_replaced = False
     plan_status = None
     if schedule_id:
         if _plan_schedule_has_open_execution(db, schedule_id):
@@ -21442,19 +21684,55 @@ def _vehicle_plan_use_state(db, use_row):
             except sqlite3.OperationalError:
                 schedule_exists = None
             plan_status = 'completed' if schedule_exists else 'unknown'
+        try:
+            schedule_columns = {
+                item['name'] for item in db.execute('PRAGMA table_info(plan_schedules)').fetchall()
+            }
+            vehicle_column = ', vehicle_id' if 'vehicle_id' in schedule_columns else ''
+            schedule = db.execute(
+                f'SELECT status, vehicle_days{vehicle_column} FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone()
+            if schedule and schedule['status'] == 'approved':
+                current_vehicle_id = schedule['vehicle_id'] if vehicle_column else None
+                current_vehicle_known = True
+                if current_vehicle_id in (None, ''):
+                    current_days = json.loads(schedule['vehicle_days'] or '{}')
+                    if not isinstance(current_days, dict):
+                        current_vehicle_known = False
+                    else:
+                        current_ids = set()
+                        for value in current_days.values():
+                            if value in (None, ''):
+                                continue
+                            parsed = int(value)
+                            if parsed <= 0:
+                                raise ValueError('invalid current vehicle')
+                            current_ids.add(parsed)
+                        if len(current_ids) > 1:
+                            current_vehicle_known = False
+                        else:
+                            current_vehicle_id = next(iter(current_ids), None)
+                if current_vehicle_known:
+                    plan_vehicle_replaced = current_vehicle_id in (None, '') \
+                        or int(current_vehicle_id) != int(row.get('vehicle_id'))
+        except (TypeError, ValueError, json.JSONDecodeError, sqlite3.OperationalError):
+            plan_vehicle_replaced = False
     trip_end = str(row.get('end_at') or '')[:10]
     today = datetime.now().strftime('%Y-%m-%d')
     expired = bool(trip_end and trip_end < today)
     plan_completed = bool(is_plan_trip and plan_status == 'completed')
     active = not row.get('returned_at') and row.get('status') != 'returned'
     needs_extension = bool(active and is_plan_trip and expired and not plan_completed)
-    can_return = bool(active and (not is_plan_trip or plan_completed or row.get('vehicle_status') == 'restricted'))
+    can_return = bool(active and (
+        not is_plan_trip or plan_completed or plan_vehicle_replaced
+        or row.get('vehicle_status') == 'restricted'))
     row.update({
         'plan_schedule_id': schedule_id,
         'is_plan_trip': is_plan_trip,
         'trip_end_date': trip_end or None,
         'plan_status': plan_status,
         'plan_completed': plan_completed,
+        'plan_vehicle_replaced': plan_vehicle_replaced,
         'use_expired': expired,
         'needs_extension': needs_extension,
         'can_return': can_return,
@@ -22210,7 +22488,9 @@ def api_vehicle_use_record_return(rec_id):
         use_state = _vehicle_plan_use_state(db, rec)
         trip_end = str(rec['end_at'] or '')[:10]
         is_plan_trip = '巡检计划#' in str(rec['reason'] or '')
-        if is_plan_trip and not use_state['plan_completed'] and rec['vehicle_status'] != 'restricted':
+        if (is_plan_trip and not use_state['plan_completed']
+                and not use_state['plan_vehicle_replaced']
+                and rec['vehicle_status'] != 'restricted'):
             return jsonify({'error': '本巡检计划行程尚未结束；如需提前结束，请先发起计划变更'}), 409
         if end_mileage < float(rec['start_mileage'] or 0):
             return jsonify({'error': '还车里程不能小于出车里程'}), 400
@@ -22647,7 +22927,113 @@ def _ps_parse_row(row):
                 r[f] = empty if empty is not None else v
         else:
             r[f] = empty if empty is not None else None
+    # New plans may store one plan-level vehicle; expose it while preserving
+    # legacy per-day vehicle_days for existing schedules and execution packages.
+    if r.get('vehicle_id') in ('', 0):
+        r['vehicle_id'] = None
+    if r.get('vehicle_id') is None and r.get('vehicle_days'):
+        values = {str(v) for v in r['vehicle_days'].values() if v not in (None, '')}
+        if len(values) == 1:
+            try:
+                r['vehicle_id'] = int(next(iter(values)))
+            except (TypeError, ValueError):
+                r['vehicle_id'] = None
     return r
+
+
+def _ensure_plan_schedule_vehicle_column(db):
+    """Add the optional plan-level vehicle column without rewriting legacy vehicle_days."""
+    if not _table_exists(db, 'plan_schedules'):
+        return False
+    if _table_has_column(db, 'plan_schedules', 'vehicle_id'):
+        return True
+    try:
+        db.execute('ALTER TABLE plan_schedules ADD COLUMN vehicle_id INTEGER')
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _ps_expand_plan_vehicle(plan_data, vehicle_id, vehicle_days):
+    """Normalize every writable plan to one vehicle or no vehicle."""
+    if vehicle_days is None:
+        vehicle_days = {}
+    if not isinstance(vehicle_days, dict):
+        raise PlanScheduleSiteScopeError('vehicle_days 格式无效', code='PLAN_RESOURCE_DATA_INVALID')
+    planned_dates = [
+        str(date_str) for date_str, day_data in (plan_data or {}).items()
+        if isinstance(day_data, dict) and day_data.get('sites')
+    ]
+    normalized_id = None
+    if vehicle_id not in (None, ''):
+        try:
+            normalized_id = int(vehicle_id)
+        except (TypeError, ValueError):
+            raise PlanScheduleSiteScopeError('vehicle_id 无效', code='PLAN_VEHICLE_INVALID')
+        if normalized_id <= 0:
+            raise PlanScheduleSiteScopeError('vehicle_id 无效', code='PLAN_VEHICLE_INVALID')
+    else:
+        legacy_ids = set()
+        for raw_id in vehicle_days.values():
+            if raw_id in (None, ''):
+                continue
+            try:
+                legacy_id = int(raw_id)
+            except (TypeError, ValueError):
+                raise PlanScheduleSiteScopeError('vehicle_days 包含无效车辆', code='PLAN_VEHICLE_INVALID')
+            if legacy_id <= 0:
+                raise PlanScheduleSiteScopeError('vehicle_days 包含无效车辆', code='PLAN_VEHICLE_INVALID')
+            legacy_ids.add(legacy_id)
+        if len(legacy_ids) > 1:
+            raise PlanScheduleSiteScopeError(
+                '同一巡检计划只能使用一辆车；请选择计划车辆或明确无需用车',
+                code='PLAN_MULTIPLE_VEHICLES_NOT_ALLOWED')
+        normalized_id = next(iter(legacy_ids), None)
+    return {date_str: normalized_id for date_str in planned_dates} if normalized_id else {}
+
+
+def _ps_plan_vehicle_id(vehicle_days):
+    """Return the single normalized vehicle id from daily compatibility data."""
+    if not isinstance(vehicle_days, dict):
+        raise PlanScheduleSiteScopeError(
+            'vehicle_days 格式无效', code='PLAN_RESOURCE_DATA_INVALID')
+    values = set()
+    for value in vehicle_days.values():
+        if value in (None, ''):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise PlanScheduleSiteScopeError(
+                'vehicle_days 包含无效车辆', code='PLAN_VEHICLE_INVALID')
+        if parsed <= 0:
+            raise PlanScheduleSiteScopeError(
+                'vehicle_days 包含无效车辆', code='PLAN_VEHICLE_INVALID')
+        values.add(parsed)
+    if len(values) > 1:
+        raise PlanScheduleSiteScopeError(
+            '同一巡检计划只能使用一辆车',
+            code='PLAN_MULTIPLE_VEHICLES_NOT_ALLOWED')
+    return next(iter(values), None)
+
+
+def _ps_normalize_vehicle_exception_reason(vehicle_id, raw_reason):
+    """Keep the no-vehicle explanation mutually exclusive with a vehicle assignment."""
+    return '' if vehicle_id is not None else (raw_reason or '').strip()
+
+
+def _ps_persisted_vehicle_id(vehicle_days):
+    """Reject invalid persisted vehicle state as a state conflict, not a new payload error."""
+    try:
+        return _ps_plan_vehicle_id(vehicle_days)
+    except PlanScheduleSiteScopeError as exc:
+        raise PlanScheduleSiteScopeError(
+            str(exc), status=409, code=exc.code, site_ids=exc.site_ids) from exc
+
+
+def _ps_vehicle_reason_like(schedule_id):
+    """Match the stable plan vehicle token without #1/#10 prefix collisions."""
+    return f'%巡检计划#{int(schedule_id)}用车%'
 
 
 class PlanScheduleResourceConflict(Exception):
@@ -22779,6 +23165,127 @@ def _ps_validate_execution_sites(db, user_id, plan_data):
     return normalized
 
 
+def _ps_site_device_types(db, site_id):
+    """Return active device types used by all plan item matching paths."""
+    if not _table_exists(db, 'device_shadows'):
+        return set()
+    columns = {row['name'] for row in db.execute('PRAGMA table_info(device_shadows)').fetchall()}
+    if not {'site_id', 'device_type'}.issubset(columns):
+        return set()
+    query = 'SELECT DISTINCT device_type FROM device_shadows WHERE site_id=?'
+    if 'status' in columns:
+        query += " AND COALESCE(status, '') NOT IN ('retired', 'deleted')"
+    return {row['device_type'] for row in db.execute(query, (site_id,)).fetchall()
+            if row['device_type']}
+
+
+def _ps_site_template_items(db, site_id, schedule_type):
+    """Return currently applicable template items for one site.
+
+    This is used only while drafting/generating a new plan. Generated item rows
+    remain snapshots and are never re-filtered by later device changes.
+    """
+    site = db.execute('SELECT id, type FROM sites WHERE id=?', (site_id,)).fetchone()
+    if not site or not _table_exists(db, 'inspection_configs'):
+        return []
+    device_types = _ps_site_device_types(db, site_id)
+    config_columns = {row['name'] for row in db.execute('PRAGMA table_info(inspection_configs)').fetchall()}
+    template_columns = {row['name'] for row in db.execute('PRAGMA table_info(inspection_templates)').fetchall()}
+    device_types_select = 'c.device_types' if 'device_types' in config_columns else 'NULL'
+    template_order = 't.sort_order, t.id' if 'sort_order' in template_columns else 't.id'
+    configs = db.execute(f"""
+        SELECT {device_types_select} AS device_types, c.template_id
+        FROM inspection_configs c
+        JOIN inspection_templates t ON t.id=c.template_id
+        WHERE c.site_type=? AND c.is_active=1 AND t.status='active' AND t.frequency=?
+        ORDER BY {template_order}
+    """, (site['type'], schedule_type)).fetchall()
+    result = []
+    seen_item_ids = set()
+    for config in configs:
+        raw_required = config['device_types']
+        if raw_required not in (None, '', '[]'):
+            try:
+                required = json.loads(raw_required)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(required, list) or (required and not device_types.intersection(required)):
+                continue
+        rows = db.execute(
+            'SELECT * FROM inspection_template_items WHERE template_id=? ORDER BY sort_order, id',
+            (config['template_id'],)).fetchall()
+        for row in rows:
+            item = dict(row)
+            item_id = int(item['id'])
+            if item_id in seen_item_ids:
+                continue
+            seen_item_ids.add(item_id)
+            result.append(item)
+    return result
+
+
+def _ps_validate_item_selections(db, plan_data, schedule_type):
+    """Validate optional per-site item selections against current site devices."""
+    normalized = {}
+    for date_str, day_data in (plan_data or {}).items():
+        if not isinstance(day_data, dict):
+            normalized[str(date_str)] = day_data
+            continue
+        day = dict(day_data)
+        selection_keys = [key for key in ('inspection_items', 'site_items') if key in day]
+        if not selection_keys:
+            normalized[str(date_str)] = day
+            continue
+        if len(selection_keys) > 1 and day.get(selection_keys[0]) != day.get(selection_keys[1]):
+            raise PlanScheduleSiteScopeError('检查项选择字段不一致', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+        selection_key = selection_keys[0]
+        raw_selection = day.get(selection_key)
+        if not isinstance(raw_selection, dict):
+            raise PlanScheduleSiteScopeError('检查项选择必须按站点填写', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+        canonical = {}
+        for raw_site_id, raw_ids in raw_selection.items():
+            try:
+                site_id = int(raw_site_id)
+            except (TypeError, ValueError):
+                raise PlanScheduleSiteScopeError('检查项选择包含无效站点', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+            if site_id <= 0 or site_id not in [int(value) for value in (day.get('sites') or [])]:
+                raise PlanScheduleSiteScopeError('检查项选择站点不在本日安排中', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+            if not isinstance(raw_ids, list):
+                raise PlanScheduleSiteScopeError('检查项选择必须是数组', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+            applicable = _ps_site_template_items(db, site_id, schedule_type)
+            by_id = {int(item['id']): item for item in applicable if item.get('id') is not None}
+            by_name = {str(item.get('item_name')): int(item['id']) for item in applicable if item.get('item_name') and item.get('id') is not None}
+            ids = []
+            for raw_id in raw_ids:
+                item_id = None
+                if isinstance(raw_id, dict):
+                    raw_id = raw_id.get('id', raw_id.get('template_item_id'))
+                try:
+                    item_id = int(raw_id)
+                except (TypeError, ValueError):
+                    item_id = by_name.get(str(raw_id))
+                if not item_id or item_id not in by_id:
+                    raise PlanScheduleSiteScopeError(
+                        '检查项与本站设备或当前模板不匹配', code='PLAN_INSPECTION_ITEM_SELECTION_INVALID',
+                        site_ids=[site_id])
+                if item_id not in ids:
+                    ids.append(item_id)
+            canonical[str(site_id)] = ids
+        for scheduled_site_id in day.get('sites') or []:
+            site_id = int(scheduled_site_id)
+            key = str(site_id)
+            if key not in canonical:
+                canonical[key] = [
+                    int(item['id']) for item in _ps_site_template_items(db, site_id, schedule_type)
+                    if item.get('id') is not None
+                ]
+        day['inspection_items'] = canonical
+        if selection_key == 'site_items':
+            day.pop('site_items', None)
+        normalized[str(date_str)] = day
+    return normalized
+
+
 def _ps_prune_vehicle_days(plan_data, vehicle_days, period_start, period_end):
     """Remove vehicle allocations that no longer belong to an arranged plan day."""
     if not isinstance(vehicle_days, dict):
@@ -22907,31 +23414,39 @@ def _ps_favorite_snapshot(schedule):
     parsed = _ps_parse_row(schedule)
     start = datetime.strptime(str(parsed['period_start'])[:10], '%Y-%m-%d')
     end = datetime.strptime(str(parsed['period_end'])[:10], '%Y-%m-%d')
-    relative_plan, relative_vehicles = {}, {}
+    relative_plan = {}
     for date_str, day in (parsed.get('plan_data') or {}).items():
         try:
             offset = (datetime.strptime(str(date_str)[:10], '%Y-%m-%d') - start).days
         except (TypeError, ValueError):
             continue
         if 0 <= offset <= (end - start).days and isinstance(day, dict):
-            relative_plan[str(offset)] = {
+            relative_day = {
                 'sites': [int(site_id) for site_id in (day.get('sites') or []) if str(site_id).isdigit()],
                 'notes': (day.get('notes') or '').strip(),
             }
-    for date_str, vehicle_id in (parsed.get('vehicle_days') or {}).items():
-        try:
-            offset = (datetime.strptime(str(date_str)[:10], '%Y-%m-%d') - start).days
-        except (TypeError, ValueError):
-            continue
-        if 0 <= offset <= (end - start).days and str(vehicle_id).isdigit():
-            relative_vehicles[str(offset)] = int(vehicle_id)
+            if 'inspection_items' in day:
+                selection = day.get('inspection_items')
+                if not isinstance(selection, dict):
+                    raise PlanScheduleSiteScopeError(
+                        '常用计划中的检查项选择无效',
+                        code='PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+                relative_day['inspection_items'] = {
+                    str(site_id): list(selection.get(str(site_id), []))
+                    for site_id in relative_day['sites'] if str(site_id) in selection
+                }
+            relative_plan[str(offset)] = relative_day
+    normalized_vehicle_days = _ps_expand_plan_vehicle(
+        parsed.get('plan_data') or {}, parsed.get('vehicle_id'), parsed.get('vehicle_days') or {})
+    plan_vehicle_id = _ps_plan_vehicle_id(normalized_vehicle_days)
     return {
         'schedule_type': parsed['schedule_type'],
         'source_period_start': parsed['period_start'],
         'source_period_end': parsed['period_end'],
         'duration_days': max(1, (end - start).days + 1),
         'plan_data': relative_plan,
-        'vehicle_days': relative_vehicles,
+        'vehicle_id': plan_vehicle_id,
+        'vehicle_exception_reason': parsed.get('vehicle_exception_reason') or '',
         'spare_parts': parsed.get('spare_parts') or [],
         'remarks': parsed.get('remarks') or '',
     }
@@ -22953,7 +23468,11 @@ def _ps_favorite_response(row):
         'day_count': sum(1 for day in (snapshot.get('plan_data') or {}).values()
                          if isinstance(day, dict) and day.get('sites')),
         'site_count': len(site_ids),
-        'vehicle_day_count': len(snapshot.get('vehicle_days') or {}),
+        'vehicle_day_count': (
+            sum(1 for day in (snapshot.get('plan_data') or {}).values()
+                if isinstance(day, dict) and day.get('sites'))
+            if snapshot.get('vehicle_id') else len(snapshot.get('vehicle_days') or {})
+        ),
         'part_count': len(snapshot.get('spare_parts') or []),
     })
     return result
@@ -23021,6 +23540,10 @@ def api_plan_schedule_favorites_create():
             return jsonify({'error': '只能收藏自己的巡检计划'}), 403
         try:
             snapshot = _ps_favorite_snapshot(schedule)
+        except PlanScheduleSiteScopeError as exc:
+            if exc.code == 'PLAN_MULTIPLE_VEHICLES_NOT_ALLOWED':
+                exc.status = 409
+            return _ps_site_scope_error_response(exc)
         except (TypeError, ValueError):
             return jsonify({'error': '计划周期数据不完整，无法收藏'}), 400
         site_count = len({site_id for day in snapshot['plan_data'].values() for site_id in day['sites']})
@@ -23103,6 +23626,9 @@ def api_plan_schedule_favorite_create_draft(favorite_id):
                 date_str = (period_start_date + timedelta(days=offset)).strftime('%Y-%m-%d')
                 plan_data[date_str] = {
                     'sites': day.get('sites') or [], 'notes': day.get('notes') or ''}
+                if 'inspection_items' in day:
+                    plan_data[date_str]['inspection_items'] = json.loads(
+                        json.dumps(day.get('inspection_items'), ensure_ascii=False))
         for offset_text, vehicle_id in (snapshot.get('vehicle_days') or {}).items():
             try:
                 offset = int(offset_text)
@@ -23112,17 +23638,22 @@ def api_plan_schedule_favorite_create_draft(favorite_id):
                 vehicle_days[(period_start_date + timedelta(days=offset)).strftime('%Y-%m-%d')] = int(vehicle_id)
         try:
             plan_data = _ps_validate_execution_sites(db, g.current_user['id'], plan_data)
+            plan_data = _ps_validate_item_selections(db, plan_data, schedule_type)
+            vehicle_days = _ps_expand_plan_vehicle(
+                plan_data, snapshot.get('vehicle_id'), vehicle_days)
+            vehicle_id = _ps_plan_vehicle_id(vehicle_days)
         except PlanScheduleSiteScopeError as exc:
             return _ps_site_scope_error_response(exc)
         validation = _ps_validate(db, g.current_user['id'], schedule_type, period_start, period_end,
                                   plan_data, vehicle_days)
         cursor = db.execute("""INSERT INTO plan_schedules
-            (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days,
-             spare_parts, work_order_ids, status, remarks, tasks_generated)
-            VALUES (?,?,?,?,?,?,?,?, 'draft', ?, 0)""",
+            (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days, vehicle_id,
+             spare_parts, work_order_ids, status, remarks, vehicle_exception_reason, tasks_generated)
+            VALUES (?,?,?,?,?,?,?,?,?, 'draft', ?, ?, 0)""",
             (g.current_user['id'], schedule_type, period_start, period_end,
-             json.dumps(plan_data, ensure_ascii=False), json.dumps(vehicle_days, ensure_ascii=False),
-             json.dumps(snapshot.get('spare_parts') or [], ensure_ascii=False), '[]', snapshot.get('remarks') or ''))
+             json.dumps(plan_data, ensure_ascii=False), json.dumps(vehicle_days, ensure_ascii=False), vehicle_id,
+             json.dumps(snapshot.get('spare_parts') or [], ensure_ascii=False), '[]', snapshot.get('remarks') or '',
+             snapshot.get('vehicle_exception_reason') or ''))
         schedule_id = cursor.lastrowid
         _ps_record_event(db, schedule_id, 1, 'created_from_favorite', g.current_user['id'], {
             'favorite_id': favorite_id, 'source_schedule_id': favorite['source_schedule_id'],
@@ -23377,6 +23908,8 @@ def _ps_validate(db, user_id, schedule_type, period_start, period_end,
     )
     if not planned_dates:
         errors.append('请至少安排一个巡检日期和站点')
+    elif _ps_generatable_item_count(db, pd, schedule_type) == 0:
+        errors.append('当前计划未选择任何可执行检查项，请至少为一个站点选择检查项')
     missing_vehicle_dates = [
         date_str for date_str in planned_dates
         if not (vehicle_days or {}).get(date_str)
@@ -23568,30 +24101,34 @@ def _ps_site_scores(db, site_ids):
     return scores, details
 
 
-def _ps_add_site_tasks(db, plan_id, site_id, schedule_type):
+def _ps_add_site_tasks(db, plan_id, site_id, schedule_type, selected_item_ids=None):
     """按计划频次为一个执行包补齐一个站点的模板检查项，返回新增项数。"""
-    site = db.execute("SELECT type FROM sites WHERE id=?", (site_id,)).fetchone()
-    site_type = site['type'] if site else ''
-    items = db.execute("""
-        SELECT iti.item_name, iti.category, t.id as template_id,
-               iti.photo_required, iti.max_photos, iti.need_review
-        FROM inspection_configs c
-        JOIN inspection_templates t ON c.template_id = t.id
-        JOIN inspection_template_items iti ON iti.template_id = t.id
-        WHERE c.site_type=? AND c.is_active=1 AND t.status='active' AND t.frequency=?
-        ORDER BY iti.sort_order, iti.id
-    """, (site_type, schedule_type)).fetchall()
+    items = _ps_site_template_items(db, site_id, schedule_type)
+    if selected_item_ids is not None:
+        selected = {int(item_id) for item_id in selected_item_ids}
+        items = [item for item in items if int(item['id']) in selected]
+        if not items:
+            return 0
     if items:
+        item_columns = {row['name'] for row in db.execute('PRAGMA table_info(insp_plan_items)').fetchall()}
         for it in items:
             required_photos = int(it['max_photos'] or 0)
             if not required_photos and it['photo_required']:
                 required_photos = 1
-            db.execute("""
-                INSERT INTO insp_plan_items
-                (plan_id, site_id, template_id, item_name, category, frequency, required_photos)
-                VALUES (?,?,?,?,?,?,?)
-            """, (plan_id, site_id, it['template_id'], it['item_name'],
-                  it['category'], schedule_type, required_photos))
+            values = {
+                'plan_id': plan_id, 'site_id': site_id, 'template_id': it['template_id'],
+                'item_name': it['item_name'], 'category': it['category'],
+                'frequency': schedule_type, 'required_photos': required_photos,
+            }
+            if 'need_review' in item_columns:
+                values['need_review'] = int(it.get('need_review') or 0)
+            if 'inspection_standard' in item_columns:
+                values['inspection_standard'] = it.get('inspection_standard') or ''
+            columns = list(values)
+            db.execute(
+                f"INSERT INTO insp_plan_items ({','.join(columns)}) "
+                f"VALUES ({','.join('?' for _ in columns)})",
+                [values[column] for column in columns])
         return len(items)
     # 无匹配模板仍保留一项可执行任务，避免审批通过后出现空站点。
     db.execute("""
@@ -23599,6 +24136,28 @@ def _ps_add_site_tasks(db, plan_id, site_id, schedule_type):
         VALUES (?,?,?,?,?)
     """, (plan_id, site_id, '常规检查', '常规', schedule_type))
     return 1
+
+
+def _ps_site_task_count(db, site_id, schedule_type, selected_item_ids=None):
+    """Count what task generation would create without writing an execution package."""
+    items = _ps_site_template_items(db, site_id, schedule_type)
+    if selected_item_ids is not None:
+        selected = {int(item_id) for item_id in selected_item_ids}
+        return sum(1 for item in items if int(item['id']) in selected)
+    return len(items) if items else 1
+
+
+def _ps_generatable_item_count(db, plan_data, schedule_type):
+    total = 0
+    for day_data in (plan_data or {}).values():
+        if not isinstance(day_data, dict):
+            continue
+        selected_by_site = day_data.get('inspection_items')
+        for site_id in day_data.get('sites') or []:
+            selected = (selected_by_site.get(str(site_id))
+                        if isinstance(selected_by_site, dict) else None)
+            total += _ps_site_task_count(db, site_id, schedule_type, selected)
+    return total
 
 
 def _ps_generate_tasks(db, schedule):
@@ -23615,6 +24174,15 @@ def _ps_generate_tasks(db, schedule):
         site_ids = day_data.get('sites') if isinstance(day_data, dict) else day_data
         if not site_ids:
             continue
+        selected_by_site = day_data.get('inspection_items') if isinstance(day_data, dict) else None
+        day_item_count = sum(
+            _ps_site_task_count(
+                db, site_id, schedule['schedule_type'],
+                selected_by_site.get(str(site_id)) if isinstance(selected_by_site, dict) else None)
+            for site_id in site_ids
+        )
+        if not day_item_count:
+            continue
         # 同来源同日期已有可执行包时不重复生成；被替代/取消的历史包仍可保留审计。
         dup = db.execute("SELECT id FROM insp_plans WHERE plan_schedule_id=? AND generate_date=? AND status != 'cancelled'",
                          (schedule['id'], date_str)).fetchone()
@@ -23629,8 +24197,10 @@ def _ps_generate_tasks(db, schedule):
               date_str, 'active', schedule['id'], schedule['version'],
               json.dumps({date_str: day_data}, ensure_ascii=False)))
         plan_id = cur.lastrowid
+        selected_by_site = day_data.get('inspection_items') or {} if isinstance(day_data, dict) else {}
         for sid in site_ids:
-            total_items += _ps_add_site_tasks(db, plan_id, sid, schedule['schedule_type'])
+            selected = selected_by_site.get(str(sid)) if isinstance(selected_by_site, dict) else None
+            total_items += _ps_add_site_tasks(db, plan_id, sid, schedule['schedule_type'], selected)
         created += 1
     return created, total_items
 
@@ -23663,7 +24233,7 @@ def _ps_auto_flow(db, schedule):
             SELECT id FROM vehicle_applications
             WHERE vehicle_id=? AND applicant_id=? AND reason LIKE ?
             LIMIT 1
-        """, (vid, schedule['user_id'], f'%计划#{schedule["id"]}%')).fetchone()
+        """, (vid, schedule['user_id'], _ps_vehicle_reason_like(schedule["id"]))).fetchone()
         if exists:
             continue
         # Approval holds a SQLite write transaction. This overlap check is the
@@ -23716,8 +24286,10 @@ def _ps_rebuild_tasks_on_change(db, schedule):
             cancelled += cur.rowcount
             existing_sites = {row['site_id'] for row in db.execute(
                 "SELECT DISTINCT site_id FROM insp_plan_items WHERE plan_id=?", (ep['id'],)).fetchall()}
+            selected_by_site = day_data.get('inspection_items') or {} if isinstance(day_data, dict) else {}
             for added_site_id in desired_sites - existing_sites:
-                added_items += _ps_add_site_tasks(db, ep['id'], added_site_id, schedule['schedule_type'])
+                selected = selected_by_site.get(str(added_site_id)) if isinstance(selected_by_site, dict) else None
+                added_items += _ps_add_site_tasks(db, ep['id'], added_site_id, schedule['schedule_type'], selected)
             db.execute("UPDATE insp_plans SET schedule_version=? WHERE id=?", (schedule['version'], ep['id']))
             kept += 1
             continue
@@ -24091,6 +24663,9 @@ def api_plan_schedules_create():
     if not period_start or not period_end:
         return jsonify({'error': '缺少周期起止日期'}), 400
     plan_data = data.get('plan_data') or {}
+    if not isinstance(plan_data, dict):
+        return jsonify({'error': 'plan_data 必须是日期到安排的对象',
+                        'code': 'PLAN_DATA_INVALID'}), 400
     user_id = data.get('user_id') or u['id']
     try:
         user_id = int(user_id)
@@ -24099,21 +24674,32 @@ def api_plan_schedules_create():
     # 非管理者只能给自己排程；管理员代排时仍按目标执行人的 user_sites 校验。
     if not _has_any_role(u, 'admin') and user_id != u['id']:
         return jsonify({'error': '只能为自己创建巡检计划'}), 403
-    vehicle_days = data.get('vehicle_days') or {}
+    vehicle_id = data.get('vehicle_id')
+    vehicle_days = data.get('vehicle_days') if 'vehicle_days' in data else {}
     spare_parts = data.get('spare_parts') or []
     work_order_ids = data.get('work_order_ids') or []
     if not isinstance(spare_parts, list) or not isinstance(work_order_ids, list):
         return jsonify({'error': '计划资源格式无效', 'code': 'PLAN_RESOURCE_DATA_INVALID'}), 400
     coverage_exception_reason = (data.get('coverage_exception_reason') or '').strip()
     vehicle_exception_reason = (data.get('vehicle_exception_reason') or '').strip()
+    if 'vehicle_id' in data and vehicle_id in (None, '') and vehicle_exception_reason:
+        vehicle_days = {}
     submit = bool(data.get('submit'))
     with get_db() as db:
+        if not _ensure_plan_schedule_vehicle_column(db):
+            return jsonify({'error': '计划数据结构缺少 vehicle_id，无法保存，请先完成数据库迁移',
+                            'code': 'PLAN_SCHEMA_UNAVAILABLE'}), 503
         try:
             plan_data = _ps_validate_execution_sites(db, user_id, plan_data)
+            plan_data = _ps_validate_item_selections(db, plan_data, schedule_type)
+            vehicle_days = _ps_expand_plan_vehicle(plan_data, vehicle_id, vehicle_days)
+            vehicle_id = _ps_plan_vehicle_id(vehicle_days)
             vehicle_days, _ = _ps_prune_vehicle_days(
                 plan_data, vehicle_days, period_start, period_end)
         except PlanScheduleSiteScopeError as exc:
             return _ps_site_scope_error_response(exc)
+        vehicle_exception_reason = _ps_normalize_vehicle_exception_reason(
+            vehicle_id, vehicle_exception_reason)
         # 同用户同类型周期重叠检查（防止重复排程）
         overlap = _ps_period_overlap(db, user_id, schedule_type, period_start, period_end)
         if overlap:
@@ -24130,12 +24716,13 @@ def api_plan_schedules_create():
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cur = db.execute("""
             INSERT INTO plan_schedules
-                (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days,
+                (user_id, schedule_type, period_start, period_end, plan_data, vehicle_days, vehicle_id,
                  spare_parts, work_order_ids, status, remarks, submitted_at, coverage_exception_reason,
                  vehicle_exception_reason, validation_snapshot)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (user_id, schedule_type, period_start, period_end,
               json.dumps(plan_data, ensure_ascii=False), json.dumps(vehicle_days, ensure_ascii=False),
+              vehicle_id,
               json.dumps(spare_parts, ensure_ascii=False), json.dumps(work_order_ids, ensure_ascii=False),
               status, data.get('remarks', ''), now if submit else None, coverage_exception_reason,
               vehicle_exception_reason,
@@ -24311,8 +24898,14 @@ def api_plan_schedules_update(sid):
     draft/rejected 修改后回到 draft；modifying（变更中）修改后保持 modifying。"""
     u = g.current_user
     data = request.get_json(silent=True) or {}
+    vehicle_days = data.get('vehicle_days') if 'vehicle_days' in data else {}
+    vehicle_id = data.get('vehicle_id')
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
+        if not _ensure_plan_schedule_vehicle_column(db):
+            db.rollback()
+            return jsonify({'error': '计划数据结构缺少 vehicle_id，无法保存，请先完成数据库迁移',
+                            'code': 'PLAN_SCHEMA_UNAVAILABLE'}), 503
         row = db.execute("SELECT * FROM plan_schedules WHERE id=?", (sid,)).fetchone()
         if not row:
             return jsonify({'error': '计划不存在'}), 404
@@ -24346,6 +24939,7 @@ def api_plan_schedules_update(sid):
             return jsonify({'error': 'Plan resource data is invalid',
                             'code': 'PLAN_RESOURCE_DATA_INVALID'}), 409
         plan_data = data['plan_data'] if 'plan_data' in data else current_plan_data
+        vehicle_id = data['vehicle_id'] if 'vehicle_id' in data else (row['vehicle_id'] if 'vehicle_id' in row.keys() else None)
         vehicle_days = data['vehicle_days'] if 'vehicle_days' in data else current_vehicle_days
         spare_parts = data['spare_parts'] if 'spare_parts' in data else current_spare_parts
         work_order_ids = data['work_order_ids'] if 'work_order_ids' in data else current_work_order_ids
@@ -24372,12 +24966,20 @@ def api_plan_schedules_update(sid):
         coverage_exception_reason = (data.get('coverage_exception_reason', row['coverage_exception_reason'] or '') or '').strip()
         vehicle_exception_reason = (data.get(
             'vehicle_exception_reason', row['vehicle_exception_reason'] or '') or '').strip()
+        if 'vehicle_id' in data and vehicle_id in (None, '') and vehicle_exception_reason:
+            vehicle_days = {}
         try:
             plan_data = _ps_validate_execution_sites(db, row['user_id'], plan_data)
+            schedule_type = row['schedule_type'] if 'schedule_type' in row.keys() else 'weekly'
+            plan_data = _ps_validate_item_selections(db, plan_data, schedule_type)
             vehicle_days, pruned_vehicle_dates = _ps_prune_vehicle_days(
                 plan_data, vehicle_days, period_start, period_end)
+            vehicle_days = _ps_expand_plan_vehicle(plan_data, vehicle_id, vehicle_days)
+            vehicle_id = _ps_plan_vehicle_id(vehicle_days)
         except PlanScheduleSiteScopeError as exc:
             return _ps_site_scope_error_response(exc)
+        vehicle_exception_reason = _ps_normalize_vehicle_exception_reason(
+            vehicle_id, vehicle_exception_reason)
         validation = _ps_validate(
             db, row['user_id'], row['schedule_type'], period_start, period_end,
             plan_data, vehicle_days, exclude_schedule_id=sid,
@@ -24390,12 +24992,13 @@ def api_plan_schedules_update(sid):
         # 变更中保持 modifying；其余回到 draft
         new_status = 'modifying' if row['status'] == 'modifying' else 'draft'
         cursor = db.execute("""
-            UPDATE plan_schedules SET period_start=?, period_end=?, plan_data=?, vehicle_days=?, spare_parts=?, work_order_ids=?,
+            UPDATE plan_schedules SET period_start=?, period_end=?, plan_data=?, vehicle_days=?, vehicle_id=?, spare_parts=?, work_order_ids=?,
                    remarks=?, coverage_exception_reason=?, vehicle_exception_reason=?,
                    status=?, reject_reason=NULL, version=version+1
              WHERE id=? AND version=?
         """, (period_start, period_end,
               json.dumps(plan_data, ensure_ascii=False), json.dumps(vehicle_days, ensure_ascii=False),
+              vehicle_id,
               json.dumps(spare_parts, ensure_ascii=False), json.dumps(work_order_ids, ensure_ascii=False),
               remarks, coverage_exception_reason, vehicle_exception_reason, new_status, sid,
               int(row['version'] or 1)))
@@ -24416,6 +25019,7 @@ def api_plan_schedules_update(sid):
             'success': True, 'id': sid, 'status': new_status, 'version': next_version,
             'period_start': period_start, 'period_end': period_end,
             'plan_data': plan_data, 'vehicle_days': vehicle_days,
+            'vehicle_exception_reason': vehicle_exception_reason,
             'pruned_vehicle_dates': pruned_vehicle_dates,
             'validation': validation, 'draft_issue_count': len(draft_issues),
             'draft_issues': draft_issues,
@@ -24461,13 +25065,24 @@ def api_plan_schedules_submit(sid):
         except (TypeError, ValueError, json.JSONDecodeError):
             return jsonify({'error': 'Plan resource data is invalid',
                             'code': 'PLAN_RESOURCE_DATA_INVALID'}), 409
+        if not isinstance(vehicle_days, dict):
+            return jsonify({'error': 'Plan resource data is invalid',
+                            'code': 'PLAN_RESOURCE_DATA_INVALID'}), 409
         try:
             plan_data = _ps_validate_execution_sites(db, row['user_id'], plan_data)
+            plan_data = _ps_validate_item_selections(db, plan_data, row['schedule_type'])
+            _ps_persisted_vehicle_id(vehicle_days)
+            stored_vehicle_id = row['vehicle_id'] if 'vehicle_id' in row.keys() else None
+            vehicle_days = _ps_expand_plan_vehicle(plan_data, stored_vehicle_id, vehicle_days)
+            normalized_vehicle_id = _ps_plan_vehicle_id(vehicle_days)
         except PlanScheduleSiteScopeError as exc:
             return _ps_site_scope_error_response(exc)
+        vehicle_exception_reason = _ps_normalize_vehicle_exception_reason(
+            normalized_vehicle_id, row['vehicle_exception_reason'] or '')
         v = _ps_validate(db, row['user_id'], row['schedule_type'],
                          row['period_start'], row['period_end'], plan_data, vehicle_days,
-                         vehicle_exception_reason=row['vehicle_exception_reason'] or '')
+                         exclude_schedule_id=sid,
+                         vehicle_exception_reason=vehicle_exception_reason)
         if not v['ok']:
             return jsonify({'error': '；'.join(v['errors']), 'validation': v}), 400
         coverage_error = _ps_coverage_exception_required(v, row['schedule_type'], row['coverage_exception_reason'])
@@ -24475,19 +25090,33 @@ def api_plan_schedules_submit(sid):
             return jsonify({'error': coverage_error, 'validation': v}), 400
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if is_change:
-            transitioned = db.execute("""
+            vehicle_sql = ', vehicle_id=?' if _table_has_column(db, 'plan_schedules', 'vehicle_id') else ''
+            transition_params = [now, json.dumps(v, ensure_ascii=False),
+                                 vehicle_exception_reason, json.dumps(vehicle_days, ensure_ascii=False)]
+            if vehicle_sql:
+                transition_params.append(normalized_vehicle_id)
+            transition_params.extend([sid, expected_version])
+            transitioned = db.execute(f"""
                 UPDATE plan_schedules SET status='change_submitted', submitted_at=?,
-                       reject_reason=NULL, validation_snapshot=?
+                       reject_reason=NULL, validation_snapshot=?, vehicle_exception_reason=?,
+                       vehicle_days=?{vehicle_sql}
                  WHERE id=? AND status='modifying' AND version=?
-            """, (now, json.dumps(v, ensure_ascii=False), sid, expected_version))
+            """, transition_params)
             new_status = 'change_submitted'
             notif_title, notif_body = '巡检计划变更待审', \
                 f'{_PS_FREQ_CN.get(row["schedule_type"], "巡检")}计划（{row["period_start"]} ~ {row["period_end"]}）发起变更（原因：{row["change_reason"] or "未填"}），请审核。'
         else:
-            transitioned = db.execute("""UPDATE plan_schedules
-                SET status='submitted', submitted_at=?, reject_reason=NULL, validation_snapshot=?
+            vehicle_sql = ', vehicle_id=?' if _table_has_column(db, 'plan_schedules', 'vehicle_id') else ''
+            transition_params = [now, json.dumps(v, ensure_ascii=False),
+                                 vehicle_exception_reason, json.dumps(vehicle_days, ensure_ascii=False)]
+            if vehicle_sql:
+                transition_params.append(normalized_vehicle_id)
+            transition_params.extend([sid, expected_version])
+            transitioned = db.execute(f"""UPDATE plan_schedules
+                SET status='submitted', submitted_at=?, reject_reason=NULL,
+                    validation_snapshot=?, vehicle_exception_reason=?, vehicle_days=?{vehicle_sql}
                 WHERE id=? AND status IN ('draft','rejected') AND version=?""",
-                (now, json.dumps(v, ensure_ascii=False), sid, expected_version))
+                transition_params)
             new_status = 'submitted'
             notif_title, notif_body = '有新的巡检计划待审批', \
                 f'{_PS_FREQ_CN.get(row["schedule_type"], "巡检")}计划（{row["period_start"]} ~ {row["period_end"]}）已提交，请审批。'
@@ -24503,7 +25132,8 @@ def api_plan_schedules_submit(sid):
             _create_notification(approver_id, 'plan_schedule', sid, notif_title, notif_body, db=db)
         _ps_record_event(db, sid, row['version'],
                          'change_submitted' if is_change else 'submitted', u['id'],
-                         {'validation': v, 'coverage_exception_reason': row['coverage_exception_reason']})
+                         {'validation': v, 'coverage_exception_reason': row['coverage_exception_reason'],
+                          'vehicle_exception_reason': vehicle_exception_reason})
         db.commit()
         return jsonify({'success': True, 'id': sid, 'status': new_status,
                         'version': expected_version, 'validation': v})
@@ -24543,15 +25173,26 @@ def api_plan_schedules_approve(sid):
             db.rollback()
             return jsonify({'error': 'Plan resource data is invalid',
                             'code': 'PLAN_RESOURCE_DATA_INVALID'}), 409
+        if not isinstance(vehicle_days, dict):
+            db.rollback()
+            return jsonify({'error': 'Plan resource data is invalid',
+                            'code': 'PLAN_RESOURCE_DATA_INVALID'}), 409
         try:
             plan_data = _ps_validate_execution_sites(db, row['user_id'], plan_data)
+            plan_data = _ps_validate_item_selections(db, plan_data, row['schedule_type'])
+            _ps_persisted_vehicle_id(vehicle_days)
+            stored_vehicle_id = row['vehicle_id'] if 'vehicle_id' in row.keys() else None
+            vehicle_days = _ps_expand_plan_vehicle(plan_data, stored_vehicle_id, vehicle_days)
+            normalized_vehicle_id = _ps_plan_vehicle_id(vehicle_days)
         except PlanScheduleSiteScopeError as exc:
             db.rollback()
             return _ps_site_scope_error_response(exc)
+        vehicle_exception_reason = _ps_normalize_vehicle_exception_reason(
+            normalized_vehicle_id, row['vehicle_exception_reason'] or '')
         validation = _ps_validate(
             db, row['user_id'], row['schedule_type'], row['period_start'], row['period_end'],
             plan_data, vehicle_days, exclude_schedule_id=sid,
-            vehicle_exception_reason=row['vehicle_exception_reason'] or '',
+            vehicle_exception_reason=vehicle_exception_reason,
             # Submitted plans are requests, not reservations. The immediate
             # transaction and final application guard resolve contenders.
             include_submitted_plan_conflicts=False)
@@ -24567,10 +25208,17 @@ def api_plan_schedules_approve(sid):
                             'code': 'PLAN_COVERAGE_EXCEPTION_REQUIRED'}), 409
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # 审批仅确认计划需求，不占用库存；现场领用时按实时库存决定领用或转外购。
-        transitioned = db.execute("""
-            UPDATE plan_schedules SET status='approved', approver_id=?, approved_at=?, reject_reason=NULL
+        vehicle_sql = ', vehicle_id=?' if _table_has_column(db, 'plan_schedules', 'vehicle_id') else ''
+        transition_params = [u['id'], now, vehicle_exception_reason,
+                             json.dumps(vehicle_days, ensure_ascii=False)]
+        if vehicle_sql:
+            transition_params.append(normalized_vehicle_id)
+        transition_params.extend([sid, row['status']])
+        transitioned = db.execute(f"""
+            UPDATE plan_schedules SET status='approved', approver_id=?, approved_at=?,
+                reject_reason=NULL, vehicle_exception_reason=?, vehicle_days=?{vehicle_sql}
             WHERE id=? AND status=?
-        """, (u['id'], now, sid, row['status']))
+        """, transition_params)
         if not transitioned.rowcount:
             db.rollback()
             return jsonify({'error': 'Plan status changed; refresh and retry',
@@ -24591,9 +25239,29 @@ def api_plan_schedules_approve(sid):
                 return jsonify({'error': str(exc),
                                 'validation': validation,
                                 'code': 'PLAN_PART_RESERVATION_FAILED'}), 409
-            # 取消今天及未来的旧用车预约，再按新日期/车辆锁定；历史出车申请保持原样。
-            db.execute("UPDATE vehicle_applications SET status='cancelled' WHERE applicant_id=? AND date(start_at)>=date('now','localtime') AND reason LIKE ? AND status='approved'",
-                       (fresh['user_id'], f'%计划#{sid}%'))
+            # Older return flows could leave a completed trip's application approved.
+            # Close only this plan's fully returned history before rebuilding reservations.
+            if _table_exists(db, 'vehicle_use_records'):
+                db.execute("""UPDATE vehicle_applications SET status='returned'
+                    WHERE applicant_id=? AND reason LIKE ? AND status='approved'
+                      AND EXISTS (
+                          SELECT 1 FROM vehicle_use_records vur
+                          WHERE vur.application_id=vehicle_applications.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM vehicle_use_records vur
+                          WHERE vur.application_id=vehicle_applications.id
+                            AND vur.returned_at IS NULL
+                            AND COALESCE(vur.status,'checked_out')!='returned'
+                      )""", (fresh['user_id'], _ps_vehicle_reason_like(sid)))
+            # 只取消尚未形成出车事实的旧预约；已出车车辆保留 approved 直至完成还车闭环。
+            use_record_guard = """AND NOT EXISTS (
+                SELECT 1 FROM vehicle_use_records vur
+                WHERE vur.application_id=vehicle_applications.id
+            )""" if _table_exists(db, 'vehicle_use_records') else ''
+            db.execute(f"""UPDATE vehicle_applications SET status='cancelled'
+                WHERE applicant_id=? AND reason LIKE ? AND status='approved' {use_record_guard}""",
+                       (fresh['user_id'], _ps_vehicle_reason_like(sid)))
             try:
                 changed_vehicle_days = json.loads(fresh['vehicle_days'] or '{}')
             except Exception:
@@ -24607,10 +25275,48 @@ def api_plan_schedules_approve(sid):
                 dates = sorted(set(dates))
                 if not dates:
                     continue
+                start_at = f'{dates[0]} 08:00:00'
+                end_at = f'{dates[-1]} 18:00:00'
+                active_application = None
+                if _table_exists(db, 'vehicle_use_records'):
+                    active_application = db.execute("""SELECT va.id,va.start_at,va.end_at
+                        FROM vehicle_applications va
+                        WHERE va.vehicle_id=? AND va.applicant_id=? AND va.status='approved'
+                          AND va.reason LIKE ? AND EXISTS (
+                              SELECT 1 FROM vehicle_use_records vur
+                              WHERE vur.application_id=va.id AND vur.returned_at IS NULL
+                                AND COALESCE(vur.status,'checked_out')!='returned'
+                          )
+                        ORDER BY va.id DESC LIMIT 1
+                    """, (vid, fresh['user_id'], _ps_vehicle_reason_like(sid))).fetchone()
+                reservation_start = min(str(active_application['start_at']), start_at) \
+                    if active_application else start_at
+                reservation_end = max(str(active_application['end_at']), end_at) \
+                    if active_application else end_at
+                reservation = db.execute("""SELECT id FROM vehicle_applications
+                    WHERE vehicle_id=? AND status='approved'
+                      AND NOT (end_at < ? OR start_at > ?)
+                      AND (? IS NULL OR id!=?)
+                    LIMIT 1
+                """, (vid, reservation_start, reservation_end,
+                      active_application['id'] if active_application else None,
+                      active_application['id'] if active_application else None)).fetchone()
+                if reservation:
+                    db.rollback()
+                    return jsonify({
+                        'error': '车辆时间已被其他已批准安排占用',
+                        'validation': validation,
+                        'code': 'PLAN_VEHICLE_RESERVATION_CONFLICT',
+                    }), 409
+                if active_application:
+                    db.execute("""UPDATE vehicle_applications
+                        SET start_at=?, end_at=? WHERE id=? AND status='approved'""",
+                               (reservation_start, reservation_end, active_application['id']))
+                    continue
                 db.execute("""INSERT INTO vehicle_applications
                     (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
-                    VALUES (?,?,?,?,?,?,?)""", (vid, fresh['user_id'], f'{dates[0]} 08:00:00',
-                    f'{dates[-1]} 18:00:00', '巡检', f'巡检计划#{sid}用车（v{fresh["version"]}，{dates[0]}至{dates[-1]}）', 'approved'))
+                    VALUES (?,?,?,?,?,?,?)""", (vid, fresh['user_id'], start_at,
+                    end_at, '巡检', f'巡检计划#{sid}用车（v{fresh["version"]}，{dates[0]}至{dates[-1]}）', 'approved'))
             # 变更审批通过：保留已执行内容，取消未执行旧项并生成新增日执行包。
             try:
                 flow = _ps_rebuild_tasks_on_change(db, fresh)
@@ -24627,7 +25333,9 @@ def api_plan_schedules_approve(sid):
                                  f'（保留{flow["kept"]}个、重建{flow["plans_created"]}个）。', db=db)
             # 二次审批完成后清理临时回滚快照；完整变更事实已写入审计事件。
             db.execute("""UPDATE plan_schedules SET previous_plan_data=NULL, previous_vehicle_days=NULL,
-                previous_spare_parts=NULL, previous_work_order_ids=NULL, previous_remarks=NULL,
+                previous_vehicle_id=NULL, previous_spare_parts=NULL, previous_work_order_ids=NULL,
+                previous_remarks=NULL, previous_period_start=NULL, previous_period_end=NULL,
+                previous_coverage_exception_reason=NULL, previous_vehicle_exception_reason=NULL,
                 change_reason=NULL WHERE id=?""", (sid,))
         else:
             try:
@@ -24675,17 +25383,42 @@ def api_plan_schedules_reject(sid):
             return jsonify({'error': f'当前状态（{row["status"]}）不可退回'}), 400
         if row['status'] == 'change_submitted':
             # 驳回变更：回滚到变更前的已批准版本，计划整体仍保持 approved
+            raw_rollback_vehicle_id = row['previous_vehicle_id'] \
+                if 'previous_vehicle_id' in row.keys() else None
+            try:
+                rollback_vehicle_id = int(raw_rollback_vehicle_id) \
+                    if raw_rollback_vehicle_id not in (None, '') else None
+                if rollback_vehicle_id is not None and rollback_vehicle_id <= 0:
+                    rollback_vehicle_id = None
+            except (TypeError, ValueError):
+                rollback_vehicle_id = None
+            if rollback_vehicle_id is None:
+                try:
+                    previous_vehicle_days = json.loads(row['previous_vehicle_days'] or '{}')
+                    rollback_vehicle_id = _ps_plan_vehicle_id(previous_vehicle_days)
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError,
+                        PlanScheduleSiteScopeError):
+                    # 历史多车计划保留原逐日事实，但不虚构一个计划级车辆。
+                    rollback_vehicle_id = None
             db.execute("""
             UPDATE plan_schedules SET status='approved', approver_id=?, reject_reason=?,
+                       period_start=COALESCE(previous_period_start, period_start),
+                       period_end=COALESCE(previous_period_end, period_end),
                        plan_data=COALESCE(previous_plan_data, plan_data),
                        vehicle_days=COALESCE(previous_vehicle_days, vehicle_days),
+                       vehicle_id=?,
                        spare_parts=COALESCE(previous_spare_parts, spare_parts),
                        work_order_ids=COALESCE(previous_work_order_ids, work_order_ids),
                        remarks=COALESCE(previous_remarks, remarks),
-                       previous_plan_data=NULL, previous_vehicle_days=NULL, previous_spare_parts=NULL,
-                       previous_work_order_ids=NULL, previous_remarks=NULL, change_reason=NULL
+                       coverage_exception_reason=COALESCE(previous_coverage_exception_reason, coverage_exception_reason),
+                       vehicle_exception_reason=COALESCE(previous_vehicle_exception_reason, vehicle_exception_reason),
+                       previous_plan_data=NULL, previous_vehicle_days=NULL, previous_vehicle_id=NULL,
+                       previous_spare_parts=NULL, previous_work_order_ids=NULL, previous_remarks=NULL,
+                       previous_period_start=NULL, previous_period_end=NULL,
+                       previous_coverage_exception_reason=NULL,
+                       previous_vehicle_exception_reason=NULL, change_reason=NULL
                 WHERE id=?
-            """, (u['id'], reason, sid))
+            """, (u['id'], reason, rollback_vehicle_id, sid))
             _create_notification(row['user_id'], 'plan_schedule', sid, '计划变更被驳回',
                                  f'原因：{reason}。已恢复原计划，请继续按原计划执行。', db=db)
             db.commit()
@@ -24816,7 +25549,7 @@ def api_plan_schedules_delete(sid):
             db.execute('SELECT 1 FROM insp_plans WHERE plan_schedule_id=? LIMIT 1', (sid,)).fetchone(),
             db.execute('SELECT 1 FROM plan_resource_reservations WHERE schedule_id=? LIMIT 1', (sid,)).fetchone(),
             db.execute('SELECT 1 FROM plan_departure_confirmations WHERE schedule_id=? LIMIT 1', (sid,)).fetchone(),
-            db.execute("SELECT 1 FROM vehicle_applications WHERE reason LIKE ? LIMIT 1", (f'%计划#{sid}%',)).fetchone(),
+            db.execute("SELECT 1 FROM vehicle_applications WHERE reason LIKE ? LIMIT 1", (_ps_vehicle_reason_like(sid),)).fetchone(),
         ))
         is_empty_approved_cleanup = (
             _has_any_role(u, 'admin') and row['status'] == 'approved'
@@ -24828,6 +25561,441 @@ def api_plan_schedules_delete(sid):
         db.execute('DELETE FROM plan_schedules WHERE id=?', (sid,))
         db.commit()
     return jsonify({'success': True, 'id': sid})
+
+
+def _cleanup_candidates(db):
+    """Return records safe for physical deletion or auditable anomaly close."""
+    candidates = []
+    schedules = db.execute("""SELECT ps.id, ps.status, ps.period_start, ps.period_end,
+            ps.created_at, ps.tasks_generated, ps.plan_data, ps.vehicle_days,
+            ps.spare_parts, ps.work_order_ids, u.real_name AS owner_name
+        FROM plan_schedules ps LEFT JOIN users u ON u.id=ps.user_id
+        WHERE ps.status IN ('draft','rejected') AND COALESCE(ps.tasks_generated,0)=0
+        ORDER BY ps.created_at DESC""").fetchall()
+    for row in schedules:
+        # A saved draft normally has plan_data and lifecycle events.  Neither
+        # constitutes field activity and therefore must not hide a recoverable
+        # draft from the administrator's explicit cleanup preview.
+        if any((db.execute('SELECT 1 FROM insp_plans WHERE plan_schedule_id=? LIMIT 1', (row['id'],)).fetchone(),
+                db.execute('SELECT 1 FROM plan_resource_reservations WHERE schedule_id=? LIMIT 1', (row['id'],)).fetchone(),
+                db.execute('SELECT 1 FROM plan_departure_confirmations WHERE schedule_id=? LIMIT 1', (row['id'],)).fetchone(),
+                db.execute('SELECT 1 FROM vehicle_applications WHERE reason LIKE ? LIMIT 1', (_ps_vehicle_reason_like(row["id"]),)).fetchone())):
+            continue
+        if _table_exists(db, 'operation_attachments') and db.execute(
+                "SELECT 1 FROM operation_attachments WHERE source_type='plan_schedule' AND source_id=? LIMIT 1",
+                (row['id'],)).fetchone():
+            continue
+        notifications = int(db.execute(
+            "SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
+            (row['id'],)).fetchone()[0] or 0) if _table_exists(db, 'notifications') else 0
+        candidates.append({'kind': 'plan_schedule', 'id': row['id'], 'label': f'巡检计划#{row["id"]}',
+                           'status': row['status'], 'owner_name': row['owner_name'] or '',
+                           'period_start': row['period_start'] or '',
+                           'period_end': row['period_end'] or '',
+                           'cleanup_action': 'physical_delete',
+                           'activity_facts': {
+                               'locations': 0, 'checkins': 0, 'photos': 0, 'reviews': 0,
+                               'attachments': 0, 'notifications': notifications,
+                               'execution_records': 0, 'resource_records': 0,
+                           },
+                           'reason': '草稿/退回且未生成执行任务、资源或现场记录'})
+    # Expired generated packages without any field fact are not deleted: they
+    # are offered as auditable anomaly-close candidates instead.
+    plan_columns = {item['name'] for item in db.execute('PRAGMA table_info(insp_plans)').fetchall()} if _table_exists(db, 'insp_plans') else set()
+    item_columns = {item['name'] for item in db.execute('PRAGMA table_info(insp_plan_items)').fetchall()} if _table_exists(db, 'insp_plan_items') else set()
+    schedule_columns = {item['name'] for item in db.execute('PRAGMA table_info(plan_schedules)').fetchall()}
+    timeline_columns = {item['name'] for item in db.execute('PRAGMA table_info(timeline_events)').fetchall()} if _table_exists(db, 'timeline_events') else set()
+    anomaly_close_ready = (
+        {'id', 'plan_schedule_id', 'status'}.issubset(plan_columns)
+        and {'plan_id', 'execution_status', 'result', 'check_in_time', 'check_out_time',
+             'gps_lat', 'gps_lng'}.issubset(item_columns)
+        and {'id', 'status'}.issubset(schedule_columns)
+        and {'source_type', 'source_id', 'event_type', 'operator', 'remark'}.issubset(timeline_columns)
+    )
+    if anomaly_close_ready:
+        generated = db.execute("""
+            SELECT ps.id, ps.status, ps.user_id, ps.period_start, ps.period_end,
+                   u.real_name AS owner_name,
+                   COUNT(DISTINCT ip.id) AS generated_plans
+            FROM plan_schedules ps
+            JOIN insp_plans ip ON ip.plan_schedule_id=ps.id
+            LEFT JOIN users u ON u.id=ps.user_id
+            WHERE ps.status IN ('submitted','approved','modifying','change_submitted')
+              AND ps.period_end < date('now','localtime')
+              AND ip.status NOT IN ('completed','cancelled')
+            GROUP BY ps.id
+        """).fetchall()
+        for row in generated:
+            field_parts = []
+            for field in ('result', 'check_time', 'completed_at', 'remark', 'calibrator',
+                          'calibration_values', 'part_consumed'):
+                if field in item_columns:
+                    field_parts.append(
+                        f"TRIM(COALESCE(CAST(pi.{field} AS TEXT),'')) NOT IN ('','[]','{{}}')")
+            field_records = int(db.execute(
+                f"SELECT COUNT(*) FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id "
+                f"WHERE ip.plan_schedule_id=? AND ({' OR '.join(field_parts) or '0'})",
+                (row['id'],)).fetchone()[0] or 0) if _table_exists(db, 'insp_plan_items') else 0
+
+            location_parts = []
+            for field in ('gps_lat', 'gps_lng', 'latitude', 'longitude',
+                          'location_lat', 'location_lng'):
+                if field in item_columns:
+                    location_parts.append(
+                        f"TRIM(COALESCE(CAST(pi.{field} AS TEXT),''))!=''")
+            locations = int(db.execute(
+                f"SELECT COUNT(*) FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id "
+                f"WHERE ip.plan_schedule_id=? AND ({' OR '.join(location_parts) or '0'})",
+                (row['id'],)).fetchone()[0] or 0)
+
+            item_checkin_parts = [
+                f"TRIM(COALESCE(pi.{field},''))!=''"
+                for field in ('check_in_time', 'check_out_time') if field in item_columns
+            ]
+            checkins = int(db.execute(
+                f"SELECT COUNT(*) FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id "
+                f"WHERE ip.plan_schedule_id=? AND ({' OR '.join(item_checkin_parts) or '0'})",
+                (row['id'],)).fetchone()[0] or 0)
+
+            photo_parts = []
+            if 'photo_urls' in item_columns:
+                photo_parts.append(
+                    "LOWER(TRIM(COALESCE(pi.photo_urls,''))) NOT IN ('','[]','{}','null')")
+            if 'actual_photos' in item_columns:
+                photo_parts.append('COALESCE(pi.actual_photos,0)>0')
+            photos = int(db.execute(
+                f"SELECT COUNT(*) FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id "
+                f"WHERE ip.plan_schedule_id=? AND ({' OR '.join(photo_parts) or '0'})",
+                (row['id'],)).fetchone()[0] or 0)
+
+            review_parts = []
+            if 'review_status' in item_columns:
+                review_parts.append(
+                    "TRIM(COALESCE(CAST(pi.review_status AS TEXT),'')) NOT IN ('','0')")
+            for field in ('review_comment', 'review_time', 'evidence_status',
+                          'supplement_required_at', 'supplement_reason'):
+                if field in item_columns:
+                    review_parts.append(f"TRIM(COALESCE(pi.{field},''))!=''")
+            if 'reviewer_id' in item_columns:
+                review_parts.append('pi.reviewer_id IS NOT NULL')
+            reviews = int(db.execute(
+                f"SELECT COUNT(*) FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id "
+                f"WHERE ip.plan_schedule_id=? AND ({' OR '.join(review_parts) or '0'})",
+                (row['id'],)).fetchone()[0] or 0)
+
+            if _table_exists(db, 'inspection_checkins'):
+                checkin_columns = {item['name'] for item in db.execute('PRAGMA table_info(inspection_checkins)').fetchall()}
+                checkin_rows = []
+                if 'plan_id' in checkin_columns:
+                    relations = [
+                        'plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)'
+                    ]
+                    params = [row['id']]
+                    if {'site_id', 'user_id', 'check_time'}.issubset(checkin_columns):
+                        relations.append(
+                            '(COALESCE(plan_id,0)=0 AND user_id=? AND site_id IN '
+                            '(SELECT DISTINCT pi.site_id FROM insp_plan_items pi '
+                            'JOIN insp_plans ip ON ip.id=pi.plan_id WHERE ip.plan_schedule_id=?) '
+                            "AND date(check_time) BETWEEN date(?) AND date(?))")
+                        params.extend((row['user_id'], row['id'], row['period_start'], row['period_end']))
+                    checkin_rows = db.execute(
+                        'SELECT * FROM inspection_checkins WHERE ' + ' OR '.join(relations),
+                        tuple(params)).fetchall()
+                elif 'site_id' in checkin_columns:
+                    checkin_rows = db.execute(
+                        'SELECT * FROM inspection_checkins WHERE site_id IN '
+                        '(SELECT DISTINCT pi.site_id FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id '
+                        'WHERE ip.plan_schedule_id=?)', (row['id'],)).fetchall()
+                checkins += len(checkin_rows)
+                locations += sum(1 for item in checkin_rows if any(
+                    field in item.keys() and item[field] not in (None, '')
+                    for field in ('lat', 'lng', 'gps_lat', 'gps_lng')))
+                photos += sum(1 for item in checkin_rows if
+                              'photo_url' in item.keys() and str(item['photo_url'] or '').strip())
+            attachments = 0
+            if _table_exists(db, 'operation_attachments'):
+                attachment_columns = {item['name'] for item in db.execute('PRAGMA table_info(operation_attachments)').fetchall()}
+                attachment_links = [
+                    "oa.source_id IN (SELECT pi.id FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id WHERE ip.plan_schedule_id=?)",
+                ]
+                if 'plan_id' in attachment_columns:
+                    attachment_links.append("oa.plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)")
+                if 'item_id' in attachment_columns:
+                    attachment_links.append("oa.item_id IN (SELECT pi.id FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id WHERE ip.plan_schedule_id=?)")
+                attachments = int(db.execute(
+                    "SELECT COUNT(*) FROM operation_attachments oa WHERE oa.source_type='inspection' AND ("
+                    + ' OR '.join(attachment_links) + ')', tuple([row['id']] * len(attachment_links))).fetchone()[0] or 0)
+                if attachments:
+                    image_parts = []
+                    if 'file_type' in attachment_columns:
+                        image_parts.append("LOWER(COALESCE(oa.file_type,''))='image'")
+                    if 'mime_type' in attachment_columns:
+                        image_parts.append("LOWER(COALESCE(oa.mime_type,'')) LIKE 'image/%'")
+                    if image_parts:
+                        photos += int(db.execute(
+                            "SELECT COUNT(*) FROM operation_attachments oa WHERE oa.source_type='inspection' AND ("
+                            + ' OR '.join(attachment_links) + ') AND (' + ' OR '.join(image_parts) + ')',
+                            tuple([row['id']] * len(attachment_links))).fetchone()[0] or 0)
+                    else:
+                        photos += attachments
+
+            notifications = 0
+            if _table_exists(db, 'notifications'):
+                notifications = int(db.execute(
+                    "SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
+                    (row['id'],)).fetchone()[0] or 0)
+            resource_records = 0
+            actual_resource_facts = False
+            if _table_exists(db, 'plan_resource_reservations'):
+                reservation_columns = {
+                    item['name'] for item in db.execute('PRAGMA table_info(plan_resource_reservations)').fetchall()
+                }
+                reservations = db.execute(
+                    'SELECT * FROM plan_resource_reservations WHERE schedule_id=?', (row['id'],)).fetchall()
+                resource_records += len(reservations)
+                quantity_columns = [name for name in (
+                    'issued_quantity', 'used_quantity', 'returned_quantity') if name in reservation_columns]
+                for reservation in reservations:
+                    if any(int(reservation[name] or 0) > 0 for name in quantity_columns):
+                        actual_resource_facts = True
+                    if 'status' not in reservation_columns or reservation['status'] not in ('planned', 'reserved'):
+                        actual_resource_facts = True
+            if _table_exists(db, 'plan_departure_confirmations'):
+                resource_records += int(db.execute(
+                    'SELECT COUNT(*) FROM plan_departure_confirmations WHERE schedule_id=?',
+                    (row['id'],)).fetchone()[0] or 0)
+            if _table_exists(db, 'vehicle_applications'):
+                vehicle_columns = {item['name'] for item in db.execute('PRAGMA table_info(vehicle_applications)').fetchall()}
+                vehicle_parts = []
+                params = []
+                if 'reason' in vehicle_columns:
+                    vehicle_parts.append('reason LIKE ?')
+                    params.append(_ps_vehicle_reason_like(row['id']))
+                if 'rework_plan_id' in vehicle_columns:
+                    vehicle_parts.append('rework_plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)')
+                    params.append(row['id'])
+                if vehicle_parts:
+                    vehicle_rows = db.execute(
+                        'SELECT * FROM vehicle_applications WHERE ' + ' OR '.join(vehicle_parts),
+                        tuple(params)).fetchall()
+                    resource_records += len(vehicle_rows)
+                    for vehicle_row in vehicle_rows:
+                        if 'status' not in vehicle_columns or vehicle_row['status'] != 'approved':
+                            actual_resource_facts = True
+                        if (_table_exists(db, 'vehicle_use_records')
+                                and _table_has_column(db, 'vehicle_use_records', 'application_id')
+                                and db.execute(
+                                    'SELECT 1 FROM vehicle_use_records WHERE application_id=? LIMIT 1',
+                                    (vehicle_row['id'],)).fetchone()):
+                            actual_resource_facts = True
+            if (field_records or locations or checkins or photos or reviews or attachments
+                    or actual_resource_facts):
+                continue
+            candidates.append({'kind': 'plan_schedule', 'id': row['id'],
+                               'label': f'巡检计划#{row["id"]}', 'status': row['status'],
+                               'owner_name': row['owner_name'] or '',
+                               'cleanup_action': 'anomaly_close',
+                               'activity_facts': {
+                                   'locations': locations, 'checkins': checkins,
+                                   'photos': photos, 'reviews': reviews,
+                                   'attachments': attachments, 'notifications': notifications,
+                                   'execution_records': int(row['generated_plans'] or 0),
+                                   'resource_records': resource_records,
+                               },
+                               'reason': '计划已超期且已生成执行包，但未发现现场定位、结果或附件；可异常关闭并保留审计'})
+    workorder_columns = {row['name'] for row in db.execute('PRAGMA table_info(work_orders)').fetchall()}
+    workorder_conditions = [
+        "w.status IN ('pending','accepted')",
+        "COALESCE(w.check_in_time,'')=''",
+    ]
+    if 'related_alert_id' in workorder_columns:
+        workorder_conditions.append("COALESCE(w.related_alert_id,0)=0")
+    # Empty legacy images are safe; any non-empty or malformed value blocks physical deletion.
+    if 'images' in workorder_columns:
+        workorder_conditions.append("TRIM(COALESCE(w.images,'')) IN ('','[]')")
+    for field in ('check_in_lat', 'check_in_lng'):
+        if field in workorder_columns:
+            workorder_conditions.append(f'w.{field} IS NULL')
+    if 'review_submitted_at' in workorder_columns:
+        workorder_conditions.append("TRIM(COALESCE(w.review_submitted_at,''))=''")
+    association_tables = (
+        ('operation_attachments', "oa.source_type='workorder' AND oa.source_id=w.id"),
+        ('timeline_events', "te.source_type='workorder' AND te.source_id=w.id"),
+        ('alerts', "a.related_order_no=w.order_no"),
+        ('hotline_events', "he.related_order_no=w.order_no"),
+        ('parts_requests', "pr.work_order_no=w.order_no"),
+        ('spare_part_requests', "spr.work_order_no=w.order_no"),
+        ('device_recycle', "dr.work_order_no=w.order_no"),
+        ('vehicle_applications', "va.work_order_no=w.order_no"),
+        ('inventory_logs', "il.work_order_no=w.order_no"),
+    )
+    for table, relation in association_tables:
+        if not _table_exists(db, table):
+            continue
+        alias = relation.split('.', 1)[0]
+        required_columns = set(re.findall(rf'{re.escape(alias)}\.([A-Za-z_][A-Za-z0-9_]*)', relation))
+        table_columns = {row['name'] for row in db.execute(f'PRAGMA table_info({table})').fetchall()}
+        if not required_columns.issubset(table_columns):
+            continue
+        workorder_conditions.append(f'NOT EXISTS (SELECT 1 FROM {table} {alias} WHERE {relation})')
+    linked_workorder_ids = set()
+    plan_links_safe = True
+    if _table_has_column(db, 'plan_schedules', 'work_order_ids'):
+        for plan_row in db.execute('SELECT work_order_ids FROM plan_schedules').fetchall():
+            raw_links = plan_row['work_order_ids']
+            if raw_links in (None, '', '[]'):
+                continue
+            try:
+                parsed_links = json.loads(raw_links)
+                if not isinstance(parsed_links, list):
+                    raise ValueError
+                linked_workorder_ids.update(int(item) for item in parsed_links)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                plan_links_safe = False
+                break
+    if not plan_links_safe:
+        workorder_conditions.append('0')
+    elif linked_workorder_ids:
+        placeholders = ','.join('?' for _ in linked_workorder_ids)
+        workorder_conditions.append(f'w.id NOT IN ({placeholders})')
+    workorders = db.execute(f"""SELECT w.id, w.order_no, w.title, w.status, w.source,
+            w.created_at, s.name AS site_name
+        FROM work_orders w LEFT JOIN sites s ON s.id=w.site_id
+        WHERE {' AND '.join(workorder_conditions)}
+        ORDER BY w.created_at DESC""", tuple(sorted(linked_workorder_ids)) if plan_links_safe else ()).fetchall()
+    for row in workorders:
+        notifications = int(db.execute(
+            "SELECT COUNT(*) FROM notifications WHERE source_type='workorder' AND source_id=?",
+            (row['id'],)).fetchone()[0] or 0) if _table_exists(db, 'notifications') else 0
+        candidates.append({'kind': 'workorder', 'id': row['id'], 'order_no': row['order_no'],
+                           'label': f'工单{row["order_no"]}', 'status': row['status'],
+                           'title': row['title'] or '', 'site_name': row['site_name'] or '',
+                           'cleanup_action': 'physical_delete',
+                           'activity_facts': {
+                               'locations': 0, 'checkins': 0, 'photos': 0, 'reviews': 0,
+                               'attachments': 0, 'notifications': notifications,
+                               'execution_records': 0, 'resource_records': 0,
+                           },
+                           'reason': '未签到、未审核且无附件或其他业务关联'})
+    return candidates
+
+
+@app.route('/api/admin/data-cleanup/candidates', methods=['GET'])
+@login_required
+def api_data_cleanup_candidates():
+    denied = require_admin()
+    if denied:
+        return denied
+    with get_db() as db:
+        return jsonify({
+            'candidates': _cleanup_candidates(db),
+            'policy': '草稿和无业务事实工单可物理删除；已生成但无现场事实的超期计划仅异常关闭并保留审计。确认时会再次复核。',
+        })
+
+
+@app.route('/api/admin/data-cleanup/apply', methods=['POST'])
+@login_required
+def api_data_cleanup_apply():
+    denied = require_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    selected = data.get('items')
+    if not isinstance(selected, list) or not selected or len(selected) > 100:
+        return jsonify({'error': '请选择1至100条候选记录', 'code': 'CLEANUP_SELECTION_INVALID'}), 400
+    with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = {(row['kind'], int(row['id'])): row for row in _cleanup_candidates(db)}
+        normalized = []
+        for item in selected:
+            if not isinstance(item, dict) or item.get('kind') not in ('plan_schedule', 'workorder'):
+                db.rollback(); return jsonify({'error': '清理对象格式无效', 'code': 'CLEANUP_SELECTION_INVALID'}), 400
+            try: key = (item['kind'], int(item['id']))
+            except (TypeError, ValueError):
+                db.rollback(); return jsonify({'error': '清理对象编号无效', 'code': 'CLEANUP_SELECTION_INVALID'}), 400
+            if key not in current:
+                db.rollback(); return jsonify({'error': '候选已变化，请刷新预览后重试', 'code': 'CLEANUP_CANDIDATE_CHANGED'}), 409
+            if key in normalized:
+                db.rollback(); return jsonify({'error': '清理对象不能重复选择', 'code': 'CLEANUP_SELECTION_DUPLICATE'}), 400
+            normalized.append(key)
+        deleted = []
+        try:
+            for kind, record_id in normalized:
+                if kind == 'plan_schedule':
+                    candidate = current[(kind, record_id)]
+                    if candidate.get('cleanup_action') == 'anomaly_close':
+                        item_columns = {row['name'] for row in db.execute('PRAGMA table_info(insp_plan_items)').fetchall()}
+                        pending_condition = " AND result IS NULL" if 'result' in item_columns else ''
+                        db.execute(
+                            "UPDATE insp_plan_items SET execution_status='cancelled' "
+                            "WHERE plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)"
+                            + pending_condition,
+                            (record_id,))
+                        db.execute("UPDATE insp_plans SET status='cancelled' WHERE plan_schedule_id=? AND status NOT IN ('completed','cancelled')", (record_id,))
+                        if _table_exists(db, 'plan_resource_reservations'):
+                            reservation_columns = {
+                                row['name'] for row in db.execute(
+                                    'PRAGMA table_info(plan_resource_reservations)').fetchall()
+                            }
+                            updates = []
+                            if 'planned_quantity' in reservation_columns:
+                                updates.append('planned_quantity=0')
+                            if 'reserved_quantity' in reservation_columns:
+                                updates.append('reserved_quantity=0')
+                            if 'status' in reservation_columns:
+                                updates.append("status='released'")
+                            if 'updated_at' in reservation_columns:
+                                updates.append("updated_at=datetime('now','localtime')")
+                            if updates:
+                                db.execute(
+                                    'UPDATE plan_resource_reservations SET ' + ','.join(updates)
+                                    + " WHERE schedule_id=? AND status IN ('planned','reserved')",
+                                    (record_id,))
+                        if _table_exists(db, 'vehicle_applications'):
+                            vehicle_columns = {
+                                row['name'] for row in db.execute(
+                                    'PRAGMA table_info(vehicle_applications)').fetchall()
+                            }
+                            if {'reason', 'status'}.issubset(vehicle_columns):
+                                db.execute(
+                                    "UPDATE vehicle_applications SET status='cancelled' "
+                                    "WHERE reason LIKE ? AND status='approved'",
+                                    (_ps_vehicle_reason_like(record_id),))
+                            if {'rework_plan_id', 'status'}.issubset(vehicle_columns):
+                                db.execute(
+                                    "UPDATE vehicle_applications SET status='cancelled' "
+                                    "WHERE rework_plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?) "
+                                    "AND status='approved'", (record_id,))
+                        db.execute("UPDATE plan_schedules SET status='archived' WHERE id=?", (record_id,))
+                        db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
+                                   ('plan_schedule', record_id, 'anomaly_closed', g.current_user.get('real_name') or '',
+                                    '清理操作异常关闭：无现场事实'))
+                        deleted.append({'kind': kind, 'id': record_id, 'action': 'anomaly_close'})
+                        continue
+                    if _table_exists(db, 'plan_schedule_events'):
+                        db.execute('DELETE FROM plan_schedule_events WHERE schedule_id=?', (record_id,))
+                    if _table_exists(db, 'notifications'):
+                        db.execute(
+                            "DELETE FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
+                            (record_id,))
+                    db.execute('DELETE FROM plan_schedules WHERE id=?', (record_id,))
+                else:
+                    row = db.execute('SELECT order_no FROM work_orders WHERE id=?', (record_id,)).fetchone()
+                    db.execute('DELETE FROM timeline_events WHERE source_type=? AND source_id=?', ('workorder', record_id))
+                    if _table_exists(db, 'notifications'):
+                        db.execute(
+                            "DELETE FROM notifications WHERE source_type='workorder' AND source_id=?",
+                            (record_id,))
+                    db.execute('DELETE FROM work_orders WHERE id=?', (record_id,))
+                db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
+                           ('data_cleanup', record_id, 'physical_delete', g.current_user.get('real_name') or '', f'{kind}:{record_id}'))
+                deleted.append({'kind': kind, 'id': record_id, 'action': 'physical_delete'})
+            db.commit()
+        except Exception:
+            app.logger.exception('data cleanup transaction failed')
+            db.rollback()
+            return jsonify({'error': '清理失败，已回滚且未删除记录', 'code': 'CLEANUP_ROLLED_BACK'}), 500
+    return jsonify({'success': True, 'deleted': deleted})
 
 
 @app.route('/api/plan-schedules/<int:sid>/request-change', methods=['POST'])
@@ -24852,18 +26020,27 @@ def api_plan_schedules_request_change(sid):
                             'code': 'PLAN_EXECUTION_COMPLETED'}), 409
         db.execute("""
             UPDATE plan_schedules SET status='modifying', change_reason=?,
-                   previous_plan_data=?, previous_vehicle_days=?, previous_spare_parts=?,
-                   previous_work_order_ids=?, previous_remarks=?
+                   previous_plan_data=?, previous_vehicle_days=?, previous_vehicle_id=?,
+                   previous_spare_parts=?, previous_work_order_ids=?, previous_remarks=?,
+                   previous_period_start=?, previous_period_end=?,
+                   previous_coverage_exception_reason=?, previous_vehicle_exception_reason=?
             WHERE id=?
-        """, (reason, row['plan_data'], row['vehicle_days'], row['spare_parts'],
-              row['work_order_ids'], row['remarks'], sid))
+        """, (reason, row['plan_data'], row['vehicle_days'],
+              row['vehicle_id'] if 'vehicle_id' in row.keys() else None,
+              row['spare_parts'], row['work_order_ids'], row['remarks'],
+              row['period_start'], row['period_end'],
+              row['coverage_exception_reason'] or '', row['vehicle_exception_reason'] or '', sid))
         # 通知审批人有变更待处理
         for approver_id in _ps_approver_ids(db):
             _create_notification(approver_id, 'plan_schedule', sid, '巡检计划发起变更',
                                  f'原因：{reason}。修改后将重新提交审核。', db=db)
         _ps_record_event(db, sid, row['version'], 'change_requested', u['id'], {
             'reason': reason,
-            'snapshot_fields': ['plan_data', 'vehicle_days', 'spare_parts', 'work_order_ids', 'remarks'],
+            'snapshot_fields': [
+                'period_start', 'period_end', 'plan_data', 'vehicle_id', 'vehicle_days',
+                'spare_parts', 'work_order_ids', 'remarks', 'coverage_exception_reason',
+                'vehicle_exception_reason',
+            ],
         })
         db.commit()
         return jsonify({'success': True, 'id': sid, 'status': 'modifying'})
@@ -24876,17 +26053,30 @@ def api_plan_schedules_validate():
     u = g.current_user
     data = request.get_json(silent=True) or {}
     user_id = data.get('user_id') or u['id']
+    raw_plan_data = data.get('plan_data') or {}
+    if not isinstance(raw_plan_data, dict):
+        return jsonify({'error': 'plan_data 必须是日期到安排的对象',
+                        'code': 'PLAN_DATA_INVALID'}), 400
+    vehicle_id = data.get('vehicle_id')
+    vehicle_days = data.get('vehicle_days') if 'vehicle_days' in data else {}
+    if 'vehicle_id' in data and vehicle_id in (None, '') and (data.get('vehicle_exception_reason') or '').strip():
+        vehicle_days = {}
     with get_db() as db:
         try:
-            plan_data = _ps_validate_execution_sites(db, user_id, data.get('plan_data') or {})
+            plan_data = _ps_validate_execution_sites(db, user_id, raw_plan_data)
+            plan_data = _ps_validate_item_selections(db, plan_data, data.get('schedule_type', 'weekly'))
         except PlanScheduleSiteScopeError as exc:
             return _ps_site_scope_error_response(exc)
-        v = _ps_validate(db, user_id,
-                         data.get('schedule_type', 'weekly'),
-                         data.get('period_start'), data.get('period_end'),
-                         plan_data, data.get('vehicle_days') or {},
-                         data.get('exclude_schedule_id'),
-                         data.get('vehicle_exception_reason') or '')
+        try:
+            vehicle_days = _ps_expand_plan_vehicle(plan_data, vehicle_id, vehicle_days)
+        except PlanScheduleSiteScopeError as exc:
+            return _ps_site_scope_error_response(exc)
+        v = _ps_validate(
+            db, user_id, data.get('schedule_type', 'weekly'),
+            data.get('period_start'), data.get('period_end'),
+            plan_data, vehicle_days,
+            data.get('exclude_schedule_id'),
+            data.get('vehicle_exception_reason') or '')
         return jsonify(v)
 
 

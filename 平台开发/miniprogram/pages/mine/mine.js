@@ -3,7 +3,7 @@ const maps = require('../../services/maps.js');
 const api = require('../../services/api.js');
 const { chooseAndCompress, fileToBase64 } = require('../../utils/photos.js');
 const { todayStr } = require('../../utils/util.js');
-const { myVehicleQuery, activeUseFromRows } = require('../../utils/vehicleScope.js');
+const { myVehicleQuery, activeUseFromRows, effectiveVehicleCanReturn } = require('../../utils/vehicleScope.js');
 const { canReview, loadReviewTodoCount } = require('../../utils/reviewAccess.js');
 
 const app = getApp();
@@ -52,7 +52,7 @@ Page({
           is_plan_trip: isPlanTrip,
           trip_end_date: tripEnd,
           plan_schedule_id: row.plan_schedule_id || null,
-          can_return: !isPlanTrip || !tripEnd || tripEnd <= today || row.vehicle_status === 'restricted'
+          can_return: effectiveVehicleCanReturn(row, today)
         });
       });
       this.setData({ activeVehicleUse: activeUseFromRows(currentUses) });

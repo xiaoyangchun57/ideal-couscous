@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty,
-  Drawer, Descriptions, Alert, Input, InputNumber, Tooltip, Badge, DatePicker,
+  Drawer, Descriptions, Alert, Input, InputNumber, Tooltip, Badge, DatePicker, Checkbox,
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
@@ -18,6 +18,10 @@ import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
+import {
+  cleanupCandidateFactRows, cleanupCandidateIdentityRows, reconcileCleanupSelection,
+} from './cleanupCandidateFacts';
+import { applyPlanVehicleSelection, buildPlanValidationPayload } from './planVehicleState';
 import './PlanSchedulesPage.css';
 
 const { Text } = Typography;
@@ -65,6 +69,7 @@ export default function PlanSchedulesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const userRoles = user?.roles || [user?.role];
   const canApprove = userRoles.some(role => role === 'admin' || role === 'manager');
+  const canCleanup = userRoles.includes('admin');
   const canUseFavorites = userRoles.includes('operator');
 
   const [list, setList] = useState([]);
@@ -85,7 +90,6 @@ export default function PlanSchedulesPage() {
   const [validation, setValidation] = useState(null);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
-  const [routeDay, setRouteDay] = useState(null);
   const [acting, setActing] = useState(false);
   const [draftRecommendations, setDraftRecommendations] = useState([]);
   const [recommendationLoading, setRecommendationLoading] = useState(false);
@@ -103,6 +107,11 @@ export default function PlanSchedulesPage() {
   const [favoriteStart, setFavoriteStart] = useState(null);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [favoritesError, setFavoritesError] = useState('');
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupCandidates, setCleanupCandidates] = useState([]);
+  const [cleanupSelected, setCleanupSelected] = useState([]);
+  const [cleanupError, setCleanupError] = useState('');
   const [supplementTarget, setSupplementTarget] = useState(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editDraft, setEditDraft] = useState(null);
@@ -110,6 +119,10 @@ export default function PlanSchedulesPage() {
   const [editError, setEditError] = useState('');
   const [editValidation, setEditValidation] = useState(null);
   const [editSites, setEditSites] = useState([]);
+  const [editItemOptions, setEditItemOptions] = useState({});
+  const [editItemsReady, setEditItemsReady] = useState(false);
+  const [editItemError, setEditItemError] = useState('');
+  const [editItemsReloadKey, setEditItemsReloadKey] = useState(0);
   const [editVehicles, setEditVehicles] = useState([]);
   const [editParts, setEditParts] = useState([]);
   const [editResourcesReady, setEditResourcesReady] = useState(false);
@@ -117,6 +130,8 @@ export default function PlanSchedulesPage() {
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const editorRequestRef = useRef(0);
+  const cleanupRequestRef = useRef(0);
+  const cleanupActionRef = useRef(false);
   const mountedRef = useRef(true);
 
   const loadList = useCallback(async () => {
@@ -140,6 +155,56 @@ export default function PlanSchedulesPage() {
       if (mountedRef.current && requestId === listRequestRef.current) setLoading(false);
     }
   }, [statusFilter, typeFilter, attentionFilter]);
+
+  const loadCleanupCandidates = useCallback(async ({ notice = '' } = {}) => {
+    const requestId = ++cleanupRequestRef.current;
+    setCleanupLoading(true);
+    try {
+      const result = await api.getStrict('/admin/data-cleanup/candidates');
+      if (!mountedRef.current || requestId !== cleanupRequestRef.current) return false;
+      const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+      setCleanupCandidates(candidates);
+      setCleanupSelected(current => reconcileCleanupSelection(current, candidates));
+      setCleanupError(notice);
+      return true;
+    } catch (error) {
+      if (!mountedRef.current || requestId !== cleanupRequestRef.current) return false;
+      setCleanupError([notice, error?.message || '清理候选加载失败'].filter(Boolean).join('；'));
+      return false;
+    } finally {
+      if (mountedRef.current && requestId === cleanupRequestRef.current) setCleanupLoading(false);
+    }
+  }, []);
+
+  const openCleanup = useCallback(async () => {
+    setCleanupOpen(true);
+    setCleanupSelected([]);
+    setCleanupError('');
+    await loadCleanupCandidates();
+  }, [loadCleanupCandidates]);
+
+  const applyCleanup = useCallback(async () => {
+    if (!cleanupSelected.length || cleanupActionRef.current) return;
+    cleanupActionRef.current = true;
+    setCleanupLoading(true);
+    try {
+      await api.postStrict('/admin/data-cleanup/apply', { items: cleanupSelected });
+      message.success(`已处理 ${cleanupSelected.length} 条无效记录`);
+      setCleanupOpen(false);
+      loadList();
+    } catch (error) {
+      if (error?.code === 'CLEANUP_CANDIDATE_CHANGED') {
+        const notice = '候选已变化，所选记录均未处理；列表已重新加载，请重新确认';
+        setCleanupSelected([]);
+        await loadCleanupCandidates({ notice });
+      } else {
+        setCleanupError(error?.message || '处理失败，数据未改变，可保留当前选择后重试');
+      }
+    } finally {
+      cleanupActionRef.current = false;
+      if (mountedRef.current) setCleanupLoading(false);
+    }
+  }, [cleanupSelected, loadCleanupCandidates, loadList]);
 
   const loadOverview = useCallback(async () => {
     if (!canApprove) return;
@@ -305,7 +370,6 @@ export default function PlanSchedulesPage() {
     setDetail(null);
     setSuggestions(null);
     setValidation(null);
-    setRouteDay(null);
     try {
       const det = await api.getStrict(`/plan-schedules/${id}`);
       if (!mountedRef.current || requestId !== detailRequestRef.current) return;
@@ -316,15 +380,7 @@ export default function PlanSchedulesPage() {
         if (!mountedRef.current || requestId !== detailRequestRef.current) return;
         setSuggestions(sug);
       }
-      const val = await api.postStrict('/plan-schedules/validate', {
-        user_id: det?.user_id,
-        schedule_type: det?.schedule_type,
-        period_start: det?.period_start,
-        period_end: det?.period_end,
-        plan_data: det?.plan_data || {},
-        vehicle_days: det?.vehicle_days || {},
-        exclude_schedule_id: det?.id,
-      });
+      const val = await api.postStrict('/plan-schedules/validate', buildPlanValidationPayload(det));
       if (!mountedRef.current || requestId !== detailRequestRef.current) return;
       setValidation(val);
     } catch (error) {
@@ -339,11 +395,17 @@ export default function PlanSchedulesPage() {
   const openEditor = useCallback(async (schedule = detail) => {
     if (!schedule) return;
     const requestId = ++editorRequestRef.current;
+    const scheduleVehicleId = schedule.vehicle_id || (() => {
+      const ids = [...new Set(Object.values(schedule.vehicle_days || {}).filter(Boolean).map(Number))];
+      return ids.length === 1 ? ids[0] : null;
+    })();
     setEditOpen(true);
     setEditSaving(true);
     setEditError('');
     setEditValidation(null);
     setEditResourcesReady(false);
+    setEditItemsReady(false);
+    setEditItemError('');
     setNewScheduleDate(null);
     setEditDraft({
       id: schedule.id,
@@ -354,11 +416,12 @@ export default function PlanSchedulesPage() {
       period_end: schedule.period_end,
       plan_data: JSON.parse(JSON.stringify(schedule.plan_data || {})),
       vehicle_days: { ...(schedule.vehicle_days || {}) },
+      vehicle_id: scheduleVehicleId,
       spare_parts: (schedule.spare_parts || []).map(part => ({ ...part })),
       work_order_ids: [...(schedule.work_order_ids || [])],
       remarks: schedule.remarks || '',
       coverage_exception_reason: schedule.coverage_exception_reason || '',
-      vehicle_exception_reason: schedule.vehicle_exception_reason || '',
+      vehicle_exception_reason: scheduleVehicleId ? '' : schedule.vehicle_exception_reason || '',
     });
     try {
       const requests = [api.getStrict('/sites'), api.getStrict('/vehicles'), api.getStrict('/parts/inventory')];
@@ -370,6 +433,7 @@ export default function PlanSchedulesPage() {
       const authorizedIds = scopeResult?.site_ids ? new Set(scopeResult.site_ids.map(Number)) : null;
       setEditSites((Array.isArray(siteRows) ? siteRows : siteRows?.sites || [])
         .filter(site => !authorizedIds || authorizedIds.has(Number(site.id))));
+      setEditItemOptions({});
       setEditVehicles((Array.isArray(vehicleRows) ? vehicleRows : []).filter(vehicle => vehicle.status !== 'retired'));
       setEditParts(Array.isArray(partRows) ? partRows : []);
       setEditResourcesReady(true);
@@ -382,14 +446,83 @@ export default function PlanSchedulesPage() {
     }
   }, [canApprove, detail, user?.id]);
 
+  const selectedEditSiteIds = useMemo(() => [...new Set(Object.values(editDraft?.plan_data || {})
+    .flatMap(day => Array.isArray(day?.sites) ? day.sites.map(Number) : []))], [editDraft?.plan_data]);
+
+  useEffect(() => {
+    if (!editOpen || !editDraft?.schedule_type) return undefined;
+    if (!selectedEditSiteIds.length) {
+      setEditItemOptions({});
+      setEditItemError('');
+      setEditItemsReady(true);
+      return undefined;
+    }
+    let cancelled = false;
+    setEditItemsReady(false);
+    setEditItemError('');
+    Promise.all(selectedEditSiteIds.map(async siteId => {
+        const result = await api.getStrict(`/inspection-v2/configs/match?site_id=${siteId}&schedule_type=${encodeURIComponent(editDraft.schedule_type)}`);
+        const items = Array.isArray(result?.items) ? result.items : [];
+        const unique = [...new Map(items.map(item => [Number(item.id), item])).values()];
+        return [siteId, unique];
+    })).then(entries => {
+      if (cancelled || !mountedRef.current) return;
+      const options = Object.fromEntries(entries);
+      setEditItemOptions(options);
+      setEditItemsReady(true);
+      setEditDraft(current => {
+        if (!current) return current;
+        let changed = false;
+        const planData = Object.fromEntries(Object.entries(current.plan_data || {}).map(([date, day]) => {
+          const selected = { ...(day?.inspection_items || {}) };
+          (day?.sites || []).forEach(siteId => {
+            const key = String(siteId);
+            if (!(key in selected)) {
+              selected[key] = (options[Number(siteId)] || []).map(item => Number(item.id));
+              changed = true;
+            }
+          });
+          return [date, { ...day, inspection_items: selected }];
+        }));
+        return changed ? { ...current, plan_data: planData } : current;
+      });
+    }).catch(error => {
+      if (cancelled || !mountedRef.current) return;
+      setEditItemOptions({});
+      setEditItemError(error?.message || '站点检查项加载失败，请重试后再保存计划');
+      setEditItemsReady(false);
+    });
+    return () => { cancelled = true; };
+  }, [editOpen, editDraft?.schedule_type, selectedEditSiteIds.join(','), editItemsReloadKey]);
+
   const updateEditDay = useCallback((date, patch) => {
     setEditDraft(current => current ? {
       ...current,
       plan_data: {
         ...current.plan_data,
-        [date]: { ...(current.plan_data?.[date] || { sites: [], notes: '' }), ...patch },
+        [date]: { ...(current.plan_data?.[date] || { sites: [], notes: '', inspection_items: {} }), ...patch },
       },
     } : current);
+  }, []);
+
+  const updateEditSiteItems = useCallback((date, siteId, itemIds) => {
+    setEditDraft(current => {
+      if (!current) return current;
+      const day = current.plan_data?.[date] || { sites: [], notes: '' };
+      return {
+        ...current,
+        plan_data: {
+          ...current.plan_data,
+          [date]: {
+            ...day,
+            inspection_items: {
+              ...(day.inspection_items || {}),
+              [String(siteId)]: (itemIds || []).map(Number).filter(Number.isInteger),
+            },
+          },
+        },
+      };
+    });
   }, []);
 
   const removeEditDay = useCallback((date) => {
@@ -415,14 +548,8 @@ export default function PlanSchedulesPage() {
     setEditError('');
   }, [editDraft, newScheduleDate, updateEditDay]);
 
-  const setEditVehicle = useCallback((date, vehicleId) => {
-    setEditDraft(current => {
-      if (!current) return current;
-      const vehicleDays = { ...current.vehicle_days };
-      if (vehicleId) vehicleDays[date] = vehicleId;
-      else delete vehicleDays[date];
-      return { ...current, vehicle_days: vehicleDays };
-    });
+  const setPlanVehicle = useCallback((vehicleId) => {
+    setEditDraft(current => applyPlanVehicleSelection(current, vehicleId));
   }, []);
 
   const updateEditPart = useCallback((index, patch) => {
@@ -457,9 +584,19 @@ export default function PlanSchedulesPage() {
 
   const saveEdit = useCallback(async (submitAfterSave = false) => {
     if (!editDraft || editSaving || !editResourcesReady) return;
+    if (!editItemsReady) {
+      setEditError(editItemError || '站点检查项尚未加载完成，请稍后重试');
+      return;
+    }
     const normalizedPlan = Object.fromEntries(Object.entries(editDraft.plan_data || {})
       .filter(([, day]) => Array.isArray(day?.sites) && day.sites.length > 0)
-      .map(([date, day]) => [date, { sites: [...new Set(day.sites.map(Number))], notes: String(day.notes || '').trim() }]));
+      .map(([date, day]) => {
+        const sites = [...new Set(day.sites.map(Number))];
+        const inspectionItems = Object.fromEntries(Object.entries(day.inspection_items || {})
+          .filter(([siteId, ids]) => sites.includes(Number(siteId)) && Array.isArray(ids))
+          .map(([siteId, ids]) => [String(siteId), [...new Set(ids.map(Number).filter(Number.isInteger))]]));
+        return [date, { sites, notes: String(day.notes || '').trim(), inspection_items: inspectionItems }];
+      }));
     const plannedDates = new Set(Object.keys(normalizedPlan));
     const normalizedVehicleDays = Object.fromEntries(Object.entries(editDraft.vehicle_days || {})
       .filter(([date, vehicleId]) => plannedDates.has(date) && vehicleId));
@@ -469,6 +606,7 @@ export default function PlanSchedulesPage() {
     try {
       const validationResult = await api.postStrict('/plan-schedules/validate', {
         ...payload,
+        vehicle_id: payload.vehicle_id || null,
         exclude_schedule_id: payload.id,
       });
       setEditValidation(validationResult);
@@ -505,7 +643,7 @@ export default function PlanSchedulesPage() {
     } finally {
       setEditSaving(false);
     }
-  }, [editDraft, editResourcesReady, editSaving, message, openDetail, refreshAll]);
+  }, [editDraft, editItemError, editItemsReady, editResourcesReady, editSaving, message, openDetail, refreshAll]);
 
   useEffect(() => {
     const scheduleId = Number(searchParams.get('schedule'));
@@ -802,9 +940,10 @@ export default function PlanSchedulesPage() {
     <WorkspacePage
       title="巡检计划"
       subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
-      primaryAction={canUseFavorites
-        ? <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>
-        : null}
+      primaryAction={<Space>
+        {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
+        {canCleanup && <Button icon={<DeleteOutlined />} danger onClick={openCleanup}>清理无效数据</Button>}
+      </Space>}
       statusItems={[
         { key: 'total', label: '当前结果', value: stats.total, color: tokens.colorText, always: true },
         { key: 'draft', label: '草稿', value: stats.draft, color: tokens.colorTextSecondary },
@@ -1034,74 +1173,6 @@ export default function PlanSchedulesPage() {
               </div>
             </div>
 
-            {/* 路线示意图（折返检测可视化） */}
-            {dayRows.length > 0 && detail.site_map && (() => {
-              const dates = dayRows.map(([d]) => d);
-              const selDate = routeDay || dates[0];
-              const dayData = detail.plan_data?.[selDate] || {};
-              const siteIds = dayData.sites || [];
-              const pts = siteIds
-                .map(sid => { const s = detail.site_map[sid]; return s && s.lat && s.lng ? { sid, name: s.name, lat: s.lat, lng: s.lng } : null; })
-                .filter(Boolean);
-              if (pts.length < 2) return null;
-              if (pts.length > 12) return <Alert type="info" showIcon message={`本站点日共 ${pts.length} 站，已完成路线距离与折返校验；节点图仅适用于 12 站以内的短路线。`} />;
-              // 归一化到 SVG 坐标 (280x160 viewport, padding 30)
-              const lats = pts.map(p => p.lat), lngs = pts.map(p => p.lng);
-              const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-              const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-              const spanLat = maxLat - minLat || 0.01, spanLng = maxLng - minLng || 0.01;
-              const W = 280, H = 160, PAD = 30;
-              const toX = lng => PAD + ((lng - minLng) / spanLng) * (W - 2 * PAD);
-              const toY = lat => H - PAD - ((lat - minLat) / spanLat) * (H - 2 * PAD);
-              const coords = pts.map(p => ({ ...p, x: toX(p.lng), y: toY(p.lat) }));
-              // 折返检测（与后端同逻辑）
-              const backtrack = new Set();
-              for (let i = 0; i < coords.length - 2; i++) {
-                const a = coords[i], b = coords[i + 1], c = coords[i + 2];
-                const dAB = Math.hypot(a.x - b.x, a.y - b.y);
-                const dAC = Math.hypot(a.x - c.x, a.y - c.y);
-                if (dAC < dAB * 0.85) { backtrack.add(i + 1); }
-              }
-              return (
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Text strong style={{ fontSize: 13 }}>路线示意图</Text>
-                    <Select size="small" style={{ width: 120 }} value={selDate} onChange={setRouteDay}
-                      options={dates.map(d => ({ value: d, label: `${d.slice(5)} ${weekdayOf(d)}` }))} />
-                  </div>
-                  <div style={{ marginTop: 8, background: tokens.colorBgLayout, borderRadius: 8, padding: 8, overflow: 'hidden' }}>
-                    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
-                      {/* 连线 */}
-                      {coords.slice(1).map((c, i) => {
-                        const prev = coords[i];
-                        const isBT = backtrack.has(i);
-                        return <line key={i} x1={prev.x} y1={prev.y} x2={c.x} y2={c.y}
-                          stroke={isBT ? tokens.colorError : tokens.colorPrimary} strokeWidth={isBT ? 2.5 : 1.5}
-                          strokeDasharray={isBT ? '6 3' : undefined} markerEnd="url(#arrow)" />;
-                      })}
-                      <defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-                        <path d="M0,0 L6,3 L0,6 Z" fill={tokens.colorTextSecondary} />
-                      </marker></defs>
-                      {/* 站点圆点 + 序号 + 名称 */}
-                      {coords.map((c, i) => (
-                        <g key={c.sid}>
-                          <circle cx={c.x} cy={c.y} r={7} fill={backtrack.has(i - 1) ? tokens.colorErrorBg : tokens.colorBgContainer}
-                            stroke={backtrack.has(i - 1) ? tokens.colorError : tokens.colorPrimary} strokeWidth={1.5} />
-                          <text x={c.x} y={c.y + 3.5} textAnchor="middle" fontSize={8} fill={tokens.colorText} fontWeight="bold">{i + 1}</text>
-                          <text x={c.x} y={c.y - 11} textAnchor="middle" fontSize={8} fill={tokens.colorTextSecondary}>{c.name}</text>
-                        </g>
-                      ))}
-                    </svg>
-                    {backtrack.size > 0 && (
-                      <div style={{ fontSize: 11, color: tokens.colorError, marginTop: 4 }}>
-                        红色虚线为折返段，建议调整站点顺序以减少路程
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
             {/* 站点情况卡（审批决策支撑） */}
             {suggestions && Object.keys(suggestions.site_scores || {}).length > 0 && (
               <div>
@@ -1162,11 +1233,14 @@ export default function PlanSchedulesPage() {
         onCancel={() => { if (!editSaving) setEditOpen(false); }}
         footer={[
           <Button key="cancel" disabled={editSaving} onClick={() => setEditOpen(false)}>取消</Button>,
-          <Button key="save" loading={editSaving} disabled={!editDraft || !editResourcesReady} onClick={() => saveEdit(false)}>保存草稿</Button>,
-          <Button key="submit" type="primary" loading={editSaving} disabled={!editDraft || !editResourcesReady} onClick={() => saveEdit(true)}>保存并提交</Button>,
+          <Button key="save" loading={editSaving} disabled={!editDraft || !editResourcesReady || !editItemsReady} onClick={() => saveEdit(false)}>保存草稿</Button>,
+          <Button key="submit" type="primary" loading={editSaving} disabled={!editDraft || !editResourcesReady || !editItemsReady} onClick={() => saveEdit(true)}>保存并提交</Button>,
         ]}
       >
         {editError && <Alert type="error" showIcon message={editError} style={{ marginBottom: 12 }} />}
+        {editItemError && <Alert type="error" showIcon message={editItemError}
+          action={<Button size="small" onClick={() => setEditItemsReloadKey(value => value + 1)}>重新加载检查项</Button>}
+          style={{ marginBottom: 12 }} />}
         {editValidation?.warnings?.length > 0 && (
           <Alert type="warning" showIcon message="计划可保存，但提交前需确认以下事项"
             description={editValidation.warnings.join('；')} style={{ marginBottom: 12 }} />
@@ -1183,9 +1257,21 @@ export default function PlanSchedulesPage() {
                 </Space.Compact>
               </div>
               <div>
+                <Text type="secondary">计划车辆（同一计划共用）</Text>
+                <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
+                  value={editDraft.vehicle_id || undefined} placeholder="选择车辆；清空表示无需用车"
+                  onChange={setPlanVehicle}
+                  options={editVehicles.map(vehicle => ({
+                    value: Number(vehicle.id),
+                    label: `${vehicle.plate_no || `车辆 #${vehicle.id}`}${vehicle.dispatchable === false ? ` · ${vehicle.dispatch_block_reason || '不可调度'}` : ''}`,
+                    disabled: vehicle.dispatchable === false,
+                  }))} />
+              </div>
+              <div>
                 <Text type="secondary">无需用车说明</Text>
                 <Input value={editDraft.vehicle_exception_reason} style={{ marginTop: 6 }}
-                  placeholder="有巡检日期未安排车辆时必填"
+                  disabled={Boolean(editDraft.vehicle_id)}
+                  placeholder={editDraft.vehicle_id ? '已选择计划车辆，无需填写' : '未安排车辆时必填'}
                   onChange={event => setEditDraft(current => ({ ...current, vehicle_exception_reason: event.target.value }))} />
               </div>
             </div>
@@ -1205,17 +1291,22 @@ export default function PlanSchedulesPage() {
                         value={day.sites || []} placeholder="选择当日巡检站点"
                         onChange={sites => updateEditDay(date, { sites })}
                         options={editSites.map(site => ({ value: Number(site.id), label: site.name }))} />
-                    </div>
-                    <div>
-                      <Text type="secondary">车辆</Text>
-                      <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
-                        value={editDraft.vehicle_days?.[date]} placeholder="选择车辆或填写无需用车说明"
-                        onChange={vehicleId => setEditVehicle(date, vehicleId)}
-                        options={editVehicles.map(vehicle => ({
-                          value: Number(vehicle.id),
-                          label: `${vehicle.plate_no || `车辆 #${vehicle.id}`}${vehicle.dispatchable === false ? ` · ${vehicle.dispatch_block_reason || '不可调度'}` : ''}`,
-                          disabled: vehicle.dispatchable === false,
-                        }))} />
+                      {(day.sites || []).map(siteId => {
+                        const choices = editItemOptions[Number(siteId)] || [];
+                        const selected = day.inspection_items?.[String(siteId)] || [];
+                        const siteName = editSites.find(site => Number(site.id) === Number(siteId))?.name || `站点 #${siteId}`;
+                        return <div key={`items-${siteId}`} style={{ marginTop: 6 }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{siteName} 检查项</Text>
+                          {choices.length ? (
+                            <Select mode="multiple" allowClear showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 4 }}
+                              value={selected} placeholder="选择本次计划需要的检查项"
+                              onChange={ids => updateEditSiteItems(date, siteId, ids)}
+                              options={choices.map(item => ({ value: Number(item.id), label: item.item_name }))} />
+                          ) : (
+                            <div style={{ marginTop: 4 }}><Text type="secondary">本站当前设备没有适用检查项</Text></div>
+                          )}
+                        </div>;
+                      })}
                     </div>
                   </div>
                   <Input value={day.notes || ''} placeholder="当日备注（可选）" maxLength={200}
@@ -1313,6 +1404,42 @@ export default function PlanSchedulesPage() {
           </div>
         </div>
       </Modal>
+
+      {canCleanup && <Modal open={cleanupOpen} title="处理无效数据" okText="确认处理所选" cancelText="取消"
+        onOk={applyCleanup} onCancel={() => { if (!cleanupLoading) setCleanupOpen(false); }}
+        cancelButtonProps={{ disabled: cleanupLoading }} confirmLoading={cleanupLoading}
+        okButtonProps={{ danger: true, disabled: !cleanupSelected.length }} destroyOnHidden>
+        <Alert type="warning" showIcon message="逐条确认处理方式" description="空草稿和无业务事实工单会物理删除；已生成但无现场事实的超期计划只会异常关闭并保留审计。系统会在确认时再次复核，任一候选变化则整批回滚。" />
+        {cleanupError && <Alert type="error" showIcon message={cleanupError}
+          action={<Button size="small" onClick={() => loadCleanupCandidates()}>重新加载候选</Button>}
+          style={{ marginTop: 12 }} />}
+        <div style={{ marginTop: 12, maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {cleanupCandidates.length === 0 && !cleanupLoading && !cleanupError && <Empty description="暂无可安全清理的候选" />}
+          {cleanupCandidates.map(item => {
+            const value = `${item.kind}:${item.id}`;
+            return <Checkbox key={value} checked={cleanupSelected.some(selected => selected.kind === item.kind && Number(selected.id) === Number(item.id))}
+              onChange={(event) => setCleanupSelected(current => event.target.checked
+                ? [...current, { kind: item.kind, id: item.id }]
+                : current.filter(selected => !(selected.kind === item.kind && Number(selected.id) === Number(item.id))))}>
+              <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, verticalAlign: 'top' }}>
+                <span><Tag color={item.cleanup_action === 'physical_delete' ? 'red' : 'orange'}>
+                  {item.cleanup_action === 'physical_delete' ? '物理删除' : '异常关闭'}
+                </Tag>{item.label} · {item.reason}</span>
+                {cleanupCandidateIdentityRows(item).map(text => (
+                  <Text key={text} type="secondary" style={{ fontSize: 12 }}>{text}</Text>
+                ))}
+                <span style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 12px' }}>
+                  {cleanupCandidateFactRows(item.activity_facts).map(fact => (
+                    <Text key={fact.key} type="secondary" style={{ fontSize: 12 }}>
+                      {fact.label}：{fact.value}
+                    </Text>
+                  ))}
+                </span>
+              </span>
+            </Checkbox>;
+          })}
+        </div>
+      </Modal>}
 
       {canUseFavorites && <Modal open={favoritesOpen} title="从常用计划生成草稿" okText="生成草稿" cancelText="取消"
         onOk={createFavoriteDraft} onCancel={() => setFavoritesOpen(false)} confirmLoading={favoriteLoading}

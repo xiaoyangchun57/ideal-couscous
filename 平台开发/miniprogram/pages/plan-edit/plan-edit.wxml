@@ -88,6 +88,16 @@
       <switch checked="{{noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#1677ff" />
     </view>
     <text class="vehicle-policy-switch-label">本计划无需用车</text>
+    <view class="vehicle-row" wx:if="{{!noVehicleRequired}}">
+      <text class="vehicle-label">计划车辆</text>
+      <picker mode="selector" range="{{vehicles}}" range-key="name"
+              value="{{ft.vehicleIdx(vehicles, planVehicleId)}}" bindchange="onPlanVehicleChange">
+        <view class="vehicle-picker">
+          <text class="{{planVehicleId ? 'vehicle-val' : 'vehicle-ph'}}">{{ft.vehicleName(vehicles, planVehicleId)}}</text>
+          <text class="vehicle-arrow">▶</text>
+        </view>
+      </picker>
+    </view>
     <textarea wx:if="{{noVehicleRequired}}" class="ta vehicle-exception-input"
       placeholder="请说明无需车辆的具体原因，如站点位于办公区内且可步行到达"
       value="{{vehicleExceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200" />
@@ -122,21 +132,22 @@
       </view>
     </view>
 
-    <!-- 车辆选择 -->
-    <view class="vehicle-row" wx:if="{{ft.daySiteCount(day) && !noVehicleRequired}}">
-      <text class="vehicle-label">用车</text>
-      <picker mode="selector" range="{{vehicles}}" range-key="name"
-              value="{{ft.vehicleIdx(vehicles, day.vehicle_id)}}"
-              data-day-idx="{{di}}" bindchange="onVehicleChange">
-        <view class="vehicle-picker">
-          <text class="{{day.vehicle_id ? 'vehicle-val' : 'vehicle-ph'}}">{{ft.vehicleName(vehicles, day.vehicle_id)}}</text>
-          <text class="vehicle-arrow">▾</text>
-        </view>
-      </picker>
+    <view class="inspection-items" wx:for="{{day.sites}}" wx:key="*this" wx:for-item="selectedSiteId">
+      <text class="resource-title">适用检查项</text>
+      <view class="site-chips-wrap" wx:if="{{inspectionItemOptions[selectedSiteId].length}}">
+        <view class="chip {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'chip-on' : ''}}"
+              wx:for="{{inspectionItemOptions[selectedSiteId]}}" wx:key="id" wx:for-item="item"
+              data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-item-id="{{item.id}}" bindtap="onToggleInspectionItem">{{item.item_name}}</view>
+      </view>
+      <text class="resource-empty" wx:elif="{{inspectionItemsState === 'loading'}}">正在读取适用检查项…</text>
+      <view class="resource-empty" wx:elif="{{inspectionItemsState === 'unavailable'}}"
+            bindtap="loadInspectionItems">{{inspectionItemsError}}，点击重试</view>
+      <text class="resource-empty" wx:else>本站当前设备没有适用检查项</text>
     </view>
+
   </view>
 
-  <!-- 出车资源：车辆按天选择，备件在计划层统一确认；同站未结工单自动关联 -->
+  <!-- 出车资源：车辆和备件在计划层统一确认；同站未结工单自动关联 -->
   <view class="card resource-card">
     <view class="resource-head">
       <text class="resource-title">出车备件</text>

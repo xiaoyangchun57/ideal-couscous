@@ -24,6 +24,7 @@ export const routeMeta = {
   '/analysis': { title: '数据分析', group: '查询与分析', icon: <BarChartOutlined /> },
   '/workorders': { title: '工单', group: '任务闭环', icon: <FileTextOutlined /> },
   '/plan-schedules': { title: '巡检计划', group: '任务闭环', icon: <ScheduleOutlined /> },
+  '/inspection-settings': { title: '检查项设置', group: '系统管理', icon: <ToolOutlined /> },
   '/reports': { title: '异常闭环', group: '任务闭环', icon: <FileTextOutlined /> },
   '/audit': { title: '统一审核', group: '任务闭环', icon: <AuditOutlined /> },
   '/sites': { title: '站点全景', group: '站点与资产', icon: <EnvironmentOutlined /> },
@@ -47,6 +48,7 @@ export const pageRoles = {
   '/analysis': ['admin', 'reviewer'],
   '/workorders': ['admin', 'operator'],
   '/plan-schedules': ['admin', 'operator'],
+  '/inspection-settings': ['admin'],
   '/reports': ['admin', 'reviewer'],
   '/equipment': ['admin'],
   '/vehicles': ['admin'],
@@ -84,7 +86,7 @@ export function getNavigation(roles) {
       key: 'system',
       label: '系统管理',
       roles: ['admin'],
-      children: ['/users', '/reagents'],
+      children: ['/users', '/reagents', '/inspection-settings'],
     },
   ];
 

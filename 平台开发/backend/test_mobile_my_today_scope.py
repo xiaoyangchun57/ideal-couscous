@@ -476,6 +476,15 @@ class MobileMyTodayScopeTest(unittest.TestCase):
             self.assertEqual(detail.status_code, 200, detail.json)
 
     def test_today_execution_keeps_one_vehicle_trip_until_plan_end(self):
+        with app_module.get_db() as db:
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            db.execute('''INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,destination,status,reason)
+                VALUES (10,1,2,?,?,?,?,?)''', (
+                    yesterday + ' 08:00:00', tomorrow + ' 18:00:00',
+                    '巡检', 'approved', '巡检计划#110用车',
+                ))
         response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(response.status_code, 200, response.json)
         today_package = next(item for item in response.json['packages'] if item['plan_id'] == 101)

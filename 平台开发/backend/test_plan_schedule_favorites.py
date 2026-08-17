@@ -42,7 +42,9 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
             db.executescript('''
                 CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
-                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
+                CREATE TABLE sites (
+                    id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL, type TEXT
+                );
                 CREATE TABLE vehicles (
                     id INTEGER PRIMARY KEY, plate_no TEXT, status TEXT,
                     insurance_expiry TEXT, annual_inspection_expiry TEXT
@@ -58,7 +60,18 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, schedule_type TEXT,
                     period_start TEXT, period_end TEXT, plan_data TEXT, vehicle_days TEXT,
                     spare_parts TEXT, work_order_ids TEXT, status TEXT, remarks TEXT,
-                    tasks_generated INTEGER DEFAULT 0
+                    tasks_generated INTEGER DEFAULT 0, vehicle_id INTEGER,
+                    vehicle_exception_reason TEXT DEFAULT ''
+                );
+                CREATE TABLE inspection_configs (
+                    site_type TEXT, device_types TEXT, template_id INTEGER, is_active INTEGER
+                );
+                CREATE TABLE inspection_templates (
+                    id INTEGER PRIMARY KEY, status TEXT, frequency TEXT, sort_order INTEGER
+                );
+                CREATE TABLE inspection_template_items (
+                    id INTEGER PRIMARY KEY, template_id INTEGER, item_name TEXT, category TEXT,
+                    photo_required INTEGER, max_photos INTEGER, need_review INTEGER, sort_order INTEGER
                 );
                 CREATE TABLE plan_schedule_favorites (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
@@ -73,28 +86,37 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                 INSERT INTO users VALUES (3, '其他运维', 'operator');
                 INSERT INTO user_sites VALUES (2, 10);
                 INSERT INTO user_sites VALUES (2, 11);
-                INSERT INTO sites VALUES (10, '一号站', 28.1, 115.1);
-                INSERT INTO sites VALUES (11, '二号站', 28.2, 115.2);
+                INSERT INTO sites VALUES (10, '一号站', 28.1, 115.1, 'water_quality');
+                INSERT INTO sites VALUES (11, '二号站', 28.2, 115.2, 'water_quality');
                 INSERT INTO vehicles VALUES (7, '赣A00007', 'available', NULL, NULL);
+                INSERT INTO inspection_templates VALUES (5, 'active', 'weekly', 1);
+                INSERT INTO inspection_template_items VALUES
+                    (101, 5, '浊度', '水质', 1, 1, 1, 1);
+                INSERT INTO inspection_configs VALUES ('water_quality', '[]', 5, 1);
             ''')
             plan_data = {
-                '2026-07-21': {'sites': [10], 'notes': '先做一号站'},
-                '2026-07-23': {'sites': [11], 'notes': ''},
+                '2026-07-21': {
+                    'sites': [10], 'notes': '先做一号站',
+                    'inspection_items': {'10': [101]},
+                },
+                '2026-07-23': {
+                    'sites': [11], 'notes': '', 'inspection_items': {'11': []},
+                },
             }
             second_plan_data = {
                 '2026-07-28': {'sites': [10, 11], 'notes': '两个站同日巡检'},
             }
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
-                 spare_parts,work_order_ids,status,remarks,tasks_generated)
-                VALUES (1,2,'weekly','2026-07-20','2026-07-26',?,?,?,?, 'approved',?,1)''',
+                 spare_parts,work_order_ids,status,remarks,tasks_generated,vehicle_id)
+                VALUES (1,2,'weekly','2026-07-20','2026-07-26',?,?,?,?, 'approved',?,1,7)''',
                 (json.dumps(plan_data), json.dumps({'2026-07-21': 7}),
                  json.dumps([{'part_id': 8, 'quantity': 2, 'part_name': '滤芯'}]),
                  json.dumps([99]), '固定路线'))
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
-                 spare_parts,work_order_ids,status,remarks,tasks_generated)
-                VALUES (2,2,'weekly','2026-07-27','2026-08-02',?,?,?,?, 'approved',?,1)''',
+                 spare_parts,work_order_ids,status,remarks,tasks_generated,vehicle_id)
+                VALUES (2,2,'weekly','2026-07-27','2026-08-02',?,?,?,?, 'approved',?,1,7)''',
                 (json.dumps(second_plan_data), json.dumps({'2026-07-28': 7}),
                  json.dumps([]), json.dumps([]), '另一条固定路线'))
         self.client = app_module.app.test_client()
@@ -126,7 +148,10 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
         self.assertEqual(schedule['period_end'], '2026-08-09')
         self.assertEqual(schedule['plan_data']['2026-08-04']['sites'], [10])
         self.assertEqual(schedule['plan_data']['2026-08-06']['sites'], [11])
-        self.assertEqual(schedule['vehicle_days'], {'2026-08-04': 7})
+        self.assertEqual(schedule['plan_data']['2026-08-04']['inspection_items'], {'10': [101]})
+        self.assertEqual(schedule['plan_data']['2026-08-06']['inspection_items'], {'11': []})
+        self.assertEqual(schedule['vehicle_id'], 7)
+        self.assertEqual(schedule['vehicle_days'], {'2026-08-04': 7, '2026-08-06': 7})
         self.assertEqual(schedule['spare_parts'][0]['part_id'], 8)
         self.assertEqual(schedule['work_order_ids'], [])
         with app_module.get_db() as db:
@@ -134,6 +159,26 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                                (schedule['id'],)).fetchone()
         self.assertEqual(event['event_type'], 'created_from_favorite')
         self.assertIn('work_order_ids', json.loads(event['payload'])['excluded_fields'])
+
+    def test_legacy_multi_vehicle_plan_cannot_become_a_favorite(self):
+        with app_module.get_db() as db:
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,remarks,tasks_generated,vehicle_id)
+                VALUES (3,2,'weekly','2026-08-10','2026-08-16',?,?,?,?, 'approved','',1,NULL)''', (
+                    json.dumps({
+                        '2026-08-11': {'sites': [10], 'inspection_items': {'10': [101]}},
+                        '2026-08-13': {'sites': [11], 'inspection_items': {'11': []}},
+                    }),
+                    json.dumps({'2026-08-11': 7, '2026-08-13': 8}), '[]', '[]'))
+        response = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),
+                                    json={'schedule_id': 3})
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'PLAN_MULTIPLE_VEHICLES_NOT_ALLOWED')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_favorites WHERE source_schedule_id=3'
+            ).fetchone()[0], 0)
 
     def test_duplicate_and_cross_user_favorites_are_rejected(self):
         first = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),

@@ -1,3 +1,32 @@
+# r9 targeted release gate (2026-08-17)
+
+Target candidate tag: `release-20260817-cross-module-freeze-r9`
+
+r9 contains the reviewed PF01-PF06 product-feedback batch on top of immutable r8. The release manifest accepts only r9; r1 through r8 are historical and must remain rejected. This section records the product-authorized targeted gate. Commit, tag, package, and deployment identities are not asserted in advance here and must be verified directly from the generated objects.
+
+## r9 scope and evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| PF01-PF06 backend and direct neighbors | 102/102 passed | 0 |
+| Miniprogram inspection selection and vehicle return state | 4/4 passed | 0 |
+| React existing API/logic suite | 43/43 passed | 0 |
+| React PF01-PF06 pure-logic tests | 12/12 passed | 0 |
+| React lint and production build | PASS; 1746 modules transformed | 0 |
+| Backup and staged candidate-archive tests | 4/4 passed; archived shell shebang is LF | 0 |
+| Candidate guard | 2/2 passed; r1-r8 rejected and r9 accepted | 0 |
+| Targeted diff check | No whitespace errors; existing LF-to-CRLF notices only | 0 |
+
+Product read-only Review passed after two adjacent PF06 blockers were corrected: replaced vehicles retain a returnable lifecycle, and the miniprogram “我的” page now respects the server-authoritative `can_return` value. The incorrect PF business copies in `E:\杂七杂八\水质运维` were removed by explicit whitelist; release-side scripts, inspection directories, historical packages, and product records were retained.
+
+Real Web and miniprogram UI for r9: **NOT RUN**. Product explicitly chose to skip this regression and collect feedback from online users. Automated tests do not replace that evidence. The main residual risks are responsive layout for the new settings/cleanup interfaces, real authenticated template download, actual single-site creation, no-device empty inspection selection, and plan-level vehicle interactions on a real device.
+
+## r9 freeze boundary
+
+The candidate must include only reviewed source, tests, `AGENTS.md`, product/release records, and r9 gate metadata. Exclude all private configuration, TEST_UI databases and evidence, `.codex-wechat-automation`, `minitest`, temporary servers, generated front-end output, and historical source archives. The staged whitelist contains 35 files. Create one immutable commit and one annotated r9 tag, then derive the source package only from that tag. Before deployment, create and verify fresh database and uploads backups; retain r8/r6 rollback materials.
+
+---
+
 # r8 final release gate (2026-08-15)
 
 Target candidate tag: `release-20260815-cross-module-freeze-r8`

@@ -20,6 +20,7 @@ import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
+import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 
 const { Text } = Typography;
@@ -101,6 +102,10 @@ export default function SitesPage() {
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState(null);
   const [dataSources, setDataSources] = useState([]);
+  const [siteCreateOpen, setSiteCreateOpen] = useState(false);
+  const [siteCreateSaving, setSiteCreateSaving] = useState(false);
+  const [siteManagers, setSiteManagers] = useState([]);
+  const [siteCreateForm] = Form.useForm();
 
   const { user } = useAuth();
   const isAdmin = (user?.roles || [user?.role]).includes('admin');
@@ -131,6 +136,38 @@ export default function SitesPage() {
   useEffect(() => {
     fetchSites();
   }, [fetchSites]);
+
+  const openSiteCreate = useCallback(async () => {
+    siteCreateForm.resetFields();
+    setSiteCreateOpen(true);
+    try {
+      const rows = await api.getStrict('/users?status=active');
+      setSiteManagers(filterSiteManagerCandidates(rows));
+    } catch (error) {
+      setSiteManagers([]);
+      message.error(error?.message || '负责人列表加载失败');
+    }
+  }, [siteCreateForm]);
+
+  const submitSiteCreate = useCallback(async () => {
+    const values = await siteCreateForm.validateFields();
+    setSiteCreateSaving(true);
+    try {
+      await api.postStrict('/sites', {
+        ...values,
+        gps_lat: Number(values.gps_lat),
+        gps_lng: Number(values.gps_lng),
+        manager_id: Number(values.manager_id),
+      });
+      message.success('站点已新增并授权负责人');
+      setSiteCreateOpen(false);
+      fetchSites();
+    } catch (error) {
+      message.error(error?.message || '站点新增失败');
+    } finally {
+      setSiteCreateSaving(false);
+    }
+  }, [fetchSites, siteCreateForm]);
 
   // 加载阈值配置（色阶数据源）
   useEffect(() => {
@@ -1082,15 +1119,17 @@ export default function SitesPage() {
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
-      primaryAction={<Button
-          type="primary"
+      primaryAction={<Space>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
+        <Button
           icon={<CloudServerOutlined />}
           onClick={() => { setImportModalOpen(true); setImportResult(null); fetchDataSources(); }}
           disabled={!isAdmin}
           title={!isAdmin ? '仅管理员可配置数据接入' : undefined}
         >
           数据接入
-        </Button>}
+        </Button>
+      </Space>}
     >
 
       {/* ---- Filter Bar ---- */}
@@ -1176,6 +1215,33 @@ export default function SitesPage() {
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight />
       )}
+
+      <Modal
+        title="新增站点"
+        open={siteCreateOpen}
+        onCancel={() => setSiteCreateOpen(false)}
+        onOk={submitSiteCreate}
+        confirmLoading={siteCreateSaving}
+        okText="创建并授权"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Form form={siteCreateForm} layout="vertical">
+          <Form.Item name="code" label="站点编码" rules={[{ required: true, message: '请输入站点编码' }]}><Input maxLength={80} /></Form.Item>
+          <Form.Item name="name" label="站点名称" rules={[{ required: true, message: '请输入站点名称' }]}><Input maxLength={120} /></Form.Item>
+          <Form.Item label="站点类型"><Input value="水质监测站" disabled /></Form.Item>
+          <Space size={12} style={{ width: '100%' }}>
+            <Form.Item name="gps_lat" label="纬度" style={{ width: '50%' }} rules={[{ required: true, message: '请输入纬度' }]}><InputNumber min={-90} max={90} precision={6} style={{ width: '100%' }} /></Form.Item>
+            <Form.Item name="gps_lng" label="经度" style={{ width: '50%' }} rules={[{ required: true, message: '请输入经度' }]}><InputNumber min={-180} max={180} precision={6} style={{ width: '100%' }} /></Form.Item>
+          </Space>
+          <Form.Item name="manager_id" label="负责人" rules={[{ required: true, message: '请选择负责人' }]}>
+            <Select showSearch optionFilterProp="label" options={siteManagers.map(row => ({ value: row.id, label: `${row.real_name || row.username}（${row.login_name || row.username}）` }))} placeholder="选择负责人" />
+          </Form.Item>
+          <Form.Item name="district" label="所属区域"><Input /></Form.Item>
+          <Form.Item name="address" label="详细地址"><Input /></Form.Item>
+          <Form.Item name="river" label="所属流域"><Input /></Form.Item>
+        </Form>
+      </Modal>
 
       {/* ---- Archive Modal ---- */}
       <Modal
@@ -1316,7 +1382,19 @@ export default function SitesPage() {
                   <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: tokens.colorBgTextHover }}>
                     <Text style={{ fontSize: 13 }}>
                       支持 CSV 格式整批导入。必填字段为 code、name、type，当前 type 固定填写 water_quality。
-                      <a onClick={() => window.open('/api/sites/template')} style={{ marginLeft: 8 }}>下载导入模板</a>
+                      <a onClick={async () => {
+                        try {
+                          const result = await api.downloadStrict('/sites/template');
+                          const url = URL.createObjectURL(result.blob);
+                          const anchor = document.createElement('a');
+                          anchor.href = url;
+                          anchor.download = result.filename || 'site_import_template.csv';
+                          anchor.click();
+                          URL.revokeObjectURL(url);
+                        } catch (error) {
+                          message.error(error?.message || '模板下载失败，请确认登录状态后重试');
+                        }
+                      }} style={{ marginLeft: 8 }}>下载导入模板</a>
                     </Text>
                   </div>
                   <Upload.Dragger

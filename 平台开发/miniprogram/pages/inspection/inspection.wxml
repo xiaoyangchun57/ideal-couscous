@@ -306,6 +306,10 @@
       <text class="supplement-notice-text">{{sheet.item.supplement_reason || sheet.item.review_comment || '照片内容未通过审核，请按要求补拍'}}</text>
     </view>
     <text class="sheet-freq" wx:if="{{sheet.item.frequency_cn}}">{{sheet.item.frequency_cn}}</text>
+    <view class="sheet-standard" wx:if="{{sheet.item.inspection_standard}}">
+      <text class="sheet-standard-title">检查提醒</text>
+      <text>{{sheet.item.inspection_standard}}</text>
+    </view>
 
     <view class="field-label">判定结果</view>
     <view class="seg">

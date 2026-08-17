@@ -28,6 +28,7 @@ const EvaluationPage = lazy(() => import('./pages/evaluation/EvaluationPage'));
 const VehiclesPage = lazy(() => import('./pages/vehicles/VehiclesPage'));
 const ReagentMasterPage = lazy(() => import('./pages/reagents/ReagentMasterPage'));
 const PlanSchedulesPage = lazy(() => import('./pages/plan-schedules/PlanSchedulesPage'));
+const InspectionSettingsPage = lazy(() => import('./pages/inspection-settings/InspectionSettingsPage'));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 
@@ -100,6 +101,9 @@ function AppRoutes() {
         )} />
         <Route path="plan-schedules" element={(
           <PageRoute path="/plan-schedules"><Deferred><PlanSchedulesPage /></Deferred></PageRoute>
+        )} />
+        <Route path="inspection-settings" element={(
+          <PageRoute path="/inspection-settings"><Deferred><InspectionSettingsPage /></Deferred></PageRoute>
         )} />
         <Route path="reports" element={(
           <PageRoute path="/reports"><Deferred><ReportsPage /></Deferred></PageRoute>

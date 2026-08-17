@@ -524,8 +524,8 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
 
     def test_plan_days_require_vehicle_or_explicit_exception(self):
         with app_module.get_db() as db:
-            db.execute('CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT)')
-            db.execute("INSERT INTO sites VALUES (1,'室内测试站')")
+            db.execute('CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, type TEXT)')
+            db.execute("INSERT INTO sites VALUES (1,'室内测试站','water_quality')")
             without_exception = app_module._ps_validate(
                 db, 2, 'weekly', '2026-08-10', '2026-08-16',
                 {'2026-08-10': {'sites': [1]}}, {}, vehicle_exception_reason='')

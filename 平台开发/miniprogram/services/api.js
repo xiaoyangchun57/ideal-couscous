@@ -271,6 +271,10 @@ const api = {
   // 排程校验（车辆冲突等）
   validatePlanSchedule: (payload) => request('/api/plan-schedules/validate', 'POST', payload),
 
+  inspectionConfigMatches: (siteId, scheduleType) => request(
+    '/api/inspection-v2/configs/match?site_id=' + encodeURIComponent(siteId)
+      + '&schedule_type=' + encodeURIComponent(scheduleType || 'weekly'), 'GET'),
+
   // 智能建议（站点优先级+工单顺路）
   planSuggestions: (userId, scheduleType) =>
     request('/api/plan-schedules/suggestions?user_id=' + userId + '&schedule_type=' + (scheduleType || 'weekly'), 'GET')
