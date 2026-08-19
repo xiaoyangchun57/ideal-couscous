@@ -1,3 +1,36 @@
+# r10 candidate gate (2026-08-19)
+
+Target candidate tag: `release-20260819-cross-module-freeze-r10`
+
+r10 is the only candidate accepted by the release manifest; r1 through r9 are immutable historical tags and remain rejected. The complete automated gate, precise 60-file staging, cached diff check, candidate guard, and Git index boundary check have passed. A frozen candidate content boundary now exists, but no immutable commit or tag has been created.
+
+## r10 automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 365/365 passed in 83.068s | 0 |
+| Miniprogram Node tests | 51/51 passed across 23 test files | 0 |
+| Miniprogram JavaScript syntax | 62/62 files passed `node --check` | 0 |
+| React tests | 71/71 passed across 13 test files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1748 modules transformed | 0 |
+| Backend Python syntax | 75/75 files passed | 0 |
+| `python-docx` import smoke | PASS; version 1.2.0 | 0 |
+| Candidate guard | Product-independent 2/2 passed; r1-r9 rejected and r10 accepted | 0 |
+| Working-tree diff check | No whitespace errors; existing LF-to-CRLF notices only | 0 |
+
+The first complete backend run had two failures, both caused by stale test contracts: the multirole in-memory fixture lacked the production-required `insp_plans` and `insp_plan_items` tables, and an old period-shortening test incorrectly expected business dates and vehicle assignments to be silently pruned. Only tests were corrected. The three directly affected modules then passed 64/64 in development and 3/3 in independent product verification; the final complete backend run passed 365/365. No business code was changed for these gate failures. HTTP 500 logs from attachment voiding and work-order image upload are intentional fault-injection paths whose assertions passed.
+
+## r10 UI and freeze boundary
+
+Previously recorded real-UI PASS results for the changed scope remain valid. The three invalid-scheduler reason cards in cleanup remain **NOT RUN** because the real database has no natural candidate and no data was fabricated. Download entry points and DOCX/XLSX visual checks remain **SKIPPED**. These boundaries do not establish that all eight areas passed UI review and do not authorize deployment.
+
+The final candidate boundary is 60 files: 52 tracked content diffs and 8 required untracked implementation/test files. The index check found exactly 60 cached paths, all under `平台开发`, with zero forbidden paths and zero unstaged content at check time. `git diff --cached --check` exited 0 with only a global-ignore permission warning, and `backend.test_release_candidate_gate` passed 2/2. `miniprogram/services/maps.js` remains unstaged because its filtered working-tree hash matches the index; root `project.private.config.json` is the only untracked item and is excluded. `docs/PRODUCT_WORK_LEDGER.md` was already counted in the tracked business scope, while this handoff document and `backend/test_multirole_cross_module_access.py` account for the two additions from the prior boundary.
+
+The precise staging and cached/candidate/index boundary checks are complete. The single next action is to wait for explicit user authorization to create one immutable commit and one new tag. No commit, tag, package, push, deployment, service operation, or database operation is claimed by this section.
+
+---
+
 # r9 targeted release gate (2026-08-17)
 
 Target candidate tag: `release-20260817-cross-module-freeze-r9`

@@ -4,7 +4,6 @@ export function inspectionItemFormValues(row, itemCount = 0) {
   return {
     item_name: source.item_name || '',
     category: source.category || '',
-    frequency_level: source.frequency_level || 'mid',
     photo_required: Boolean(source.photo_required),
     need_review: Boolean(source.need_review),
     max_photos: Number.isFinite(Number(source.max_photos)) ? Number(source.max_photos) : 0,
@@ -13,22 +12,25 @@ export function inspectionItemFormValues(row, itemCount = 0) {
   };
 }
 
-export function inspectionConfigFormValues(row) {
+const DEFAULT_TEMPLATE_CATEGORY = '水质';
+
+export function inspectionTemplateFormValues(row) {
   const source = row || {};
-  let devices = [];
-  try {
-    devices = Array.isArray(source.device_types)
-      ? source.device_types
-      : JSON.parse(source.device_types || '[]');
-  } catch {
-    devices = [];
-  }
   return {
-    site_type: source.site_type || 'water_quality',
-    template_id: source.template_id,
-    device_types: Array.isArray(devices) ? devices : [],
-    remark: source.remark || '',
-    is_active: row ? Boolean(source.is_active) : true,
+    template_name: source.template_name || '',
+    frequency: source.frequency || undefined,
+    description: source.description || '',
+  };
+}
+
+export function inspectionTemplatePayload(values, row) {
+  const source = row || {};
+  const { template_name, frequency, description } = values || {};
+  return {
+    template_name,
+    frequency,
+    description,
+    category: String(source.category || '').trim() || DEFAULT_TEMPLATE_CATEGORY,
   };
 }
 

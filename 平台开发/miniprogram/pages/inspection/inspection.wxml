@@ -175,22 +175,10 @@
       </view>
     </view>
   </block>
-  <view class="responsible-section" wx:if="{{loaded && !currentPackage && !executionError && responsibleSites.length}}">
-    <view class="responsible-head">
-      <text class="responsible-title">负责站点</text>
-      <text class="responsible-note">仅供查看，未生成巡检任务</text>
-    </view>
-    <view class="responsible-list">
-      <view class="responsible-card" wx:for="{{responsibleSites}}" wx:key="id">
-        <text class="responsible-name">{{item.name}}</text>
-        <text class="responsible-meta">{{item.code}} · {{item.type}}</text>
-      </view>
-    </view>
-  </view>
   <view class="empty" wx:if="{{loaded && !currentPackage}}">
     <view class="empty-circle"></view>
     <text class="empty-tx">{{executionError || '今日暂无已批准的巡检任务'}}</text>
-    <text class="empty-hint" wx:if="{{!executionError}}">请由管理员确认巡检计划已批准并分派至当前账号</text>
+    <text class="empty-hint" wx:if="{{!executionError}}">今日无可执行任务；未来计划请到首页“即将执行”或“我的计划”查看</text>
   </view>
 
   <view class="sheet-mask" wx:if="{{reworkResourceSheet.open}}" bindtap="onCloseReworkResource"></view>

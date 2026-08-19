@@ -86,6 +86,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 INSERT INTO insp_plans VALUES (10,2,'原运维','逾期巡检','2026-01-01','active',20);
                 INSERT INTO insp_plan_items VALUES (100,10,NULL,'active');
                 INSERT INTO insp_plan_items VALUES (101,10,'已完成','active');
+                INSERT INTO insp_plan_items VALUES (102,10,NULL,'active');
                 INSERT INTO plan_schedules VALUES (20,2,'approved','2026-01-01','2026-01-07');
                 INSERT INTO work_orders VALUES (30,'原运维','in_progress');
                 INSERT INTO notifications (user_id,source_type,source_id,title,content)
@@ -140,25 +141,51 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             'action': 'close', 'reason': '道路封闭，已登记改期',
         })
         self.assertEqual(closed.status_code, 200, closed.json)
-        self.assertEqual(closed.json['cancelled_items'], 1)
+        self.assertEqual(closed.json['cancelled_items'], 2)
         with app_module.get_db() as db:
             items = db.execute('SELECT id,result,execution_status FROM insp_plan_items ORDER BY id').fetchall()
             self.assertEqual(items[0]['execution_status'], 'cancelled')
             self.assertEqual(items[1]['result'], '已完成')
             self.assertEqual(items[1]['execution_status'], 'active')
+            self.assertEqual(items[2]['execution_status'], 'cancelled')
             self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'cancelled')
 
+    def test_parent_schedule_change_blocks_remind_and_close_without_side_effects(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=20")
+            before = {
+                'notifications': db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0],
+                'events': db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0],
+            }
+        reminded = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                    json={'action': 'remind'})
+        closed = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                  json={'action': 'close', 'reason': '不应写入'})
+        self.assertEqual((reminded.status_code, closed.status_code), (409, 409))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'active')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM insp_plan_items WHERE execution_status='cancelled'").fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], before['notifications'])
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0], before['events'])
+
     def test_stale_plan_notification_is_removed_from_unread_count(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,payload_json)
+                VALUES (1,'plan_schedule',20,'计划状态更新','明确审核通知',
+                        '{"notification_target":"review","review_type":"plan_schedule"}')""")
         count = self.client.get('/api/notifications/unread-count', headers=self.headers())
         self.assertEqual(count.status_code, 200, count.json)
         self.assertEqual(count.json['count'], 0)
         response = self.client.get('/api/notifications', headers=self.headers())
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json['unread_count'], 0)
-        notice = response.json['notifications'][0]
-        self.assertTrue(notice['is_stale'])
-        self.assertEqual(notice['current_status'], 'approved')
-        self.assertEqual(notice['is_read'], 1)
+        notices = response.json['notifications']
+        self.assertEqual(len(notices), 2)
+        for notice in notices:
+            self.assertTrue(notice['is_stale'])
+            self.assertEqual(notice['current_status'], 'approved')
+            self.assertEqual(notice['is_read'], 1)
 
     def test_notification_status_filter_separates_current_and_history(self):
         with app_module.get_db() as db:

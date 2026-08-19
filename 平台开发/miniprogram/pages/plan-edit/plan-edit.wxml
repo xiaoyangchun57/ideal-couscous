@@ -42,18 +42,22 @@
 
   <!-- 周期信息 + 频次选择 -->
   <view class="period-bar">
-    <text class="period-text">{{periodStart}} ~ {{periodEnd}}</text>
+    <view class="period-text">
+      <picker mode="date" value="{{periodStart}}" bindchange="onPeriodStart"><text>{{periodStart}}</text></picker>
+      <text> ~ </text>
+      <picker mode="date" value="{{periodEnd}}" bindchange="onPeriodEnd"><text>{{periodEnd}}</text></picker>
+    </view>
     <picker mode="selector" range="{{scheduleTypeOptions}}" value="0" bindchange="onTypeChange" disabled="{{!!editId}}">
       <view class="type-picker"><text class="tag tag-brand">{{scheduleType === 'weekly' ? '周检' : (scheduleType === 'monthly' ? '月检' : (scheduleType === 'quarterly' ? '季检' : '年检'))}}</text><text class="vehicle-arrow" wx:if="{{!editId}}">▾</text></view>
     </picker>
   </view>
 
-  <!-- 添加巡检日期（月/季/年检） -->
+  <!-- 月、季、年只选择实际执行日期；周检日期由周期自动生成。 -->
   <view class="add-day-bar" wx:if="{{scheduleType !== 'weekly'}}">
     <picker mode="date" value="{{periodStart}}" start="{{periodStart}}" end="{{periodEnd}}" bindchange="onAddDay">
-      <view class="add-day-btn">＋ 添加巡检日期</view>
+      <view class="add-day-btn">＋ 选择执行日期</view>
     </picker>
-    <text class="add-day-hint">已添加 {{days.length}} 天</text>
+    <text class="add-day-hint">已选择 {{days.length}} 天</text>
   </view>
 
   <view class="card template-card" wx:if="{{templateContext.length}}">
@@ -113,7 +117,7 @@
       <view class="day-ops">
         <text class="day-count" wx:if="{{ft.daySiteCount(day)}}">{{ft.daySiteCount(day)}} 站</text>
         <text class="day-all" data-day-idx="{{di}}" bindtap="onToggleAll">全选</text>
-        <text class="day-del" data-date="{{day.date}}" bindtap="onRemoveDay">{{scheduleType === 'weekly' ? '清空' : '移除'}}</text>
+        <text class="day-del" wx:if="{{scheduleType !== 'weekly'}}" data-date="{{day.date}}" bindtap="onRemoveDay">移除</text>
       </view>
     </view>
 
@@ -145,6 +149,9 @@
       <text class="resource-empty" wx:else>本站当前设备没有适用检查项</text>
     </view>
 
+    <textarea class="ta day-notes" placeholder="当日备注（选填）" value="{{day.notes}}"
+      data-day-idx="{{di}}" bindinput="onDayNotes" maxlength="200" />
+
   </view>
 
   <!-- 出车资源：车辆和备件在计划层统一确认；同站未结工单自动关联 -->
@@ -170,10 +177,10 @@
     <text class="resource-auto">所选站点的未结工单将在提交时自动关联，无需重复填写</text>
   </view>
 
-  <!-- 空态：未添加巡检日期（月/季/年检） -->
-  <view class="empty" wx:if="{{!days.length && scheduleType !== 'weekly'}}">
+  <!-- 长周期尚未选择实际执行日期 -->
+  <view class="empty" wx:if="{{scheduleType !== 'weekly' && !days.length}}">
     <view class="empty-circle"></view>
-    <text class="empty-tx">点击上方"添加巡检日期"开始排程</text>
+    <text class="empty-tx">点击上方“选择执行日期”开始排程</text>
   </view>
 
   <!-- 备注 -->
@@ -185,6 +192,11 @@
   <view class="card remarks-card" wx:if="{{scheduleType === 'weekly'}}">
     <text class="remarks-label">漏站例外说明（仅未全覆盖时必填）</text>
     <textarea class="ta" placeholder="如遇封路、站点停运或应急调度，请说明原因" value="{{coverageExceptionReason}}" bindinput="onCoverageExceptionReason" maxlength="200" />
+  </view>
+
+  <view class="coverage-warning" wx:if="{{submitError}}">
+    <text class="risk-title">提交未完成</text>
+    <text class="risk-text">{{submitError}}</text>
   </view>
 
   <!-- 底部操作 -->

@@ -15,7 +15,7 @@
 /* 频次选择 */
 .type-picker { display: flex; align-items: center; gap: 6rpx; }
 
-/* 添加日期栏（月/季/年检） */
+/* 选择执行日期栏（月/季/年检） */
 .add-day-bar { display: flex; align-items: center; justify-content: space-between; margin: 16rpx 24rpx 0; }
 .add-day-btn {
   font-size: 26rpx; color: var(--brand); background: var(--brand-weak);
@@ -54,6 +54,7 @@
 .day-ops { display: flex; align-items: center; gap: 16rpx; }
 .day-count { font-size: 23rpx; color: var(--brand); }
 .day-all { font-size: 23rpx; color: var(--text-3); text-decoration: underline; }
+.day-notes { box-sizing: border-box; margin-top: 18rpx; }
 
 /* 站点 chips */
 .site-chips-wrap { display: flex; flex-wrap: wrap; gap: 14rpx; }

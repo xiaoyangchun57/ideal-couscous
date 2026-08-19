@@ -5,6 +5,9 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from io import BytesIO
+
+from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -107,33 +110,39 @@ class ProductFeedbackPf06Test(unittest.TestCase):
                        (41, 1, 1, 1, '浊度'))
 
         for path in ('/api/inspection-v2/templates/1',
-                     '/api/inspection-v2/configs/21',
                      '/api/inspection-v2/templates/1/items/11'):
             response = self.client.delete(path, headers=self.headers())
             self.assertEqual(response.status_code, 409, response.json)
+        retired = self.client.delete('/api/inspection-v2/configs/21', headers=self.headers())
+        self.assertEqual((retired.status_code, retired.json['code']),
+                         (410, 'INSPECTION_CONFIG_RULES_RETIRED'))
         with app_module.get_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_templates').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_configs').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_template_items').fetchone()[0], 1)
 
-    def test_config_template_reference_is_validated_before_write(self):
-        response = self.client.post('/api/inspection-v2/configs', headers=self.headers(), json={
-            'site_type': 'water_quality', 'template_id': 999,
-        })
-        self.assertEqual(response.status_code, 404, response.json)
-        self.assertEqual(response.json['code'], 'INSPECTION_TEMPLATE_NOT_FOUND')
+    def test_retired_config_writes_do_not_validate_or_mutate_legacy_rules(self):
         self._insert_template()
-        created = self.client.post('/api/inspection-v2/configs', headers=self.headers(), json={
-            'site_type': 'water_quality', 'template_id': 1, 'is_active': False,
-        })
-        self.assertEqual(created.status_code, 200, created.json)
-        config_id = created.json['id']
         with app_module.get_db() as db:
-            self.assertEqual(db.execute('SELECT is_active FROM inspection_configs WHERE id=?', (config_id,)).fetchone()[0], 0)
-        response = self.client.put(f'/api/inspection-v2/configs/{config_id}', headers=self.headers(), json={'template_id': 999})
-        self.assertEqual(response.status_code, 404, response.json)
+            db.execute("INSERT INTO inspection_configs VALUES (?,?,?,?,?,?)",
+                       (21, 'water_quality', '[\"legacy\"]', 1, 1, '历史规则'))
+            before = tuple(db.execute(
+                'SELECT site_type,device_types,template_id,is_active,remark '
+                'FROM inspection_configs WHERE id=21').fetchone())
+        for response in (
+                self.client.post('/api/inspection-v2/configs', headers=self.headers(), json={
+                    'site_type': 'water_quality', 'template_id': 999,
+                }),
+                self.client.put('/api/inspection-v2/configs/21', headers=self.headers(), json={
+                    'template_id': 999,
+                })):
+            self.assertEqual((response.status_code, response.json['code']),
+                             (410, 'INSPECTION_CONFIG_RULES_RETIRED'))
         with app_module.get_db() as db:
-            self.assertEqual(db.execute('SELECT template_id FROM inspection_configs WHERE id=?', (config_id,)).fetchone()[0], 1)
+            after = tuple(db.execute(
+                'SELECT site_type,device_types,template_id,is_active,remark '
+                'FROM inspection_configs WHERE id=21').fetchone())
+        self.assertEqual(after, before)
 
     def test_item_sort_order_update_rejects_invalid_value_without_write(self):
         self._insert_template()
@@ -182,7 +191,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             'resource_records': 0,
         })
 
-    def test_match_uses_frequency_active_devices_and_site_scope(self):
+    def test_match_uses_frequency_and_site_scope_without_device_filtering(self):
         with app_module.get_db() as db:
             db.execute("INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)", (10, 'S10', '匹配站点', 'water_quality', 'normal'))
             db.execute("INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)", (11, 'S11', '未授权站点', 'water_quality', 'normal'))
@@ -202,7 +211,8 @@ class ProductFeedbackPf06Test(unittest.TestCase):
         with app_module.get_db() as db:
             db.execute("UPDATE device_shadows SET status='retired' WHERE id=1")
         retired = self.client.get('/api/inspection-v2/configs/match?site_id=10&schedule_type=weekly', headers=self.headers())
-        self.assertEqual(retired.json['items'], [])
+        self.assertEqual([item['id'] for item in retired.json['items']], [11])
+        self.assertEqual(retired.json['device_types'], [])
         forbidden = self.client.get('/api/inspection-v2/configs/match?site_id=11&schedule_type=weekly', headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(forbidden.status_code, 403, forbidden.json)
 
@@ -271,7 +281,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             db.execute("INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)",
                        (10, 'S10', '十号站', 'water_quality', 'normal'))
             db.execute("INSERT INTO plan_schedules VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
-                72, 2, 'rejected', '2026-08-01', '2026-08-07', '2026-08-01', 0,
+                72, 2, 'draft', '2026-08-01', '2026-08-07', '2026-08-01', 0,
                 '{"2026-08-02":{"sites":[10]}}', '{}', '[]', '[]'))
             db.execute("INSERT INTO work_orders (id,order_no,title,status,source,created_at,site_id,check_in_time,related_alert_id,images) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (73, 'WO-NOTICE', '待确认泵房工单', 'pending', '', '2026-08-01', 10, '', 0, ''))
@@ -281,7 +291,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
         plan = next(item for item in candidates if item['kind'] == 'plan_schedule' and item['id'] == 72)
         order = next(item for item in candidates if item['kind'] == 'workorder' and item['id'] == 73)
         self.assertEqual((plan['owner_name'], plan['period_start'], plan['period_end'], plan['status']),
-                         ('运维甲', '2026-08-01', '2026-08-07', 'rejected'))
+                         ('运维甲', '2026-08-01', '2026-08-07', 'draft'))
         self.assertEqual((order['order_no'], order['title'], order['site_name'], order['status']),
                          ('WO-NOTICE', '待确认泵房工单', '十号站', 'pending'))
         self.assertEqual((plan['activity_facts']['notifications'], order['activity_facts']['notifications']), (1, 1))
@@ -341,9 +351,18 @@ class ProductFeedbackPf06Test(unittest.TestCase):
         self.assertEqual(operator.status_code, 403, operator.json)
         admin = self.client.get('/api/sites/template', headers=self.headers())
         self.assertEqual(admin.status_code, 200)
-        self.assertTrue(admin.data.startswith(b'\xef\xbb\xbfcode,name,type'))
-        self.assertIn('attachment; filename=site_import_template.csv',
-                      admin.headers.get('Content-Disposition', ''))
+        self.assertEqual(admin.mimetype,
+                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        workbook = load_workbook(BytesIO(admin.data))
+        self.assertEqual(workbook.sheetnames, ['站点导入', '填写说明', '示例（不导入）'])
+        self.assertEqual(
+            [cell.value for cell in workbook['站点导入'][1]],
+            ['站点编码', '站点名称', '站点类型', '纬度', '经度', '区县', '河流', '负责人', '联系电话'],
+        )
+        self.assertEqual(workbook['站点导入'].max_row, 1)
+        self.assertEqual(workbook['示例（不导入）']['A2'].value, 'WQ001')
+        workbook.close()
+        self.assertIn('.xlsx', admin.headers.get('Content-Disposition', ''))
 
     def test_plan_level_vehicle_expands_to_legacy_days(self):
         plan_data = {
@@ -368,6 +387,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
 
     def test_create_rejects_legacy_multiple_vehicles_without_write(self):
         response = self.client.post('/api/plan-schedules', headers=self.headers(), json={
+            'schedule_type': 'weekly',
             'period_start': '2026-08-20', 'period_end': '2026-08-21',
             'plan_data': {},
             'vehicle_days': {'2026-08-20': 7, '2026-08-21': 8},
@@ -379,6 +399,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
 
     def test_create_rejects_non_dict_vehicle_days_without_write(self):
         response = self.client.post('/api/plan-schedules', headers=self.headers(), json={
+            'schedule_type': 'weekly',
             'period_start': '2026-08-20', 'period_end': '2026-08-20',
             'plan_data': {}, 'vehicle_id': 7, 'vehicle_days': [7],
         })
@@ -429,7 +450,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             row = db.execute('SELECT need_review,max_photos,inspection_standard FROM inspection_template_items WHERE id=11').fetchone()
             self.assertEqual(tuple(row), (1, 2, '现场读数清晰'))
             db.execute("INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)",
-                       (10, 'SITE-10', '设备站', 'water_quality', 'normal'))
+                       (10, 'SITE-10', '水质站', 'water_quality', 'normal'))
             db.execute("INSERT INTO user_sites VALUES (?,?)", (2, 10))
             db.execute("INSERT INTO device_shadows VALUES (?,?,?,?)", (101, 10, 'pump', 'online'))
             db.execute("UPDATE inspection_configs SET device_types=? WHERE id=21", ('["pump"]',))
@@ -445,12 +466,14 @@ class ProductFeedbackPf06Test(unittest.TestCase):
 
     def test_validate_rejects_non_dict_vehicle_days_without_write(self):
         response = self.client.post('/api/plan-schedules/validate', headers=self.headers(), json={
+            'schedule_type': 'weekly',
             'period_start': '2026-08-20', 'period_end': '2026-08-20',
             'plan_data': {}, 'vehicle_id': 7, 'vehicle_days': [],
         })
         self.assertEqual(response.status_code, 400, response.json)
         self.assertEqual(response.json['code'], 'PLAN_RESOURCE_DATA_INVALID')
         valid_shape = self.client.post('/api/plan-schedules/validate', headers=self.headers(), json={
+            'schedule_type': 'weekly',
             'period_start': '2026-08-20', 'period_end': '2026-08-20',
             'plan_data': {}, 'vehicle_days': {},
         })
@@ -470,7 +493,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             self.assertEqual(db.execute('SELECT status FROM plan_schedules WHERE id=89').fetchone()[0], 'draft')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=89').fetchone()[0], 0)
 
-    def test_task_generation_uses_device_filtered_selection_and_keeps_snapshot(self):
+    def test_task_generation_uses_frequency_selection_and_keeps_snapshot(self):
         self._insert_template()
         with app_module.get_db() as db:
             db.execute("INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)",
@@ -488,20 +511,135 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             self.assertEqual([tuple(row) for row in generated], [('浊度', 1, 1, '读数在合格范围内')])
             db.execute("UPDATE inspection_template_items SET item_name='新名称', need_review=0, inspection_standard='新标准' WHERE id=11")
             db.execute("UPDATE device_shadows SET status='retired' WHERE id=101")
+            self.assertEqual(
+                [item['id'] for item in app_module._ps_site_template_items(db, 10, 'monthly')],
+                [11])
             self.assertEqual(tuple(db.execute(
                 'SELECT item_name,need_review,inspection_standard FROM insp_plan_items WHERE plan_id=501').fetchone()),
                              ('浊度', 1, '读数在合格范围内'))
             normalized = app_module._ps_validate_item_selections(
-                db, {'2026-08-21': {'sites': [10], 'inspection_items': {}}}, 'monthly')
+                db, {'2026-08-21': {
+                    'sites': [10], 'inspection_items': {'10': []},
+                }}, 'monthly')
             self.assertEqual(normalized['2026-08-21']['inspection_items'], {'10': []})
             self.assertEqual(app_module._ps_add_site_tasks(db, 502, 10, 'monthly', []), 0)
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM insp_plan_items WHERE plan_id=502').fetchone()[0], 0)
 
+    def test_cleanup_anomaly_close_requires_invalid_active_operator_and_rechecks_roles(self):
+        with app_module.get_db() as db:
+            for sql in (
+                "ALTER TABLE plan_schedules ADD COLUMN schedule_type TEXT DEFAULT 'weekly'",
+                "ALTER TABLE insp_plans ADD COLUMN status TEXT DEFAULT 'active'",
+                "ALTER TABLE insp_plan_items ADD COLUMN result TEXT",
+                "ALTER TABLE insp_plan_items ADD COLUMN execution_status TEXT DEFAULT 'active'",
+                "ALTER TABLE insp_plan_items ADD COLUMN check_in_time TEXT",
+                "ALTER TABLE insp_plan_items ADD COLUMN check_out_time TEXT",
+                "ALTER TABLE insp_plan_items ADD COLUMN gps_lat REAL",
+                "ALTER TABLE insp_plan_items ADD COLUMN gps_lng REAL",
+            ):
+                db.execute(sql)
+            db.executemany(
+                "INSERT INTO users (id,real_name,role,status,phone) VALUES (?,?,?,?,?)", [
+                    (5, '停用运维', 'operator', 'inactive', ''),
+                    (6, '仅管理员', 'admin', 'active', ''),
+                    (7, '管理员兼运维', 'admin', 'active', ''),
+                ])
+            db.executemany("INSERT INTO user_roles VALUES (?,?)", [
+                (5, 'operator'), (6, 'admin'), (7, 'admin'), (7, 'operator'),
+            ])
+            db.executemany(
+                "INSERT INTO sites (id,code,name,type,status) VALUES (?,?,?,?,?)", [
+                    (10, 'S10', '有效站点', 'water_quality', 'normal'),
+                    (11, 'S11', '监测离线站点', 'water_quality', 'offline'),
+                ])
+            db.executemany("INSERT INTO user_sites VALUES (?,?)", [
+                (99, 10), (5, 10), (6, 10), (3, 10), (2, 10), (7, 10), (2, 11),
+            ])
+            expired_start, expired_end = '2026-07-01', '2026-07-02'
+            schedule_rows = [
+                (201, 99, expired_start, expired_end, 10),
+                (202, 5, expired_start, expired_end, 10),
+                (203, 6, expired_start, expired_end, 10),
+                (204, 3, expired_start, expired_end, 10),
+                (205, 2, expired_start, expired_end, 10),
+                (206, 7, expired_start, expired_end, 10),
+                (207, 6, '2099-01-01', '2099-01-02', 10),
+                (208, 2, expired_start, expired_end, 11),
+                (209, 5, expired_start, expired_end, 404),
+            ]
+            for sid, user_id, period_start, period_end, site_id in schedule_rows:
+                db.execute("""INSERT INTO plan_schedules
+                    (id,user_id,status,period_start,period_end,created_at,tasks_generated,
+                     plan_data,vehicle_days,spare_parts,work_order_ids,schedule_type)
+                    VALUES (?,?, 'submitted', ?,?,?,0,?, '{}','[]','[]','weekly')""",
+                    (sid, user_id, period_start, period_end, period_start,
+                     json.dumps({period_start: {'sites': [site_id]}})))
+            candidates = app_module._cleanup_candidates(db)
+
+        by_id = {
+            item['id']: item for item in candidates
+            if item.get('cleanup_action') == 'anomaly_close'
+        }
+        self.assertEqual(sorted(by_id), [201, 202, 203, 204, 209])
+        self.assertIn('排程人不存在', by_id[201]['reason'])
+        self.assertIn('排程人已停用', by_id[202]['reason'])
+        self.assertIn('排程人已失去运维角色', by_id[203]['reason'])
+        self.assertIn('排程人已失去运维角色', by_id[204]['reason'])
+        self.assertEqual(by_id[201]['invalid_sites'], [])
+        self.assertIn('排程人已停用', by_id[209]['reason'])
+        self.assertIn('包含无效站点安排', by_id[209]['reason'])
+        self.assertEqual(by_id[209]['invalid_sites'][0]['invalid_reason'], '站点已不存在')
+        for non_candidate in (205, 206, 207, 208):
+            self.assertNotIn(non_candidate, by_id)
+
+        # A previewed batch must remain all-or-nothing when an inactive owner recovers.
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET status='active' WHERE id=5")
+        inactive_recovered = self.client.post(
+            '/api/admin/data-cleanup/apply', headers=self.headers(), json={
+                'items': [
+                    {'kind': 'plan_schedule', 'id': 202},
+                    {'kind': 'plan_schedule', 'id': 201},
+                ],
+            })
+        self.assertEqual(
+            (inactive_recovered.status_code, inactive_recovered.json['code']),
+            (409, 'CLEANUP_CANDIDATE_CHANGED'))
+
+        # Restoring operator as a secondary role must invalidate the old preview too.
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO user_roles VALUES (6, 'operator')")
+        role_recovered = self.client.post(
+            '/api/admin/data-cleanup/apply', headers=self.headers(), json={
+                'items': [
+                    {'kind': 'plan_schedule', 'id': 203},
+                    {'kind': 'plan_schedule', 'id': 201},
+                ],
+            })
+        self.assertEqual(
+            (role_recovered.status_code, role_recovered.json['code']),
+            (409, 'CLEANUP_CANDIDATE_CHANGED'))
+        with app_module.get_db() as db:
+            self.assertEqual(
+                [tuple(row) for row in db.execute(
+                    'SELECT id,status FROM plan_schedules WHERE id IN (201,202,203) ORDER BY id')],
+                [(201, 'submitted'), (202, 'submitted'), (203, 'submitted')])
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id IN (201,202,203)').fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM timeline_events WHERE source_type='plan_schedule' "
+                'AND source_id IN (201,202,203)').fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_resource_reservations WHERE schedule_id IN (201,202,203)').fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_departure_confirmations WHERE schedule_id IN (201,202,203)').fetchone()[0], 0)
+
     def test_cleanup_anomaly_close_excludes_any_field_fact_and_keeps_audit(self):
         with app_module.get_db() as db:
             for sql in (
                 "ALTER TABLE plan_schedules ADD COLUMN reject_reason TEXT DEFAULT ''",
+                "ALTER TABLE plan_schedules ADD COLUMN schedule_type TEXT DEFAULT 'weekly'",
                 "ALTER TABLE insp_plans ADD COLUMN status TEXT DEFAULT 'active'",
                 "ALTER TABLE insp_plan_items ADD COLUMN result TEXT",
                 "ALTER TABLE insp_plan_items ADD COLUMN execution_status TEXT DEFAULT 'active'",
@@ -535,6 +673,20 @@ class ProductFeedbackPf06Test(unittest.TestCase):
                     (id,plan_id,site_id,template_id,item_name,result,execution_status,check_in_time,location_lat)
                     VALUES (?,?,?,?,?,?,?,?,?)""",
                     (sid + 100, sid, sid, 1, 'item', None, 'active', None, None))
+            db.execute("""INSERT INTO plan_schedules
+                (id,user_id,status,period_start,period_end,created_at,tasks_generated,
+                 plan_data,vehicle_days,spare_parts,work_order_ids)
+                VALUES (110,1,'submitted','2026-07-01','2026-07-02','2026-07-01',0,
+                        ?, '{}', '[]', '[]')""",
+                       (json.dumps({'2026-07-01': {'sites': [404]}}),))
+            db.executemany("""INSERT INTO plan_schedules
+                (id,user_id,status,period_start,period_end,created_at,tasks_generated,
+                 plan_data,vehicle_days,spare_parts,work_order_ids)
+                VALUES (?,1,'submitted','2026-07-01','2026-07-02','2026-07-01',0,
+                        ?, '{}', '[]', '[]')""", [
+                (111, json.dumps({'2026-07-01': {'sites': [405]}})),
+                (112, json.dumps({'2026-07-01': {'sites': [406]}})),
+            ])
             db.execute("UPDATE insp_plan_items SET check_in_time='2026-07-01 09:00:00' WHERE id=191")
             # Attachment source_id is the item ID, deliberately different from its plan ID.
             db.execute("INSERT INTO operation_attachments VALUES (?,?,?)", (920, 'inspection', 192))
@@ -543,6 +695,16 @@ class ProductFeedbackPf06Test(unittest.TestCase):
                        (1, 94, 94, 1, '2026-07-01 09:00:00'))
             db.execute("INSERT INTO inspection_checkins (id,site_id,plan_id,user_id,check_time) VALUES (?,?,?,?,?)",
                        (2, 97, 0, 1, '2026-07-01 10:00:00'))
+            # A no-package schedule still owns legacy same-person/site/period check-in facts.
+            db.execute("INSERT INTO inspection_checkins (id,site_id,plan_id,user_id,check_time) VALUES (?,?,?,?,?)",
+                       (3, 405, 0, 1, '2026-07-01 11:00:00'))
+            # Cross-user, cross-site and cross-period rows must not block schedule #110.
+            db.executemany("INSERT INTO inspection_checkins (id,site_id,plan_id,user_id,check_time) VALUES (?,?,?,?,?)", [
+                (4, 404, 0, 2, '2026-07-01 11:00:00'),
+                (5, 999, 0, 1, '2026-07-01 11:00:00'),
+                (6, 404, 0, 1, '2026-06-30 11:00:00'),
+            ])
+            db.execute("INSERT INTO operation_attachments VALUES (?,?,?)", (930, 'plan_schedule', 112))
             db.execute("UPDATE insp_plan_items SET photo_urls='[\"/uploads/field.jpg\"]' WHERE id=195")
             db.execute("UPDATE insp_plan_items SET review_status=2 WHERE id=196")
             db.execute("INSERT INTO plan_resource_reservations (id,schedule_id,planned_quantity,reserved_quantity,status) VALUES (?,?,?,?,?)",
@@ -557,8 +719,19 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             db.execute("INSERT INTO vehicle_use_records VALUES (?,?,?)", (6, 5, 'in_use'))
             candidates = app_module._cleanup_candidates(db)
         anomaly_ids = [item['id'] for item in candidates if item.get('cleanup_action') == 'anomaly_close']
-        self.assertEqual(anomaly_ids, [90])
+        self.assertEqual(anomaly_ids, [90, 110])
         safe = next(item for item in candidates if item['kind'] == 'plan_schedule' and item['id'] == 90)
+        self.assertEqual((safe['period_start'], safe['period_end']), ('2026-07-01', '2026-07-02'))
+        self.assertEqual((safe['schedule_type'], safe['created_at']), ('weekly', '2026-07-01'))
+        self.assertEqual(safe['invalid_sites'], [{
+            'site_id': 90,
+            'site_name': '站点已不存在',
+            'invalid_reason': '站点已不存在',
+        }])
+        no_package_preview = next(
+            item for item in candidates if item['kind'] == 'plan_schedule' and item['id'] == 110)
+        self.assertEqual(no_package_preview['invalid_sites'][0]['site_id'], 404)
+        self.assertEqual(no_package_preview['schedule_type'], 'weekly')
         self.assertEqual(safe['activity_facts'], {
             'locations': 0,
             'checkins': 0,
@@ -597,6 +770,13 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             self.assertEqual(vehicle['status'], 'cancelled')
             self.assertEqual(db.execute("SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=90").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE source_type='plan_schedule' AND source_id=90 AND event_type='anomaly_closed'").fetchone()[0], 1)
+        no_package = self.client.post('/api/admin/data-cleanup/apply', headers=self.headers(), json={
+            'items': [{'kind': 'plan_schedule', 'id': 110}],
+        })
+        self.assertEqual(no_package.status_code, 200, no_package.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM plan_schedules WHERE id=110').fetchone()[0], 'archived')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE source_type='plan_schedule' AND source_id=110 AND event_type='anomaly_closed'").fetchone()[0], 1)
 
 
 if __name__ == '__main__':

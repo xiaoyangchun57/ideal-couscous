@@ -25,7 +25,7 @@ import {
   resolveAuditTarget,
   resolveAuditTargetFromServer,
 } from '../../utils/shellNavigation';
-import { getAuditAllowedTabs, getAuditColumnProfile } from './auditColumnDefinitions';
+import { countUniqueAuditSites, getAuditAllowedTabs, getAuditColumnProfile } from './auditColumnDefinitions';
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import DataReviewTab from '../alerts/components/DataReviewTab';
@@ -130,7 +130,7 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
   });
 
   // 业务指标
-  const siteCount = new Set(filtered.map(i => i.site_id || i.site_name).filter(Boolean)).size;
+  const siteCount = countUniqueAuditSites(filtered);
   const photoMissing = filtered.filter(i => (i.actual_photos || 0) < (i.required_photos || 0)).length;
   const oldestDays = (() => {
     const times = filtered.map(i => i.submit_time).filter(Boolean);

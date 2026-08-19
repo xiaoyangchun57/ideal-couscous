@@ -20,6 +20,8 @@ test('notification targets respect role-visible pages', () => {
   assert.equal(getNotificationTarget({ source_type: 'inspection_review_batch', source_id: 'insp_batch_10_1' }, ['reviewer']), '/audit?tab=inspection&inspection_batch=insp_batch_10_1');
   assert.equal(getNotificationTarget({ source_type: 'inspection_review', source_id: 12 }, ['operator']), '/plan-schedules');
   assert.equal(getNotificationTarget({ source_type: 'inspection_rework', source_id: 18 }, ['operator']), '/plan-schedules?rework_plan=18');
+  assert.equal(getNotificationTarget({ source_type: 'inspection_due_suggestion', source_id: 710 }, ['operator']), '/plan-schedules');
+  assert.equal(getNotificationTarget({ source_type: 'inspection_follow_up_suggestion', source_id: 711 }, ['admin']), '/plan-schedules');
   assert.equal(getNotificationTarget({ source_type: 'workorder_review', source_id: 'WO-1' }, ['admin']), '/audit?tab=workorder&order=WO-1');
   assert.equal(getNotificationTarget({ source_type: 'spare_part_request', source_id: 9 }, ['admin']), '/audit?tab=parts&request=9&request_type=spare_part_request');
   assert.equal(getNotificationTarget({ source_type: 'data_review', source_id: 7 }, ['reviewer']), '/audit?tab=data&review=7');

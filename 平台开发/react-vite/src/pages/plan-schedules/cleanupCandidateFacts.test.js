@@ -41,6 +41,19 @@ test('cleanup preview identifies the exact plan or workorder with explicit place
     period_end: '2026-08-07', status: 'rejected',
   }), ['执行人：运维甲', '周期：2026-08-01 ~ 2026-08-07', '状态：已退回']);
   assert.deepEqual(cleanupCandidateIdentityRows({
+    kind: 'plan_schedule', owner_name: '运维乙', schedule_type: 'weekly',
+    created_at: '2026-07-03 10:20:00', status: 'approved', invalid_sites: [
+      { site_id: 9, site_name: '城北站', invalid_reason: '站点已不再分配给负责人' },
+      { site_id: 10, site_name: '站点已不存在', invalid_reason: '站点已不存在' },
+    ],
+  }), [
+    '执行人：运维乙',
+    '计划类型：周计划',
+    '来源日期：2026-07-03',
+    '无效站点：城北站（站点已不再分配给负责人）；站点#10（站点已不存在）',
+    '状态：已通过',
+  ]);
+  assert.deepEqual(cleanupCandidateIdentityRows({
     kind: 'workorder', order_no: 'WO-1', title: '', site_name: '', status: 'pending',
   }), ['工单编号：WO-1', '标题：未填写', '站点：未关联', '状态：待处理']);
 });

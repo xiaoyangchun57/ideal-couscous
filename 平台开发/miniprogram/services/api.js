@@ -225,17 +225,9 @@ const api = {
   // 小程序“我的计划”只展示当前登录人的排程；管理员在 PC 端仍可查看团队计划。
   planSchedules: () => request('/api/plan-schedules?mine=1', 'GET'),
 
-  // 到期检查项形成的排程草稿建议；只读，不会自动派发任务
-  planScheduleDraftRecommendations: () =>
-    request('/api/plan-schedules/draft-recommendations', 'GET'),
-
-  // 将一条服务端建议落为可编辑草稿；不创建执行任务、不锁车、不预留备件
-  createPlanScheduleFromRecommendation: (payload) =>
-    request('/api/plan-schedules/draft-recommendations', 'POST', payload),
-
   // 系统性巡检异常复查建议（30 天内同类异常达到阈值）
-  planScheduleFollowUpRecommendations: () =>
-    request('/api/plan-schedules/follow-up-recommendations', 'GET'),
+  planScheduleFollowUpRecommendations: (team) =>
+    request('/api/plan-schedules/follow-up-recommendations?scope=' + (team ? 'team' : 'mine'), 'GET'),
 
   createPlanScheduleFollowUpDraft: (payload) =>
     request('/api/plan-schedules/follow-up-recommendations', 'POST', payload),
@@ -247,7 +239,8 @@ const api = {
   createPlanSchedule: (payload) => request('/api/plan-schedules', 'POST', payload),
 
   // 编辑排程（仅 draft/rejected 可编辑）
-  updatePlanSchedule: (id, payload) => request('/api/plan-schedules/' + id, 'PUT', payload),
+  updatePlanSchedule: (id, payload, options) =>
+    request('/api/plan-schedules/' + id, 'PUT', payload, options),
   deletePlanSchedule: (id) => request('/api/plan-schedules/' + id, 'DELETE'),
 
   // 常用排程：收藏的是相对日期模板，从收藏生成的始终是可编辑草稿。
@@ -260,7 +253,7 @@ const api = {
 
   // 提交排程审批
   submitPlanSchedule: (id, version) =>
-    request('/api/plan-schedules/' + id + '/submit', 'POST', { version }),
+    request('/api/plan-schedules/' + id + '/submit', 'POST', { version }, { queue: false }),
   approvePlanSchedule: (id) => request('/api/plan-schedules/' + id + '/approve', 'POST', {}),
   rejectPlanSchedule: (id, reason) => request('/api/plan-schedules/' + id + '/reject', 'POST', { reason: reason || '' }),
 

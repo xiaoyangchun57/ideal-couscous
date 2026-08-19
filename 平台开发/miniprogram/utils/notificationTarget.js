@@ -63,11 +63,22 @@ function resolveNotificationTarget(notification) {
   if (sourceType === 'alert' || sourceType === 'manual_report') {
     return { kind: 'page', page: '/pages/alert/alert' };
   }
+  if (sourceType === 'inspection_due_suggestion'
+      || sourceType === 'inspection_follow_up_suggestion') {
+    return { kind: 'page', page: '/pages/plan/plan' };
+  }
   if (!sourceId) return invalidTarget('通知缺少对象 ID，无法打开具体业务。');
 
   if (sourceType === 'plan_schedule') {
     if (!/^[1-9]\d*$/.test(sourceId)) {
       return invalidTarget('计划通知中的对象 ID 无效，无法打开计划。');
+    }
+    const payload = notificationPayload(notification);
+    if (payload.notification_target === 'review' && payload.review_type === 'plan_schedule') {
+      return {
+        kind: 'review', reviewType: 'plan_schedule', sourceId,
+        attachmentIds: [], page: reviewUrl('plan_schedule', sourceId)
+      };
     }
     return { kind: 'page', page: planScheduleDetailUrl(sourceId) };
   }
@@ -132,6 +143,9 @@ function findReviewItem(groups, target) {
     }
     if (target.reviewType === 'workorder_review') {
       return sameId(item.order_no, target.sourceId) || sameId(item.source_name, target.sourceId);
+    }
+    if (target.reviewType === 'plan_schedule') {
+      return sameId(item.schedule_id, target.sourceId) || prefixedId(item, 'ps_', target.sourceId);
     }
     if (target.reviewType === 'parts_request') return prefixedId(item, 'pr_', target.sourceId);
     if (target.reviewType === 'spare_part_request') return prefixedId(item, 'spr_', target.sourceId);

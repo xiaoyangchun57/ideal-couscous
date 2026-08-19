@@ -1,5 +1,5 @@
 const api = require('../../services/api.js');
-const { getUser, getSites } = require('../../utils/auth.js');
+const { getUser } = require('../../utils/auth.js');
 const { todayStr } = require('../../utils/util.js');
 const maps = require('../../services/maps.js');
 const { homeSummary, homeSite, homeSiteSelection } = require('../../utils/homeTaskState.js');
@@ -9,7 +9,7 @@ const app = getApp();
 Page({
   data: {
     realName: '', today: '', loaded: false,
-    summary: null, sites: [], responsibleSites: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
+    summary: null, sites: [], upcoming: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
     workPackage: null
   },
 
@@ -20,9 +20,6 @@ Page({
     this.setData({
       realName: (u && u.real_name) || '运维人员',
       today: todayStr(),
-      responsibleSites: (getSites() || []).map(site => Object.assign({}, site, {
-        type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点')
-      })),
       canReview: reviewRoles.some(role => roles.includes(role)),
     });
   },
@@ -51,6 +48,9 @@ Page({
           loaded: true,
           summary4,
           sites: (res.sites || []).map(homeSite),
+          upcoming: (res.upcoming || []).map(item => Object.assign({}, item, {
+            site_names_text: (item.site_names || []).join('、')
+          })),
           workorders: (res.workorders || []).map(maps.workorderCn),
           alerts: (res.alerts || []).map(a => Object.assign({}, a, { level_cls: maps.alertLevelCls(a.level) })),
           workPackage,
@@ -79,6 +79,9 @@ Page({
     app.globalData.selItemId = target.itemId;
     api.trackEvent('inspection.station_opened', { site_id: id, entry: 'home' });
     wx.switchTab({ url: '/pages/inspection/inspection' });
+  },
+  onUpcomingTap(e) {
+    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + e.currentTarget.dataset.id });
   },
   goInspection() { wx.switchTab({ url: '/pages/inspection/inspection' }); },
   goWorkorder() { wx.navigateTo({ url: '/pages/workorder/workorder' }); },

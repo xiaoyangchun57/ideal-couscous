@@ -5,6 +5,36 @@ const DEFAULT_COLUMNS = ['content', 'site', 'photos', 'submit_time', 'action'];
 const ADMIN_TABS = ['data', 'inspection', 'plan', 'workorder', 'parts', 'vehicle'];
 const REVIEWER_TABS = ['data', 'inspection', 'workorder'];
 
+function auditSiteIdKey(value) {
+  const text = typeof value === 'number' || typeof value === 'string'
+    ? String(value).trim()
+    : '';
+  if (!/^\d+$/.test(text)) return '';
+  const siteId = Number(text);
+  return Number.isSafeInteger(siteId) && siteId > 0 ? `id:${siteId}` : '';
+}
+
+export function countUniqueAuditSites(items = []) {
+  const siteKeys = new Set();
+  items.forEach(item => {
+    if (Array.isArray(item?.site_ids)) {
+      item.site_ids.forEach(siteId => {
+        const key = auditSiteIdKey(siteId);
+        if (key) siteKeys.add(key);
+      });
+      return;
+    }
+    const idKey = auditSiteIdKey(item?.site_id);
+    if (idKey) {
+      siteKeys.add(idKey);
+      return;
+    }
+    const siteName = typeof item?.site_name === 'string' ? item.site_name.trim() : '';
+    if (siteName) siteKeys.add(`name:${siteName}`);
+  });
+  return siteKeys.size;
+}
+
 export function getAuditAllowedTabs(roles) {
   const currentRoles = new Set((Array.isArray(roles) ? roles : [roles]).filter(Boolean));
   if (currentRoles.has('admin')) return ADMIN_TABS;

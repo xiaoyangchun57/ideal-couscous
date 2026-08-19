@@ -17,6 +17,19 @@ assert.deepEqual(resolveNotificationTarget({ source_type: 'plan_schedule', sourc
   kind: 'page',
   page: '/pages/plan-detail/plan-detail?id=43'
 });
+const planReviewTarget = resolveNotificationTarget({
+  source_type: 'plan_schedule', source_id: 44,
+  payload_json: JSON.stringify({ notification_target: 'review', review_type: 'plan_schedule' })
+});
+assert.deepEqual(planReviewTarget, {
+  kind: 'review', reviewType: 'plan_schedule', sourceId: '44', attachmentIds: [],
+  page: '/pages/review/view?target_type=plan_schedule&target_id=44'
+});
+['inspection_due_suggestion', 'inspection_follow_up_suggestion'].forEach(sourceType => {
+  assert.deepEqual(resolveNotificationTarget({ source_type: sourceType, source_id: 710 }), {
+    kind: 'page', page: '/pages/plan/plan'
+  });
+});
 
 const reviewCases = [
   ['inspection_review_batch', 'insp_batch_8_9', 'inspection_batch'],
@@ -59,6 +72,7 @@ const groups = [{ items: [
   { source_type: 'vehicle_application', id: 'va_13' },
   { source_type: 'data_review', id: 'dr_14' },
   { source_type: 'workorder_review', order_no: 'WO-2026-001' }
+  , { source_type: 'plan_schedule', id: 'ps_44', schedule_id: 44 }
 ] }];
 assert.equal(findReviewItem(groups, { reviewType: 'inspection_batch', sourceId: 'insp_batch_8_9' }).site_id, 9);
 assert.equal(findReviewItem(groups, { reviewType: 'inspection_batch', sourceId: '88' }).id, 'insp_batch_8_9');
@@ -67,6 +81,7 @@ assert.equal(findReviewItem(groups, { reviewType: 'parts_request', sourceId: '12
 assert.equal(findReviewItem(groups, { reviewType: 'vehicle_application', sourceId: '13' }).id, 'va_13');
 assert.equal(findReviewItem(groups, { reviewType: 'data_review', sourceId: '14' }).id, 'dr_14');
 assert.equal(findReviewItem(groups, { reviewType: 'workorder_review', sourceId: 'WO-2026-001' }).order_no, 'WO-2026-001');
+assert.equal(findReviewItem(groups, planReviewTarget).schedule_id, 44);
 assert.equal(findReviewItem(groups, { reviewType: 'parts_request', sourceId: '404' }), null);
 
 console.log('notificationTarget tests passed');

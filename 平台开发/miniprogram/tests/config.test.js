@@ -37,18 +37,38 @@ test('devtools defaults to the online API', () => {
 
 test('devtools can explicitly select and clear the local API', () => {
   const { config, storage } = loadConfig('devtools');
-  assert.equal(config.setApiBaseOverride('http://127.0.0.1:5020'), true);
-  assert.equal(storage.api_base_url_override, 'http://127.0.0.1:5020');
+  const now = Date.now();
+  assert.equal(config.setApiBaseOverride('http://127.0.0.1:5020', now), true);
+  assert.deepEqual(storage.api_base_url_override, {
+    url: 'http://127.0.0.1:5020',
+    expires_at: now + config.API_OVERRIDE_TTL_MS,
+  });
   config.clearApiOverride();
   assert.equal(storage.api_base_url_override, undefined);
 
-  const overridden = loadConfig('devtools', 'http://127.0.0.1:5020').config;
+  const overridden = loadConfig('devtools', {
+    url: 'http://127.0.0.1:5020', expires_at: Date.now() + 60_000,
+  }).config;
   assert.equal(overridden.BASE_URL, 'http://127.0.0.1:5020');
   assert.equal(overridden.API_PROFILE, 'local');
 });
 
+test('legacy and expired local overrides are cleared without production fallback credentials', () => {
+  const legacy = loadConfig('devtools', 'http://127.0.0.1:5020');
+  assert.equal(legacy.config.BASE_URL, 'https://ops.hhyc-tec.cn');
+  assert.equal(legacy.storage.api_base_url_override, undefined);
+
+  const expired = loadConfig('devtools', {
+    url: 'http://127.0.0.1:5020', expires_at: Date.now() - 1,
+  });
+  assert.equal(expired.config.BASE_URL, 'https://ops.hhyc-tec.cn');
+  assert.equal(expired.storage.api_base_url_override, undefined);
+});
+
 test('real devices always use the online API', () => {
-  const { config } = loadConfig('ios', 'local');
+  const { config } = loadConfig('ios', {
+    url: 'http://127.0.0.1:5020', expires_at: Date.now() + 60_000,
+  });
   assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
   assert.equal(config.API_PROFILE, 'online');
   assert.equal(config.setApiBaseOverride('http://127.0.0.1:5020'), false);

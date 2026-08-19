@@ -86,6 +86,13 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
                     schedule_id INTEGER, version INTEGER, event_type TEXT,
                     operator_id INTEGER, payload TEXT
                 );
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, plan_schedule_id INTEGER
+                );
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER,
+                    result TEXT, execution_status TEXT
+                );
 
                 INSERT INTO users VALUES (1,'dual role','operator');
                 INSERT INTO users VALUES (2,'operator','operator');

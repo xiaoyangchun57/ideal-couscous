@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from openpyxl import load_workbook
+from docx import Document
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -66,7 +67,7 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
                 CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, assignee_id INTEGER);
                 CREATE TABLE insp_plan_items (
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, completed_at TEXT,
-                    reviewer_id INTEGER, review_time TEXT
+                    reviewer_id INTEGER, review_time TEXT, result TEXT
                 );
                 CREATE TABLE param_thresholds (metric TEXT PRIMARY KEY, low REAL, high REAL);
                 CREATE TABLE sensor_data (site_id INTEGER, metric TEXT, value REAL, recorded_at TEXT);
@@ -141,25 +142,38 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
         self.assertTrue(evaluation_sheet.auto_filter.ref.startswith('A7:'))
         self.assertEqual(evaluation_sheet['H7'].value, '已关单SLA样本')
         self.assertEqual(evaluation_sheet['K7'].value, '开放已逾期')
+        self.assertGreaterEqual(evaluation_sheet.column_dimensions['H'].width, 18)
+        self.assertGreaterEqual(evaluation_sheet.column_dimensions['K'].width, 14)
         evaluation_book.close()
         evaluation.close()
 
         report = self.client.get('/api/export/ops-report?period=quarter', headers=self.headers())
         self.assertEqual(report.status_code, 200)
-        report_book = load_workbook(io.BytesIO(report.data))
+        self.assertEqual(report.mimetype,
+                         'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        document = Document(io.BytesIO(report.data))
+        paragraphs = [paragraph.text for paragraph in document.paragraphs]
+        self.assertEqual(paragraphs[0], '水质运维工作报告')
+        for heading in ('一、工作摘要', '二、巡检情况', '三、工单与异常', '四、站点风险',
+                        '五、人员客观指标', '六、未闭环事项', '七、下周期建议', '八、指标口径附录'):
+            self.assertIn(heading, paragraphs)
+        self.assertEqual(document.tables[0].rows[0].cells[0].text, '人员')
+        report.close()
+
+        details = self.client.get('/api/export/ops-report-details?period=quarter', headers=self.headers())
+        self.assertEqual(details.status_code, 200)
+        report_book = load_workbook(io.BytesIO(details.data))
         overview = report_book['概览']
         self.assertIn('水质智慧运维报告', overview['A1'].value)
-        self.assertEqual(overview['A2'].value, '统计周期')
         health = report_book['站点健康度']
         self.assertEqual(health.freeze_panes, 'A7')
-        self.assertEqual(health['C8'].value, 0)
-        self.assertEqual(health['F8'].value, 0)
-        self.assertEqual(health['H8'].value, '未启用监测')
         personnel = report_book['人员绩效']
         self.assertEqual(personnel['H7'].value, '已关单SLA样本')
         self.assertEqual(personnel['K7'].value, '开放已逾期')
+        self.assertGreaterEqual(personnel.column_dimensions['H'].width, 18)
+        self.assertGreaterEqual(personnel.column_dimensions['K'].width, 14)
         report_book.close()
-        report.close()
+        details.close()
 
     def test_reviewer_report_is_limited_to_assigned_sites(self):
         headers = {'Authorization': 'Bearer reviewer-token'}
@@ -170,7 +184,15 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
 
         response = self.client.get('/api/export/ops-report?period=quarter', headers=headers)
         self.assertEqual(response.status_code, 200, response.json if response.is_json else None)
-        workbook = load_workbook(io.BytesIO(response.data))
+        document = Document(io.BytesIO(response.data))
+        text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn('零样本站', text)
+        self.assertNotIn('越权站点', text)
+        response.close()
+
+        details = self.client.get('/api/export/ops-report-details?period=quarter', headers=headers)
+        self.assertEqual(details.status_code, 200)
+        workbook = load_workbook(io.BytesIO(details.data))
         self.assertEqual(workbook['概览']['B4'].value, '零样本站')
         self.assertEqual(workbook['概览']['B7'].value, 1)
         site_names = [cell.value for cell in workbook['站点健康度']['A'][7:]]
@@ -178,7 +200,7 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
         workorder_numbers = [cell.value for cell in workbook['工单明细']['A'][7:]]
         self.assertNotIn('WO-OUT-OF-SCOPE', workorder_numbers)
         workbook.close()
-        response.close()
+        details.close()
 
 
 if __name__ == '__main__':

@@ -1,12 +1,10 @@
 <wxs module="ft">
-  var ACTIVE = ['draft','submitted','rejected','modifying','change_submitted'];
-  var DONE = ['approved','archived'];
   module.exports.filter = function(list, f) {
     if (f === 'active') {
-      return list.filter(function(i) { return ACTIVE.indexOf(i.status) > -1; });
+      return list.filter(function(i) { return i.filter_group === 'active'; });
     }
     if (f === 'done') {
-      return list.filter(function(i) { return DONE.indexOf(i.status) > -1; });
+      return list.filter(function(i) { return i.filter_group === 'done'; });
     }
     return list;
   };
@@ -31,46 +29,43 @@
     <text class="favorite-entry-action">{{favorites.length ? (favorites.length + ' 个 ›') : '暂无 ›'}}</text>
   </view>
 
-  <!-- 到期检查项建议：由人确认后才创建可编辑草稿，不自动派单 -->
-  <view class="card recommendation-card" wx:if="{{recommendations.length}}">
-    <view class="recommendation-head">
-      <view>
-        <text class="recommendation-title">到期巡检建议</text>
-        <text class="recommendation-hint">确认后生成草稿，仍需完善排程并提交审批</text>
-      </view>
-      <text class="recommendation-count">{{recommendations.length}} 条</text>
+  <view class="new-plan-entry" bindtap="onNewPlan">+ 新建排程</view>
+
+  <view class="favorite-entry" wx:if="{{canTeamView}}" bindtap="onToggleRecommendationScope">
+    <view>
+      <text class="favorite-entry-title">{{isTeamView ? '团队异常复查建议' : '我的异常复查建议'}}</text>
+      <text class="favorite-entry-hint">{{isTeamView ? '查看团队异常复查并通知负责人' : '查看本人异常复查建议'}}</text>
     </view>
-    <view class="recommendation-item" wx:for="{{recommendations}}" wx:key="recommendation_key">
-      <view class="recommendation-main">
-        <text class="recommendation-type">{{item.schedule_type_cn}}</text>
-        <text class="recommendation-text">{{item.site_count}}站 · {{item.due_item_count}}项到期</text>
-        <text class="recommendation-period">{{item.period_start}} ~ {{item.period_end}}</text>
-      </view>
-      <button class="recommendation-btn" size="mini" loading="{{creatingRecommendationKey === item.recommendation_key}}"
-        data-user-id="{{item.user_id}}" data-schedule-type="{{item.schedule_type}}" data-period-start="{{item.period_start}}"
-        bindtap="onCreateRecommendedDraft">生成草稿</button>
-    </view>
+    <text class="favorite-entry-action">{{isTeamView ? '返回我的复查 ›' : '查看团队复查 ›'}}</text>
   </view>
 
   <!-- 系统性异常只给出复查草稿建议，由人确认后进入同一排程审批链 -->
   <view class="card recommendation-card follow-up-card" wx:if="{{followUpRecommendations.length}}">
-    <view class="recommendation-head">
+    <view class="recommendation-head" bindtap="onToggleFollowUpRecommendations">
       <view>
         <text class="recommendation-title">系统性异常复查</text>
         <text class="recommendation-hint">同站同类异常 30 天内出现 2 次，建议安排复查</text>
       </view>
-      <text class="recommendation-count follow-up-count">{{followUpRecommendations.length}} 条</text>
-    </view>
-    <view class="recommendation-item" wx:for="{{followUpRecommendations}}" wx:key="follow_up_key">
-      <view class="recommendation-main">
-        <text class="recommendation-type follow-up-type">{{item.site_name}}</text>
-        <text class="recommendation-text">{{item.anomaly_type}} · {{item.window_days}}天{{item.occurrence_count}}次</text>
-        <text class="recommendation-period">最近一次：{{item.latest_at}}</text>
+      <view class="recommendation-summary-action">
+        <text class="recommendation-count follow-up-count">{{followUpRecommendations.length}} 条</text>
+        <text class="recommendation-toggle follow-up-count">{{followUpRecommendationsExpanded ? '收起' : '展开'}} ›</text>
       </view>
-      <button class="recommendation-btn follow-up-btn" size="mini" loading="{{creatingFollowUpKey === item.follow_up_key}}"
-        data-user-id="{{item.user_id}}" data-site-id="{{item.site_id}}" data-anomaly-type="{{item.anomaly_type}}"
-        bindtap="onCreateFollowUpDraft">建复查草稿</button>
     </view>
+    <block wx:if="{{followUpRecommendationsExpanded}}">
+      <view class="recommendation-item" wx:for="{{followUpRecommendations}}" wx:key="follow_up_key">
+        <view class="recommendation-main">
+          <text class="recommendation-type follow-up-type">{{item.site_name}}</text>
+          <text class="recommendation-text">{{item.anomaly_type}} · {{item.window_days}}天{{item.occurrence_count}}次</text>
+          <text class="recommendation-period">最近一次：{{item.latest_at}}</text>
+        </view>
+        <button class="recommendation-btn follow-up-btn" size="mini" wx:if="{{!isTeamView}}" loading="{{creatingFollowUpKey === item.follow_up_key}}"
+          data-user-id="{{item.user_id}}" data-site-id="{{item.site_id}}" data-anomaly-type="{{item.anomaly_type}}"
+          bindtap="onCreateFollowUpDraft">建复查草稿</button>
+        <button class="recommendation-btn follow-up-btn" size="mini" wx:else loading="{{creatingFollowUpKey === item.follow_up_key}}"
+          data-user-id="{{item.user_id}}" data-site-id="{{item.site_id}}" data-anomaly-type="{{item.anomaly_type}}"
+          bindtap="onNotifyFollowUpOwner">通知负责人</button>
+      </view>
+    </block>
   </view>
 
   <!-- 列表 -->
@@ -123,6 +118,4 @@
     <view class="favorite-delete" bindtap="onDeleteFavorite">删除此收藏</view>
   </view>
 
-  <!-- 新建按钮 -->
-  <view class="fab" bindtap="onNewPlan">+ 新建排程</view>
 </view>

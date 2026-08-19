@@ -4,6 +4,7 @@ const { getUser, getSites } = require('../../utils/auth.js');
 
 const app = getApp();
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const MAX_PERIOD_DAYS = 366;
 
 // 计算下周一日期（YYYY-MM-DD）
 function nextMonday() {
@@ -29,6 +30,57 @@ function weekdayCn(dateStr) {
 }
 function lastDayOfMonth(y, m) { return new Date(y, m, 0).getDate(); } // m: 1-12
 
+function periodDates(start, end) {
+  const parse = value => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '');
+    if (!match) return null;
+    const parts = match.slice(1).map(Number);
+    const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    return date.getUTCFullYear() === parts[0]
+      && date.getUTCMonth() === parts[1] - 1
+      && date.getUTCDate() === parts[2] ? date : null;
+  };
+  const startDate = parse(start);
+  const endDate = parse(end);
+  if (!startDate || !endDate || startDate > endDate) {
+    throw new Error('周期日期无效，请检查开始和结束日期');
+  }
+  const count = Math.floor((endDate - startDate) / 86400000) + 1;
+  if (count > MAX_PERIOD_DAYS) throw new Error('周期最多支持366天，请缩短日期范围');
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(startDate.getTime() + index * 86400000);
+    return [date.getUTCFullYear(), ('0' + (date.getUTCMonth() + 1)).slice(-2),
+      ('0' + date.getUTCDate()).slice(-2)].join('-');
+  });
+}
+
+function reconcilePeriodDays(start, end, existing, fillRange) {
+  const dates = periodDates(start, end);
+  const allowed = new Set(dates);
+  const byDate = new Map();
+  (existing || []).forEach(day => {
+    if (!day || !allowed.has(day.date)) return;
+    const inspectionItems = {};
+    Object.keys(day.inspection_items || {}).forEach(key => {
+      const value = day.inspection_items[key];
+      inspectionItems[key] = Array.isArray(value) ? value.slice() : value;
+    });
+    byDate.set(day.date, Object.assign({}, day, {
+      date: day.date,
+      weekday_cn: weekdayCn(day.date),
+      sites: Array.isArray(day.sites) ? day.sites.slice() : [],
+      notes: day.notes || '',
+      vehicle_id: day.vehicle_id || null,
+      inspection_items: inspectionItems
+    }));
+  });
+  const targetDates = fillRange ? dates : [...byDate.keys()].sort();
+  return targetDates.map(date => byDate.get(date) || {
+    date, weekday_cn: weekdayCn(date), sites: [], vehicle_id: null,
+    notes: '', inspection_items: {}
+  });
+}
+
 function initializeInspectionItemSelections(days, options) {
   return (days || []).map(day => {
     const selected = Object.assign({}, day.inspection_items || {});
@@ -40,6 +92,24 @@ function initializeInspectionItemSelections(days, options) {
     });
     return Object.assign({}, day, { inspection_items: selected });
   });
+}
+
+function dayHasBusinessContent(day) {
+  const inspectionItems = day && day.inspection_items;
+  return !!(day && (
+    (Array.isArray(day.sites) && day.sites.length)
+    || String(day.notes || '').trim()
+    || day.vehicle_id
+    || (inspectionItems && typeof inspectionItems === 'object'
+        && Object.keys(inspectionItems).some(key => Array.isArray(inspectionItems[key])
+          ? inspectionItems[key].length > 0 : !!inspectionItems[key]))
+  ));
+}
+
+function planSubmitFingerprint(payload) {
+  const businessPayload = Object.assign({}, payload);
+  delete businessPayload.version;
+  return JSON.stringify(businessPayload);
 }
 
 // 各频次周期计算：返回 [periodStart, periodEnd]
@@ -99,6 +169,7 @@ Page({
     planVehicleId: null,
     vehicleExceptionReason: '',
     submitting: false,
+    submitError: '',
     loaded: false,
     isChange: false,      // 是否为变更编辑（modifying 状态）
     changeReason: ''
@@ -124,19 +195,16 @@ Page({
     this.loadSuggestions();
   },
 
-  // 新建：按频次初始化周期。周检预填7天（要求全覆盖）；月/季/年检周期长，
-  // 由运维通过"添加日期"挑选具体巡检日，不预铺全部日期。
+  // 周检自动展开周期日期；月、季、年只保留用户选择的实际执行日期。
   initPeriod(type) {
     const [start, end] = periodRange(type);
-    let days = [];
-    if (type === 'weekly') {
-      let cur = start;
-      while (cur <= end) {
-        days.push({ date: cur, weekday_cn: weekdayCn(cur), sites: [], vehicle_id: null });
-        cur = addDays(cur, 1);
-      }
+    try {
+      const days = reconcilePeriodDays(start, end, [], type === 'weekly');
+      this.setData({ scheduleType: type, periodStart: start, periodEnd: end, days, loaded: true }, () => this.loadInspectionItems());
+    } catch (err) {
+      wx.showToast({ title: err.message || '周期日期无效', icon: 'none' });
+      this.setData({ loaded: true });
     }
-    this.setData({ scheduleType: type, periodStart: start, periodEnd: end, days, loaded: true }, () => this.loadInspectionItems());
   },
 
   // 切换频次（仅新建时可切换；编辑已有排程锁定频次）
@@ -148,8 +216,9 @@ Page({
     this.loadSuggestions(type);
   },
 
-  // 添加巡检日期（月/季/年检用，限制在周期范围内）
+  // 月、季、年选择实际执行日期；周检日期由周期自动生成。
   onAddDay(e) {
+    if (this.data.scheduleType === 'weekly') return;
     const date = e.detail.value;
     if (!date) return;
     if (date < this.data.periodStart || date > this.data.periodEnd) {
@@ -157,25 +226,54 @@ Page({
       return;
     }
     if (this.data.days.some(d => d.date === date)) {
-      wx.showToast({ title: '该日期已添加', icon: 'none' });
+      wx.showToast({ title: '该日期已选择', icon: 'none' });
       return;
     }
-    const days = this.data.days.concat([{ date, weekday_cn: weekdayCn(date), sites: [], vehicle_id: null }]);
-    days.sort((a, b) => a.date < b.date ? -1 : 1);
-    this.setData({ days }, () => this.refreshValidation());
+    try {
+      const days = reconcilePeriodDays(this.data.periodStart, this.data.periodEnd,
+        this.data.days.concat([{ date, sites: [], notes: '', inspection_items: {} }]), false);
+      this.setData({ days }, () => this.refreshValidation());
+    } catch (err) {
+      wx.showToast({ title: err.message || '日期无效', icon: 'none' });
+    }
   },
 
-  // 删除某天
+  // 长周期可移除实际执行日；周检日期行始终跟随周期。
   onRemoveDay(e) {
+    if (this.data.scheduleType === 'weekly') return;
     const date = e.currentTarget.dataset.date;
-    // 周检始终保留完整的七天骨架；“移除”仅清空当天安排，避免误删后无法重新添加。
-    if (this.data.scheduleType === 'weekly') {
-      const days = this.data.days.map(d => d.date === date ? Object.assign({}, d, { sites: [], vehicle_id: null, notes: '' }) : d);
-      this.setData({ days }, () => this.refreshValidation());
-      return;
-    }
     this.setData({ days: this.data.days.filter(d => d.date !== date) }, () => this.refreshValidation());
   },
+
+  updatePeriod(field, value) {
+    const start = field === 'periodStart' ? value : this.data.periodStart;
+    const end = field === 'periodEnd' ? value : this.data.periodEnd;
+    try {
+      periodDates(start, end);
+    } catch (err) {
+      wx.showToast({ title: err.message || '周期日期无效', icon: 'none' });
+      return;
+    }
+    const outside = (this.data.days || []).filter(day =>
+      (day.date < start || day.date > end) && dayHasBusinessContent(day));
+    if (outside.length) {
+      wx.showModal({
+        title: '先调整已有执行日期',
+        content: `${outside.map(day => day.date).join('、')} 超出新周期。请先移除或改回周期，系统不会静默删除安排。`,
+        showCancel: false
+      });
+      return;
+    }
+    try {
+      const days = reconcilePeriodDays(start, end, this.data.days, this.data.scheduleType === 'weekly');
+      this.setData({ [field]: value, days }, () => this.refreshValidation());
+    } catch (err) {
+      wx.showToast({ title: err.message || '周期日期无效', icon: 'none' });
+    }
+  },
+
+  onPeriodStart(e) { this.updatePeriod('periodStart', e.detail.value); },
+  onPeriodEnd(e) { this.updatePeriod('periodEnd', e.detail.value); },
 
   // 加载已有排程
   loadExisting(id) {
@@ -187,30 +285,17 @@ Page({
         const start = res.period_start;
         const end = res.period_end;
         const type = res.schedule_type || 'weekly';
-        const days = [];
-        if (type === 'weekly') {
-          // 周检：铺满周期内每一天（空草稿也要有7天可选）
-          let cur = start;
-          while (cur <= end) {
-            const dayPlan = planData[cur] || {};
-            days.push({
-              date: cur, weekday_cn: weekdayCn(cur),
-              sites: dayPlan.sites || [], vehicle_id: vehicleDays[cur] || null, notes: dayPlan.notes || '',
-              inspection_items: dayPlan.inspection_items || {}
-            });
-            cur = addDays(cur, 1);
-          }
-        } else {
-          // 月/季/年检：只载入已有安排的日期
-          Object.keys(planData).sort().forEach(date => {
-            const dayPlan = planData[date] || {};
-            days.push({
-              date, weekday_cn: weekdayCn(date),
-              sites: dayPlan.sites || [], vehicle_id: vehicleDays[date] || null, notes: dayPlan.notes || '',
-              inspection_items: dayPlan.inspection_items || {}
-            });
-          });
-        }
+        const existingDays = [];
+        Object.keys(planData).sort().forEach(date => {
+          const dayPlan = planData[date] || {};
+          const day = {
+            date, weekday_cn: weekdayCn(date),
+            sites: dayPlan.sites || [], vehicle_id: vehicleDays[date] || null, notes: dayPlan.notes || '',
+            inspection_items: dayPlan.inspection_items || {}
+          };
+          if (dayHasBusinessContent(day)) existingDays.push(day);
+        });
+        const days = reconcilePeriodDays(start, end, existingDays, type === 'weekly');
         this.setData({
           loaded: true,
           editId: res.id,
@@ -231,8 +316,8 @@ Page({
           changeReason: res.change_reason || ''
         }, () => { this.loadVehicles(); this.loadInspectionItems(); });
       })
-      .catch(() => {
-        wx.showToast({ title: '加载失败', icon: 'none' });
+      .catch(err => {
+        wx.showToast({ title: (err && (err.error || err.message)) || '加载失败', icon: 'none' });
         this.setData({ loaded: true });
       });
   },
@@ -288,13 +373,18 @@ Page({
     const { dayIdx, siteId } = e.currentTarget.dataset;
     const key = 'days[' + dayIdx + '].sites';
     let sites = this.data.days[dayIdx].sites.slice();
+    const inspectionItems = Object.assign({}, this.data.days[dayIdx].inspection_items || {});
     const pos = sites.indexOf(siteId);
     if (pos > -1) {
       sites.splice(pos, 1);
+      delete inspectionItems[String(siteId)];
     } else {
       sites.push(siteId);
     }
-    this.setData({ [key]: sites }, () => { this.loadInspectionItems(); this.refreshValidation(); });
+    this.setData({
+      [key]: sites,
+      ['days[' + dayIdx + '].inspection_items']: inspectionItems
+    }, () => { this.loadInspectionItems(); this.refreshValidation(); });
   },
 
   // 一键全选/清空当天
@@ -305,7 +395,15 @@ Page({
     const allIds = this.data.mySites.map(s => s.id);
     // 如果已全选则清空，否则全选
     const allSelected = allIds.every(id => cur.indexOf(id) > -1);
-    this.setData({ [key]: allSelected ? [] : allIds.slice() }, () => { this.loadInspectionItems(); this.refreshValidation(); });
+    const updates = { [key]: allSelected ? [] : allIds.slice() };
+    if (allSelected) updates['days[' + dayIdx + '].inspection_items'] = {};
+    this.setData(updates, () => { this.loadInspectionItems(); this.refreshValidation(); });
+  },
+
+  onDayNotes(e) {
+    const dayIdx = e.currentTarget.dataset.dayIdx;
+    if (!this.data.days[dayIdx]) return;
+    this.setData({ ['days[' + dayIdx + '].notes']: e.detail.value }, () => this.refreshValidation());
   },
 
   loadInspectionItems() {
@@ -411,9 +509,9 @@ Page({
           if (Array.isArray(ids)) inspectionItems[String(siteId)] = [...new Set(ids.map(Number).filter(Number.isInteger))];
         });
         planData[d.date] = { sites: d.sites, notes: d.notes || '', inspection_items: inspectionItems };
-      }
-      if (!noVehicleRequired && planVehicleId) {
-        vehicleDays[d.date] = planVehicleId;
+        if (!noVehicleRequired && planVehicleId) {
+          vehicleDays[d.date] = planVehicleId;
+        }
       }
     });
     const selectedSiteIds = new Set();
@@ -474,11 +572,17 @@ Page({
       wx.showToast({ title: '请至少安排一天的巡检站点', icon: 'none' });
       return;
     }
-    this.setData({ submitting: true });
+    this.setData({ submitting: true, submitError: '' });
     const payload = this.buildPayload(true);
+    const payloadFingerprint = planSubmitFingerprint(payload);
+    const pendingSubmit = this._pendingFormalSubmit;
+    const retrySavedSubmit = !!(this.data.editId && pendingSubmit
+      && pendingSubmit.version === this.data.version
+      && pendingSubmit.fingerprint === payloadFingerprint);
 
-    // 先校验
-    api.validatePlanSchedule(Object.assign({ user_id: (getUser() || {}).id }, payload))
+    const submission = retrySavedSubmit
+      ? api.submitPlanSchedule(this.data.editId, pendingSubmit.version)
+      : api.validatePlanSchedule(Object.assign({ user_id: (getUser() || {}).id }, payload))
       .then(vr => {
         this.applyValidation(vr || {});
         if (vr.errors && vr.errors.length) {
@@ -504,21 +608,41 @@ Page({
       .then(() => {
         // 创建或更新
         if (this.data.editId) {
-          return api.updatePlanSchedule(this.data.editId, payload)
+          return api.updatePlanSchedule(this.data.editId, payload, { queue: false })
             .then(saved => {
               this.setData({ version: saved.version });
+              this._pendingFormalSubmit = {
+                version: saved.version,
+                fingerprint: payloadFingerprint,
+              };
               return api.submitPlanSchedule(this.data.editId, saved.version);
             });
         }
         return api.createPlanSchedule(payload);
-      })
-      .then(() => {
+      });
+
+    submission
+      .then(submitted => {
+        if (this.data.isChange && (!submitted || submitted.status !== 'change_submitted')) {
+          throw { error: '服务端未确认计划变更已进入待审核，请直接重试' };
+        }
+        this._pendingFormalSubmit = null;
         wx.showToast({ title: '已提交审批', icon: 'success' });
         setTimeout(() => wx.navigateBack(), 1200);
       })
       .catch(err => {
         if (err === 'blocked' || err === 'cancel') return;
-        wx.showToast({ title: (err && (err.error || err.message)) || '提交失败', icon: 'none' });
+        const message = (err && (err.error || err.message)) || '提交失败，请重试';
+        const nextAction = err && err.code === 'PLAN_VERSION_CONFLICT'
+          ? '计划已被其他操作更新，请返回计划详情刷新后重新编辑。'
+          : '修改内容已保留，请确认后直接重试。';
+        const failureText = message + '\n' + nextAction;
+        this.setData({ submitError: failureText });
+        wx.showModal({
+          title: '提交未完成',
+          content: failureText,
+          showCancel: false
+        });
       })
       .finally(() => this.setData({ submitting: false }));
   },
@@ -548,4 +672,7 @@ Page({
   }
 });
 
-module.exports = { initializeInspectionItemSelections };
+module.exports = {
+  initializeInspectionItemSelections, dayHasBusinessContent, planSubmitFingerprint,
+  periodDates, reconcilePeriodDays
+};

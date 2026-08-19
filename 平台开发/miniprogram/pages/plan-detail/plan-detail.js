@@ -7,6 +7,67 @@ const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '�
 const EXECUTION_STATUS = {
   active: '执行中', completed: '已完成', rejected: '已驳回', cancelled: '已取消', draft: '待执行'
 };
+const SITE_TASK_STATUS = {
+  pending: { label: '待执行', cls: 'gray' },
+  partial: { label: '部分完成', cls: 'orange' },
+  completed: { label: '已完成', cls: 'green' },
+  change_pending: { label: '变更待审', cls: 'orange' },
+  rework: { label: '需整改', cls: 'orange' }
+};
+
+function planHeaderPresentation(detail) {
+  const source = detail || {};
+  if (source.status === 'modifying' || source.status === 'change_submitted') {
+    return SITE_TASK_STATUS.change_pending;
+  }
+  if (source.status === 'approved') {
+    const key = SITE_TASK_STATUS[source.execution_status]
+      ? source.execution_status
+      : (source.execution_completed ? 'completed' : 'pending');
+    const presentation = SITE_TASK_STATUS[key];
+    return {
+      label: source.execution_status === key && source.execution_status_cn
+        ? source.execution_status_cn
+        : presentation.label,
+      cls: presentation.cls
+    };
+  }
+  return {
+    label: maps.map(maps.PLAN_SCHEDULE_STATUS, source.status, source.status),
+    cls: maps.PLAN_SCHEDULE_STATUS_CLS[source.status] || 'gray'
+  };
+}
+
+function normalizeGeneratedTasks(detail) {
+  const source = detail || {};
+  if (Array.isArray(source.generated_site_tasks)) {
+    return {
+      mode: 'site',
+      items: source.generated_site_tasks.map((item, index) => {
+        const status = SITE_TASK_STATUS[item.status] || {};
+        const executionDate = item.execution_date || item.date || '日期未设置';
+        const siteName = item.site_name || (item.site_id ? ('站点#' + item.site_id) : '站点未设置');
+        return Object.assign({}, item, {
+          key: ['site', item.plan_id || item.id || 0, executionDate, item.site_id || 0, index].join('-'),
+          display_name: executionDate + ' · ' + siteName,
+          status_cn: item.status_cn || status.label || '状态未知',
+          status_cls: status.cls || 'gray',
+          legacy: false
+        });
+      })
+    };
+  }
+  return {
+    mode: 'legacy',
+    items: (source.generated_plans || []).map((item, index) => Object.assign({}, item, {
+      key: ['legacy', item.id || 0, index].join('-'),
+      display_name: item.plan_name || ('巡检任务#' + item.id),
+      status_cn: EXECUTION_STATUS[item.status] || '状态未知',
+      status_cls: item.status === 'completed' ? 'green' : (item.status === 'active' ? 'blue' : 'gray'),
+      legacy: true
+    }))
+  };
+}
 
 function weekdayCn(dateStr) {
   return WEEKDAYS[new Date(dateStr.replace(/-/g, '/')).getDay()];
@@ -36,6 +97,7 @@ Page({
     statusCls: '',
     typeCn: '',
     generatedPlans: [],
+    generatedTaskMode: 'site',
     resourceDays: [],
     resourceParts: [],
     linkedWorkorders: [],
@@ -116,18 +178,17 @@ Page({
 
         const favorite = (favorites || []).find(item => Number(item.source_schedule_id) === Number(this.scheduleId)) || null;
         const executionCompleted = !!res.execution_completed;
+        const generatedTasks = normalizeGeneratedTasks(res);
+        const headerStatus = planHeaderPresentation(res);
         this.setData({
           loaded: true,
           detail: res,
           days,
-          statusCn: executionCompleted ? '已完成' : maps.map(maps.PLAN_SCHEDULE_STATUS, res.status, res.status),
-          statusCls: maps.PLAN_SCHEDULE_STATUS_CLS[res.status] || 'gray',
+          statusCn: headerStatus.label,
+          statusCls: headerStatus.cls,
           typeCn: maps.map(maps.SCHEDULE_TYPE, res.schedule_type, res.schedule_type),
-          generatedPlans: (res.generated_plans || []).map(item => Object.assign({}, item, {
-            display_name: item.plan_name || ('巡检任务#' + item.id),
-            status_cn: EXECUTION_STATUS[item.status] || '状态未知',
-            status_cls: item.status === 'completed' ? 'green' : (item.status === 'active' ? 'blue' : 'gray')
-          })),
+          generatedPlans: generatedTasks.items,
+          generatedTaskMode: generatedTasks.mode,
           resourceDays,
           resourceParts: plannedParts,
           linkedWorkorders: res.linked_workorders || [],
@@ -264,3 +325,5 @@ Page({
     });
   }
 });
+
+module.exports = { normalizeGeneratedTasks, planHeaderPresentation };

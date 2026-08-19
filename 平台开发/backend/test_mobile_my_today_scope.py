@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -171,6 +172,30 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertIn(13, package['schedule_ids'])
         self.assertEqual(package['carryover_package_count'], 1)
         self.assertIn('昨日遗留站', [site['name'] for site in package['sites']])
+
+    def test_future_plan_is_discoverable_but_not_today_executable(self):
+        future = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d')
+        plan_data = {future: {'sites': [1], 'inspection_items': {'1': []}}}
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO plan_schedules
+                (id,user_id,schedule_type,status,plan_data,vehicle_days,spare_parts,work_order_ids,
+                 version,remarks,period_start,period_end)
+                VALUES (20,2,'weekly','approved',?,'{}','[]','[]',1,'',?,?)""",
+                (json.dumps(plan_data), future, future))
+        home = self.client.get('/api/mobile/my-today',
+                               headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(home.status_code, 200, home.json)
+        self.assertEqual(home.json['summary']['pending_items'], 2)
+        upcoming = next(item for item in home.json['upcoming'] if item['schedule_id'] == 20)
+        self.assertEqual(upcoming['next_date'], future)
+        self.assertEqual(upcoming['site_names'], ['测试站'])
+        self.assertFalse(upcoming['operable'])
+        self.assertNotIn(20, home.json['work_package']['schedule_ids'])
+
+        execution = self.client.get('/api/mobile/today-execution',
+                                    headers={'Authorization': 'Bearer operator-token'})
+        self.assertFalse(any(package.get('schedule_id') == 20
+                             for package in execution.json['packages']))
 
     def test_today_execution_includes_unfinished_historical_package(self):
         response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})
@@ -444,6 +469,8 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(home.json['summary']['pending_items'], 0)
         self.assertEqual(home.json['summary']['rework_items'], 0)
         self.assertEqual(home.json['summary']['abnormal_items'], 0)
+        self.assertEqual(home.json['work_package']['sites'], [])
+        self.assertFalse(home.json['work_package']['has_plan'])
 
         execution = self.client.get('/api/mobile/today-execution', headers=headers)
         self.assertEqual(execution.status_code, 200, execution.json)

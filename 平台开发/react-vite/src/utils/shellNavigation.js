@@ -85,6 +85,9 @@ export function getNotificationTarget(item, roles) {
         : null;
     case 'inspection':
       return hasAnyRole(roles, ['admin', 'operator']) ? '/plan-schedules' : null;
+    case 'inspection_due_suggestion':
+    case 'inspection_follow_up_suggestion':
+      return hasAnyRole(roles, ['admin', 'operator']) ? '/plan-schedules' : null;
     case 'inspection_review':
       if (hasAnyRole(roles, ['admin', 'reviewer'])) {
         return buildAuditTargetPath('inspection', 'inspection', sourceId, item.source_type);

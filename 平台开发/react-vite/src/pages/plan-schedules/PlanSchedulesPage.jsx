@@ -19,6 +19,10 @@ import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageSt
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
 import {
+  DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
+} from './planRecommendationScope';
+import { groupExecutionPackagesByDate, planExecutionPresentation } from './planExecutionPackages';
+import {
   cleanupCandidateFactRows, cleanupCandidateIdentityRows, reconcileCleanupSelection,
 } from './cleanupCandidateFacts';
 import { applyPlanVehicleSelection, buildPlanValidationPayload } from './planVehicleState';
@@ -35,12 +39,6 @@ const SCHEDULE_STATUS_MAP = {
   modifying: { label: '变更中', color: 'warning' },
   change_submitted: { label: '变更待审', color: 'processing' },
   archived: { label: '已归档', color: 'default' },
-};
-
-const FIELD_STATUS_MAP = {
-  active: { label: '现场进行中', color: 'processing' },
-  completed: { label: '现场已完成', color: 'success' },
-  rework: { label: '现场待整改', color: 'warning' },
 };
 
 const TYPE_MAP = { weekly: '周巡检', monthly: '月巡检', quarterly: '季巡检', yearly: '年巡检' };
@@ -69,6 +67,7 @@ export default function PlanSchedulesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const userRoles = user?.roles || [user?.role];
   const canApprove = userRoles.some(role => role === 'admin' || role === 'manager');
+  const isAdmin = userRoles.includes('admin');
   const canCleanup = userRoles.includes('admin');
   const canUseFavorites = userRoles.includes('operator');
 
@@ -77,7 +76,8 @@ export default function PlanSchedulesPage() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [teamOverviewError, setTeamOverviewError] = useState('');
-  const [recommendationsError, setRecommendationsError] = useState('');
+  const [followUpError, setFollowUpError] = useState('');
+  const [followUpScope, setFollowUpScope] = useState(DEFAULT_FOLLOW_UP_SCOPE);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
   const [attentionFilter, setAttentionFilter] = useState(searchParams.get('attention') || undefined);
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || undefined);
@@ -91,11 +91,9 @@ export default function PlanSchedulesPage() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [acting, setActing] = useState(false);
-  const [draftRecommendations, setDraftRecommendations] = useState([]);
-  const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
   const [followUpLoading, setFollowUpLoading] = useState(false);
-  const [recommendationsExpanded, setRecommendationsExpanded] = useState(false);
+  const [followUpExpanded, setFollowUpExpanded] = useState(false);
   const [teamOverviewExpanded, setTeamOverviewExpanded] = useState(false);
   const [executionGuide, setExecutionGuide] = useState(null);
   const [closingExecution, setClosingExecution] = useState(null);
@@ -131,6 +129,7 @@ export default function PlanSchedulesPage() {
   const detailRequestRef = useRef(0);
   const editorRequestRef = useRef(0);
   const cleanupRequestRef = useRef(0);
+  const followUpRequestRef = useRef(0);
   const cleanupActionRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -216,55 +215,41 @@ export default function PlanSchedulesPage() {
     }
   }, [canApprove]);
 
-  const loadRecommendations = useCallback(async () => {
-    const [draftResult, followUpResult] = await Promise.allSettled([
-      api.getStrict('/plan-schedules/draft-recommendations'),
-      api.getStrict('/plan-schedules/follow-up-recommendations'),
-    ]);
-    if (!mountedRef.current) return;
-    if (draftResult.status === 'fulfilled') setDraftRecommendations(draftResult.value?.recommendations || []);
-    if (followUpResult.status === 'fulfilled') setFollowUpRecommendations(followUpResult.value?.recommendations || []);
-    setRecommendationsError(draftResult.status === 'fulfilled' && followUpResult.status === 'fulfilled'
-      ? '' : '排程建议加载失败，当前建议数量不完整');
-  }, []);
+  const loadFollowUps = useCallback(async () => {
+    const requestId = ++followUpRequestRef.current;
+    const result = await loadFollowUpRecommendations(
+      api,
+      followUpScope,
+      () => mountedRef.current && requestId === followUpRequestRef.current,
+    );
+    if (!result) return;
+    if (result.followUpRecommendations !== null) setFollowUpRecommendations(result.followUpRecommendations);
+    setFollowUpError(result.error);
+  }, [followUpScope]);
 
   const refreshAll = useCallback(() => {
     loadList();
     loadOverview();
-    loadRecommendations();
-  }, [loadList, loadOverview, loadRecommendations]);
+    loadFollowUps();
+  }, [loadList, loadOverview, loadFollowUps]);
 
-  const createRecommendedDraft = async (item) => {
-    setRecommendationLoading(true);
-    try {
-      const created = await api.postStrict('/plan-schedules/draft-recommendations', {
-        user_id: item.user_id,
-        schedule_type: item.schedule_type,
-        period_start: item.period_start,
-      });
-      message.success('已生成待确认草稿；尚未派发执行任务或占用资源');
-      refreshAll();
-      if (created?.schedule?.id) openDetail(created.schedule.id);
-    } catch (error) {
-      message.error(error?.message || '生成草稿失败，请刷新后重试');
-    } finally {
-      setRecommendationLoading(false);
-    }
-  };
-
-  const createFollowUpDraft = async (item) => {
+  const handleFollowUpRecommendation = async (item) => {
     setFollowUpLoading(true);
     try {
-      const created = await api.postStrict('/plan-schedules/follow-up-recommendations', {
-        user_id: item.user_id,
-        site_id: item.site_id,
-        anomaly_type: item.anomaly_type,
-      });
-      message.success('已生成复查草稿；仍需确认资源并提交审批');
+      const created = await api.postStrict(
+        '/plan-schedules/follow-up-recommendations',
+        followUpRecommendationActionPayload(followUpScope, item),
+      );
+      if (followUpScope === 'team') {
+        message.success(created?.notified ? '已通知负责人' : '负责人已有未读通知，无需重复通知');
+      } else {
+        message.success('已生成复查草稿；仍需确认资源并提交审批');
+      }
       refreshAll();
       if (created?.schedule?.id) openDetail(created.schedule.id);
     } catch (error) {
-      message.error(error?.message || '生成复查草稿失败，请刷新后重试');
+      message.error(error?.message || (followUpScope === 'team'
+        ? '通知失败，请刷新后重试' : '生成草稿失败，请刷新后重试'));
     } finally {
       setFollowUpLoading(false);
     }
@@ -341,7 +326,7 @@ export default function PlanSchedulesPage() {
   }, []);
 
   useEffect(() => { loadList(); }, [loadList]);
-  useEffect(() => { loadOverview(); loadRecommendations(); }, [loadOverview, loadRecommendations]);
+  useEffect(() => { loadOverview(); loadFollowUps(); }, [loadOverview, loadFollowUps]);
 
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
@@ -503,7 +488,7 @@ export default function PlanSchedulesPage() {
         [date]: { ...(current.plan_data?.[date] || { sites: [], notes: '', inspection_items: {} }), ...patch },
       },
     } : current);
-  }, []);
+  }, [isAdmin]);
 
   const updateEditSiteItems = useCallback((date, siteId, itemIds) => {
     setEditDraft(current => {
@@ -786,7 +771,17 @@ export default function PlanSchedulesPage() {
   }, [detail]);
 
   const hasScheduledSites = Number(detail?.site_count || 0) > 0 || dayRows.length > 0;
-  const generatedPlanCount = (detail?.generated_plans || []).length;
+  const generatedPlanCount = (detail?.generated_site_tasks || []).length;
+  const executionByDate = useMemo(() => (detail?.generated_site_tasks || []).reduce((result, task) => {
+    const date = task.date || '';
+    if (!result[date]) result[date] = [];
+    result[date].push(task);
+    return result;
+  }, {}), [detail]);
+  const executionPackagesByDate = useMemo(
+    () => groupExecutionPackagesByDate(detail?.generated_site_tasks || []),
+    [detail],
+  );
   const isApprovedSchedule = ['approved', 'archived'].includes(detail?.status);
 
   // 详情内：风险预警汇总（校验警告 + 高危排序提示）
@@ -843,9 +838,9 @@ export default function PlanSchedulesPage() {
       },
     },
     {
-      title: '现场', dataIndex: 'field_status', width: 110,
-      render: v => {
-        const s = FIELD_STATUS_MAP[v || 'active'];
+      title: '现场', dataIndex: 'execution_status', width: 110,
+      render: (_, record) => {
+        const s = planExecutionPresentation(record);
         return <Badge status={s.color} text={s.label} />;
       },
     },
@@ -895,47 +890,6 @@ export default function PlanSchedulesPage() {
     { key: 'resource', label: '资源阻塞', count: teamOverview?.summary?.resource_blocks || 0, danger: true },
   ].filter(item => item.count > 0);
 
-  const generatedTasksSection = (detail?.generated_plans || []).length > 0 ? (
-    <div className="plan-generated-tasks">
-      <div className="plan-detail-section-heading">
-        <Text strong style={{ fontSize: 13 }}>已生成执行任务</Text>
-        {(detail.generated_plans || []).some(task => task.status === 'active') && (
-          <Text type="secondary" style={{ fontSize: 12 }}>现场记录请在小程序“今日执行”完成</Text>
-        )}
-      </div>
-      <Table size="small" rowKey="id" pagination={false} style={{ marginTop: 8 }}
-        tableLayout="fixed"
-        dataSource={detail.generated_plans}
-        columns={[
-          { title: '任务', dataIndex: 'plan_name', width: 130, ellipsis: true },
-          { title: '日期', dataIndex: 'generate_date', width: 92 },
-          {
-            title: '状态', dataIndex: 'status', width: 68,
-            render: v => <Tag color={v === 'active' ? 'blue' : v === 'completed' ? 'green' : 'default'}>{v === 'active' ? '待执行' : v === 'completed' ? '已完成' : v}</Tag>,
-          },
-          {
-            title: '完成率', dataIndex: 'completion_rate', width: 62,
-            render: v => <Text style={{ fontSize: 11 }}>{Math.round(v || 0)}%</Text>,
-          },
-          {
-            title: '现场执行', width: 220,
-            render: (_, task) => task.status === 'active' ? (
-              <Space size={0}>
-                <Button size="small" type="link" icon={<MobileOutlined />}
-                  aria-label={`查看${task.plan_name}执行说明`} onClick={() => showExecutionGuide(task)}>执行说明</Button>
-                {canApprove && dayjs(task.generate_date).isBefore(dayjs(), 'day') && <>
-                  <Button size="small" type="link" aria-label={`催办${task.plan_name}`}
-                    onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>
-                  <Button size="small" type="link" danger aria-label={`登记${task.plan_name}未执行原因并关闭`}
-                    onClick={() => closeOverdueExecution(task)}>登记并关闭</Button>
-                </>}
-              </Space>
-            ) : <Text type="secondary">-</Text>,
-          },
-        ]} />
-    </div>
-  ) : null;
-
   return (
     <WorkspacePage
       title="巡检计划"
@@ -955,46 +909,43 @@ export default function PlanSchedulesPage() {
         { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
       ]}
     >
-      {recommendationsError && <Alert type="warning" showIcon message={recommendationsError} action={<Button size="small" onClick={loadRecommendations}>重试</Button>} />}
+      {followUpError && <Alert type="warning" showIcon message={followUpError} action={<Button size="small" onClick={loadFollowUps}>重试</Button>} />}
       {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
       {supplementTarget && <Alert type="warning" showIcon
         message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
         description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
 
-      {(draftRecommendations.length > 0 || followUpRecommendations.length > 0) && (
+      {(isAdmin || followUpRecommendations.length > 0) && (
         <Alert
           type={followUpRecommendations.length > 0 ? "warning" : "info"}
           showIcon
           icon={<BulbOutlined />}
-          message="待确认排程建议"
-          action={<Button size="small" type="link" onClick={() => setRecommendationsExpanded(value => !value)}>{recommendationsExpanded ? '收起' : `查看 ${draftRecommendations.length + followUpRecommendations.length} 条`}</Button>}
-          description={recommendationsExpanded && (
-            <Space wrap size={[8, 6]}>
-              {draftRecommendations.slice(0, 3).map(item => (
-                <Space key={`${item.user_id}-${item.schedule_type}-${item.period_start}`} size={4}>
-                  <Text style={{ fontSize: 12 }}>
-                    {item.user_name} · {TYPE_MAP[item.schedule_type] || item.schedule_type}：
-                    {item.site_count}站 / {item.due_item_count}项到期
-                  </Text>
-                  <Button size="small" type="link" loading={recommendationLoading}
-                    onClick={() => createRecommendedDraft(item)}>
-                    生成待确认草稿
-                  </Button>
-                </Space>
-              ))}
-              {draftRecommendations.length > 3 && <Text type="secondary">另有 {draftRecommendations.length - 3} 条建议</Text>}
+          message={followUpScope === 'team' ? '团队系统性异常复查' : '我的系统性异常复查'}
+          action={<Space size={4} wrap>
+            {isAdmin && <Button size="small" type="link" onClick={() => {
+              setFollowUpRecommendations([]); setFollowUpError('');
+              setFollowUpScope(scope => scope === 'team' ? 'mine' : 'team');
+            }}>{followUpScope === 'team' ? '返回我的复查' : '查看团队复查'}</Button>}
+            <Button size="small" type="link" onClick={() => setFollowUpExpanded(value => !value)}>
+              {followUpExpanded ? '收起' : `查看 ${followUpRecommendations.length} 条`}
+            </Button>
+          </Space>}
+          description={followUpExpanded && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {!followUpRecommendations.length && <Text type="secondary">当前范围暂无系统性异常复查建议</Text>}
               {followUpRecommendations.map(item => (
-                <Space key={`follow-up-${item.user_id}-${item.site_id}-${item.anomaly_type}`} size={4}>
-                  <Text style={{ fontSize: 12 }}>
-                    系统性异常复查：{item.user_name} · {item.site_name} · {item.anomaly_type}（{item.window_days}天{item.occurrence_count}次）
+                <div key={`follow-up-${item.user_id}-${item.site_id}-${item.anomaly_type}`}>
+                  <Text style={{ fontSize: 12 }}>复查建议：{item.user_name} · {item.site_name} · {item.anomaly_type}</Text>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+                    {item.window_days} 天内出现 {item.occurrence_count} 次；最近一次 {item.latest_at}；建议由负责人确认本周执行日期
                   </Text>
                   <Button size="small" type="link" danger loading={followUpLoading}
-                    onClick={() => createFollowUpDraft(item)}>
-                    生成复查草稿
+                    onClick={() => handleFollowUpRecommendation(item)}>
+                    {followUpScope === 'team' ? '通知负责人' : '生成复查草稿'}
                   </Button>
-                </Space>
+                </div>
               ))}
-            </Space>
+            </div>
           )}
         />
       )}
@@ -1086,7 +1037,7 @@ export default function PlanSchedulesPage() {
                 <Badge status={(SCHEDULE_STATUS_MAP[detail.status] || {}).color} text={(SCHEDULE_STATUS_MAP[detail.status] || {}).label || detail.status} />
               </Descriptions.Item>
               <Descriptions.Item label="现场状态">
-                <Badge status={(FIELD_STATUS_MAP[detail.field_status || 'active'] || {}).color} text={(FIELD_STATUS_MAP[detail.field_status || 'active'] || {}).label || detail.field_status} />
+                <Badge status={planExecutionPresentation(detail).color} text={planExecutionPresentation(detail).label} />
               </Descriptions.Item>
               <Descriptions.Item label="周期">{detail.period_start} ~ {detail.period_end}</Descriptions.Item>
               <Descriptions.Item label="版本">v{detail.version || 1}</Descriptions.Item>
@@ -1124,11 +1075,11 @@ export default function PlanSchedulesPage() {
               </div>
             )}
 
-            {generatedTasksSection}
-
             {/* 每日行程 + 站点情况 */}
             <div>
-              <Text strong style={{ fontSize: 13 }}>每日行程与站点情况</Text>
+              <Text strong style={{ fontSize: 13 }}>
+                每日行程与站点情况{generatedPlanCount ? `（已生成 ${generatedPlanCount} 个日期×站点任务）` : ''}
+              </Text>
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {dayRows.length === 0 && <Empty description="未安排站点" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
                 {dayRows.map(([date, dayData]) => (
@@ -1168,6 +1119,38 @@ export default function PlanSchedulesPage() {
                       {(dayData.sites || []).length > 10 && <Tag>其余 {(dayData.sites || []).length - 10} 站</Tag>}
                     </div>
                     {dayData.notes && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>{dayData.notes}</Text>}
+                    {(executionByDate[date] || []).length > 0 && (
+                      <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${tokens.colorBorderSecondary}` }}>
+                        {(executionByDate[date] || []).map(task => (
+                          <div key={`${task.date}-${task.site_id}`} style={{
+                            display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
+                            padding: '4px 0',
+                          }}>
+                            <Text style={{ fontSize: 12 }}>{task.site_name}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>{task.assignee || '未指定负责人'}</Text>
+                            <Tag color={task.status === 'completed' ? 'green' : task.status === 'change_pending' ? 'gold' : task.status === 'partial' ? 'blue' : 'default'}>
+                              {task.status_cn}
+                            </Tag>
+                            <Text type="secondary" style={{ fontSize: 11 }}>完成 {task.completed_items}/{task.total_items}（{Math.round(task.completion_rate || 0)}%）</Text>
+                            {task.attention && <Text type="secondary" style={{ fontSize: 11 }}>{task.attention}</Text>}
+                          </div>
+                        ))}
+                        {(executionPackagesByDate[date] || []).map(task => (
+                          <div key={`package-${task.plan_id}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, paddingTop: 4 }}>
+                            <Text type="secondary" style={{ fontSize: 11 }}>当日任务（含 {task.site_count} 个站点）</Text>
+                            <Button size="small" type="link" icon={<MobileOutlined />}
+                              aria-label={`查看${date}当日任务执行说明`}
+                              onClick={() => showExecutionGuide({ ...task, plan_name: `${date} 当日任务`, generate_date: date })}>执行说明</Button>
+                            {canApprove && task.can_handle_overdue && <>
+                              <Button size="small" type="link" aria-label={`催办${date}当日任务`}
+                                onClick={() => handleOverdueAction(task, 'remind')}>催办当日任务</Button>
+                              <Button size="small" type="link" danger aria-label={`登记${date}当日任务未执行原因并关闭`}
+                                onClick={() => closeOverdueExecution(task)}>登记并关闭当日任务</Button>
+                            </>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </Card>
                 ))}
               </div>

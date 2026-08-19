@@ -47,6 +47,13 @@ class AuditPartsContractTest(unittest.TestCase):
             'roles': ['reviewer'],
             'real_name': '审核员',
         }
+        app_module._tokens['operator-token'] = {
+            'id': 2,
+            'username': 'operator',
+            'role': 'operator',
+            'roles': ['operator'],
+            'real_name': '计划执行人',
+        }
         app_module.init_db()
         app_module.migrate_workorder_flow_columns()
         app_module.migrate_parts_requests_v2()
@@ -199,6 +206,17 @@ class AuditPartsContractTest(unittest.TestCase):
                 'SELECT status,approver,approval_comment FROM spare_part_requests WHERE id=21'
             ).fetchone()
         self.assertEqual(tuple(row), ('approved', '审核管理员', '审批通过'))
+
+    def test_change_schedule_is_pending_for_admin_but_operator_cannot_open_audit(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=31")
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        plan = next(item for item in pending.json if item['source_type'] == 'plan_schedule')
+        self.assertEqual(plan['schedule_id'], 31)
+        self.assertTrue(plan['is_change'])
+        forbidden = self.client.get('/api/audit/pending', headers=self.headers('operator-token'))
+        self.assertEqual(forbidden.status_code, 403, forbidden.json)
 
     def test_legacy_reject_requires_reason_and_is_removed_from_pending(self):
         rejected = self.client.put('/api/parts/requests/21/reject', headers=self.headers(), json={

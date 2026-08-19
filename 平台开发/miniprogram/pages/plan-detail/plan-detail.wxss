@@ -53,10 +53,11 @@
 .site-tag { margin: 0; }
 
 /* 任务列表 */
+.section-hint { display: block; margin-top: 4rpx; font-size: 22rpx; color: var(--text-3); }
 .task-list { margin: 16rpx 24rpx 0; }
 .task-item { display: flex; align-items: center; justify-content: space-between; padding: 16rpx 0; border-bottom: 1rpx solid var(--line); }
 .task-item:last-child { border-bottom: none; }
-.task-name { font-size: 26rpx; color: var(--text); }
+.task-name { flex: 1; min-width: 0; padding-right: 16rpx; font-size: 26rpx; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .task-status { flex: none; font-size: 23rpx; }
 
 .favorite-sheet { padding-bottom: calc(28rpx + env(safe-area-inset-bottom)); }

@@ -31,13 +31,7 @@ const renderRate = (value) => value == null
   ? <Text type="secondary">无样本</Text>
   : <Tag color={evaluationRateColor(Number(value))}>{Number(value)}%</Tag>;
 
-const opsReportFilename = (period) => {
-  const now = new Date();
-  const year = now.getFullYear();
-  return period === 'quarter'
-    ? `运维报告_${year}年第${Math.floor(now.getMonth() / 3) + 1}季度.xlsx`
-    : `运维报告_${year}年度.xlsx`;
-};
+const opsReportFilename = () => '水质运维工作报告.docx';
 
 export default function EvaluationPage() {
   const { tokens } = useTheme();
@@ -164,9 +158,18 @@ export default function EvaluationPage() {
 
   const toolbar = <WorkspaceToolbar actions={<>
     <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
-    <Button icon={<DownloadOutlined />} loading={exporting === 'evaluation'} disabled={Boolean(exporting)} onClick={() => downloadExport(`/export/evaluation?period=${period}`, `人员评估_${personnel.period_label || period}.xlsx`, 'evaluation')}>导出评估</Button>
-    <Dropdown menu={{ items: [{ key: 'quarter', label: '本季度运维报告' }, { key: 'year', label: '本年度运维报告' }], onClick: ({ key }) => downloadExport(`/export/ops-report?period=${key}`, opsReportFilename(key), key) }} disabled={Boolean(exporting)}>
-      <Button type="primary" icon={<FileExcelOutlined />} loading={exporting === 'quarter' || exporting === 'year'}>导出运维报告</Button>
+    <Button icon={<DownloadOutlined />} loading={exporting === 'evaluation'} disabled={Boolean(exporting)} onClick={() => downloadExport(`/export/evaluation?period=${period}`, `人员客观指标明细_${personnel.period_label || period}.xlsx`, 'evaluation')}>下载人员指标明细</Button>
+    <Dropdown menu={{ items: [
+      { key: 'report-quarter', label: '本季度工作报告（Word）' },
+      { key: 'report-year', label: '本年度工作报告（Word）' },
+      { key: 'details-quarter', label: '本季度详细数据附件（Excel）' },
+      { key: 'details-year', label: '本年度详细数据附件（Excel）' },
+    ], onClick: ({ key }) => {
+      const [kind, periodKey] = key.split('-');
+      downloadExport(`/export/ops-report${kind === 'details' ? '-details' : ''}?period=${periodKey}`,
+        kind === 'details' ? `水质运维详细数据_${periodKey}.xlsx` : opsReportFilename(), key);
+    } }} disabled={Boolean(exporting)}>
+      <Button type="primary" icon={<FileExcelOutlined />} loading={exporting.startsWith('report-') || exporting.startsWith('details-')}>下载工作报告</Button>
     </Dropdown>
   </>}>
     <FilterField label="统计周期">

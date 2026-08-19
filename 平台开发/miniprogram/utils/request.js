@@ -39,7 +39,22 @@ function queueCount() {
 }
 
 function taskSignature(task) {
-  return (task.method || '') + ':' + (task.url || '') + ':' + JSON.stringify(task.data || null);
+  return (task.api_profile || '') + ':' + (task.method || '') + ':' + (task.url || '') + ':' + JSON.stringify(task.data || null);
+}
+
+function isDevtoolsRuntime() {
+  try {
+    const platform = wx.getSystemInfoSync && wx.getSystemInfoSync().platform;
+    return ['devtools', 'windows', 'mac'].indexOf(platform) !== -1;
+  } catch (_) { return false; }
+}
+
+function canReplayInCurrentProfile(task) {
+  if (task.api_profile) return task.api_profile === CONFIG.API_PROFILE;
+  // Ownerless-profile legacy jobs are treated as online only on an actual
+  // device. Devtools may switch between local and production, so keep them
+  // isolated until the user clears or repeats the operation explicitly.
+  return CONFIG.API_PROFILE === 'online' && !isDevtoolsRuntime();
 }
 
 // 恢复网络后重传失败队列（写类请求）
@@ -51,7 +66,9 @@ function flushQueue(onResolve) {
   if (!q.length) return Promise.resolve({ synced: 0, remaining: 0, rejected: [] });
   const remain = [];
   const rejected = [];
-  const jobs = q.map((task) => request(task.url, task.method, task.data, { retry: 2, queue: false })
+  const isolated = q.filter(task => !canReplayInCurrentProfile(task));
+  const replayable = q.filter(canReplayInCurrentProfile);
+  const jobs = replayable.map((task) => request(task.url, task.method, task.data, { retry: 2, queue: false })
     .then((resp) => {
       if (onResolve) onResolve(task, resp);
       return { synced: true };
@@ -72,10 +89,13 @@ function flushQueue(onResolve) {
     // operation created during the flush would be overwritten by the old snapshot.
     const original = new Set(q.map(taskSignature));
     const additions = getQueue(ownerUserId).filter(task => !original.has(taskSignature(task)));
-    saveQueue(remain.concat(additions), ownerUserId);
+    const isolatedSignatures = new Set(isolated.map(taskSignature));
+    const newAdditions = additions.filter(task => !isolatedSignatures.has(taskSignature(task)));
+    saveQueue(remain.concat(isolated, newAdditions), ownerUserId);
     return {
       synced: results.filter(item => item.synced).length,
-      remaining: remain.length + additions.length,
+      remaining: remain.length + isolated.length + newAdditions.length,
+      isolated: isolated.map(task => ({ task, reason: '接口环境不一致，请清理队列或在原环境重新操作' })),
       rejected,
     };
   }).finally(() => { flushing = null; });
@@ -114,11 +134,17 @@ function request(path, method, data, options) {
         },
         fail(err) {
           err = Object.assign({}, err || {}, { code: -1, status: 0, network: true });
+          if (CONFIG.API_PROFILE === 'local') {
+            err.error = '本地服务未启动；请启动本地服务或清除本地接口设置后重试';
+            err.code = 'LOCAL_API_UNAVAILABLE';
+            err.queued = false;
+          }
           if (n < maxRetry) {
             setTimeout(() => attempt(n + 1), Math.min(1000 * Math.pow(2, n), 8000));
           } else {
             // 写类请求进入失败队列，待网络恢复自动重传
-            if (options.queue !== false && (method === 'POST' || method === 'PUT' || method === 'DELETE')) {
+            if (CONFIG.API_PROFILE !== 'local' && options.queue !== false
+                && (method === 'POST' || method === 'PUT' || method === 'DELETE')) {
               const ownerUserId = currentOwnerUserId();
               if (ownerUserId) {
                 const q = getQueue(ownerUserId);
@@ -126,7 +152,10 @@ function request(path, method, data, options) {
                 const sig = method + ':' + path + ':' + JSON.stringify(data || null);
                 const exists = q.some(t => (t.method + ':' + t.url + ':' + JSON.stringify(t.data || null)) === sig);
                 if (!exists) {
-                  q.push({ url: path, method: method, data: data, ts: Date.now(), ownerUserId });
+                  q.push({
+                    url: path, method: method, data: data, ts: Date.now(), ownerUserId,
+                    api_profile: CONFIG.API_PROFILE
+                  });
                   saveQueue(q, ownerUserId);
                 }
                 // 让调用页区分「业务失败」与「已安全落入离线队列」。

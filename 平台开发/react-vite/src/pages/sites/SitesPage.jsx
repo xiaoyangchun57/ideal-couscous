@@ -1257,70 +1257,20 @@ export default function SitesPage() {
         open={archiveModalOpen}
         onCancel={closeArchive}
         footer={[
-          <Button key="export" icon={<DownloadOutlined />} disabled={!archiveData} onClick={() => {
+          <Button key="export" icon={<DownloadOutlined />} disabled={!archiveData} onClick={async () => {
             if (!archiveData) return;
-            const valueOrMissing = (value) => value === '' || value == null ? '未录入' : value;
-            const exportData = {
-              导出时间: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-              站点名称: archiveData.name,
-              站点编码: archiveData.code,
-              站点类型: stationTypeMap[archiveData.type] || archiveData.type,
-              所属区县: valueOrMissing(extractDistrict(archiveData.district)),
-              详细地址: valueOrMissing(archiveData.address),
-              所属流域: valueOrMissing(archiveData.basin),
-              负责人: valueOrMissing(archiveData.manager),
-              监测状态: getStatusCfg(archiveData.status).text,
-              数据接入状态: archiveData.has_sensor_data ? '已接入真实采集' : '未接入真实采集',
-              经纬度: archiveData.gps_lat != null && archiveData.gps_lng != null
-                ? `${Number(archiveData.gps_lat).toFixed(6)}, ${Number(archiveData.gps_lng).toFixed(6)}` : '未录入',
-              海拔高程: archiveData.elevation == null || archiveData.elevation === '' ? '未录入' : `${archiveData.elevation} m`,
-              建站日期: valueOrMissing(archiveData.build_date),
-              试点状态: archiveData.is_pilot ? '试点站点' : '非试点站点',
-              试点频次: archiveData.is_pilot ? valueOrMissing(archiveData.operation_frequency) : '非试点站点无需设置',
-              设备清单: (archiveData.equipment || []).map(e => ({
-                设备编码: valueOrMissing(e.device_code), 设备名称: valueOrMissing(e.device_name),
-                设备类型: valueOrMissing(e.device_type), 型号: valueOrMissing(e.device_model),
-                厂商: valueOrMissing(e.manufacturer), 安装日期: valueOrMissing(e.install_date),
-                采集属性: Number(e.monitoring_enabled) === 1 ? '采集设备' : '非采集设备',
-                档案状态: valueOrMissing(e.status),
-              })),
-              故障记录: (archiveData.fault_records || []).map(r => ({
-                时间: valueOrMissing(r.date || r.time || r.created_at),
-                描述: valueOrMissing(r.description || r.detail || r.event),
-                严重度: valueOrMissing(r.severity), 操作人: valueOrMissing(r.operator),
-              })),
-              更换记录: (archiveData.replacement_records || []).map(r => ({
-                时间: valueOrMissing(r.date || r.time || r.created_at),
-                旧设备: valueOrMissing(r.old_equipment), 新设备: valueOrMissing(r.new_equipment || r.device_name),
-                原因: valueOrMissing(r.reason || r.description), 操作人: valueOrMissing(r.operator),
-              })),
-              巡检记录: (archiveData.inspection_records || []).map(r => ({
-                时间: valueOrMissing(r.date), 类型: valueOrMissing(r.type),
-                结果: valueOrMissing(r.result), 发现问题: valueOrMissing(r.issues),
-                巡检人: valueOrMissing(r.inspector),
-              })),
-              校准报告: (archiveData.calibration_reports || []).map(r => ({
-                时间: valueOrMissing(r.date), 类型: valueOrMissing(r.type),
-                结论: valueOrMissing(r.result), 有效期至: valueOrMissing(r.valid_until),
-                文件名: valueOrMissing(r.file?.name), 文件地址: valueOrMissing(r.file?.url),
-              })),
-              试剂库存: reagentInventory.map(r => ({
-                试剂名称: valueOrMissing(r.reagent_name), 厂家: valueOrMissing(r.manufacturer),
-                当前余量: r.current_qty == null ? '未录入' : `${r.current_qty} ${r.unit || ''}`.trim(),
-                最近更换时间: valueOrMissing(r.last_replaced_at),
-                预计可用天数: r.expected_duration_days == null ? '未设置' : `${r.expected_duration_days} 天`,
-                剩余可用天数: r.remaining_days == null ? '未设置' : `${r.remaining_days} 天`,
-                更换后质控: r.qc_status === 'pending' ? '待质控' : r.qc_status === 'failed' ? '质控不通过' : '质控通过',
-              })),
-            };
-            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `站点档案_${archiveData.name || archiveData.code || 'export'}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-            message.success('档案已导出');
+            try {
+              const result = await api.downloadStrict(`/sites/${archiveData.id}/archive/export`);
+              const url = URL.createObjectURL(result.blob);
+              const anchor = document.createElement('a');
+              anchor.href = url;
+              anchor.download = result.filename || `站点档案_${archiveData.name || archiveData.code}.xlsx`;
+              anchor.click();
+              URL.revokeObjectURL(url);
+              message.success('中文站点档案已开始下载');
+            } catch (error) {
+              message.error(error?.message || '站点档案导出失败，未生成文件');
+            }
           }}>
             导出档案
           </Button>,
@@ -1381,14 +1331,14 @@ export default function SitesPage() {
                 <div style={{ padding: '16px 0' }}>
                   <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 8, background: tokens.colorBgTextHover }}>
                     <Text style={{ fontSize: 13 }}>
-                      支持 CSV 格式整批导入。必填字段为 code、name、type，当前 type 固定填写 water_quality。
+                      支持中文 XLSX 和历史英文 CSV/XLSX，整批校验通过后才会写入。
                       <a onClick={async () => {
                         try {
                           const result = await api.downloadStrict('/sites/template');
                           const url = URL.createObjectURL(result.blob);
                           const anchor = document.createElement('a');
                           anchor.href = url;
-                          anchor.download = result.filename || 'site_import_template.csv';
+                          anchor.download = result.filename || '站点批量导入模板.xlsx';
                           anchor.click();
                           URL.revokeObjectURL(url);
                         } catch (error) {
@@ -1398,15 +1348,15 @@ export default function SitesPage() {
                     </Text>
                   </div>
                   <Upload.Dragger
-                    accept=".csv"
+                    accept=".xlsx,.xlsm,.csv"
                     showUploadList={false}
                     beforeUpload={handleImportFile}
                     disabled={importLoading}
                     style={{ borderRadius: 12 }}
                   >
                     <p style={{ fontSize: 36, color: tokens.colorPrimary, marginBottom: 8 }}><InboxOutlined /></p>
-                    <p style={{ fontSize: 15, fontWeight: 500 }}>点击或拖拽 CSV 文件到此区域</p>
-                    <p style={{ fontSize: 13, color: tokens.colorTextSecondary }}>支持 .csv 格式，UTF-8 编码</p>
+                    <p style={{ fontSize: 15, fontWeight: 500 }}>点击或拖拽站点文件到此区域</p>
+                    <p style={{ fontSize: 13, color: tokens.colorTextSecondary }}>推荐中文 .xlsx；兼容历史 UTF-8 .csv</p>
                   </Upload.Dragger>
                   {importLoading && <div style={{ textAlign: 'center', padding: 16 }}><Spin /> <Text style={{ marginLeft: 8 }}>正在导入...</Text></div>}
                   {importResult?.success && (

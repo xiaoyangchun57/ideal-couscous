@@ -99,9 +99,10 @@
   <block wx:if="{{generatedPlans.length}}">
     <view class="section">
       <view class="section-title">已生成巡检任务</view>
+      <text class="section-hint" wx:if="{{generatedTaskMode === 'legacy'}}">旧版执行包数据，状态沿用原任务口径</text>
     </view>
     <view class="card task-list">
-      <view class="task-item" wx:for="{{generatedPlans}}" wx:key="id">
+      <view class="task-item" wx:for="{{generatedPlans}}" wx:key="key">
         <text class="task-name">{{item.display_name}}</text>
         <text class="tag tag-{{item.status_cls}} task-status">{{item.status_cn}}</text>
       </view>

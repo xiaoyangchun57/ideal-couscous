@@ -113,6 +113,8 @@ export const deviceTypeMap = {
   pressure_water_level: '压力式水位计',
   current_meter: '流速仪',
   radar_water_level: '雷达水位计',
+  station_facility: '站房设施',
+  cod_analyzer: 'COD分析仪',
 };
 
 // Inspection type mappings

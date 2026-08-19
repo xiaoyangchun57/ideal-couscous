@@ -14,6 +14,7 @@ class SystemicFollowUpRecommendationTest(unittest.TestCase):
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
             CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT, status TEXT);
+            CREATE TABLE user_roles (user_id INTEGER, role TEXT, UNIQUE(user_id, role));
             CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
             CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE work_orders (
@@ -26,6 +27,7 @@ class SystemicFollowUpRecommendationTest(unittest.TestCase):
             );
         ''')
         self.db.execute("INSERT INTO users VALUES (7, 'operator', 'active')")
+        self.db.execute("INSERT INTO user_roles VALUES (7, 'operator')")
         self.db.execute('INSERT INTO user_sites VALUES (7, 3)')
         self.db.execute("INSERT INTO sites VALUES (3, '三号站')")
 

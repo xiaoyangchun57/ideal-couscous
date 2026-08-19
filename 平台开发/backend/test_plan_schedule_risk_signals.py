@@ -36,6 +36,7 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, role TEXT, status TEXT);
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT, UNIQUE(user_id, role));
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE work_orders (
@@ -58,6 +59,7 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
                 );
             ''')
             db.execute("INSERT INTO users VALUES (9, '测试运维', 'operator', 'active')")
+            db.execute("INSERT INTO user_roles VALUES (9, 'operator')")
             db.execute('INSERT INTO user_sites VALUES (9, 1)')
             db.executemany('INSERT INTO sites VALUES (?,?)', [(1, '甲站'), (2, '乙站')])
             db.execute("""INSERT INTO manual_reports

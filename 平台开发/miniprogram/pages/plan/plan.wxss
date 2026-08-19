@@ -14,6 +14,8 @@
 .recommendation-title { display: block; color: var(--text); font-size: 30rpx; font-weight: 600; }
 .recommendation-hint { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; line-height: 1.5; }
 .recommendation-count { flex: none; color: var(--brand); font-size: 24rpx; }
+.recommendation-summary-action { flex: none; text-align: right; }
+.recommendation-toggle { display: block; margin-top: 6rpx; color: var(--text-3); font-size: 22rpx; }
 .recommendation-item { display: flex; align-items: center; justify-content: space-between; gap: 16rpx; margin-top: 20rpx; padding-top: 20rpx; border-top: 1rpx solid var(--line); }
 .recommendation-main { min-width: 0; flex: 1; }
 .recommendation-type { display: inline-block; margin-right: 12rpx; color: var(--brand); font-size: 24rpx; font-weight: 600; }
@@ -41,9 +43,8 @@
 .plan-actions { margin-top: 20rpx; display: flex; justify-content: flex-end; }
 .btn-danger { margin-left: 16rpx; color: var(--red); border-color: rgba(239, 68, 68, .35); }
 
-.fab {
-  position: fixed; right: 32rpx; bottom: calc(48rpx + env(safe-area-inset-bottom));
+.new-plan-entry {
+  margin: 20rpx 24rpx 0; padding: 22rpx 24rpx; border-radius: 12rpx;
   background: var(--brand); color: var(--on-brand); font-size: 28rpx; font-weight: 500;
-  padding: 24rpx 40rpx; border-radius: 999rpx;
-  box-shadow: 0 8rpx 24rpx var(--brand-line);
+  text-align: center; box-shadow: 0 6rpx 18rpx var(--brand-line);
 }
