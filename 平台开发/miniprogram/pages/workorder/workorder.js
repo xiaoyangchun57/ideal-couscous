@@ -9,6 +9,7 @@ const {
 const { resolveUploadUrl, uploadStoragePath } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
+const { inventoryOptions, inventoryErrorMessage, buildPartsPayload } = require('../../utils/partsApplication.js');
 
 const app = getApp();
 
@@ -16,8 +17,7 @@ const app = getApp();
 const TAB_GROUPS = {
   all: null,
   pending: ['pending'],
-  accepted: ['accepted', 'dispatched'],
-  in_progress: ['in_progress'],
+  in_progress: ['accepted', 'dispatched', 'in_progress'],
   reviewing: ['reviewing'],
   closed: ['closed', 'resolved']
 };
@@ -29,17 +29,17 @@ Page({
     tabs: [
       { key: 'all', label: '全部' },
       { key: 'pending', label: '待受理' },
-      { key: 'accepted', label: '已受理' },
-      { key: 'in_progress', label: '处置中' },
-      { key: 'reviewing', label: '审核中' },
+      { key: 'in_progress', label: '进行中' },
+      { key: 'reviewing', label: '待核验' },
       { key: 'closed', label: '已完成' }
     ],
-    sheet: { open: false, item: null }, isAdmin: false, acting: false,
+    sheet: { open: false, item: null }, detailLoading: false, detailError: '', isAdmin: false, acting: false,
     resolutionNote: '',
     online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
     vehicleOptions: [{ id: 0, label: '暂无可用车辆' }],
-    partsOptions: [{ id: 0, label: '手动输入（自定义名称）' }],
+    partsOptions: [],
+    partsInventoryStatus: 'idle', partsInventoryError: '',
     // 极简申请弹层（含关联下标）
     vehicleApply: { open: false, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' },
     partsFulfillmentOptions: [
@@ -47,7 +47,7 @@ Page({
       { key: 'local_purchase', label: '附近紧急购买' },
       { key: 'vendor_order', label: '厂家订购' }
     ],
-    partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 }
+    partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0, submitting: false, requestKey: '' }
   },
 
   onShow() {
@@ -58,6 +58,11 @@ Page({
       isAdmin: roles.includes('admin')
     });
     this.refreshSyncState();
+    const focusedOrderNo = app.globalData.selWorkorderNo;
+    if (focusedOrderNo) {
+      app.globalData.selWorkorderNo = null;
+      this.openWorkorderSheet({ order_no: focusedOrderNo });
+    }
     this.load();
     this.loadLists();
   },
@@ -107,20 +112,42 @@ Page({
     return all.filter(w => set.indexOf(w.status) >= 0);
   },
 
+  openWorkorderSheet(seed) {
+    const orderNo = String(seed && seed.order_no || '').trim();
+    if (!orderNo) return;
+    const requestId = (this._detailRequest || 0) + 1;
+    this._detailRequest = requestId;
+    this.setData({ sheet: { open: true, item: seed || null }, detailLoading: true, detailError: '' });
+    api.workorderDetail(orderNo).then(item => {
+      if (this._detailRequest !== requestId) return null;
+      const mapped = maps.workorderCn(item || {});
+      const flowEvents = Array.isArray(mapped.flow_events) ? mapped.flow_events : [];
+      this.setData({
+        sheet: { open: true, item: Object.assign({}, mapped, {
+          flowEvents, flowUnavailable: !Array.isArray(mapped.flow_events), detailStale: false,
+        }) },
+        detailLoading: false,
+        resolutionNote: mapped.remark || '',
+      });
+      return api.workorderRelated(orderNo).catch(() => ({ unavailable: true }));
+    }).then(related => {
+      if (!related || this._detailRequest !== requestId || !this.data.sheet.item
+          || String(this.data.sheet.item.order_no) !== orderNo) return;
+      this.setData({ 'sheet.item.related': related, 'sheet.item.relatedUnavailable': !!related.unavailable });
+    }).catch(err => {
+      if (this._detailRequest !== requestId) return;
+      const hasSeed = !!(seed && seed.order_no);
+      this.setData({ detailLoading: false, detailError: (err && err.error) || '工单详情加载失败',
+        'sheet.item.detailStale': hasSeed });
+      wx.showToast({ title: (err && err.error) || '工单详情加载失败', icon: 'none' });
+    });
+  },
+
   load(one) {
     api.workorders()
       .then(res => {
         const all = (res || []).map(maps.workorderCn);
         this.setData({ all, list: this.filter(all, this.data.tab), loaded: true });
-        const focusedOrderNo = app.globalData.selWorkorderNo;
-        if (focusedOrderNo) {
-          const item = all.find(workorder => workorder.order_no === focusedOrderNo);
-          app.globalData.selWorkorderNo = null;
-          if (item) {
-            const stepMap = { pending: 1, accepted: 2, dispatched: 2, in_progress: 3, reviewing: 4, closed: 5, resolved: 5 };
-            this.setData({ sheet: { open: true, item: Object.assign({}, item, { step: stepMap[item.status] || 0 }) }, resolutionNote: item.remark || '' });
-          }
-        }
         if (one) one();
       })
       .catch(() => { this.setData({ loaded: true }); if (one) one(); wx.showToast({ title: '加载失败', icon: 'none' }); });
@@ -135,15 +162,17 @@ Page({
   onOpen(e) {
     const no = e.currentTarget.dataset.no;
     const item = this.data.list.find(w => w.order_no === no);
-    if (item) {
-      const stepMap = { pending: 1, accepted: 2, in_progress: 3, reviewing: 4, closed: 5 };
-      const step = stepMap[item.status] || 0;
-      this.setData({ sheet: { open: true, item: Object.assign({}, item, { step }) }, resolutionNote: item.remark || '' });
-    }
+    if (item) this.openWorkorderSheet(item);
   },
-  onClose() { this.setData({ 'sheet.open': false }); },
+  onClose() {
+    if (this.data.acting) { wx.showToast({ title: '操作提交中，请稍候', icon: 'none' }); return; }
+    this.setData({ 'sheet.open': false });
+  },
   onCloseVehicle() { this.setData({ 'vehicleApply.open': false }); },
-  onCloseParts() { this.setData({ 'partsApply.open': false }); },
+  onCloseParts() {
+    if (this.data.partsApply.submitting) { wx.showToast({ title: '提交中，请稍候', icon: 'none' }); return; }
+    this.setData({ 'partsApply.open': false });
+  },
   onResolutionNote(e) { this.setData({ resolutionNote: e.detail.value }); },
 
   afterAction(tip) {
@@ -153,7 +182,9 @@ Page({
   },
 
   doAccept() {
-    const no = this.data.sheet.item.order_no;
+    const item = this.data.sheet.item || {};
+    if (item.detailStale || item.actions && item.actions.primary !== 'accept') { wx.showToast({ title: item.block_reason || '请刷新后重试', icon: 'none' }); return; }
+    const no = item.order_no;
     this.setData({ acting: true });
     api.updateWorkorderStatus(no, 'accepted')
       .then(() => this.afterAction('已接单'))
@@ -163,7 +194,7 @@ Page({
   // 到场签到：GPS 围栏由后端校验（距站点 ≤500m）
   onCheckIn() {
     const item = this.data.sheet.item;
-    if (!item) return;
+    if (!item || item.detailStale || item.actions && item.actions.primary !== 'check_in') { wx.showToast({ title: (item && item.block_reason) || '请刷新后重试', icon: 'none' }); return; }
     wx.showLoading({ title: '定位中' });
     requestLocation().then(gps => {
       wx.hideLoading();
@@ -189,7 +220,7 @@ Page({
 
   doStart() {
     const item = this.data.sheet.item;
-    if (!item.checked_in) { wx.showToast({ title: '请先到场签到', icon: 'none' }); return; }
+    if (!item || item.detailStale || item.actions && item.actions.primary !== 'start') { wx.showToast({ title: (item && item.block_reason) || '请刷新后重试', icon: 'none' }); return; }
     const no = item.order_no;
     this.setData({ acting: true });
     api.updateWorkorderStatus(no, 'in_progress', { client: 'mobile' })
@@ -289,6 +320,7 @@ Page({
 
   doReview() {
     const item = this.data.sheet.item;
+    if (!item || item.detailStale || item.actions && item.actions.primary !== 'submit_review') { wx.showToast({ title: (item && item.block_reason) || '请刷新后重试', icon: 'none' }); return; }
     if (!item.has_images) { wx.showToast({ title: '请先上传处置影像', icon: 'none' }); return; }
     const resolutionNote = (this.data.resolutionNote || '').trim();
     if (!resolutionNote) { wx.showToast({ title: '请填写现场处置说明', icon: 'none' }); return; }
@@ -327,22 +359,35 @@ Page({
 
   // ---- 关联下拉数据（可选，不指定则纯文字兜底） ----
   loadLists() {
-    Promise.all([api.vehicles(), api.partsInventory()])
-      .then(([vs, ps]) => {
+    api.vehicles()
+      .then(vs => {
         const availableVehicles = (vs || []).filter(v => v.dispatchable).map(v => ({
           id: v.id,
           label: (v.plate_no || '未上牌') + (v.model ? '（车型：' + v.model + '）' : '')
         }));
         const vehicleOptions = availableVehicles.length ? availableVehicles : [{ id: 0, label: '暂无可用车辆' }];
-        const partsOptions = [{ id: 0, label: '手动输入（自定义名称）' }].concat((ps || []).map(p => ({
-          id: p.id,
-          part_name: p.part_name,
-          label: p.part_name + (p.part_code ? '（' + p.part_code + '）' : '') + ' 余' + p.quantity
-        })));
-        this.setData({ vehicleOptions, partsOptions });
+        this.setData({ vehicleOptions });
       })
       .catch(() => {});
+    this.loadPartsInventory();
   },
+
+  loadPartsInventory() {
+    if (this.data.partsInventoryStatus === 'loading') return;
+    const requestId = (this._partsInventoryRequest || 0) + 1;
+    this._partsInventoryRequest = requestId;
+    this.setData({ partsInventoryStatus: 'loading', partsInventoryError: '' });
+    api.partsInventory().then(parts => {
+      if (this._partsInventoryRequest !== requestId) return;
+      const partsOptions = inventoryOptions(parts);
+      this.setData({ partsOptions, partsInventoryStatus: partsOptions.length ? 'ready' : 'empty' });
+    }).catch(error => {
+      if (this._partsInventoryRequest !== requestId) return;
+      this.setData({ partsInventoryStatus: 'error', partsInventoryError: inventoryErrorMessage(error) });
+    });
+  },
+
+  onRetryPartsInventory() { this.loadPartsInventory(); },
 
   // ---- 工单资源申请弹层 ----
   onApplyVehicle() { this.setData({ vehicleApply: { open: true, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' } }); },
@@ -370,16 +415,27 @@ Page({
       .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'vehicleApply.open'); });
   },
 
-  onApplyParts() { this.setData({ partsApply: { open: true, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } }); },
+  onApplyParts() {
+    this.setData({ partsApply: { open: true, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0, submitting: false, requestKey: 'parts_workorder_' + Date.now() } });
+    if (this.data.partsInventoryStatus === 'idle' || this.data.partsInventoryStatus === 'error') this.loadPartsInventory();
+  },
   onPartsFulfillmentPick(e) {
+    if (this.data.partsApply.submitting) return;
     const idx = parseInt(e.detail.value, 10) || 0;
     const selected = this.data.partsFulfillmentOptions[idx] || this.data.partsFulfillmentOptions[0];
+    const previousType = this.data.partsApply.fulfillment_type;
+    const resetManualFields = selected.key === 'stock' || previousType === 'stock';
     this.setData({
       'partsApply.fulfillmentIndex': idx,
       'partsApply.fulfillment_type': selected.key,
       'partsApply.index': 0,
-      'partsApply.part_name': selected.key === 'stock' ? '' : this.data.partsApply.part_name
+      'partsApply.part_name': resetManualFields ? '' : this.data.partsApply.part_name,
+      'partsApply.specification': resetManualFields ? '' : this.data.partsApply.specification,
+      'partsApply.estimated_amount': resetManualFields ? '' : this.data.partsApply.estimated_amount
     });
+  },
+  onPartsFulfillmentSelect(e) {
+    this.onPartsFulfillmentPick({ detail: { value: e.currentTarget.dataset.index } });
   },
   onPartsName(e) { this.setData({ 'partsApply.part_name': e.detail.value }); },
   onPartsSpecification(e) { this.setData({ 'partsApply.specification': e.detail.value }); },
@@ -395,22 +451,15 @@ Page({
   },
   submitParts() {
     const pa = this.data.partsApply;
-    const part_name = (pa.part_name || '').trim();
-    const reason = (pa.reason || '').trim();
-    if (!part_name) { wx.showToast({ title: '请填写备件名称', icon: 'none' }); return; }
-    if (!reason) { wx.showToast({ title: '请填写申请事由', icon: 'none' }); return; }
+    if (pa.submitting) return;
     const item = this.data.sheet.item;
-    const opt = this.data.partsOptions[pa.index];
-    const spare_part_id = pa.fulfillment_type === 'stock' && opt && opt.id ? opt.id : null;
-    if (pa.fulfillment_type === 'stock' && !spare_part_id) { wx.showToast({ title: '请选择现有库存备件', icon: 'none' }); return; }
+    const result = buildPartsPayload(pa, this.data.partsOptions, this.data.partsInventoryStatus);
+    if (result.error) { wx.showToast({ title: result.error, icon: 'none' }); return; }
+    this.setData({ 'partsApply.submitting': true });
     wx.showLoading({ title: '提交中' });
-    api.applyParts({
-      site_id: item.site_id, work_order_no: item.order_no, part_name,
-      specification: (pa.specification || '').trim(), quantity: pa.quantity || 1,
-      reason, spare_part_id, fulfillment_type: pa.fulfillment_type,
-      estimated_amount: pa.estimated_amount === '' ? null : Number(pa.estimated_amount)
-    })
-      .then(() => { wx.hideLoading(); wx.showToast({ title: '备件需求已提交', icon: 'success' }); this.setData({ 'partsApply.open': false }); })
-      .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'partsApply.open'); });
+    api.applyParts(Object.assign({ site_id: item.site_id, work_order_no: item.order_no,
+      _idempotency_key: pa.requestKey }, result.payload))
+      .then(() => { wx.hideLoading(); wx.showToast({ title: '已提交审批', icon: 'success' }); this.setData({ 'partsApply.open': false, 'partsApply.submitting': false }); })
+      .catch((err) => { wx.hideLoading(); this.setData({ 'partsApply.submitting': false }); this.handleWriteFailure(err, '提交失败'); });
   }
 });

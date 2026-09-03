@@ -9,11 +9,24 @@ function resolveUploadUrl(path) {
 }
 
 function uploadStoragePath(url) {
-  if (typeof url !== 'string' || !url) return '';
-  if (url.startsWith('/uploads/')) return url;
+  if (typeof url !== 'string' || !url || url.trim() !== url || /[?#]/.test(url)) return '';
+  if (url.startsWith('/uploads/')) return url.length > '/uploads/'.length ? url : '';
   const prefix = CONFIG.BASE_URL.replace(/\/$/, '');
-  if (url.startsWith(prefix + '/uploads/')) return url.slice(prefix.length);
+  const absolutePrefix = prefix + '/uploads/';
+  if (url.startsWith(absolutePrefix) && url.length > absolutePrefix.length) return url.slice(prefix.length);
   return '';
 }
 
-module.exports = { resolveUploadUrl, uploadStoragePath };
+function prepareReportPhotoStoragePaths(urls) {
+  if (!Array.isArray(urls)) return { ok: false, paths: [], reason: 'invalid_path' };
+  const paths = [];
+  for (const url of urls) {
+    const path = uploadStoragePath(url);
+    if (!path) return { ok: false, paths: [], reason: 'invalid_path' };
+    if (paths.indexOf(path) === -1) paths.push(path);
+  }
+  if (paths.length < 1 || paths.length > 6) return { ok: false, paths: [], reason: 'invalid_count' };
+  return { ok: true, paths };
+}
+
+module.exports = { resolveUploadUrl, uploadStoragePath, prepareReportPhotoStoragePaths };

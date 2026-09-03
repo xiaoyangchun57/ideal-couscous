@@ -28,14 +28,18 @@ const api = {
 
   // 今日聚合
   myToday: () => request('/api/mobile/my-today', 'GET'),
+  // 当前登录人服务端授权的站点；手工异常上报不能使用登录缓存代替此范围。
+  sites: () => request('/api/sites', 'GET', {}, { queue: false }),
   anomalyCodes: () => request('/api/anomaly-codes', 'GET'),
-  submitManualReport: (payload) => request('/api/manual-reports', 'POST', payload),
+  // 失败必须由上报页保留草稿并显式重试，不能在未知网络结果下悄悄排队二次写入。
+  submitManualReport: (payload) => request('/api/manual-reports', 'POST', payload, { queue: false }),
   manualReports: (status) => request('/api/manual-reports' + (status ? '?status=' + status : ''), 'GET'),
 
   // 今日已批准巡检执行包（巡检 Tab 的唯一入口）
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
-  executionSiteTasks: (planId, siteId) =>
-    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId, 'GET'),
+  executionSiteTasks: (planId, siteId, options) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId
+      + (options && options.reworkOnly ? '?scope=rework' : ''), 'GET'),
   checkOutExecutionSite: (planId, siteId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}),
   executionSiteReagents: (planId, siteId) =>
@@ -87,7 +91,18 @@ const api = {
   createPhotoCaptureSession: (payload) =>
     request('/api/mobile/photo-capture-session', 'POST', payload, { queue: false, retry: 0 }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
-  deletePendingSitePhoto: (url) => request('/api/mobile/site-photos/delete', 'POST', { url }),
+  deletePendingSitePhoto: (url) => request(
+    '/api/mobile/site-photos/delete', 'POST', { url }, { queue: false }
+  ),
+  purgeRejectedInspectionPhoto: (attachmentId) => request(
+    '/api/attachments/' + attachmentId + '/purge-rejected', 'POST', {}, { queue: false }
+  ),
+  getRejectedInspectionPurgeBatch: (attachmentId) => request(
+    '/api/attachments/' + attachmentId + '/purge-rejected-batch', 'GET', {}, { queue: false }
+  ),
+  purgeRejectedInspectionPhotoBatch: (attachmentId) => request(
+    '/api/attachments/' + attachmentId + '/purge-rejected-batch', 'POST', {}, { queue: false }
+  ),
 
   trackEvent: (eventName, context) => request('/api/telemetry/events', 'POST', {
     event_id: 'evt_' + Date.now() + '_' + Math.floor(Math.random() * 1e6),
@@ -110,10 +125,10 @@ const api = {
     request('/api/mobile/workorder/' + orderNo + '/image/delete', 'POST', { url }),
 
   // 用车申请；无车执行仅允许关联具体工单并登记例外原因。
-  applyVehicle: (payload) => request('/api/vehicle/applications', 'POST', payload),
+  applyVehicle: (payload) => request('/api/vehicle/applications', 'POST', payload, { queue: false }),
 
   // 备件申请（关联工单/站点）
-  applyParts: (payload) => request('/api/parts/requests', 'POST', payload),
+  applyParts: (payload) => request('/api/parts/requests', 'POST', payload, { queue: false }),
   myPartsRequests: () => request('/api/parts/requests/mine', 'GET'),
   issuePartsRequest: (id, items) => request('/api/parts/requests/' + id + '/issue', 'POST', { items }),
   orderPartsRequest: (id, payload) => request('/api/parts/requests/' + id + '/order', 'POST', payload || {}),
@@ -129,6 +144,8 @@ const api = {
   // 工单列表（无 _cn，需前端映射）
   workorders: (status) =>
     request('/api/workorders' + (status ? '?status=' + status : ''), 'GET'),
+  workorderDetail: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo), 'GET', {}, { queue: false }),
+  workorderRelated: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo) + '/related', 'GET', {}, { queue: false }),
 
   // 工单状态流转；closed 仅管理员；extra 透传（移动端强制携带 client:'mobile' 触发流程门禁）
   updateWorkorderStatus: (orderNo, status, extra) =>
@@ -151,6 +168,7 @@ const api = {
   // 告警列表（无 _cn，需前端映射）
   alerts: (status) =>
     request('/api/alerts' + (status ? '?status=' + status : ''), 'GET'),
+  alertDetail: (id) => request('/api/alerts/' + encodeURIComponent(id), 'GET', {}, { queue: false }),
 
   // 确认告警
   acknowledgeAlert: (id) =>
@@ -221,16 +239,8 @@ const api = {
   }),
 
   // ===== 计划调度（排程） =====
-  // 我的排程列表（运维只看自己的）
-  // 小程序“我的计划”只展示当前登录人的排程；管理员在 PC 端仍可查看团队计划。
-  planSchedules: () => request('/api/plan-schedules?mine=1', 'GET'),
-
-  // 系统性巡检异常复查建议（30 天内同类异常达到阈值）
-  planScheduleFollowUpRecommendations: (team) =>
-    request('/api/plan-schedules/follow-up-recommendations?scope=' + (team ? 'team' : 'mine'), 'GET'),
-
-  createPlanScheduleFollowUpDraft: (payload) =>
-    request('/api/plan-schedules/follow-up-recommendations', 'POST', payload),
+  // 默认个人范围；管理员/审核员可在计划页显式切换团队范围。
+  planSchedules: (team) => request('/api/plan-schedules' + (team ? '' : '?mine=1'), 'GET'),
 
   // 排程详情（含 site_map、generated_plans）
   planScheduleDetail: (id) => request('/api/plan-schedules/' + id, 'GET'),
@@ -260,6 +270,11 @@ const api = {
   // 发起变更（已通过的计划，approved → modifying）
   requestPlanScheduleChange: (id, changeReason) =>
     request('/api/plan-schedules/' + id + '/request-change', 'POST', { change_reason: changeReason }),
+
+  cancelPlanSchedule: (id, reason, version) =>
+    request('/api/plan-schedules/' + id + '/cancel', 'POST', {
+      reason: String(reason || '').trim(), version
+    }, { queue: false }),
 
   // 排程校验（车辆冲突等）
   validatePlanSchedule: (payload) => request('/api/plan-schedules/validate', 'POST', payload),

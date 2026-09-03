@@ -26,7 +26,15 @@ function chooseInspectionPhotos(maxCount, captureSource) {
       sourceType,
       sizeType: ['original'],
       success(res) {
-        resolve((res.tempFiles || []).map(file => file.tempFilePath).filter(Boolean));
+        const files = res && Array.isArray(res.tempFiles) ? res.tempFiles : [];
+        const paths = files.map(file => file && file.tempFilePath)
+          .filter(path => typeof path === 'string' && path.trim())
+          .map(path => path.trim());
+        if (!paths.length) {
+          reject({ error: '未获取到有效照片，请重新选择' });
+          return;
+        }
+        resolve(paths);
       },
       fail: reject
     });
@@ -67,17 +75,106 @@ function captureSourceNeedsLocationSession(captureSource) {
   return captureSource === 'camera';
 }
 
+function photoActionOpeningTitle(captureSource) {
+  if (captureSource === 'camera') return '正在打开相机';
+  if (captureSource === 'watermark_album') return '正在打开相册';
+  return '正在打开相机/相册';
+}
+
+function runPhotoActionOnce(owner, captureSource, action, onStart, onFinish) {
+  if (owner && owner._photoActionPromise) return owner._photoActionPromise;
+  if (!owner || typeof action !== 'function') {
+    return Promise.reject(new Error('照片操作无法启动'));
+  }
+  if (typeof onStart === 'function') onStart(photoActionOpeningTitle(captureSource));
+  const actionPromise = Promise.resolve().then(action);
+  let trackedPromise;
+  trackedPromise = actionPromise.finally(() => {
+    if (owner._photoActionPromise !== trackedPromise) return;
+    owner._photoActionPromise = null;
+    if (typeof onFinish === 'function') onFinish();
+  });
+  owner._photoActionPromise = trackedPromise;
+  return trackedPromise;
+}
+
+function validateReportPhotoPaths(paths) {
+  const valid = Array.isArray(paths) && paths.length > 0
+    && paths.every(path => typeof path === 'string' && path.trim());
+  if (!valid) {
+    const error = new Error('未获取到有效照片，请重新拍摄或选择');
+    error.error = error.message;
+    throw error;
+  }
+  return paths.map(path => path.trim());
+}
+
+function handlePhotoActionFailure(error, showError) {
+  if (isPhotoSelectionCancelled(error)) return Promise.resolve({ cancelled: true });
+  const message = photoCaptureErrorMessage(error);
+  return Promise.resolve(typeof showError === 'function' ? showError(message) : undefined)
+    .then(() => ({ cancelled: false, message }));
+}
+
+function deletePendingPhotoOnce(owner, displayUrl, storagePath, requestDelete, getPhotos) {
+  if (!owner || !storagePath || typeof requestDelete !== 'function') {
+    return Promise.reject({ error: '照片删除无法启动，请重试' });
+  }
+  if (!owner._pendingReportPhotoDeletes) owner._pendingReportPhotoDeletes = {};
+  if (owner._pendingReportPhotoDeletes[storagePath]) {
+    return owner._pendingReportPhotoDeletes[storagePath];
+  }
+  let trackedPromise;
+  trackedPromise = Promise.resolve().then(() => requestDelete(storagePath)).then(response => {
+    const confirmed = response && response.success === true && response.path === storagePath
+      && (response.deleted === true || response.already_deleted === true);
+    if (!confirmed) throw { error: '服务响应异常，照片仍保留，请重试' };
+    const photos = typeof getPhotos === 'function' ? getPhotos() : [];
+    return (Array.isArray(photos) ? photos : []).filter(item => item !== displayUrl);
+  }).finally(() => {
+    if (owner._pendingReportPhotoDeletes
+        && owner._pendingReportPhotoDeletes[storagePath] === trackedPromise) {
+      delete owner._pendingReportPhotoDeletes[storagePath];
+    }
+  });
+  owner._pendingReportPhotoDeletes[storagePath] = trackedPromise;
+  return trackedPromise;
+}
+
+function deletePendingReportPhotoOnce(owner, displayUrl, storagePath, requestDelete, getPhotos) {
+  return deletePendingPhotoOnce(owner, displayUrl, storagePath, requestDelete, getPhotos);
+}
+
+function inspectionUploadTaskResult(response, context, resolveUrl) {
+  const result = response || {};
+  const details = context || {};
+  if (result.accepted_for_review === false) {
+    return Object.assign({ rejected: result }, details);
+  }
+  const rawUrl = typeof result.url === 'string' ? result.url.trim() : '';
+  return rawUrl ? { url: typeof resolveUrl === 'function' ? resolveUrl(rawUrl) : rawUrl } : {};
+}
+
 function collectInspectionPhotoUploadResults(results) {
   const summary = { urls: [], localPaths: [], localMetadata: [], issues: [] };
   (Array.isArray(results) ? results : []).forEach((result, index) => {
     if (result && result.status === 'fulfilled') {
       const value = result.value || {};
-      if (value.url) summary.urls.push(value.url);
-      else if (value.localPath) {
-        summary.localPaths.push(value.localPath);
+      const url = typeof value.url === 'string' ? value.url.trim() : '';
+      const localPath = typeof value.localPath === 'string' ? value.localPath.trim() : '';
+      const businessRejected = value.rejected && typeof value.rejected === 'object';
+      if (url) summary.urls.push(url);
+      else if (localPath) {
+        summary.localPaths.push(localPath);
         summary.localMetadata.push(value.metadata || {});
-      } else if (value.rejected) {
+      } else if (businessRejected) {
         summary.issues.push({ kind: 'rejected', index, value });
+      } else {
+        summary.issues.push({
+          kind: 'failed',
+          index,
+          error: { error: '服务响应异常，请重试' },
+        });
       }
     } else {
       summary.issues.push({
@@ -88,6 +185,38 @@ function collectInspectionPhotoUploadResults(results) {
     }
   });
   return summary;
+}
+
+function inspectionPhotoIssueFeedback(issue) {
+  if (issue && issue.kind === 'rejected') {
+    const rejected = issue.value && issue.value.rejected || {};
+    const reason = typeof rejected.reason === 'string' && rejected.reason.trim()
+      ? rejected.reason.trim() : '无法确认拍摄信息';
+    const nextAction = typeof rejected.next_action === 'string' && rejected.next_action.trim()
+      ? rejected.next_action.trim() : '请重新拍摄或重新选择';
+    return {
+      title: '照片未采用',
+      message: /重复/.test(reason)
+        ? '与已有照片重复，请改拍其他照片。'
+        : `${reason}。${nextAction}`,
+    };
+  }
+  return { title: '上传未完成', message: photoCaptureErrorMessage(issue && issue.error) };
+}
+
+function inspectionPhotoIssueMessage(issue) {
+  return inspectionPhotoIssueFeedback(issue).message;
+}
+
+function setInspectionPhotoIssueMessage(owner, issue) {
+  const feedback = inspectionPhotoIssueFeedback(issue);
+  if (owner && typeof owner.setData === 'function') {
+    owner.setData({
+      'sheet.photoResultTitle': feedback.title,
+      'sheet.photoResultMessage': feedback.message,
+    });
+  }
+  return feedback.message;
 }
 
 function processPhotoUploadIssues(issues, promptIssue, retainSupplement) {
@@ -161,4 +290,9 @@ module.exports = {
   isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
   requestCaptureSessionWithLocation, captureSourceNeedsLocationSession,
   collectInspectionPhotoUploadResults, processPhotoUploadIssues,
+  inspectionPhotoIssueFeedback, inspectionPhotoIssueMessage, setInspectionPhotoIssueMessage,
+  photoActionOpeningTitle, runPhotoActionOnce,
+  validateReportPhotoPaths, handlePhotoActionFailure,
+  deletePendingReportPhotoOnce,
+  deletePendingPhotoOnce, inspectionUploadTaskResult,
 };
