@@ -1,182 +1,679 @@
-/* ============ 全局设计令牌（§6.8 现代简约）============ */
+/* ============ 全局设计令牌（Apple HIG for 微信小程序 · 按设计稿精确对齐）============ */
 page {
-  --bg: #F5F6F8;
-  --card: #FFFFFF;
-  --on-brand: #FFFFFF;   /* 品牌色上的反白内容 */
-  --line: rgba(0, 0, 0, 0.06);
-  --brand: #0D9488;        /* 品牌青绿（与 PC 端统一） */
-  --red: #FA5151;
-  --green: #1FB673;
-  --orange: #FF8F1F;
-  --yellow: #FFB400;
-  --blue: #3B82F6;         /* 语义蓝（info），区别于品牌色 */
-  --text: #1A1A1A;
-  --text-2: #6B7178;
-  --text-3: #9AA0A6;
-  --fill: #F2F3F5;        /* 浅灰填充：chip、空态、弱背景 */
-  --fill-2: #F7F8FA;      /* 输入框/说明块底 */
-  --brand-weak: rgba(13,148,136,0.08);   /* 品牌浅底 */
-  --brand-line: rgba(13,148,136,0.30);    /* 品牌描边 */
-  --disabled: #B0B4B9;     /* 禁用态灰 */
-  --amber: #C77D00;        /* 深琥珀：待确认/进行中/复查等强调文字 */
-  --amber-bg: #FFF3D9;     /* 浅琥珀底：与 --amber 配套的弱背景 */
-  --amber-line: rgba(199,125,0,0.35);
+  --bg: #f2f2f7;
+  --card: #ffffff;
+  --bg-grouped: #f2f2f7;
+  --primary: #007aff;
+  --primary-foreground: #ffffff;
+  --destructive: #ff3b30;
+  --success: #34c759;
+  --warning: #ff9500;
+  --muted: #f9f9fb;
+  --border: rgba(60,60,67,0.12);
+  --text-primary: #1d1d1f;
+  --text-secondary: #3c3c43;
+  --text-tertiary: #8e8e93;
+  --text-quaternary: #c7c7cc;
+  --accent: #e8f2ff;
+  --accent-blue: #e8f2ff;
+  --shadow-card: 0 2rpx 6rpx rgba(0,0,0,0.04);
+
+  /* ===== 设计系统 --color-* 标准 Token 桥接（别名，指向上面短名）===== */
+  /* 背景与卡片 */
+  --color-background: var(--bg);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  /* 品牌 */
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-surface: var(--accent);
+  /* 语义色 */
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--destructive);
+  --color-info: var(--primary);
+  --color-success-surface: rgba(52,199,89,0.12);
+  --color-warning-surface: rgba(255,149,0,0.12);
+  --color-error-surface: rgba(255,59,48,0.12);
+  --color-info-surface: rgba(0,122,255,0.12);
+  /* 文字 */
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-disabled: var(--text-quaternary);
+  /* 图标 */
+  --color-icon-primary: var(--text-primary);
+  --color-icon-secondary: var(--text-tertiary);
+  --color-icon-tertiary: var(--text-quaternary);
+  /* 边框分隔 */
+  --color-border: var(--border);
+  --color-divider: var(--border);
+  /* 类型标签（中性灰） */
+  --color-type-bg: rgba(120,120,128,0.12);
+  --color-type-text: #6e6e73;
+  /* 圆角（rpx） */
+  --radius-xs: 8rpx;
+  --radius-sm: 16rpx;
+  --radius-md: 20rpx;
+  --radius-lg: 24rpx;
+  --radius-xl: 32rpx;
+  --radius-full: 9999rpx;
+  /* 阴影 */
+  --shadow-sm: 0 2rpx 6rpx rgba(0,0,0,0.04);
+  --shadow-md: 0 4rpx 12rpx rgba(0,0,0,0.06);
+  --shadow-lg: 0 8rpx 28rpx rgba(0,0,0,0.08);
+
+  /* 图标系统规范 */
+  --ico-stroke: 2.5rpx;
+  --ico-radius: 2rpx;
+
   background: var(--bg);
-  color: var(--text);
-  font-size: 26rpx;
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text-primary);
+  font-size: 28rpx; /* 14px */
+  font-family: -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
 }
 
-view, text, button, input { box-sizing: border-box; }
+view, text, button, input, textarea, image { box-sizing: border-box; }
 
-/* 页面包裹兜底：仅最小高与背景，不加 padding——
-   非 tab 页（review/message/reports/plan-detail/plan-edit）在各自 wxss 定义了带 padding 的 .page，
-   页面 wxss 同特异性覆盖此处，padding 由各页自管 */
-.page { min-height: 100vh; box-sizing: border-box; background: var(--bg); }
+.page {
+  min-height: 100vh;
+  background: var(--bg);
+  padding-bottom: calc(100rpx + env(safe-area-inset-bottom) + 32rpx);
+}
 
-/* 卡片：纯白、24rpx 圆角、0.5px 极细边框、零阴影零渐变 */
+/* ============ 卡片系统 ============ */
+/* 标准卡片：白底、12px圆角、微阴影、无描边 */
 .card {
   background: var(--card);
-  border-radius: 16rpx;
-  border: 1rpx solid var(--line);
+  border-radius: 24rpx;
+  box-shadow: var(--shadow-card);
   padding: 28rpx;
+  margin: 0 32rpx 16rpx;
+}
+
+/* 紧凑卡片（用于列表项） */
+.card-compact {
+  background: var(--card);
+  border-radius: 24rpx;
+  box-shadow: var(--shadow-card);
+  padding: 28rpx;
+  margin: 0 32rpx 16rpx;
 }
 
 /* 细线分隔 */
-.hairline { height: 1rpx; background: var(--line); }
+.hairline { height: 1rpx; background: var(--border); }
 
-/* 区块标题 */
-.section { margin: 36rpx 24rpx 12rpx; }
+/* ============ 区块标题（13px gray uppercase 风格）============ */
+.section-header {
+  padding: 32rpx 32rpx 16rpx;
+}
 .section-title {
-  font-size: 30rpx; font-weight: 600; color: var(--text);
-  display: flex; align-items: center; justify-content: space-between;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 1rpx;
 }
-.section-more { font-size: 24rpx; color: var(--text-3); font-weight: 400; }
 
-/* 列表卡 + 行（权威结构，视觉以 alert 页为基准）：
-   [可选 .row-left 状态点] + .row-main(.row-title/.row-sub) + [可选 .row-right 标签] */
-.list-card {
-  margin: 16rpx 24rpx 0; padding: 8rpx 28rpx;
-  background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line);
+/* ============ iOS 分段控件 ============ */
+.segment-control {
+  margin: 16rpx 32rpx;
+  background: #e9e9eb;
+  border-radius: 16rpx;
+  padding: 4rpx;
+  height: 64rpx;
+  display: flex;
 }
-.row { display: flex; align-items: center; padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
-.row:last-child { border-bottom: none; }
-.row-left { width: 28rpx; display: flex; align-items: center; }
-.row-main { flex: 1; min-width: 0; }
-.row-left + .row-main { margin-left: 16rpx; }
-.row-title { flex: 1; min-width: 0; font-size: 28rpx; color: var(--text); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-sub { font-size: 23rpx; color: var(--text-3); margin-top: 6rpx; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-right { display: flex; flex-direction: column; align-items: flex-end; margin-left: 16rpx; }
-.row-right .tag + .tag { margin-top: 8rpx; }
-
-/* 统一横向选择条（胶囊范式）：工单/告警/计划/巡检页顶部筛选一律走此组件，
-   原 .tabs/.tab（下划线式）与 .filter-bar/.filter-item（胶囊）合并为此一套 */
-.seg-strip { display: flex; gap: 16rpx; margin: 16rpx 24rpx 0; overflow-x: auto; white-space: nowrap; }
-.seg-strip::-webkit-scrollbar { display: none; }
-.seg-item { flex: 0 0 auto; padding: 12rpx 32rpx; border-radius: 999rpx; font-size: 26rpx; background: var(--card); border: 1rpx solid var(--line); color: var(--text-2); }
-.seg-on { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
-
-/* 站点 chip：巡检执行流专用（站点横向滚动选择）。
-   以 .site-chips 容器作用域登记，避免与 plan-edit 等页的同名 .chip 互相干扰 */
-.site-chips { white-space: nowrap; padding: 20rpx 24rpx 0; }
-.site-chips .chip {
-  display: inline-block; padding: 12rpx 28rpx; margin-right: 16rpx;
-  background: var(--card); border: 1rpx solid var(--line); border-radius: 999rpx;
-  font-size: 26rpx; color: var(--text-2);
+.segment-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26rpx;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: 12rpx;
+  transition: all 0.2s ease;
 }
-.site-chips .chip-on { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
+.segment-item.active {
+  background: #ffffff;
+  font-weight: 600;
+  color: var(--text-primary);
+  box-shadow: 0 2rpx 4rpx rgba(0,0,0,0.05);
+}
 
-/* 主操作按钮：品牌青绿，无渐变无阴影 */
+/* ============ 标签系统 ============ */
+/* 铁律：类型标签一律中性灰；状态仅用4个语义色 */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 22rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  line-height: 1.4;
+  font-weight: 500;
+}
+/* 类型标签：中性灰 */
+.tag-neutral {
+  background: #f2f2f7;
+  color: #6d6d70;
+}
+/* 状态标签：语义色 */
+.tag-blue {
+  background: rgba(0,122,255,0.12);
+  color: var(--primary);
+}
+.tag-green {
+  background: rgba(52,199,89,0.12);
+  color: var(--success);
+}
+.tag-orange {
+  background: rgba(255,149,0,0.12);
+  color: var(--warning);
+}
+.tag-red {
+  background: rgba(255,59,48,0.12);
+  color: var(--destructive);
+}
+.tag-yellow {
+  background: rgba(255,204,0,0.16);
+  color: #78350f;
+}
+.tag-gray {
+  background: #f2f2f7;
+  color: #8e8e93;
+}
+/* 兼容旧类名 */
+.tag-brand { background: rgba(0,122,255,0.12); color: var(--primary); }
+
+/* ============ 按钮系统 ============ */
 .btn-primary {
-  display: flex; align-items: center; justify-content: center; padding: 0;
-  background: var(--brand); color: var(--on-brand); border-radius: 16rpx;
-  font-size: 30rpx; font-weight: 500; height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+  background: var(--primary);
+  color: #ffffff;
+  border-radius: 24rpx;
+  font-size: 32rpx;
+  font-weight: 500;
+  height: 96rpx;
   border: none;
+  width: 100%;
 }
 .btn-primary::after { border: none; }
-.btn-primary[disabled] { background: var(--disabled); color: var(--on-brand); }
+.btn-primary[disabled] { background: #c7c7cc; color: rgba(255,255,255,0.85); }
+
 .btn-ghost {
-  display: flex; align-items: center; justify-content: center; padding: 0;
-  background: var(--card); color: var(--text-2); border-radius: 16rpx;
-  font-size: 28rpx; height: 80rpx;
-  border: 1rpx solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+  background: var(--card);
+  color: var(--text-secondary);
+  border-radius: 24rpx;
+  font-size: 30rpx;
+  font-weight: 500;
+  height: 96rpx;
+  border: 1rpx solid var(--border);
+  width: 100%;
 }
 .btn-ghost::after { border: none; }
-.btn-warn {
-  display: flex; align-items: center; justify-content: center; padding: 0;
-  background: rgba(255,143,31,0.12); color: var(--orange); border-radius: 16rpx;
-  font-size: 30rpx; font-weight: 500; height: 88rpx;
-  border: 1rpx solid rgba(255,143,31,0.4);
-}
-.btn-warn::after { border: none; }
+
 .btn-danger {
-  display: flex; align-items: center; justify-content: center; padding: 0;
-  background: rgba(250,81,81,0.10); color: var(--red); border-radius: 16rpx;
-  font-size: 30rpx; font-weight: 500; height: 88rpx;
-  border: 1rpx solid rgba(250,81,81,0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,59,48,0.10);
+  color: var(--destructive);
+  border-radius: 24rpx;
+  font-size: 30rpx;
+  font-weight: 500;
+  height: 96rpx;
+  border: 1rpx solid rgba(255,59,48,0.28);
 }
 .btn-danger::after { border: none; }
-.btn-sm { height: 60rpx; line-height: 60rpx; font-size: 24rpx; border-radius: 12rpx; display: inline-flex; align-items: center; justify-content: center; padding: 0 28rpx; }
+
+/* 小按钮 */
+.btn-sm {
+  height: 56rpx;
+  line-height: 56rpx;
+  font-size: 24rpx;
+  border-radius: 16rpx;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 24rpx;
+}
 .btn-sm::after { border: none; }
 
-/* 状态点 */
-.dot { width: 12rpx; height: 12rpx; border-radius: 50%; display: inline-block; }
-.dot-red { background: var(--red); }
-.dot-green { background: var(--green); }
-.dot-orange { background: var(--orange); }
-.dot-yellow { background: var(--yellow); }
-.dot-blue { background: var(--blue); }
-.dot-gray { background: var(--text-3); }
-
-/* 通用标签 */
-.tag {
-  display: inline-flex; align-items: center; box-sizing: border-box;
-  min-height: 36rpx; white-space: nowrap; line-height: 28rpx;
-  font-size: 22rpx; color: var(--text-2); background: var(--fill);
-  border-radius: 8rpx; padding: 4rpx 14rpx; font-weight: 400;
+/* 文字链接按钮 */
+.link-btn {
+  font-size: 28rpx;
+  color: var(--primary);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4rpx;
 }
-.tag-red { color: var(--red); background: rgba(250,81,81,0.08); }
-.tag-green { color: var(--green); background: rgba(31,182,115,0.10); }
-.tag-orange { color: var(--orange); background: rgba(255,143,31,0.10); }
-.tag-yellow { color: var(--yellow); background: rgba(255,180,0,0.12); }
-.tag-blue { color: var(--blue); background: rgba(59,130,246,0.08); }
-.tag-brand { color: var(--brand); background: rgba(13,148,136,0.08); }
 
-/* 空态 */
-.empty { display: flex; flex-direction: column; align-items: center; padding: 80rpx 0; }
-.empty-circle { width: 120rpx; height: 120rpx; border-radius: 50%; background: var(--fill); color: var(--disabled); font-size: 40rpx; text-align: center; line-height: 120rpx; }
-.empty-tx { font-size: 24rpx; color: var(--text-3); margin-top: 16rpx; }
+/* ============ 空态 ============ */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 120rpx 32rpx;
+}
+.empty-icon {
+  font-size: 96rpx;
+  margin-bottom: 24rpx;
+}
 
-/* 列表尾部留出呼吸空间，避免“没有更多了”贴住卡片或屏幕边缘。 */
-.list-foot { padding: 24rpx 24rpx 40rpx; text-align: center; color: var(--text-3); font-size: 23rpx; line-height: 1.5; }
+.empty-icon-shape {
+  width: 96rpx;
+  height: 96rpx;
+  margin-bottom: 24rpx;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 48 48' fill='none' stroke='%23c7c7cc' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 6h18l6 6v26a3 3 0 01-3 3H15a3 3 0 01-3-3V9a3 3 0 013-3z'/%3E%3Cpath d='M30 6v6h6'/%3E%3Cpath d='M18 22h12M18 28h12M18 34h8'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.empty-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8rpx;
+}
+.empty-sub {
+  font-size: 26rpx;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.5;
+}
 
-/* 底部弹层（行动/详情）*/
+/* ============ 列表尾部留白 ============ */
+.list-foot {
+  padding: 32rpx 32rpx 48rpx;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 24rpx;
+}
+
+/* ============ 底部固定操作栏 ============ */
+.bottom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--card);
+  border-top: 1rpx solid var(--border);
+  padding: 20rpx 32rpx calc(20rpx + env(safe-area-inset-bottom));
+  display: flex;
+  gap: 20rpx;
+  z-index: 10;
+}
+.bottom-bar .btn-primary { flex: 1; }
+.bottom-bar .btn-ghost { flex: 1; }
+
+/* ============ 底部弹层 ============ */
 .sheet-mask {
-  position: fixed; left: 0; right: 0; top: 0; bottom: 0;
-  background: rgba(0,0,0,0.45); z-index: 50;
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.40);
+  z-index: 50;
 }
 .sheet {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 51;
-  background: var(--card); border-radius: 28rpx 28rpx 0 0;
-  padding: 36rpx 28rpx calc(36rpx + env(safe-area-inset-bottom));
-  max-height: 84vh; overflow-y: auto;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 51;
+  background: var(--card);
+  border-radius: 28rpx 28rpx 0 0;
+  padding: 36rpx 32rpx calc(36rpx + env(safe-area-inset-bottom));
+  max-height: 84vh;
+  overflow-y: auto;
 }
-.sheet-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24rpx; }
-.sheet-title { font-size: 32rpx; font-weight: 500; }
-.sheet-close { font-size: 44rpx; color: var(--text-3); line-height: 1; padding: 0 8rpx; }
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24rpx;
+}
+.sheet-title {
+  font-size: 34rpx;
+  font-weight: 600;
+}
+.sheet-close {
+  font-size: 48rpx;
+  color: var(--text-tertiary);
+  line-height: 1;
+  padding: 0 8rpx;
+  font-weight: 300;
+}
 
-/* 详情弹层字段行（workorder/alert 等详情 sheet 共用，页面不再重复定义） */
-.d-tag { margin-bottom: 20rpx; }
-.d-tag .tag { margin-right: 12rpx; }
-.d-row { display: flex; padding: 14rpx 0; }
-.d-k { width: 120rpx; font-size: 26rpx; color: var(--text-3); }
-.d-v { flex: 1; font-size: 26rpx; color: var(--text); }
-.d-desc { font-size: 25rpx; color: var(--text-2); line-height: 1.6; margin: 12rpx 0 8rpx; padding: 18rpx; background: var(--fill-2); border-radius: 14rpx; }
+/* ============ 输入框 ============ */
+.input-field {
+  background: var(--muted);
+  border-radius: 20rpx;
+  padding: 20rpx 24rpx;
+  font-size: 28rpx;
+  color: var(--text-primary);
+  width: 100%;
+  border: none;
+}
+.textarea-field {
+  background: var(--muted);
+  border-radius: 20rpx;
+  padding: 20rpx 24rpx;
+  font-size: 28rpx;
+  color: var(--text-primary);
+  width: 100%;
+  border: none;
+  min-height: 200rpx;
+}
+.field-label {
+  font-size: 26rpx;
+  color: var(--text-secondary);
+  font-weight: 500;
+  margin-bottom: 12rpx;
+  display: block;
+}
+.field-hint {
+  font-size: 24rpx;
+  color: var(--text-tertiary);
+  margin-top: 8rpx;
+}
 
-/* 弱网同步条 */
+/* ============ 同步条/横幅 ============ */
 .sync-bar {
-  background: rgba(255,143,31,0.10); color: var(--orange);
-  font-size: 24rpx; padding: 16rpx 24rpx; text-align: center;
+  background: rgba(255,149,0,0.10);
+  color: var(--warning);
+  font-size: 24rpx;
+  padding: 16rpx 32rpx;
+  text-align: center;
+}
+.banner-error {
+  background: rgba(255,59,48,0.08);
+  color: var(--destructive);
+  font-size: 24rpx;
+  padding: 16rpx 32rpx;
+}
+
+/* ============ 旧版兼容（保留 JS 中引用的类名）============ */
+.list-card {
+  background: var(--card);
+  border-radius: 24rpx;
+  box-shadow: var(--shadow-card);
+  margin: 0 32rpx 16rpx;
+  overflow: hidden;
+}
+.row {
+  display: flex;
+  align-items: center;
+  padding: 28rpx;
+}
+.row + .row {
+  border-top: 1rpx solid var(--border);
+}
+.row-main { flex: 1; min-width: 0; }
+.row-title {
+  font-size: 30rpx;
+  font-weight: 400;
+  color: var(--text-primary);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-sub {
+  font-size: 24rpx;
+  color: var(--text-tertiary);
+  margin-top: 8rpx;
+  display: block;
+}
+.row-right {
+  margin-left: 16rpx;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.chevron {
+  color: var(--text-tertiary);
+  font-size: 32rpx;
+  font-weight: 300;
+  margin-left: 8rpx;
+}
+
+/* 进度条 */
+.progress-track {
+  height: 12rpx;
+  background: #e5e5ea;
+  border-radius: 6rpx;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 6rpx;
+  transition: width 0.3s ease;
+}
+
+/* 状态圆点 */
+.dot { width: 16rpx; height: 16rpx; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.dot-red { background: var(--destructive); }
+.dot-green { background: var(--success); }
+.dot-orange { background: var(--warning); }
+.dot-blue { background: var(--primary); }
+.dot-gray { background: #c7c7cc; }
+
+/* ============ 导航栏标题居中 ============ */
+.nav-title-center {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ============ 表单错误提示 ============ */
+.form-error {
+  font-size: 24rpx;
+  color: var(--destructive);
+  margin-top: 8rpx;
+  display: block;
+}
+
+/* ============ 弹层拖拽手柄 ============ */
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  background: #e5e5ea;
+  border-radius: 4rpx;
+  margin: 0 auto 20rpx;
+}
+
+/* Sheet foundation for the four PM-15 surfaces. It intentionally does not
+   inherit the legacy .sheet rules so other page sheets remain untouched. */
+.om-sheet-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.40);
+}
+.om-sheet {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 101;
+  height: 88vh;
+  max-height: calc(100vh - 20rpx);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  background: var(--card);
+  border-radius: 28rpx 28rpx 0 0;
+}
+.om-sheet.om-sheet .om-sheet-scroll {
+  flex: 1 1 0;
+  width: 100%;
+  height: 0;
+  min-height: 0;
+  overflow-y: hidden;
+  box-sizing: border-box;
+}
+.om-sheet-actions {
+  flex: 0 0 auto;
+}
+.om-sheet-dismiss {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  width: 88rpx;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+
+/* ============ 统一图标库 ico-* ============
+   规范：
+   - 线宽 var(--ico-stroke) = 2.5rpx
+   - 圆角 var(--ico-radius) = 2rpx
+   - 默认色 var(--color-icon-primary)
+   - 容器 ico- 本身是 flex 居中盒子，尺寸由父容器或 --ico-size 控制
+   ============================================================ */
+
+/* 图标基础容器 */
+.ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 关闭 × */
+.ico-close {
+  width: 28rpx;
+  height: 28rpx;
+  position: relative;
+}
+.ico-close::before,
+.ico-close::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 28rpx;
+  height: var(--ico-stroke);
+  background: var(--color-icon-secondary);
+  border-radius: var(--ico-radius);
+}
+.ico-close::before {
+  transform: translateY(-50%) rotate(45deg);
+}
+.ico-close::after {
+  transform: translateY(-50%) rotate(-45deg);
+}
+
+/* 右箭头 › */
+.ico-chevron-right {
+  width: 14rpx;
+  height: 14rpx;
+  border-right: var(--ico-stroke) solid var(--color-icon-secondary);
+  border-bottom: var(--ico-stroke) solid var(--color-icon-secondary);
+  transform: rotate(-45deg);
+  border-radius: 0 var(--ico-radius) 0 0;
+}
+
+/* 加油/充电油枪 */
+.ico-fuel {
+  width: 26rpx;
+  height: 30rpx;
+  border: var(--ico-stroke) solid var(--color-icon-primary);
+  border-radius: 4rpx;
+  position: relative;
+  box-sizing: border-box;
+}
+.ico-fuel::before {
+  content: '';
+  position: absolute;
+  top: 4rpx;
+  right: -10rpx;
+  width: 8rpx;
+  height: 14rpx;
+  border: var(--ico-stroke) solid var(--color-icon-primary);
+  border-left: none;
+  border-radius: 0 4rpx 4rpx 0;
+  box-sizing: border-box;
+}
+.ico-fuel::after {
+  content: '';
+  position: absolute;
+  bottom: 4rpx;
+  right: -11rpx;
+  width: 6rpx;
+  height: var(--ico-stroke);
+  background: var(--color-icon-primary);
+  border-radius: 0 var(--ico-radius) var(--ico-radius) 0;
+}
+
+/* 警告三角 */
+.ico-warning {
+  width: 36rpx;
+  height: 36rpx;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ico-warning::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 18rpx solid transparent;
+  border-right: 18rpx solid transparent;
+  border-bottom: 32rpx solid var(--color-error);
+  position: absolute;
+  top: 0;
+}
+.ico-warning-bar {
+  width: var(--ico-stroke);
+  height: 12rpx;
+  background: #fff;
+  position: relative;
+  z-index: 1;
+  border-radius: var(--ico-radius);
+  margin-top: -4rpx;
+}
+.ico-warning-dot {
+  width: 5rpx;
+  height: 5rpx;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  bottom: 6rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+}
+
+/* 成功对勾 ✓ */
+.ico-check {
+  width: 28rpx;
+  height: 16rpx;
+  border-left: var(--ico-stroke) solid var(--color-success);
+  border-bottom: var(--ico-stroke) solid var(--color-success);
+  transform: rotate(-45deg);
+  border-radius: 0 0 0 var(--ico-radius);
 }

@@ -1,22 +1,725 @@
-.page { min-height: 100vh; padding: 24rpx; background: var(--bg); box-sizing: border-box; }
-.head { display:flex; align-items:center; justify-content:space-between; margin: 8rpx 0 22rpx; }
-.title { display:block; font-size:36rpx; font-weight:700; color:var(--text); }
-.sub { display:block; margin-top:8rpx; font-size:24rpx; color:var(--text-3); }
-.report-btn { width: 152rpx; margin:0; font-size:25rpx; }
-.filters { margin: 0 0 18rpx; }
-.filter { margin: 0; }
-.filter-on { font-weight:600; }
-.card { background:var(--card); border:1rpx solid var(--line); border-radius:16rpx; padding:24rpx; margin-bottom:16rpx; }
-.report:active { background:var(--fill-2); }
-.line { display:flex; justify-content:space-between; align-items:center; }
-.type { color:var(--amber); font-size:26rpx; font-weight:600; }.status { font-size:24rpx; padding:4rpx 12rpx; border-radius:999rpx; background:var(--fill); color:var(--text-2); }.status-dispatched { color:var(--blue); background:rgba(59,130,246,.08); }.status-verified { color:var(--brand); background:var(--brand-weak); }.status-resolved { color:var(--green); background:rgba(31,182,115,.10); }
-.site { display:block; color:var(--text); font-size:28rpx; margin-top:16rpx; }.description { display:block; margin-top:10rpx; font-size:26rpx; line-height:1.55; color:var(--text-2); }.meta { display:flex; justify-content:space-between; margin-top:16rpx; font-size:22rpx; color:var(--text-3); }.order { margin-top:18rpx; padding-top:16rpx; border-top:1rpx solid var(--line); color:var(--brand); font-size:25rpx; }.empty { padding:90rpx 20rpx; text-align:center; color:var(--text-3); font-size:27rpx; }
-.report-detail-sheet { max-height: 78vh; overflow-y: auto; }
-.detail-row { display:flex; align-items:center; padding:16rpx 0; border-bottom:1rpx solid var(--line); gap:20rpx; }
-.detail-key { flex:0 0 132rpx; color:var(--text-3); font-size:24rpx; }
-.detail-value { flex:1; min-width:0; color:var(--text); font-size:26rpx; }
-.detail-copy { padding:20rpx 0; border-bottom:1rpx solid var(--line); }
-.detail-description { display:block; margin-top:12rpx; color:var(--text); font-size:26rpx; line-height:1.6; white-space:pre-wrap; }
-.detail-photos { margin-top:14rpx; white-space:nowrap; }
-.detail-photo { width:152rpx; height:152rpx; margin-right:12rpx; border-radius:8rpx; background:var(--fill); }
-.detail-order { margin-bottom: 8rpx; }
+/* ============================================================
+ *  我的异常上报 · iOS 风格
+ *  设计系统：水质运维-Apple v1.2.0
+ * ============================================================ */
+
+.page {
+  min-height: 100vh;
+  padding: 0 32rpx calc(40rpx + env(safe-area-inset-bottom));
+  background: var(--color-background);
+  box-sizing: border-box;
+}
+
+/* ---------- 页头 ---------- */
+
+.page-hd {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 28rpx 0 20rpx;
+  gap: 20rpx;
+}
+
+.page-hd-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.page-title {
+  display: block;
+  font-size: 40rpx;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.2;
+}
+
+.page-subtitle {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.btn-sm {
+  height: 64rpx;
+  padding: 0 24rpx;
+  font-size: 26rpx;
+  font-weight: 500;
+  border-radius: 24rpx;
+  line-height: 64rpx;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.btn-sm::after {
+  border: none;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+
+/* ---------- 筛选分段控件 ---------- */
+
+.seg-wrap {
+  margin: 8rpx -32rpx 20rpx;
+  padding: 0 32rpx;
+}
+
+.seg-scroll {
+  white-space: nowrap;
+}
+
+.seg-list {
+  display: inline-flex;
+  gap: 12rpx;
+  padding: 2rpx 0;
+}
+
+.seg-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 64rpx;
+  padding: 0 28rpx;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  background: var(--color-muted);
+  border-radius: 32rpx;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.seg-item--active {
+  color: var(--color-text-primary);
+  background: var(--color-card);
+  font-weight: 600;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- 上报卡片 ---------- */
+
+.report-card {
+  background: var(--color-card);
+  border-radius: var(--radius-lg);
+  padding: 28rpx;
+  margin-bottom: 16rpx;
+  box-shadow: var(--shadow-sm);
+  transition: opacity 0.15s ease;
+}
+
+.report-card:active {
+  opacity: 0.9;
+}
+
+.report-card-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+
+.report-type {
+  font-size: 26rpx;
+  font-weight: 500;
+  color: var(--color-type-text);
+  background: var(--color-type-bg);
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  line-height: 1.4;
+}
+
+.status-chip {
+  font-size: 22rpx;
+  font-weight: 500;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  background: var(--color-type-bg);
+  color: var(--color-type-text);
+  line-height: 1.4;
+}
+
+.status-dispatched {
+  color: var(--color-primary);
+  background: var(--color-primary-surface);
+}
+
+.status-verified {
+  color: var(--color-primary);
+  background: var(--color-primary-surface);
+}
+
+.status-resolved {
+  color: var(--color-success);
+  background: var(--color-success-surface);
+}
+
+.status-archived {
+  color: var(--color-text-tertiary);
+  background: var(--color-muted);
+}
+
+.report-site {
+  display: block;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.35;
+}
+
+.report-desc {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 26rpx;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.report-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16rpx;
+  gap: 16rpx;
+}
+
+.report-meta-item {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+.report-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18rpx;
+  padding-top: 16rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+}
+
+.report-order-text {
+  font-size: 25rpx;
+  color: var(--color-primary);
+  line-height: 1.4;
+}
+
+.report-order-arrow {
+  font-size: 28rpx;
+  color: var(--color-primary);
+  line-height: 1;
+}
+
+/* ---------- 空态 ---------- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 160rpx 48rpx;
+  text-align: center;
+}
+
+.empty-state-icon {
+  width: 128rpx;
+  height: 128rpx;
+  border-radius: 50%;
+  background: var(--color-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 32rpx;
+}
+
+.empty-state-icon-shape {
+  width: 64rpx;
+  height: 64rpx;
+  border: 3rpx solid var(--color-icon-tertiary);
+  border-radius: 16rpx;
+  position: relative;
+}
+
+.empty-state-icon-shape::after {
+  content: "";
+  position: absolute;
+  top: 14rpx;
+  left: 10rpx;
+  right: 10rpx;
+  height: 3rpx;
+  background: var(--color-icon-tertiary);
+  border-radius: 2rpx;
+  box-shadow: 0 14rpx 0 var(--color-icon-tertiary), 0 28rpx 0 var(--color-icon-tertiary);
+}
+
+.empty-state-title {
+  font-size: 32rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.empty-state-desc {
+  margin-top: 12rpx;
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.empty-state-text {
+  font-size: 28rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* ---------- 详情 Sheet ---------- */
+
+.sheet-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 100;
+}
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: 32rpx 32rpx 0 0;
+  z-index: 101;
+  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  background: var(--color-divider);
+  border-radius: 4rpx;
+  margin: 16rpx auto;
+  flex-shrink: 0;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12rpx 40rpx 20rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  flex-shrink: 0;
+}
+
+.sheet-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sheet-close {
+  font-size: 48rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1;
+  padding: 0 8rpx;
+}
+
+.sheet-body {
+  padding: 8rpx 32rpx calc(40rpx + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  flex: 1;
+}
+
+.detail-row {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 20rpx;
+}
+
+.detail-key {
+  flex: 0 0 140rpx;
+  color: var(--color-text-tertiary);
+  font-size: 26rpx;
+  line-height: 1.4;
+}
+
+.detail-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 28rpx;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.detail-block {
+  padding: 24rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+}
+
+.detail-block-label {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  margin-bottom: 12rpx;
+}
+
+.detail-block-text {
+  display: block;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.detail-photos {
+  white-space: nowrap;
+  margin-top: 4rpx;
+}
+
+.detail-photo {
+  width: 160rpx;
+  height: 160rpx;
+  margin-right: 12rpx;
+  border-radius: var(--radius-md);
+  background: var(--color-muted);
+  display: inline-block;
+}
+
+.detail-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24rpx;
+  padding: 24rpx;
+  background: var(--color-primary-surface);
+  border-radius: var(--radius-md);
+}
+
+.detail-order-text {
+  font-size: 26rpx;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.detail-order-arrow {
+  font-size: 28rpx;
+  color: var(--color-primary);
+  line-height: 1;
+}
+
+/* ============================================================
+ *  Sheet 布局修复 + 异常上报表单视觉收口
+ *  说明：修复滚动区高度，表单节奏、照片区、操作区统一设计系统规范
+ * ============================================================ */
+
+/* --- Sheet 容器：与工单/告警详情保持一致 --- */
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  background: var(--color-divider);
+  border-radius: 4rpx;
+  margin: 16rpx auto;
+  flex-shrink: 0;
+}
+
+/* 头部（上报页用 .sheet-head，与详情页 .sheet-header 命名不同） */
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40rpx 12rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  flex-shrink: 0;
+  min-height: 68rpx;
+  box-sizing: border-box;
+}
+
+.sheet-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sheet-close {
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: -24rpx;
+  flex-shrink: 0;
+}
+
+.sheet-close .ico-close::before,
+.sheet-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 滚动正文区 ---
+   flex: 0 1 auto：内容少时由内容撑开，Sheet 紧凑；内容多时被 max-height 限制，flex-shrink 压缩后内部滚动
+   替代旧的 height:0 + min-height:320rpx 方案（会导致小滚动窗 + 大片空白） */
+.sheet-body {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16rpx 32rpx 32rpx;
+  box-sizing: border-box;
+}
+
+/* --- 表单字段行（站点 / 异常类型） --- */
+.detail-row {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 8rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 20rpx;
+  min-height: 88rpx;
+  box-sizing: border-box;
+}
+
+.detail-key {
+  flex: 0 0 140rpx;
+  color: var(--color-text-tertiary);
+  font-size: 26rpx;
+  line-height: 1.4;
+}
+
+.detail-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 28rpx;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+/* Picker 选中态：右侧箭头暗示可点击（纯 CSS 绘制） */
+picker .detail-value {
+  position: relative;
+  padding-right: 32rpx;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+picker .detail-value::after {
+  content: "";
+  position: absolute;
+  right: 8rpx;
+  top: 50%;
+  width: 12rpx;
+  height: 12rpx;
+  border-right: 2.5rpx solid var(--color-icon-tertiary);
+  border-bottom: 2.5rpx solid var(--color-icon-tertiary);
+  transform: translateY(-70%) rotate(-45deg);
+}
+
+/* --- 表单区块（现场说明 / 照片） --- */
+.detail-block {
+  padding: 24rpx 8rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+}
+
+.detail-block-label {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  margin-bottom: 12rpx;
+  font-weight: 500;
+}
+
+.detail-block-text {
+  display: block;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 文本输入框 */
+.detail-block-text textarea {
+  width: 100%;
+  min-height: 180rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+/* --- 照片区 --- */
+.detail-photos {
+  white-space: nowrap;
+  margin-bottom: 16rpx;
+}
+
+.detail-photo {
+  width: 180rpx;
+  height: 180rpx;
+  margin-right: 12rpx;
+  border-radius: var(--radius-md);
+  background: var(--color-muted);
+  display: inline-block;
+  overflow: hidden;
+  position: relative;
+  vertical-align: top;
+}
+
+.detail-photo image {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 照片上的"移除"文字 */
+.detail-photo .detail-block-text {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 8rpx 0;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 22rpx;
+  text-align: center;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* 添加照片按钮：次级 outline 样式，不抢主按钮视觉焦点 */
+.detail-block .btn {
+  width: 100%;
+  height: 80rpx;
+  line-height: 80rpx;
+  font-size: 26rpx;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  margin-top: 4rpx;
+  background: var(--color-card);
+  color: var(--color-primary);
+  border: 1.5rpx solid var(--color-primary);
+}
+
+.detail-block .btn::after {
+  border: none;
+}
+
+.detail-block .btn[disabled] {
+  opacity: 0.4;
+  color: var(--color-primary);
+}
+
+/* --- 底部固定操作栏 ---
+   提交按钮固定在底部，键盘弹起 / 长内容时始终可达 */
+.sheet-bottom-bar {
+  padding: 12rpx 32rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+.sheet-bottom-bar .btn-primary {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  font-size: 30rpx;
+  font-weight: 500;
+  border-radius: var(--radius-lg);
+  border: none;
+}
+
+.sheet-bottom-bar .btn-primary::after {
+  border: none;
+}
+
+/* 提交中按钮视觉保护：loading 态保持主色，不透明度降低 */
+.sheet-bottom-bar .btn-primary[disabled] {
+  opacity: 0.6;
+  color: var(--color-primary-foreground);
+}
+
+/* 滚动区底部 spacer，防止最后一项紧贴底栏 */
+.sheet-content-spacer {
+  height: 16rpx;
+  flex-shrink: 0;
+}
+
+/* PM-15 report composer: isolated from the legacy page .sheet definitions. */
+.report-compose-sheet {
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+}
+.report-compose-body {
+  padding: 16rpx 32rpx 24rpx;
+  overflow-y: hidden;
+}
+.report-compose-heading {
+  padding: 12rpx 104rpx 20rpx 8rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+}
+.report-compose-close .ico-close::before,
+.report-compose-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 详情 Sheet 专属样式 --- */
+
+/* 详情页状态行 */
+.report-detail-sheet .detail-row:first-child .status-chip {
+  margin-left: auto;
+}
+
+/* 详情页关联工单入口 */
+.detail-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-primary-surface);
+  border-radius: var(--radius-md);
+}
+
+.detail-order-text {
+  font-size: 26rpx;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.detail-order-arrow {
+  font-size: 28rpx;
+  color: var(--color-primary);
+  line-height: 1;
+}

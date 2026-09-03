@@ -1,46 +1,150 @@
-<view class="page">
-  <view class="sync-bar" wx:if="{{canManage && !online}}">当前离线，确认操作会暂存并在联网后自动同步</view>
-  <view class="sync-bar" wx:elif="{{canManage && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
-  <view class="seg-strip">
-    <view class="seg-item {{tab === 'pending' ? 'seg-on' : ''}}" bindtap="onTab" data-t="pending">待处理</view>
-    <view class="seg-item {{tab === 'all' ? 'seg-on' : ''}}" bindtap="onTab" data-t="all">全部</view>
+<view class="alert-page">
+
+  <!-- 自定义导航栏（compact 模式） -->
+  <custom-navbar>
+    <view slot="left" class="alert-nav-title">告警</view>
+  </custom-navbar>
+
+  <!-- 离线同步提示 -->
+  <view class="sync-bar" wx:if="{{!online || syncCount > 0}}" bindtap="onSyncNow">
+    <view class="sync-icon"></view>
+    <text class="sync-text">{{online ? (syncCount + '条操作待同步') : '离线暂存'}}</text>
+    <text class="sync-action">{{syncCount > 0 ? '立即同步' : '网络恢复后自动同步'}}</text>
   </view>
 
-  <view class="list-card" wx:if="{{list.length}}">
-    <view class="row" wx:for="{{list}}" wx:key="id" bindtap="onOpen" data-id="{{item.id}}">
-      <view class="row-left">
-        <text class="dot dot-{{item.level_cls}}"></text>
+  <!-- 分段控件 -->
+  <view class="segment-wrap">
+    <view class="segment-control">
+      <view class="segment-item {{tab === 'pending' ? 'active' : ''}}" data-t="pending" bindtap="onTab">待处理</view>
+      <view class="segment-item {{tab === 'all' ? 'active' : ''}}" data-t="all" bindtap="onTab">全部</view>
+    </view>
+  </view>
+
+  <!-- 告警列表 -->
+  <view class="alert-list" wx:if="{{loaded && list.length > 0}}">
+    <view class="alert-card" wx:for="{{list}}" wx:key="id" data-id="{{item.id}}" bindtap="onOpen">
+      <view class="alert-card-top">
+        <text class="alert-station">{{item.station_name || item.site_name || '未知站点'}}</text>
+        <view class="alert-level-chip chip-{{item.level_cls}}">{{item.level_cn}}告警</view>
       </view>
-      <view class="row-main">
-        <text class="row-title">{{item.site_name}} · {{item.metric_cn}}</text>
-        <text class="row-sub">{{item.message}}</text>
+      <text class="alert-metric">{{item.display_metric}}</text>
+      <view class="alert-fact-row">
+        <text class="alert-fact-label">当前值</text>
+        <view class="alert-fact-value">
+          <block wx:if="{{item.value !== undefined && item.value !== null}}">
+            <text class="alert-value-text">{{item.value}}</text>
+            <text class="alert-value-unit" wx:if="{{item.unit && item.unit !== '告警'}}">{{item.unit}}</text>
+          </block>
+          <text class="alert-value-na" wx:else>数据不可用</text>
+          <text class="alert-threshold-text" wx:if="{{item.threshold && item.threshold !== '告警'}}">阈值 {{item.threshold}}</text>
+        </view>
       </view>
-      <view class="row-right">
-        <text class="tag {{item.status === 'pending' ? 'tag-red' : 'tag-green'}}">{{item.status_cn}}</text>
+      <view class="alert-card-bottom">
+        <text class="alert-time">{{item.created_at || item.time || ''}}</text>
+        <view class="alert-phase">
+          <text class="alert-phase-text phase-{{item.status}}">{{item.status_cn || '状态未知'}}</text>
+          <view class="alert-arrow ico ico-chevron-right"></view>
+        </view>
       </view>
     </view>
   </view>
-  <view class="empty" wx:elif="{{loaded}}">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">暂无告警</text>
+
+  <!-- 空态：待处理为空 -->
+  <view class="empty-state" wx:if="{{loaded && list.length === 0 && tab === 'pending'}}">
+    <view class="empty-icon empty-icon-success">
+      <view class="empty-check"></view>
+    </view>
+    <text class="empty-title">暂无待处理告警</text>
+    <text class="empty-sub">所有异常均已处理</text>
   </view>
 
-  <!-- 详情 / 确认 -->
-  <view class="sheet-mask" wx:if="{{sheet.open}}" bindtap="onClose"></view>
-  <view class="sheet" wx:if="{{sheet.open}}">
-    <view class="sheet-head">
-      <text class="sheet-title">{{sheet.item.site_name}}</text>
-      <text class="sheet-close" bindtap="onClose">×</text>
+  <!-- 空态：全部为空 -->
+  <view class="empty-state" wx:if="{{loaded && list.length === 0 && tab === 'all'}}">
+    <view class="empty-icon">
+      <view class="empty-bell"></view>
     </view>
-    <view class="d-tag"><text class="tag tag-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}</text><text class="tag">{{sheet.item.metric_cn}}</text></view>
-    <view class="d-row"><text class="d-k">状态</text><text class="d-v">{{sheet.item.status_cn}}</text></view>
-    <view class="d-row"><text class="d-k">时间</text><text class="d-v">{{sheet.item.created_at}}</text></view>
-    <view class="d-desc">{{sheet.item.message}}</view>
+    <text class="empty-title">暂无告警记录</text>
+    <text class="empty-sub">当前范围内没有告警记录</text>
+  </view>
 
-    <view class="sheet-ops">
-      <button wx:if="{{sheet.item.status === 'pending' && canManage}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doAck">确认告警</button>
-      <view wx:elif="{{sheet.item.status === 'pending'}}" class="op-hint">告警由管理员统一处理</view>
-      <view wx:else class="op-hint">该告警已处理</view>
+  <!-- 加载骨架屏 -->
+  <view class="alert-list skeleton-list" wx:if="{{!loaded}}">
+    <view class="alert-card skeleton-card" wx:for="{{[1,2,3]}}" wx:key="*this">
+      <view class="skeleton-line skeleton-line-sm"></view>
+      <view class="skeleton-line skeleton-line-md"></view>
+      <view class="skeleton-line skeleton-line-lg"></view>
+    </view>
+  </view>
+
+  <!-- 底部安全区 -->
+  <view class="bottom-spacer"></view>
+
+  <!-- ===== 告警详情 Sheet ===== -->
+  <view class="om-sheet-mask" wx:if="{{sheet.open}}" bindtap="onCloseMask"></view>
+  <view class="om-sheet alert-detail-sheet" wx:if="{{sheet.open}}">
+    <view class="om-sheet-dismiss alert-detail-close" bindtap="onClose">
+      <view class="ico ico-close"></view>
+    </view>
+
+    <scroll-view class="om-sheet-scroll sheet-scroll alert-detail-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <!-- 异常主事实 -->
+      <view class="adt-main-fact">
+        <view class="status-chip chip-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}告警</view>
+        <text class="adt-station">{{sheet.item.station_name || sheet.item.site_name || '未知站点'}}</text>
+        <text class="adt-metric">{{sheet.item.display_metric}}</text>
+        <view class="adt-value-block">
+          <block wx:if="{{sheet.item.value !== undefined && sheet.item.value !== null && sheet.item.value !== ''}}">
+            <text class="adt-value-num">{{sheet.item.value}}</text>
+            <text class="adt-value-unit" wx:if="{{sheet.item.unit && sheet.item.unit !== '告警'}}">{{sheet.item.unit}}</text>
+          </block>
+          <text class="adt-value-na" wx:else>数据不可用</text>
+        </view>
+        <text class="adt-threshold" wx:if="{{sheet.item.threshold && sheet.item.threshold !== '告警'}}">阈值 {{sheet.item.threshold}}</text>
+      </view>
+
+      <!-- 当前状态行 -->
+      <view class="adt-status-row">
+        <text class="adt-status-label">当前状态</text>
+        <view class="status-chip chip-{{sheet.item.status}}">{{sheet.item.status_cn || '状态未知'}}</view>
+      </view>
+      <view class="adt-info-row" wx:if="{{sheet.item.phase || sheet.item.block_reason || detailError}}">
+        <text class="adt-info-label">流转阶段</text>
+        <text class="adt-info-value adt-info-value--multi">{{detailError || sheet.item.block_reason || sheet.item.phase}}</text>
+      </view>
+
+      <!-- 分隔 -->
+      <view class="adt-divider"></view>
+
+      <!-- 关联工单（只读信息，主动作由底部按钮承载） -->
+      <view class="adt-related" wx:if="{{sheet.item.related_order_no || sheet.item.workorder_status_cn}}">
+        <view class="adt-related-left">
+          <text class="adt-related-no">{{sheet.item.related_order_no || '-'}}</text>
+          <text class="adt-related-handler" wx:if="{{sheet.item.workorder_handler_name}}">{{sheet.item.workorder_handler_name}} 负责</text>
+        </view>
+        <view class="status-chip chip-info" wx:if="{{sheet.item.workorder_status_cn}}">{{sheet.item.workorder_status_cn}}</view>
+      </view>
+
+      <!-- 告警详情 -->
+      <view class="adt-group">
+        <view class="adt-group-title">告警详情</view>
+        <view class="adt-info-row">
+          <text class="adt-info-label">触发时间</text>
+          <text class="adt-info-value">{{sheet.item.created_at || '-'}}</text>
+        </view>
+        <view class="adt-info-row adt-info-row--last" wx:if="{{sheet.item.message}}">
+          <text class="adt-info-label">告警说明</text>
+          <text class="adt-info-value adt-info-value--multi">{{sheet.item.message}}</text>
+        </view>
+      </view>
+
+      <view wx:if="{{!detailLoading && sheet.item.primary_action && sheet.item.related_workorder_target && sheet.item.related_workorder_target.order_no && sheet.item.can_view === true && !sheet.item.detailStale}}" class="sheet-content-spacer"></view>
+    </scroll-view>
+
+    <!-- 底部固定操作栏 -->
+    <view wx:if="{{!detailLoading && sheet.item.primary_action && sheet.item.related_workorder_target && sheet.item.related_workorder_target.order_no && sheet.item.can_view === true && !sheet.item.detailStale}}" class="sheet-bottom-bar">
+      <button class="btn-primary btn-lg" loading="{{acting}}" bindtap="onPrimaryAction">
+        {{sheet.item.primary_action}}
+      </button>
     </view>
   </view>
 </view>

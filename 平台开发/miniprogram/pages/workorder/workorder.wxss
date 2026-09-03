@@ -1,41 +1,1593 @@
-/* 顶部筛选已迁移至 app.wxss 全局 .seg-strip/.seg-item/.seg-on（胶囊范式，横向可滚动） */
+/* ===== 工单页 ===== */
 
-/* 列表行（.list-card/.row 族）与详情字段（.d-*）已提升至 app.wxss 全局定义 */
+.workorder-page {
+  min-height: 100vh;
+  background: var(--color-background);
+  padding-bottom: calc(env(safe-area-inset-bottom) + 120rpx);
+}
 
-.sheet-ops { margin-top: 28rpx; }
-.op-btn { width: 100%; }
-.op-sub { display: flex; gap: 20rpx; margin-top: 16rpx; }
-.op-sub .op-btn { width: auto; flex: 1; }
-.op-hint { text-align: center; color: var(--text-3); font-size: 26rpx; padding: 24rpx 0; }
+/* ===== 同步提示条（复用告警页样式） ===== */
+.sync-bar {
+  margin: 16rpx 32rpx 0;
+  background: var(--color-info-surface);
+  color: var(--color-info);
+  border-radius: var(--radius-md);
+  padding: 20rpx 24rpx;
+  font-size: 26rpx;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  font-weight: 500;
+}
 
-/* 处置影像区 */
-.blk { margin: 20rpx 0 4rpx; }
-.blk-tx { font-size: 24rpx; color: var(--text-3); display: block; margin-bottom: 14rpx; }
-.img-grid { display: flex; flex-wrap: wrap; gap: 12rpx; }
-.img-cell { width: 160rpx; height: 160rpx; border-radius: 12rpx; background: var(--fill); }
-.img-wrap { position: relative; width: 160rpx; height: 160rpx; }
-.img-delete { position: absolute; right: -8rpx; top: -8rpx; width: 40rpx; height: 40rpx; line-height: 36rpx; text-align: center; border-radius: 50%; background: var(--red); color: var(--card); font-size: 34rpx; z-index: 2; }
+.sync-icon {
+  width: 32rpx;
+  height: 32rpx;
+  flex-shrink: 0;
+  position: relative;
+}
 
-/* 申请表单 */
-.field { margin: 20rpx 0; }
-.field-label { font-size: 25rpx; color: var(--text-3); display: block; margin-bottom: 12rpx; }
-.field-input { width: 100%; box-sizing: border-box; font-size: 27rpx; color: var(--text); background: var(--fill-2); border: 1rpx solid var(--line); border-radius: 14rpx; padding: 20rpx; min-height: 88rpx; }
-textarea.field-input { height: 180rpx; }
-.parts-route-note { margin: 18rpx 0 8rpx; padding: 18rpx 20rpx; background: var(--fill); border-left: 6rpx solid var(--brand); color: var(--text-2); font-size: 24rpx; line-height: 1.55; }
-.vehicle-exception-row { display: flex; align-items: center; justify-content: space-between; gap: 24rpx; margin: 20rpx 0; padding: 18rpx 0; border-top: 1rpx solid var(--line); border-bottom: 1rpx solid var(--line); }
-.vehicle-exception-title { margin-bottom: 4rpx; color: var(--text-2); }
-.vehicle-exception-hint { display: block; font-size: 22rpx; line-height: 1.45; color: var(--text-3); }
+.sync-icon::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 24rpx;
+  height: 24rpx;
+  border: 3rpx solid var(--color-info);
+  border-top-color: transparent;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
 
-/* 流程进度条 */
-.flow { display: flex; align-items: flex-start; margin: 24rpx 0 8rpx; }
-.flow-step { display: flex; flex-direction: column; align-items: center; width: 88rpx; }
-.flow-dot { width: 28rpx; height: 28rpx; border-radius: 50%; background: var(--fill); border: 2rpx solid var(--line); }
-.flow-step.on .flow-dot { background: var(--brand); border-color: var(--brand); }
-.flow-step.done .flow-dot { background: var(--green); border-color: var(--green); }
-.flow-tx { font-size: 22rpx; color: var(--text-3); margin-top: 10rpx; }
-.flow-step.on .flow-tx, .flow-step.done .flow-tx { color: var(--text); }
-.flow-line { flex: 1; height: 2rpx; background: var(--line); margin: 14rpx 6rpx 0; }
-.flow-line.on { background: var(--brand); }
+.sync-text {
+  flex: 1;
+  color: var(--color-info);
+}
 
-/* 影像添加框（虚线） */
-.img-add { width: 160rpx; height: 160rpx; border-radius: 12rpx; border: 1rpx dashed var(--line); color: var(--text-3); font-size: 56rpx; text-align: center; line-height: 160rpx; background: var(--fill); }
+.sync-action {
+  font-weight: 600;
+  color: var(--color-info);
+  flex-shrink: 0;
+}
+
+/* ===== 分段筛选（对齐设计系统 segmented-control 规范） ===== */
+.seg-scroll {
+  white-space: nowrap;
+  padding: 24rpx 32rpx 16rpx;
+  box-sizing: border-box;
+}
+
+.seg-strip {
+  display: flex;
+  min-width: 100%;
+  height: 64rpx;
+  padding: 4rpx;
+  background: var(--color-type-bg);
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+
+.seg-item {
+  flex: 1 0 0;
+  min-width: 120rpx;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26rpx;
+  padding: 0 20rpx;
+  color: var(--color-text-secondary);
+  border-radius: calc(var(--radius-sm) - 2rpx);
+  transition: all 0.2s ease;
+  font-weight: 500;
+  white-space: nowrap;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.seg-item.seg-on {
+  background: var(--color-card);
+  color: var(--color-text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+/* ===== 工单卡片列表 ===== */
+.wo-list {
+  padding: 8rpx 32rpx 0;
+}
+
+.wo-card {
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  padding: 28rpx 32rpx;
+  margin-bottom: 20rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 14rpx;
+}
+
+.wo-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16rpx;
+}
+
+.wo-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 状态标签（surface 样式，对齐 status-chip 规范） */
+.wo-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22rpx;
+  font-weight: 500;
+  padding: 4rpx 16rpx;
+  border-radius: var(--radius-xs);
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.wschip-pending { background: var(--color-warning-surface); color: var(--color-warning); }
+.wschip-accepted { background: var(--color-info-surface); color: var(--color-info); }
+.wschip-dispatched { background: var(--color-info-surface); color: var(--color-info); }
+.wschip-in_progress { background: var(--color-info-surface); color: var(--color-info); }
+.wschip-reviewing { background: var(--color-warning-surface); color: var(--color-warning); }
+.wschip-closed { background: var(--color-success-surface); color: var(--color-success); }
+.wschip-resolved { background: var(--color-success-surface); color: var(--color-success); }
+.wschip-default { background: var(--color-type-bg); color: var(--color-type-text); }
+
+.wo-card-mid {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+
+.wo-site {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.wo-source {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+.wo-level-urgent {
+  color: var(--color-error);
+  font-weight: 500;
+}
+
+.wo-card-bottom {
+  display: flex;
+  align-items: center;
+  padding-top: 12rpx;
+  border-top: 1rpx solid var(--color-divider);
+}
+
+.wo-sla {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+}
+
+.wo-arrow {
+  margin-left: auto;
+  border-right-color: var(--color-icon-primary);
+  border-bottom-color: var(--color-icon-primary);
+}
+
+/* ===== 空态（对齐 empty-state 组件规范） ===== */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 120rpx 48rpx;
+}
+
+.empty-icon {
+  width: 128rpx;
+  height: 128rpx;
+  border-radius: 50%;
+  background: var(--color-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 32rpx;
+  position: relative;
+}
+
+/* 文档图标 */
+.empty-doc {
+  width: 52rpx;
+  height: 64rpx;
+  background: var(--color-icon-tertiary);
+  border-radius: 4rpx;
+  position: relative;
+  margin-top: -4rpx;
+}
+
+.empty-doc::before {
+  content: '';
+  position: absolute;
+  top: 14rpx;
+  left: 10rpx;
+  right: 10rpx;
+  height: 4rpx;
+  background: var(--color-muted);
+  box-shadow: 0 10rpx 0 var(--color-muted), 0 20rpx 0 var(--color-muted), 0 30rpx 0 var(--color-muted);
+  border-radius: 2rpx;
+}
+
+.empty-title {
+  font-size: 32rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 12rpx;
+}
+
+.empty-sub {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ===== 骨架屏 ===== */
+.skeleton-list .skeleton-card {
+  background: var(--color-card);
+}
+
+.skeleton-line {
+  height: 24rpx;
+  background: var(--color-muted);
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-line-sm {
+  width: 30%;
+  margin-bottom: 16rpx;
+}
+
+.skeleton-line-md {
+  width: 70%;
+  margin-bottom: 12rpx;
+}
+
+.skeleton-card {
+  animation: skeletonPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skeletonPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.bottom-spacer {
+  height: 32rpx;
+}
+
+/* ===== Sheet 弹层 ===== */
+.sheet-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 100;
+}
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  background: var(--color-divider);
+  border-radius: 4rpx;
+  margin: 16rpx auto;
+  flex-shrink: 0;
+}
+
+.sheet-scroll {
+  flex: 0 1 auto;
+  height: 0;
+  overflow-y: auto;
+  max-height: calc(85vh - 300rpx);
+}
+
+.sheet-content-spacer {
+  height: 32rpx;
+}
+
+/* ===== Sheet 头部 ===== */
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40rpx 20rpx;
+  flex-shrink: 0;
+}
+
+.sheet-header-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sheet-header-close {
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: -20rpx;
+  flex-shrink: 0;
+}
+
+/* ===== 工单详情头部 ===== */
+.wo-detail-header {
+  padding: 8rpx 40rpx 28rpx;
+}
+
+.wo-detail-status-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 16rpx;
+}
+
+.wo-detail-level {
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.wo-detail-title {
+  font-size: 40rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.25;
+  display: block;
+  margin-bottom: 10rpx;
+}
+
+.wo-detail-site {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  display: block;
+  line-height: 1.4;
+}
+
+/* ===== 详情卡片分组 ===== */
+.wo-detail-card {
+  padding: 0 40rpx 28rpx;
+}
+
+.wo-detail-card + .wo-detail-card {
+  padding-top: 12rpx;
+}
+
+.wo-detail-card-title {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  padding: 28rpx 0 16rpx;
+  font-weight: 500;
+}
+
+.wo-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20rpx 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  gap: 24rpx;
+}
+
+.wo-detail-row-clickable {
+  cursor: pointer;
+}
+
+.wo-detail-label {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.wo-detail-value {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.wo-detail-value-right {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+/* ===== 状态行分组 ===== */
+.wo-desc-text {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  padding: 20rpx 0 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 空态文字 */
+.wo-detail-empty {
+  display: block;
+  padding: 20rpx 0 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+/* ===== 流转时间线 ===== */
+.wo-timeline {
+  padding: 0 0 0 8rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+}
+
+.wo-timeline-item {
+  position: relative;
+  display: flex;
+  padding: 16rpx 0 16rpx 36rpx;
+}
+
+.wo-timeline-item--last {
+  padding-bottom: 8rpx;
+}
+
+.wo-timeline-dot {
+  position: absolute;
+  left: 4rpx;
+  top: 22rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  background: var(--color-primary);
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.wo-timeline-item--last .wo-timeline-dot {
+  background: var(--color-success);
+}
+
+.wo-timeline-line {
+  position: absolute;
+  left: 11rpx;
+  top: 38rpx;
+  bottom: -16rpx;
+  width: 2rpx;
+  background: var(--color-divider);
+}
+
+.wo-timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wo-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16rpx;
+  margin-bottom: 6rpx;
+}
+
+.wo-timeline-phase {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+}
+
+.wo-timeline-time {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.wo-timeline-operator {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 4rpx;
+}
+
+.wo-timeline-remark {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 影像网格 */
+.wo-img-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16rpx;
+  padding: 20rpx 0 0;
+  border-top: 0.5rpx solid var(--color-divider);
+}
+
+.wo-img-wrap {
+  width: calc((100% - 32rpx) / 3);
+  aspect-ratio: 1;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  position: relative;
+}
+
+.wo-img-cell {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* ===== Sheet 标题 ===== */
+.wo-sheet-header {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  padding: 0 40rpx 16rpx;
+}
+
+/* ===== 开关行 ===== */
+.wo-toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0 40rpx 24rpx;
+  padding: 24rpx;
+  background: var(--color-muted);
+  border-radius: var(--radius-lg);
+  gap: 24rpx;
+}
+
+.wo-toggle-left {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.wo-toggle-title {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.wo-toggle-hint {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* ===== 履约方式提示 ===== */
+.wo-fulfillment-note {
+  margin: 0 40rpx 24rpx;
+  padding: 16rpx 20rpx;
+  background: var(--color-info-surface);
+  color: var(--color-info);
+  border-radius: var(--radius-md);
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+/* ===== 表单字段 ===== */
+.wo-detail-field {
+  margin: 0 40rpx 24rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.wo-detail-field-label {
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.wo-detail-input {
+  height: 80rpx;
+  line-height: 80rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  padding: 0 24rpx;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+}
+
+.wo-detail-textarea {
+  min-height: 160rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  padding: 20rpx 24rpx;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.wo-detail-picker-value {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 80rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  padding: 0 24rpx;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+}
+
+/* ===== 底部操作区 ===== */
+.wo-detail-actions {
+  padding: 20rpx 40rpx;
+  padding-bottom: calc(20rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+.wo-detail-btn-gap {
+  margin-top: 16rpx;
+}
+
+.wo-detail-sub-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 16rpx;
+}
+
+.wo-detail-sub-btn {
+  flex: 1;
+  height: 72rpx;
+  line-height: 72rpx;
+  font-size: 28rpx;
+}
+
+.wo-detail-waiting {
+  text-align: center;
+  padding: 16rpx 0;
+}
+
+.wo-detail-waiting-text {
+  font-size: 28rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* ===== 按钮（复用主按钮样式） ===== */
+.btn-primary-main {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  background: var(--color-primary);
+  color: #fff;
+  border-radius: var(--radius-lg);
+  font-size: 30rpx;
+  font-weight: 500;
+  border: none;
+}
+
+.btn-primary-main::after {
+  border: none;
+}
+
+.btn-secondary-outline {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  background: var(--color-card);
+  color: var(--color-primary);
+  border: 1.5rpx solid var(--color-border);
+  border-radius: var(--radius-lg);
+  font-size: 30rpx;
+  font-weight: 500;
+}
+
+.btn-secondary-outline::after {
+  border: none;
+}
+
+.btn-ghost {
+  background: var(--color-background);
+  color: var(--color-primary);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  font-weight: 500;
+  border: none;
+}
+
+.btn-ghost::after {
+  border: none;
+}
+
+
+/* ============================================================
+   工单详情 Sheet 新样式（wos-* 前缀）
+   ============================================================ */
+
+/* Sheet 基础（覆盖/补充） */
+.sheet {
+  max-height: 75vh;
+}
+
+.sheet-scroll {
+  flex: 1 1 0;
+  height: 0;
+  min-height: 0;
+}
+
+/* ===== 底部操作栏 ===== */
+.sheet-bottom-bar {
+  padding: 20rpx 40rpx;
+  padding-bottom: calc(20rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+/* 备件申请 Sheet 底栏：横向双按钮 */
+.parts-apply-sheet .sheet-bottom-bar {
+  display: flex;
+  flex-direction: row;
+  gap: 20rpx;
+}
+
+.parts-apply-sheet .btn-lg {
+  flex: 1;
+  width: auto;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+}
+
+.parts-apply-sheet .btn-primary.btn-lg {
+  flex: 2;
+}
+
+/* 按钮 lg */
+.btn-lg {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  border-radius: var(--radius-lg);
+  font-size: 30rpx;
+  font-weight: 500;
+  border: none;
+}
+
+.btn-lg::after {
+  border: none;
+}
+
+.wos-btn-gap {
+  margin-top: 20rpx;
+}
+
+/* 次动作行 */
+.wos-sub-actions {
+  display: flex;
+  gap: 20rpx;
+  margin-top: 20rpx;
+}
+
+.wos-sub-btn {
+  flex: 1;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  font-size: 26rpx;
+  font-weight: 500;
+}
+
+.wos-sub-btn::after {
+  border: none;
+}
+
+/* ===== 状态标签 ===== */
+.wos-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rpx 16rpx;
+  border-radius: var(--radius-xs);
+  font-size: 22rpx;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.wos-chip-pending { background: var(--color-warning-surface); color: var(--color-warning); }
+.wos-chip-accepted { background: var(--color-info-surface); color: var(--color-info); }
+.wos-chip-dispatched { background: var(--color-info-surface); color: var(--color-info); }
+.wos-chip-in_progress { background: var(--color-info-surface); color: var(--color-info); }
+.wos-chip-reviewing { background: var(--color-warning-surface); color: var(--color-warning); }
+.wos-chip-closed { background: var(--color-success-surface); color: var(--color-success); }
+.wos-chip-resolved { background: var(--color-success-surface); color: var(--color-success); }
+.wos-chip-rejected { background: var(--color-error-surface); color: var(--color-error); }
+
+/* ===== 任务头部 ===== */
+.wos-header {
+  padding: 8rpx 40rpx 24rpx;
+}
+
+.wos-title {
+  display: block;
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 8rpx;
+}
+
+.wos-site {
+  display: block;
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 12rpx;
+}
+
+.wos-level {
+  display: inline-block;
+}
+
+.wos-level-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4rpx 12rpx;
+  background: var(--color-error-surface);
+  color: var(--color-error);
+  border-radius: var(--radius-xs);
+  font-size: 22rpx;
+  font-weight: 500;
+}
+
+/* ===== 当前阶段 ===== */
+.wos-phase {
+  display: flex;
+  align-items: flex-start;
+  padding: 16rpx 40rpx 24rpx;
+  gap: 24rpx;
+}
+
+.wos-phase-label {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.wos-phase-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wos-phase-text {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+/* ===== 分隔线 ===== */
+.wos-divider {
+  height: 0.5rpx;
+  background: var(--color-divider);
+  margin: 0 40rpx;
+}
+
+/* ===== 信息分组 ===== */
+.wos-group {
+  padding: 0 40rpx 12rpx;
+}
+
+.wos-group-title {
+  font-size: 24rpx;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 28rpx 0 16rpx;
+}
+
+.wos-desc {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  word-break: break-all;
+  padding: 4rpx 0;
+}
+
+.wos-empty {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  padding: 8rpx 0;
+}
+
+/* ===== 信息行 ===== */
+.wos-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20rpx 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  gap: 24rpx;
+}
+
+.wos-info-row--last {
+  padding-bottom: 0;
+}
+
+.wos-info-label {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.wos-info-value {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+/* ===== 表单字段（处置区） ===== */
+.wos-field {
+  padding: 16rpx 0 4rpx;
+}
+
+.wos-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12rpx;
+}
+
+.wos-field-label {
+  display: block;
+  font-size: 26rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 12rpx;
+}
+
+.wos-field-header .wos-field-label {
+  margin-bottom: 0;
+}
+
+.wos-upload-btn {
+  min-height: 88rpx;
+  line-height: 88rpx;
+  font-size: 26rpx;
+  padding: 0 28rpx;
+  margin: 0;
+}
+
+.wos-upload-btn::after {
+  border: none;
+}
+
+.wos-textarea {
+  width: 100%;
+  min-height: 160rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+/* ===== 影像网格 ===== */
+.wos-img-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+  padding-top: 4rpx;
+}
+
+.wos-img-wrap {
+  width: 160rpx;
+  height: 160rpx;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-muted);
+  flex-shrink: 0;
+}
+
+.wos-img-cell {
+  width: 100%;
+  height: 100%;
+}
+
+/* ===== 流转时间线 ===== */
+.wos-timeline {
+  padding-left: 8rpx;
+}
+
+.wos-timeline-item {
+  position: relative;
+  padding-left: 32rpx;
+  padding-bottom: 28rpx;
+}
+
+.wos-timeline-item--last {
+  padding-bottom: 0;
+}
+
+.wos-timeline-dot {
+  position: absolute;
+  left: 0;
+  top: 8rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  background: var(--color-primary);
+  z-index: 1;
+}
+
+.wos-timeline-item--last .wos-timeline-dot {
+  background: var(--color-success);
+}
+
+.wos-timeline-line {
+  position: absolute;
+  left: 7rpx;
+  top: 24rpx;
+  bottom: 0;
+  width: 2rpx;
+  background: var(--color-divider);
+}
+
+.wos-timeline-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.wos-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.wos-timeline-phase {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.wos-timeline-time {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.wos-timeline-operator {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+}
+
+.wos-timeline-remark {
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* ============================================================
+   备件申请 Sheet 样式（wop-* 前缀）
+   ============================================================ */
+
+.wop-group {
+  padding: 0 40rpx 12rpx;
+}
+
+/* 工单标题（多行截断） */
+.wop-title {
+  text-align: right;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+/* Picker 行 */
+.wop-picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  min-height: 88rpx;
+  box-sizing: border-box;
+}
+
+.wop-picker-value {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 处理方式说明 */
+.wop-note {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 12rpx 16rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-sm);
+  margin-top: 8rpx;
+}
+
+/* 输入框 */
+.wop-input {
+  width: 100%;
+  min-height: 88rpx;
+  padding: 0 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  box-sizing: border-box;
+}
+
+/* ============================================================
+ *  Sheet 布局修复 + 工单详情视觉收口
+ *  说明：清理历史残留，统一 flex 滚动布局，确保正文非零高度
+ * ============================================================ */
+
+/* --- Sheet 容器：统一 flex 列布局，高度由内容撑开至 max-height --- */
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* handle 条：保持在 padding-bottom 之外，使用负 margin 抵消 */
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  background: var(--color-divider);
+  border-radius: 4rpx;
+  margin: 16rpx auto;
+  flex-shrink: 0;
+}
+
+/* 头部 */
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40rpx 12rpx;
+  flex-shrink: 0;
+  min-height: 68rpx;
+  box-sizing: border-box;
+}
+
+.sheet-header-close {
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: -24rpx;
+  flex-shrink: 0;
+}
+
+.sheet-header-close .ico-close::before,
+.sheet-header-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 核心：scroll-view 正文区域 ---
+   flex: 0 1 auto + min-height: 0：
+   - 内容少时：高度由内容决定，Sheet 紧凑收束，无多余空白
+   - 内容多时：Sheet 被 max-height 限制，flex-shrink 压缩 scroll-view，内容溢出滚动
+   替代旧的 height:0 + min-height:320rpx 方案（导致小滚动窗 + 底栏比例失衡） */
+.sheet-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sheet-content-spacer {
+  height: 32rpx;
+  flex-shrink: 0;
+}
+
+/* 底部操作栏 */
+.sheet-bottom-bar {
+  padding: 12rpx 40rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+/* PM-15 work-order detail: the root no longer inherits legacy .sheet rules. */
+.workorder-detail-sheet {
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+}
+.workorder-detail-scroll {
+  overflow-y: hidden;
+}
+.workorder-detail-sheet .wos-header {
+  padding-right: 120rpx;
+}
+.workorder-detail-close .ico-close::before,
+.workorder-detail-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 工单详情内容视觉优化 --- */
+
+/* 详情头部：标题 + 站点 + 级别 */
+.wos-header {
+  padding: 8rpx 40rpx 28rpx;
+}
+
+.wos-title {
+  display: block;
+  font-size: 38rpx;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.25;
+  margin-bottom: 10rpx;
+}
+
+.wos-site {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 12rpx;
+}
+
+.wos-level {
+  display: inline-flex;
+}
+
+.wos-level-chip {
+  font-size: 22rpx;
+  font-weight: 500;
+  padding: 4rpx 14rpx;
+  border-radius: 6rpx;
+  background: var(--color-warning-surface);
+  color: var(--color-warning);
+  line-height: 1.4;
+}
+
+/* 当前阶段 */
+.wos-phase {
+  padding: 20rpx 40rpx;
+  background: var(--color-type-bg);
+  margin: 0 40rpx;
+  border-radius: var(--radius-md);
+  margin-bottom: 24rpx;
+}
+
+.wos-phase-label {
+  display: block;
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  margin-bottom: 6rpx;
+}
+
+.wos-phase-content {
+  display: flex;
+  align-items: flex-start;
+}
+
+.wos-phase-text {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.55;
+  font-weight: 500;
+}
+
+/* 分隔线 */
+.wos-divider {
+  height: 8rpx;
+  background: var(--color-type-bg);
+  margin: 0 40rpx 24rpx;
+  border-radius: 4rpx;
+}
+
+/* 内容分组 */
+.wos-group {
+  padding: 0 40rpx 28rpx;
+}
+
+.wos-group-title {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+  margin-bottom: 16rpx;
+  line-height: 1.4;
+}
+
+/* 问题描述 */
+.wos-desc {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.65;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.wos-empty {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+/* 表单字段（处置区） */
+.wos-field {
+  margin-bottom: 20rpx;
+}
+
+.wos-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10rpx;
+}
+
+.wos-field-label {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  margin-bottom: 8rpx;
+  line-height: 1.4;
+}
+
+.wos-field-header .wos-field-label {
+  margin-bottom: 0;
+}
+
+.wos-textarea {
+  width: 100%;
+  min-height: 160rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+.wos-upload-btn {
+  height: 56rpx;
+  line-height: 56rpx;
+  font-size: 24rpx;
+  padding: 0 20rpx;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.wos-upload-btn::after {
+  border: none;
+}
+
+/* 图片网格（处置影像） */
+.wos-img-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.wos-img-wrap {
+  width: calc((100% - 36rpx) / 4);
+  aspect-ratio: 1;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-muted);
+}
+
+.wos-img-cell {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 时间线（流转记录） */
+.wos-timeline {
+  position: relative;
+  padding-left: 32rpx;
+}
+
+.wos-timeline-item {
+  position: relative;
+  padding-bottom: 24rpx;
+}
+
+.wos-timeline-item--last {
+  padding-bottom: 0;
+}
+
+.wos-timeline-dot {
+  position: absolute;
+  left: -32rpx;
+  top: 6rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 3rpx solid var(--color-card);
+  box-shadow: 0 0 0 2rpx var(--color-primary-surface);
+  z-index: 1;
+}
+
+.wos-timeline-line {
+  position: absolute;
+  left: -25rpx;
+  top: 22rpx;
+  bottom: 0;
+  width: 2rpx;
+  background: var(--color-divider);
+}
+
+.wos-timeline-content {
+  padding-left: 4rpx;
+}
+
+.wos-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 4rpx;
+}
+
+.wos-timeline-phase {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.wos-timeline-time {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.wos-timeline-operator {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 4rpx;
+}
+
+.wos-timeline-remark {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+/* 信息行（基本信息 / 关联资源） */
+.wos-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 16rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 20rpx;
+}
+
+.wos-info-row--last {
+  border-bottom: none;
+}
+
+.wos-info-label {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.wos-info-value {
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  line-height: 1.4;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 底部次动作按钮区 */
+.wos-sub-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 16rpx;
+}
+
+.wos-sub-btn {
+  flex: 1;
+  height: 72rpx;
+  line-height: 72rpx;
+  font-size: 26rpx;
+  border-radius: var(--radius-md);
+  border: 1.5rpx solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.wos-sub-btn::after {
+  border: none;
+}
+
+.wos-btn-gap {
+  margin-top: 16rpx;
+}

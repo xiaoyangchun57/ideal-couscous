@@ -1,146 +1,377 @@
-<view class="page">
-  <view class="sync-bar" wx:if="{{!online}}">当前离线，提交操作会暂存并在联网后自动同步</view>
-  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
-  <view class="seg-strip">
-    <view class="seg-item {{tab === item.key ? 'seg-on' : ''}}" wx:for="{{tabs}}" wx:key="key" bindtap="onTab" data-t="{{item.key}}">{{item.label}}</view>
+<view class="workorder-page">
+
+  <!-- 离线同步提示 -->
+  <view class="sync-bar" wx:if="{{!online || syncCount > 0}}" bindtap="onSyncNow">
+    <view class="sync-icon"></view>
+    <text class="sync-text">{{online ? (syncCount + '条操作待同步') : '离线暂存'}}</text>
+    <text class="sync-action">{{syncCount > 0 ? '立即同步' : '网络恢复后自动同步'}}</text>
   </view>
 
-  <view class="list-card" wx:if="{{list.length}}">
-    <view class="row" wx:for="{{list}}" wx:key="order_no" bindtap="onOpen" data-no="{{item.order_no}}">
-      <view class="row-main">
-        <text class="row-title">{{item.title}}</text>
-        <text class="row-sub">{{item.site_name}} · {{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}"> · {{item.level_cn}}</text></text>
+  <!-- 分段筛选（可横向滚动） -->
+  <scroll-view class="seg-scroll" scroll-x="{{true}}" show-scrollbar="{{false}}">
+    <view class="seg-strip">
+      <view class="seg-item {{tab === item.key ? 'seg-on' : ''}}" wx:for="{{tabs}}" wx:key="key" bindtap="onTab" data-t="{{item.key}}">{{item.label}}</view>
+    </view>
+  </scroll-view>
+
+  <!-- 工单列表 -->
+  <view class="wo-list" wx:if="{{loaded && list.length > 0}}">
+    <view class="wo-card" wx:for="{{list}}" wx:key="order_no" bindtap="onOpen" data-no="{{item.order_no}}">
+      <view class="wo-card-top">
+        <text class="wo-title">{{item.display_title}}</text>
+        <view class="wo-status-chip wschip-{{item.status_cls}}">{{item.status_cn}}</view>
       </view>
-      <view class="row-right">
-        <text class="tag tag-{{item.status_cls}}">{{item.status_cn}}</text>
+      <view class="wo-card-mid">
+        <text class="wo-site">{{item.site_name}}</text>
+        <text class="wo-source">{{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}" class="{{item.level_cn === '紧急' ? 'wo-level-urgent' : ''}}"> · {{item.level_cn}}</text></text>
+      </view>
+      <view class="wo-card-bottom">
+        <text class="wo-sla" wx:if="{{item.sla_deadline}}">时限 {{item.sla_deadline}}</text>
+        <view class="wo-arrow ico ico-chevron-right"></view>
       </view>
     </view>
   </view>
-  <view class="empty" wx:elif="{{loaded}}">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">暂无工单</text>
+
+  <!-- 空态 -->
+  <view class="empty-state" wx:if="{{loaded && list.length === 0}}">
+    <view class="empty-icon">
+      <view class="empty-doc"></view>
+    </view>
+    <text class="empty-title">暂无工单</text>
+    <text class="empty-sub">当前筛选条件下没有工单</text>
   </view>
 
-  <!-- 详情 / 操作 -->
-  <view class="sheet-mask" wx:if="{{sheet.open}}" bindtap="onClose"></view>
-  <view class="sheet" wx:if="{{sheet.open}}">
-    <view class="sheet-head">
-      <text class="sheet-title">{{sheet.item.title}}</text>
-      <text class="sheet-close" bindtap="onClose">×</text>
+  <!-- 加载骨架屏 -->
+  <view class="wo-list skeleton-list" wx:if="{{!loaded}}">
+    <view class="wo-card skeleton-card" wx:for="{{[1,2,3]}}" wx:key="*this">
+      <view class="skeleton-line skeleton-line-sm"></view>
+      <view class="skeleton-line skeleton-line-md"></view>
+      <view class="skeleton-line skeleton-line-sm"></view>
     </view>
-    <view class="d-tag"><text class="tag tag-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}</text><text class="tag tag-{{sheet.item.status_cls}}">{{sheet.item.status_cn}}</text></view>
-    <view class="flow">
-      <view class="flow-step {{sheet.item.step >= 1 ? 'on' : ''}} {{sheet.item.step >= 2 ? 'done' : ''}}">
-        <view class="flow-dot"></view><text class="flow-tx">接单</text>
-      </view>
-      <view class="flow-line {{sheet.item.step >= 2 ? 'on' : ''}}"></view>
-      <view class="flow-step {{sheet.item.step >= 2 ? 'on' : ''}} {{sheet.item.step >= 3 ? 'done' : ''}}">
-        <view class="flow-dot"></view><text class="flow-tx">签到</text>
-      </view>
-      <view class="flow-line {{sheet.item.step >= 3 ? 'on' : ''}}"></view>
-      <view class="flow-step {{sheet.item.step >= 3 ? 'on' : ''}} {{sheet.item.step >= 4 ? 'done' : ''}}">
-        <view class="flow-dot"></view><text class="flow-tx">处置</text>
-      </view>
-      <view class="flow-line {{sheet.item.step >= 4 ? 'on' : ''}}"></view>
-      <view class="flow-step {{sheet.item.step >= 4 ? 'on' : ''}} {{sheet.item.step >= 5 ? 'done' : ''}}">
-        <view class="flow-dot"></view><text class="flow-tx">核验</text>
-      </view>
-    </view>
-    <view class="d-row"><text class="d-k">站点</text><text class="d-v">{{sheet.item.site_name}}</text></view>
-    <view class="d-row"><text class="d-k">来源</text><text class="d-v">{{sheet.item.source_cn}}</text></view>
-    <view class="d-row" wx:if="{{sheet.item.sla_deadline}}"><text class="d-k">时限</text><text class="d-v">{{sheet.item.sla_deadline}}</text></view>
-    <view class="d-row" wx:if="{{sheet.item.status === 'accepted' || sheet.item.status === 'in_progress' || sheet.item.status === 'reviewing'}}">
-      <text class="d-k">签到</text><text class="d-v">{{sheet.item.checked_in ? '已签到' : '未签到'}}</text>
-    </view>
-    <view class="d-desc" wx:if="{{sheet.item.description}}">{{sheet.item.description}}</view>
+  </view>
 
-    <!-- 处置影像展示 -->
-    <view class="blk">
-      <text class="blk-tx">处置影像（{{sheet.item.images_arr.length}}/6）</text>
-      <view class="img-grid">
-        <view wx:for="{{sheet.item.images_arr}}" wx:key="*this" class="img-wrap">
-          <image class="img-cell" src="{{item}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{item}}"></image>
-          <view wx:if="{{sheet.item.can_operate && sheet.item.status === 'in_progress'}}" class="img-delete" catchtap="onDeleteImage" data-src="{{item}}">×</view>
+  <!-- 底部安全区 -->
+  <view class="bottom-spacer"></view>
+
+  <!-- ===== 工单详情 Sheet ===== -->
+  <view class="om-sheet-mask" wx:if="{{sheet.open}}" catchtap="onClose"></view>
+  <view class="om-sheet workorder-detail-sheet" wx:if="{{sheet.open}}">
+    <view class="om-sheet-dismiss workorder-detail-close" catchtap="onClose">
+      <view class="ico ico-close"></view>
+    </view>
+
+    <scroll-view class="om-sheet-scroll sheet-scroll workorder-detail-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <!-- 状态属于详情上下文；关闭入口独立于正文滚动。 -->
+      <view class="wos-header">
+      <view class="wos-chip wos-chip-{{sheet.item.status_cls}}">{{sheet.item.status_cn}}</view>
+        <text class="wos-title">{{sheet.item.display_title}}</text>
+        <text class="wos-site">{{sheet.item.site_name}}</text>
+        <view class="wos-level" wx:if="{{sheet.item.level_cn && sheet.item.level_cn !== '未知' && sheet.item.level_cn !== '普通'}}">
+          <view class="wos-level-chip">{{sheet.item.level_cn}}</view>
         </view>
-        <view class="img-add" wx:if="{{sheet.item.can_operate && sheet.item.status === 'in_progress'}}" bindtap="onUploadImage">+</view>
       </view>
-    </view>
 
-    <view class="sheet-ops">
-      <button wx:if="{{sheet.item.status === 'pending' && sheet.item.can_operate}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doAccept">接 单</button>
+      <!-- 当前阶段说明 -->
+      <view class="wos-phase">
+        <text class="wos-phase-label">当前阶段</text>
+        <view class="wos-phase-content">
+          <text class="wos-phase-text">{{detailError || sheet.item.action_summary || '状态信息暂不可用，请刷新后重试'}}</text>
+        </view>
+      </view>
 
-      <block wx:elif="{{sheet.item.status === 'accepted' && sheet.item.can_operate}}">
-        <button wx:if="{{!sheet.item.checked_in}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="onCheckIn">到场签到</button>
-        <button wx:else class="btn-primary op-btn" loading="{{acting}}" bindtap="doStart">开始处置</button>
-        <view class="op-sub">
-          <button class="btn-ghost op-btn" bindtap="onApplyVehicle">申请用车</button>
-          <button class="btn-ghost op-btn" bindtap="onApplyParts">申请备件</button>
+      <!-- 分隔 -->
+      <view class="wos-divider"></view>
+
+      <!-- 问题事实 -->
+      <view class="wos-group">
+        <view class="wos-group-title">问题描述</view>
+        <view class="wos-desc" wx:if="{{sheet.item.description}}">{{sheet.item.description}}</view>
+        <text class="wos-empty" wx:else>暂无问题描述</text>
+      </view>
+
+      <!-- 处置区（仅处置中可操作） -->
+      <view class="wos-group" wx:if="{{sheet.item.actions.primary === 'submit_review' && !sheet.item.detailStale}}">
+        <view class="wos-group-title">现场处置</view>
+        <view class="wos-field">
+          <text class="wos-field-label">处置说明</text>
+          <textarea class="wos-textarea" placeholder="说明做了什么、现场结果和仍需关注的事项" value="{{resolutionNote}}" bindinput="onResolutionNote" maxlength="500"></textarea>
+        </view>
+        <view class="wos-field">
+          <view class="wos-field-header">
+            <text class="wos-field-label">处置影像（{{sheet.item.images_arr ? sheet.item.images_arr.length : 0}}/6）</text>
+            <button class="btn-ghost btn-sm wos-upload-btn" bindtap="onUploadImage">上传</button>
+          </view>
+          <view class="wos-img-grid" wx:if="{{sheet.item.images_arr && sheet.item.images_arr.length > 0}}">
+            <view wx:for="{{sheet.item.images_arr}}" wx:for-item="imgItem" wx:key="*this" class="wos-img-wrap">
+              <image class="wos-img-cell" src="{{imgItem}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{imgItem}}"></image>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 处置影像（只读：非处置中但有影像） -->
+      <view class="wos-group" wx:if="{{sheet.item.actions.primary !== 'submit_review' && sheet.item.images_arr && sheet.item.images_arr.length > 0}}">
+        <view class="wos-group-title">处置影像（{{sheet.item.images_arr.length}}/6）</view>
+        <view class="wos-img-grid">
+          <view wx:for="{{sheet.item.images_arr}}" wx:for-item="imgItem" wx:key="*this" class="wos-img-wrap">
+            <image class="wos-img-cell" src="{{imgItem}}" mode="aspectFill" bindtap="onPreviewImage" data-src="{{imgItem}}"></image>
+          </view>
+        </view>
+      </view>
+
+      <!-- 流转记录 -->
+      <view class="wos-group">
+        <view class="wos-group-title">流转记录</view>
+        <block wx:if="{{sheet.item.flowEvents.length}}">
+          <view class="wos-timeline">
+            <view wx:for="{{sheet.item.flowEvents}}" wx:key="index" class="wos-timeline-item {{index === sheet.item.flowEvents.length - 1 ? 'wos-timeline-item--last' : ''}}">
+              <view class="wos-timeline-dot"></view>
+              <view class="wos-timeline-line" wx:if="{{index < sheet.item.flowEvents.length - 1}}"></view>
+              <view class="wos-timeline-content">
+                <view class="wos-timeline-head">
+                  <text class="wos-timeline-phase">{{item.label}}</text>
+                  <text class="wos-timeline-time">{{item.time || '时间未记录'}}</text>
+                </view>
+                <text class="wos-timeline-operator" wx:if="{{item.operator}}">{{item.operator}}</text>
+                <text class="wos-timeline-remark" wx:if="{{item.remark}}">{{item.remark}}</text>
+              </view>
+            </view>
+          </view>
+        </block>
+        <text wx:elif="{{sheet.item.flowUnavailable}}" class="wos-empty">流转记录暂不可用</text>
+        <text wx:else class="wos-empty">暂无可关联的流转记录</text>
+      </view>
+
+      <view class="wos-group">
+        <view class="wos-group-title">关联资源</view>
+        <text wx:if="{{sheet.item.relatedUnavailable}}" class="wos-empty">关联备件和回收记录暂不可用</text>
+        <block wx:elif="{{sheet.item.related}}">
+          <text class="wos-info-value" wx:if="{{sheet.item.related.parts.length}}">关联备件申请 {{sheet.item.related.parts.length}} 条</text>
+          <text class="wos-info-value" wx:if="{{sheet.item.related.recycles.length}}">关联设备回收 {{sheet.item.related.recycles.length}} 条</text>
+          <text class="wos-empty" wx:if="{{!sheet.item.related.parts.length && !sheet.item.related.recycles.length}}">暂无关联备件或回收记录</text>
+          <text class="wos-empty">车辆关联尚未接入</text>
+        </block>
+        <text wx:else class="wos-empty">正在读取关联资源</text>
+      </view>
+
+      <!-- 追溯信息 -->
+      <view class="wos-group">
+        <view class="wos-group-title">基本信息</view>
+        <view class="wos-info-row">
+          <text class="wos-info-label">工单号</text>
+          <text class="wos-info-value">{{sheet.item.order_no}}</text>
+        </view>
+        <view class="wos-info-row">
+          <text class="wos-info-label">来源</text>
+          <text class="wos-info-value">{{sheet.item.source_cn}}</text>
+        </view>
+        <view class="wos-info-row" wx:if="{{sheet.item.sla_deadline}}">
+          <text class="wos-info-label">时限</text>
+          <text class="wos-info-value">{{sheet.item.sla_deadline}}</text>
+        </view>
+        <view class="wos-info-row wos-info-row--last">
+          <text class="wos-info-label">签到状态</text>
+          <text class="wos-info-value">{{sheet.item.checked_in ? '已签到' : '未签到'}}</text>
+        </view>
+      </view>
+
+      <view wx:if="{{!sheet.item.detailStale && (sheet.item.actions.primary === 'accept' || sheet.item.actions.primary === 'check_in' || sheet.item.actions.primary === 'start' || sheet.item.actions.primary === 'submit_review')}}" class="sheet-content-spacer"></view>
+    </scroll-view>
+
+    <!-- 底部固定操作栏 -->
+    <view wx:if="{{!sheet.item.detailStale && (sheet.item.actions.primary === 'accept' || sheet.item.actions.primary === 'check_in' || sheet.item.actions.primary === 'start' || sheet.item.actions.primary === 'submit_review')}}" class="sheet-bottom-bar">
+      <!-- pending 待受理 -->
+      <block wx:if="{{sheet.item.actions.primary === 'accept' && !sheet.item.detailStale}}">
+        <button class="btn-primary btn-lg" loading="{{acting}}" bindtap="doAccept">接单执行</button>
+        <button class="btn-ghost btn-lg wos-btn-gap" wx:if="{{sheet.item.can_dismiss_auto_alert}}" disabled>判定无需处置</button>
+      </block>
+
+      <!-- accepted/dispatched 已受理 -->
+      <block wx:elif="{{sheet.item.actions.primary === 'check_in' && !sheet.item.detailStale}}">
+        <button class="btn-primary btn-lg" loading="{{acting}}" bindtap="onCheckIn">到场签到</button>
+        <view class="wos-sub-actions" wx:if="{{sheet.item.actions.can_apply_resources}}">
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyVehicle">申请用车</button>
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyParts">申请备件</button>
         </view>
       </block>
 
-      <block wx:elif="{{sheet.item.status === 'in_progress' && sheet.item.can_operate}}">
-        <view class="field workorder-resolution-field">
-          <text class="field-label">现场处置说明</text>
-          <textarea class="field-input" placeholder="说明做了什么、现场结果和仍需关注的事项" value="{{resolutionNote}}" bindinput="onResolutionNote" maxlength="500"></textarea>
+      <block wx:elif="{{sheet.item.actions.primary === 'start' && !sheet.item.detailStale}}">
+        <button class="btn-primary btn-lg" loading="{{acting}}" bindtap="doStart">开始处置</button>
+        <view class="wos-sub-actions" wx:if="{{sheet.item.actions.can_apply_resources}}">
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyVehicle">申请用车</button>
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyParts">申请备件</button>
         </view>
-        <button class="btn-ghost op-btn" bindtap="onUploadImage">上传影像</button>
-        <button class="btn-ghost op-btn" bindtap="onApplyVehicle">申请用车</button>
-        <button class="btn-ghost op-btn" bindtap="onApplyParts">申请备件</button>
-        <button class="btn-primary op-btn" loading="{{acting}}" disabled="{{!sheet.item.has_images}}" bindtap="doReview">提交核验</button>
       </block>
 
-      <block wx:elif="{{sheet.item.status === 'reviewing'}}">
-        <button wx:if="{{isAdmin}}" class="btn-primary op-btn" loading="{{acting}}" bindtap="doApprove">核验通过</button>
-        <button wx:if="{{isAdmin}}" class="btn-ghost op-btn" loading="{{acting}}" bindtap="doReject">退回修改</button>
-        <view wx:if="{{!isAdmin}}" class="op-hint">等待管理员核验</view>
+      <!-- in_progress 处置中 -->
+      <block wx:elif="{{sheet.item.actions.primary === 'submit_review' && !sheet.item.detailStale}}">
+        <button class="btn-primary btn-lg" loading="{{acting}}" disabled="{{!sheet.item.has_images}}" bindtap="doReview">提交核验</button>
+        <view class="wos-sub-actions" wx:if="{{sheet.item.actions.can_apply_resources}}">
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyVehicle">申请用车</button>
+          <button class="btn-ghost wos-sub-btn" bindtap="onApplyParts">申请备件</button>
+        </view>
       </block>
-      <view wx:elif="{{sheet.item.status === 'closed'}}" class="op-hint">工单已闭环</view>
-      <view wx:else class="op-hint">当前账号仅可查看</view>
+
     </view>
   </view>
 
-  <!-- 工单用车申请：车辆必选，确实无需用车时登记例外 -->
-  <view class="sheet-mask" wx:if="{{vehicleApply.open}}" bindtap="onCloseVehicle"></view>
+  <!-- ===== 用车申请 Sheet ===== -->
+  <view class="sheet-mask" wx:if="{{vehicleApply.open}}" catchtap="onCloseVehicle"></view>
   <view class="sheet" wx:if="{{vehicleApply.open}}">
-    <view class="sheet-head"><text class="sheet-title">申请用车</text><text class="sheet-close" bindtap="onCloseVehicle">×</text></view>
-    <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
-    <picker wx:if="{{!vehicleApply.noVehicleRequired}}" mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
-      <view class="d-row"><text class="d-k">选择车辆</text><text class="d-v">{{vehicleOptions[vehicleApply.index].label}}</text></view>
-    </picker>
-    <view class="vehicle-exception-row">
-      <view><text class="field-label vehicle-exception-title">本工单无需用车</text><text class="vehicle-exception-hint">仅限站点可步行到达等明确情形</text></view>
-      <switch checked="{{vehicleApply.noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#1677ff" />
+    <view class="sheet-handle"></view>
+
+    <!-- Sheet 头部 -->
+    <view class="sheet-header">
+      <view class="sheet-header-title">申请用车</view>
+      <view class="sheet-header-close" catchtap="onCloseVehicle">
+        <view class="ico ico-close"></view>
+      </view>
     </view>
-    <view class="field" wx:if="{{vehicleApply.noVehicleRequired}}"><text class="field-label">无需用车原因</text><textarea class="field-input" placeholder="请说明无需车辆的具体原因" value="{{vehicleApply.exceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200"></textarea></view>
-    <view class="field"><text class="field-label">用车事由</text><textarea class="field-input" placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea></view>
-    <view class="sheet-ops">
-      <button class="btn-primary op-btn" bindtap="submitVehicle">提交申请</button>
-      <button class="btn-ghost op-btn" bindtap="onCloseVehicle">取 消</button>
+
+    <scroll-view class="sheet-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <view class="wo-detail-card">
+        <view class="wo-detail-row">
+          <text class="wo-detail-label">关联工单</text>
+          <text class="wo-detail-value">{{sheet.item.order_no}}</text>
+        </view>
+        <picker wx:if="{{!vehicleApply.noVehicleRequired}}" mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
+          <view class="wo-detail-row wo-detail-row-clickable">
+            <text class="wo-detail-label">选择车辆</text>
+            <view class="wo-detail-value-right">
+              <text class="wo-detail-value">{{vehicleOptions[vehicleApply.index].label}}</text>
+              <view class="ico ico-chevron-right"></view>
+            </view>
+          </view>
+        </picker>
+      </view>
+
+      <view class="wo-toggle-row">
+        <view class="wo-toggle-left">
+          <text class="wo-toggle-title">本工单无需用车</text>
+          <text class="wo-toggle-hint">仅限站点可步行到达等明确情形</text>
+        </view>
+        <switch checked="{{vehicleApply.noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#007aff" />
+      </view>
+
+      <view class="wo-detail-field" wx:if="{{vehicleApply.noVehicleRequired}}">
+        <text class="wo-detail-field-label">无需用车原因</text>
+        <textarea class="wo-detail-textarea" placeholder="请说明无需车辆的具体原因" value="{{vehicleApply.exceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200"></textarea>
+      </view>
+
+      <view class="wo-detail-field">
+        <text class="wo-detail-field-label">用车事由</text>
+        <textarea class="wo-detail-textarea" placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea>
+      </view>
+
+      <view class="sheet-content-spacer"></view>
+    </scroll-view>
+
+    <view class="wo-detail-actions">
+      <button class="btn-primary-main" bindtap="submitVehicle">提交申请</button>
+      <button class="btn-secondary-outline wo-detail-btn-gap" bindtap="onCloseVehicle">取消</button>
     </view>
   </view>
 
-  <!-- 统一备件需求：库存领用 / 附近急购 / 厂家订购 -->
-  <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onCloseParts"></view>
+  <!-- ===== 备件申请 Sheet ===== -->
+  <view class="sheet-mask" wx:if="{{partsApply.open}}" catchtap="onCloseParts"></view>
   <view class="sheet" wx:if="{{partsApply.open}}">
-    <view class="sheet-head"><text class="sheet-title">备件需求</text><text class="sheet-close" bindtap="onCloseParts">×</text></view>
-    <view class="d-row"><text class="d-k">关联工单</text><text class="d-v">{{sheet.item.order_no}}</text></view>
-    <picker mode="selector" range="{{partsFulfillmentOptions}}" range-key="label" value="{{partsApply.fulfillmentIndex}}" bindchange="onPartsFulfillmentPick">
-      <view class="d-row"><text class="d-k">处理方式</text><text class="d-v">{{partsFulfillmentOptions[partsApply.fulfillmentIndex].label}} ›</text></view>
-    </picker>
-    <view class="parts-route-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">批准只代表允许使用，不锁库；实际拿到备件时才扣库。</view>
-    <view class="parts-route-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">主管批准后可在附近购买，回来只需补票据和实际金额。</view>
-    <view class="parts-route-note" wx:else>批准后记录厂家和快递，到货时一次确认入库或现场直用。</view>
-    <picker wx:if="{{partsApply.fulfillment_type === 'stock'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
-      <view class="d-row"><text class="d-k">库存备件</text><text class="d-v">{{partsOptions[partsApply.index].label}}</text></view>
-    </picker>
-    <view class="field"><text class="field-label">备件名称</text><input class="field-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
-    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">规格型号</text><input class="field-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/></view>
-    <view class="field"><text class="field-label">数量</text><input class="field-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
-    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">预计金额（可不填）</text><input class="field-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/></view>
-    <view class="field"><text class="field-label">申请事由</text><textarea class="field-input" placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
-    <view class="sheet-ops">
-      <button class="btn-primary op-btn" bindtap="submitParts">提交需求</button>
-      <button class="btn-ghost op-btn" bindtap="onCloseParts">取 消</button>
+    <view class="sheet-handle"></view>
+
+    <!-- Sheet 头部 -->
+    <view class="sheet-header">
+      <view class="sheet-header-title">备件需求</view>
+      <view class="sheet-header-close" catchtap="onCloseParts">
+        <view class="ico ico-close"></view>
+      </view>
+    </view>
+
+    <scroll-view class="sheet-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <!-- 关联信息 -->
+      <view class="wop-group">
+        <view class="wos-info-row">
+          <text class="wos-info-label">关联工单</text>
+          <text class="wos-info-value">{{sheet.item.order_no}}</text>
+        </view>
+        <view class="wos-info-row">
+          <text class="wos-info-label">站点</text>
+          <text class="wos-info-value">{{sheet.item.site_name}}</text>
+        </view>
+        <view class="wos-info-row wos-info-row--last">
+          <text class="wos-info-label">工单标题</text>
+          <text class="wos-info-value wop-title">{{sheet.item.display_title}}</text>
+        </view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 处理方式 -->
+      <view class="wop-group">
+        <view class="wos-group-title">处理方式</view>
+        <view class="segment-control">
+          <view wx:for="{{partsFulfillmentOptions}}" wx:key="key" class="segment-item {{partsApply.fulfillmentIndex === index ? 'active' : ''}}" bindtap="onPartsFulfillmentSelect" data-index="{{index}}">{{item.label}}</view>
+        </view>
+        <view class="wop-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">批准只代表允许使用，不锁库；实际拿到备件时才扣库。</view>
+        <view class="wop-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">主管批准后可在附近购买，回来只需补票据和实际金额。</view>
+        <view class="wop-note" wx:else>批准后记录厂家和快递，到货时一次确认入库或现场直用。</view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 备件信息 -->
+      <view class="wop-group">
+        <view class="wos-group-title">备件信息</view>
+
+        <!-- 库存备件 -->
+        <picker wx:if="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'ready'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
+          <view class="wop-picker-row">
+            <text class="wop-picker-value">{{partsOptions[partsApply.index].label}}</text>
+            <view class="ico ico-chevron-right"></view>
+          </view>
+        </picker>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'loading'}}" class="wop-note">库存加载中</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'empty'}}" class="wop-note">暂无可领用库存</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
+
+        <!-- 非库存：备件名称 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">备件名称</text>
+          <input class="wop-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/>
+        </view>
+
+        <!-- 非库存：规格型号 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">规格型号</text>
+          <input class="wop-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/>
+        </view>
+
+        <!-- 数量（通用） -->
+        <view class="wos-field">
+          <text class="wos-field-label">数量</text>
+          <input class="wop-input" type="number" placeholder="请输入数量" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/>
+        </view>
+
+        <!-- 非库存：预计金额 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">预计金额（可不填）</text>
+          <input class="wop-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/>
+        </view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 申请事由 -->
+      <view class="wop-group">
+        <view class="wos-group-title">申请事由</view>
+        <textarea class="wos-textarea" placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea>
+      </view>
+
+      <view class="sheet-content-spacer"></view>
+    </scroll-view>
+
+    <!-- 底部操作栏 -->
+    <view class="sheet-bottom-bar">
+      <button class="btn-ghost btn-lg" bindtap="onCloseParts">取消</button>
+      <button class="btn-primary btn-lg" loading="{{partsApply.submitting}}" disabled="{{partsApply.submitting}}" bindtap="submitParts">提交需求</button>
     </view>
   </view>
 </view>

@@ -1,32 +1,150 @@
 <view class="page">
-  <view class="head">
-    <view><text class="title">我的异常上报</text><text class="sub">上报后由管理端核实并跟随工单闭环</text></view>
-    <button class="btn-primary btn-sm report-btn" size="mini" bindtap="onGoReport">现场上报</button>
-  </view>
-  <scroll-view class="seg-strip filters" scroll-x="true" enhanced show-scrollbar="false">
-    <view wx:for="{{filters}}" wx:key="*this" data-index="{{index}}" bindtap="onFilter" class="seg-item filter {{(index === 0 && !filter) || (index === 1 && filter === 'dispatched') || (index === 2 && filter === 'verified') || (index === 3 && filter === 'resolved') || (index === 4 && filter === 'archived') ? 'seg-on filter-on' : ''}}">{{item}}</view>
-  </scroll-view>
-  <view wx:if="{{loading}}" class="empty">加载中…</view>
-  <block wx:else>
-    <view wx:for="{{reports}}" wx:key="id" wx:if="{{!filter || item.status === filter}}" class="card report" bindtap="onOpenDetail" data-id="{{item.id}}">
-      <view class="line"><text class="type">{{item.type_cn}}</text><text class="status status-{{item.status}}">{{item.status_cn}}</text></view>
-      <text class="site">{{item.site_name || '未关联站点'}}</text>
-      <text class="description">{{item.description}}</text>
-      <view class="meta"><text>{{item.reported_at}}</text><text wx:if="{{item.photo_count}}">现场照片 {{item.photo_count}} 张</text></view>
-      <view wx:if="{{item.order_no}}" class="order" catchtap="goOrder" data-order="{{item.order_no}}">关联工单：{{item.order_no}} ›</view>
+  <!-- 页头 -->
+  <view class="page-hd">
+    <view class="page-hd-text">
+      <text class="page-title">我的异常上报</text>
+      <text class="page-subtitle">上报后由管理端核实并跟随工单闭环</text>
     </view>
-    <view wx:if="{{!reports.length}}" class="empty">暂无异常上报记录</view>
+    <button class="btn btn-primary btn-sm" loading="{{reportSiteLoading}}" disabled="{{reportSiteLoading}}" bindtap="onGoReport">现场上报</button>
+  </view>
+
+  <view wx:if="{{reportSiteLoadError}}" class="empty-state">
+    <text class="empty-state-text">{{reportSiteLoadError}}</text>
+    <button class="btn btn-primary btn-sm" bindtap="onRetryReportSites">重试</button>
+  </view>
+
+  <!-- 筛选分段控件 -->
+  <view class="seg-wrap">
+    <scroll-view class="seg-scroll" scroll-x="true" enhanced show-scrollbar="false">
+      <view class="seg-list">
+        <view wx:for="{{filters}}" wx:key="*this" data-index="{{index}}" bindtap="onFilter"
+              class="seg-item {{(index === 0 && !filter) || (index === 1 && filter === 'dispatched') || (index === 2 && filter === 'verified') || (index === 3 && filter === 'resolved') || (index === 4 && filter === 'archived') ? 'seg-item--active' : ''}}">
+          {{item}}
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <!-- 加载中 -->
+  <view wx:if="{{loading}}" class="empty-state">
+    <text class="empty-state-text">加载中…</text>
+  </view>
+
+  <!-- 列表 -->
+  <block wx:else>
+    <view wx:for="{{reports}}" wx:key="id" wx:if="{{!filter || item.status === filter}}"
+          class="report-card" bindtap="onOpenDetail" data-id="{{item.id}}">
+      <view class="report-card-hd">
+        <text class="report-type">{{item.type_cn}}</text>
+        <text class="status-chip status-{{item.status}}">{{item.status_cn}}</text>
+      </view>
+      <text class="report-site">{{item.site_name || '未关联站点'}}</text>
+      <text class="report-desc">{{item.description}}</text>
+      <view class="report-meta">
+        <text class="report-meta-item">{{item.reported_at}}</text>
+        <text class="report-meta-item" wx:if="{{item.photo_count}}">现场照片 {{item.photo_count}} 张</text>
+      </view>
+      <view wx:if="{{item.order_no}}" class="report-order" catchtap="goOrder" data-order="{{item.order_no}}">
+        <text class="report-order-text">关联工单：{{item.order_no}}</text>
+        <text class="report-order-arrow">›</text>
+      </view>
+    </view>
+
+    <view wx:if="{{!reports.length}}" class="empty-state">
+      <view class="empty-state-icon">
+        <view class="empty-state-icon-shape"></view>
+      </view>
+      <text class="empty-state-title">暂无异常上报记录</text>
+      <text class="empty-state-desc">发现问题时可现场拍照上报</text>
+    </view>
   </block>
 
+  <!-- 详情 Sheet -->
   <view wx:if="{{detail}}" class="sheet-mask" bindtap="onCloseDetail"></view>
   <view wx:if="{{detail}}" class="sheet report-detail-sheet">
-    <view class="sheet-head"><text class="sheet-title">异常上报详情</text><text class="sheet-close" bindtap="onCloseDetail">×</text></view>
-    <view class="detail-row"><text class="detail-key">状态</text><text class="status status-{{detail.status}}">{{detail.status_cn}}</text></view>
-    <view class="detail-row"><text class="detail-key">异常类型</text><text class="detail-value">{{detail.type_cn}}</text></view>
-    <view class="detail-row"><text class="detail-key">站点</text><text class="detail-value">{{detail.site_name || '未关联站点'}}</text></view>
-    <view class="detail-row"><text class="detail-key">上报时间</text><text class="detail-value">{{detail.reported_at}}</text></view>
-    <view class="detail-copy"><text class="detail-key">现场说明</text><text class="detail-description">{{detail.description || '未填写说明'}}</text></view>
-    <view wx:if="{{detail.photos.length}}" class="detail-copy"><text class="detail-key">现场照片</text><scroll-view class="detail-photos" scroll-x="true"><image wx:for="{{detail.photos}}" wx:key="*this" class="detail-photo" src="{{item}}" mode="aspectFill" bindtap="onPreviewPhoto" data-src="{{item}}" /></scroll-view></view>
-    <view wx:if="{{detail.order_no}}" class="order detail-order" bindtap="goOrder" data-order="{{detail.order_no}}">查看关联工单：{{detail.order_no}} ›</view>
+    <view class="sheet-handle"></view>
+    <view class="sheet-head">
+      <text class="sheet-title">异常上报详情</text>
+      <view class="sheet-close" bindtap="onCloseDetail">
+        <view class="ico ico-close"></view>
+      </view>
+    </view>
+    <view class="sheet-body">
+      <view class="detail-row">
+        <text class="detail-key">状态</text>
+        <text class="status-chip status-{{detail.status}}">{{detail.status_cn}}</text>
+      </view>
+      <view class="detail-row">
+        <text class="detail-key">异常类型</text>
+        <text class="detail-value">{{detail.type_cn}}</text>
+      </view>
+      <view class="detail-row">
+        <text class="detail-key">站点</text>
+        <text class="detail-value">{{detail.site_name || '未关联站点'}}</text>
+      </view>
+      <view class="detail-row">
+        <text class="detail-key">上报时间</text>
+        <text class="detail-value">{{detail.reported_at}}</text>
+      </view>
+      <view class="detail-block">
+        <text class="detail-block-label">现场说明</text>
+        <text class="detail-block-text">{{detail.description || '未填写说明'}}</text>
+      </view>
+      <view class="detail-block" wx:if="{{detail.photos.length}}">
+        <text class="detail-block-label">现场照片</text>
+        <scroll-view class="detail-photos" scroll-x="true">
+          <block wx:for="{{detail.photos}}" wx:key="storedPath">
+            <image wx:if="{{item.url}}" class="detail-photo" src="{{item.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-src="{{item.url}}" />
+            <text wx:else class="detail-block-text">照片地址无效，请联系管理员核对档案</text>
+          </block>
+        </scroll-view>
+      </view>
+      <view wx:if="{{detail.order_no}}" class="detail-order" bindtap="goOrder" data-order="{{detail.order_no}}">
+        <text class="detail-order-text">查看关联工单：{{detail.order_no}}</text>
+        <text class="detail-order-arrow">›</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{reportSheet.open}}" class="om-sheet-mask" bindtap="onCloseReport"></view>
+  <view wx:if="{{reportSheet.open}}" class="om-sheet report-compose-sheet">
+    <view class="om-sheet-dismiss report-compose-close" bindtap="onCloseReport">
+      <view class="ico ico-close"></view>
+    </view>
+    <scroll-view class="om-sheet-scroll sheet-body report-compose-body" scroll-y="true">
+      <view class="report-compose-heading">
+        <text class="sheet-title">现场上报</text>
+      </view>
+      <view class="detail-row">
+        <text class="detail-key">站点</text>
+        <picker wx:if="{{reportSheet.sites.length > 1}}" range="{{reportSheet.sites}}" range-key="name" value="{{reportSheet.siteIndex}}" bindchange="onReportSite">
+          <text class="detail-value">{{reportSheet.siteName || '请选择站点'}}</text>
+        </picker>
+        <text wx:else class="detail-value">{{reportSheet.siteName || '站点不可用'}}</text>
+      </view>
+      <view class="detail-row">
+        <text class="detail-key">异常类型</text>
+        <picker range="{{reportTypes}}" range-key="label" value="{{reportSheet.typeIndex}}" bindchange="onReportType">
+          <text class="detail-value">{{reportTypes[reportSheet.typeIndex].label}}</text>
+        </picker>
+      </view>
+      <view class="detail-block">
+        <text class="detail-block-label">现场说明</text>
+        <textarea class="detail-block-text" value="{{reportSheet.description}}" placeholder="请说明现场异常" maxlength="500" auto-height="true" bindinput="onReportDescription" />
+      </view>
+      <view class="detail-block">
+        <text class="detail-block-label">现场照片（1 至 6 张）</text>
+        <scroll-view wx:if="{{reportSheet.photos.length}}" class="detail-photos" scroll-x="true">
+          <view wx:for="{{reportSheet.photos}}" wx:key="*this" class="detail-photo">
+            <image class="detail-photo" src="{{item}}" mode="aspectFill" bindtap="onPreviewReportPhoto" data-url="{{item}}" />
+            <text class="detail-block-text" bindtap="onRemoveReportPhoto" data-url="{{item}}">移除</text>
+          </view>
+        </scroll-view>
+        <button class="btn btn-primary btn-sm" disabled="{{reportSheet.uploading || reportSheet.submitting}}" loading="{{reportSheet.uploading}}" bindtap="onAddReportPhoto">添加照片</button>
+      </view>
+    </scroll-view>
+    <view class="sheet-bottom-bar">
+      <button class="btn-primary btn-lg" disabled="{{reportSheet.uploading || reportSheet.submitting}}" loading="{{reportSheet.submitting}}" bindtap="onSubmitReport">提交上报</button>
+    </view>
   </view>
 </view>
