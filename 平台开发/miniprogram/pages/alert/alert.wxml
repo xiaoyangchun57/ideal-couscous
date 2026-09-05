@@ -22,27 +22,25 @@
 
   <!-- 告警列表 -->
   <view class="alert-list" wx:if="{{loaded && list.length > 0}}">
-    <view class="alert-card" wx:for="{{list}}" wx:key="id" data-id="{{item.id}}" bindtap="onOpen">
+    <view class="alert-card level-{{item.level_cls}}" wx:for="{{list}}" wx:key="id" data-id="{{item.id}}" bindtap="onOpen">
       <view class="alert-card-top">
         <text class="alert-station">{{item.station_name || item.site_name || '未知站点'}}</text>
         <view class="alert-level-chip chip-{{item.level_cls}}">{{item.level_cn}}告警</view>
       </view>
-      <text class="alert-metric">{{item.display_metric}}</text>
-      <view class="alert-fact-row">
+      <text class="alert-metric">{{item.display_title}}</text>
+      <view class="alert-fact-row" wx:if="{{item.has_monitoring_value}}">
         <text class="alert-fact-label">当前值</text>
         <view class="alert-fact-value">
-          <block wx:if="{{item.value !== undefined && item.value !== null}}">
-            <text class="alert-value-text">{{item.value}}</text>
-            <text class="alert-value-unit" wx:if="{{item.unit && item.unit !== '告警'}}">{{item.unit}}</text>
-          </block>
-          <text class="alert-value-na" wx:else>数据不可用</text>
-          <text class="alert-threshold-text" wx:if="{{item.threshold && item.threshold !== '告警'}}">阈值 {{item.threshold}}</text>
+          <text class="alert-value-text">{{item.monitoring_value}}</text>
+          <text class="alert-value-unit" wx:if="{{item.monitoring_unit}}">{{item.monitoring_unit}}</text>
+          <text class="alert-threshold-text" wx:if="{{item.monitoring_threshold !== undefined && item.monitoring_threshold !== null && item.monitoring_threshold !== ''}}">阈值 {{item.monitoring_threshold}}</text>
         </view>
       </view>
+      <view class="alert-fact-row" wx:else><text class="alert-fact-label">现场说明</text><text class="alert-value-na">{{item.display_summary}}</text></view>
       <view class="alert-card-bottom">
         <text class="alert-time">{{item.created_at || item.time || ''}}</text>
         <view class="alert-phase">
-          <text class="alert-phase-text phase-{{item.status}}">{{item.status_cn || '状态未知'}}</text>
+          <text class="alert-phase-text phase-{{item.disposition_tone}}">{{item.disposition_label}}</text>
           <view class="alert-arrow ico ico-chevron-right"></view>
         </view>
       </view>
@@ -88,45 +86,32 @@
 
     <scroll-view class="om-sheet-scroll sheet-scroll alert-detail-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
       <!-- 异常主事实 -->
-      <view class="adt-main-fact">
+      <view class="adt-main-fact level-{{sheet.item.level_cls}}">
         <view class="status-chip chip-{{sheet.item.level_cls}}">{{sheet.item.level_cn}}告警</view>
         <text class="adt-station">{{sheet.item.station_name || sheet.item.site_name || '未知站点'}}</text>
-        <text class="adt-metric">{{sheet.item.display_metric}}</text>
-        <view class="adt-value-block">
-          <block wx:if="{{sheet.item.value !== undefined && sheet.item.value !== null && sheet.item.value !== ''}}">
-            <text class="adt-value-num">{{sheet.item.value}}</text>
-            <text class="adt-value-unit" wx:if="{{sheet.item.unit && sheet.item.unit !== '告警'}}">{{sheet.item.unit}}</text>
-          </block>
-          <text class="adt-value-na" wx:else>数据不可用</text>
+        <text class="adt-metric">{{sheet.item.display_title}}</text>
+        <view class="adt-value-block" wx:if="{{sheet.item.has_monitoring_value}}">
+          <text class="adt-value-na">当前值</text>
+          <text class="adt-value-num">{{sheet.item.monitoring_value}}</text>
+          <text class="adt-value-unit" wx:if="{{sheet.item.monitoring_unit}}">{{sheet.item.monitoring_unit}}</text>
         </view>
-        <text class="adt-threshold" wx:if="{{sheet.item.threshold && sheet.item.threshold !== '告警'}}">阈值 {{sheet.item.threshold}}</text>
-      </view>
-
-      <!-- 当前状态行 -->
-      <view class="adt-status-row">
-        <text class="adt-status-label">当前状态</text>
-        <view class="status-chip chip-{{sheet.item.status}}">{{sheet.item.status_cn || '状态未知'}}</view>
-      </view>
-      <view class="adt-info-row" wx:if="{{sheet.item.phase || sheet.item.block_reason || detailError}}">
-        <text class="adt-info-label">流转阶段</text>
-        <text class="adt-info-value adt-info-value--multi">{{detailError || sheet.item.block_reason || sheet.item.phase}}</text>
+        <text class="adt-value-na" wx:else>{{sheet.item.display_summary}}</text>
+        <text class="adt-threshold" wx:if="{{sheet.item.has_monitoring_value && sheet.item.monitoring_threshold !== undefined && sheet.item.monitoring_threshold !== null && sheet.item.monitoring_threshold !== ''}}">阈值 {{sheet.item.monitoring_threshold}}</text>
       </view>
 
       <!-- 分隔 -->
       <view class="adt-divider"></view>
 
-      <!-- 关联工单（只读信息，主动作由底部按钮承载） -->
-      <view class="adt-related" wx:if="{{sheet.item.related_order_no || sheet.item.workorder_status_cn}}">
-        <view class="adt-related-left">
-          <text class="adt-related-no">{{sheet.item.related_order_no || '-'}}</text>
-          <text class="adt-related-handler" wx:if="{{sheet.item.workorder_handler_name}}">{{sheet.item.workorder_handler_name}} 负责</text>
+      <!-- 告警属性信息行 -->
+      <view class="adt-info-group">
+        <view class="adt-info-row">
+          <text class="adt-info-label">处置进展</text>
+          <view class="status-chip chip-{{sheet.item.disposition_tone}}">{{sheet.item.disposition_label}}</view>
         </view>
-        <view class="status-chip chip-info" wx:if="{{sheet.item.workorder_status_cn}}">{{sheet.item.workorder_status_cn}}</view>
-      </view>
-
-      <!-- 告警详情 -->
-      <view class="adt-group">
-        <view class="adt-group-title">告警详情</view>
+        <view class="adt-info-row" wx:if="{{sheet.item.disposition_detail || detailError}}">
+          <text class="adt-info-label">说明</text>
+          <text class="adt-info-value adt-info-value--multi">{{detailError || sheet.item.disposition_detail}}</text>
+        </view>
         <view class="adt-info-row">
           <text class="adt-info-label">触发时间</text>
           <text class="adt-info-value">{{sheet.item.created_at || '-'}}</text>
@@ -135,6 +120,19 @@
           <text class="adt-info-label">告警说明</text>
           <text class="adt-info-value adt-info-value--multi">{{sheet.item.message}}</text>
         </view>
+      </view>
+
+      <!-- 分隔 -->
+      <view class="adt-divider"></view>
+
+      <!-- 关联工单（只读信息，主动作由底部按钮承载） -->
+      <view class="adt-related" wx:if="{{sheet.item.related_order_no || sheet.item.workorder_status_cn}}">
+        <view class="adt-related-left">
+          <text class="adt-related-handler">关联工单</text>
+          <text class="adt-related-no">{{sheet.item.related_order_no || '-'}}</text>
+          <text class="adt-related-handler" wx:if="{{sheet.item.workorder_handler_name}}">{{sheet.item.workorder_handler_name}} 负责</text>
+        </view>
+        <view class="status-chip chip-{{sheet.item.workorder_status}}" wx:if="{{sheet.item.workorder_status_cn}}">{{sheet.item.workorder_status_cn}}</view>
       </view>
 
       <view wx:if="{{!detailLoading && sheet.item.primary_action && sheet.item.related_workorder_target && sheet.item.related_workorder_target.order_no && sheet.item.can_view === true && !sheet.item.detailStale}}" class="sheet-content-spacer"></view>

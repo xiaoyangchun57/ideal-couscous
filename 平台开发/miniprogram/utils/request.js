@@ -42,19 +42,11 @@ function taskSignature(task) {
   return (task.api_profile || '') + ':' + (task.method || '') + ':' + (task.url || '') + ':' + JSON.stringify(task.data || null);
 }
 
-function isDevtoolsRuntime() {
-  try {
-    const platform = wx.getSystemInfoSync && wx.getSystemInfoSync().platform;
-    return ['devtools', 'windows', 'mac'].indexOf(platform) !== -1;
-  } catch (_) { return false; }
-}
-
 function canReplayInCurrentProfile(task) {
   if (task.api_profile) return task.api_profile === CONFIG.API_PROFILE;
-  // Ownerless-profile legacy jobs are treated as online only on an actual
-  // device. Devtools may switch between local and production, so keep them
-  // isolated until the user clears or repeats the operation explicitly.
-  return CONFIG.API_PROFILE === 'online' && !isDevtoolsRuntime();
+  // A legacy entry has no trustworthy API boundary. Keep it isolated rather
+  // than replaying a write into either the development or online API.
+  return false;
 }
 
 // 恢复网络后重传失败队列（写类请求）
@@ -135,7 +127,7 @@ function request(path, method, data, options) {
         fail(err) {
           err = Object.assign({}, err || {}, { code: -1, status: 0, network: true });
           if (CONFIG.API_PROFILE === 'local') {
-            err.error = '本地服务未启动；请启动本地服务或清除本地接口设置后重试';
+            err.error = '本地服务未启动；请启动本地服务后重试';
             err.code = 'LOCAL_API_UNAVAILABLE';
             err.queued = false;
           }

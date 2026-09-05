@@ -1,71 +1,542 @@
-.greet { padding: 32rpx 28rpx 16rpx; position: relative; }
-.greet-name { font-size: 40rpx; font-weight: 600; color: var(--text); display: block; }
-.greet-sub { font-size: 26rpx; color: var(--text-3); margin-top: 8rpx; display: block; }
-.greet-date { position: absolute; top: 36rpx; right: 28rpx; font-size: 24rpx; color: var(--text-3); background: var(--fill); padding: 6rpx 16rpx; border-radius: 999rpx; }
+/* pages/index/index.wxss */
 
-.stat-grid { display: flex; margin: 12rpx 24rpx 0; padding: 28rpx 0; }
-.stat { flex: 1; text-align: center; }
-.stat-num { font-size: 56rpx; font-weight: 600; color: var(--text-3); display: block; line-height: 1; }
-.stat-brand { color: var(--brand); }
-.stat-red { color: var(--red); }
-.stat-label { font-size: 22rpx; color: var(--text-3); margin-top: 14rpx; display: block; }
-.stat-divider { width: 1rpx; background: var(--line); }
+/* ===== 导航栏 ===== */
+.nav-home-left {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
 
-.work-package { margin: 12rpx 24rpx 0; padding: 12rpx 28rpx; }
-.package-line { display: flex; align-items: center; justify-content: space-between; min-height: 68rpx; border-bottom: 1rpx solid var(--line); }
-.package-line:last-child { border-bottom: none; }
-.package-line-action { padding: 0 8rpx; margin: 0 -8rpx; border-radius: 8rpx; }
-.package-line-action:active { background: var(--surface); }
-.package-label { font-size: 25rpx; color: var(--text-2); }
-.package-value { font-size: 25rpx; color: var(--text); font-weight: 500; }
-.package-ready { color: var(--brand); }
-.package-warn { color: var(--orange); }
-.package-start-action {
-  margin: 18rpx 0 10rpx;
+.nav-home-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.nav-bell-wrap {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding-left: 16rpx;
+}
+
+/* ===== 问候区 ===== */
+.greeting-area {
+  padding: 12rpx 32rpx 24rpx;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.greeting-logo {
+  width: 104rpx;
+  height: 104rpx;
+  flex-shrink: 0;
+  display: block;
+  margin-right: 20rpx;
+}
+
+.greeting-main {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4rpx;
+}
+
+.greeting-name {
+  font-size: 56rpx;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -1rpx;
+  line-height: 1.2;
+  display: block;
+}
+
+.greeting-date {
+  font-size: 26rpx;
+  color: var(--text-tertiary);
+  margin-top: 8rpx;
+  display: block;
+}
+
+.greeting-bell {
+  position: relative;
+  width: 88rpx;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: -8rpx;
+  flex-shrink: 0;
+}
+
+.bell-icon {
+  width: 72rpx;
   height: 72rpx;
-  border-radius: 10rpx;
-  background: var(--brand);
-  color: #fff;
-  font-size: 27rpx;
-  font-weight: 500;
-  line-height: 72rpx;
+  display: block;
+}
+
+.bell-badge {
+  position: absolute;
+  top: 6rpx;
+  right: 6rpx;
+  min-width: 32rpx;
+  height: 32rpx;
+  background: var(--destructive);
+  color: #ffffff;
+  font-size: 20rpx;
+  font-weight: 600;
+  border-radius: 9999rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8rpx;
+  line-height: 1;
+  border: 3rpx solid #ffffff;
+  z-index: 3;
+}
+
+/* ===== 骨架屏 ===== */
+.loading-skeleton {
+  padding: 0 32rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.skeleton-action {
+  height: 160rpx;
+  background: var(--card);
+  border-radius: 24rpx;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-plan {
+  height: 360rpx;
+  background: var(--card);
+  border-radius: 24rpx;
+  animation: shimmer 1.5s ease-in-out infinite;
+  animation-delay: 0.2s;
+}
+
+@keyframes shimmer {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+/* ===== 首次加载失败（对齐 empty-state error 变体） ===== */
+.error-card {
+  margin: 24rpx 32rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 56rpx 32rpx;
   text-align: center;
 }
 
-.plan-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 24rpx 28rpx; }
-.plan-entry-copy { min-width: 0; display: flex; flex-direction: column; gap: 6rpx; }
-.plan-entry-label { font-size: 28rpx; font-weight: 500; color: var(--text); }
-.plan-entry-summary { font-size: 23rpx; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plan-entry-r { font-size: 23rpx; color: var(--text-3); }
-
-.review-entry { display: flex; align-items: center; justify-content: space-between; margin: 12rpx 24rpx 0; padding: 24rpx 28rpx; }
-.review-entry-l { display: flex; align-items: baseline; }
-.review-entry-num { font-size: 44rpx; font-weight: 600; color: var(--brand); margin-right: 12rpx; }
-.review-entry-label { font-size: 24rpx; color: var(--text-3); }
-.review-entry-r { font-size: 23rpx; color: var(--text-3); }
-
-.site-scroll { white-space: nowrap; padding: 12rpx 24rpx 0; }
-.site-card {
-  display: inline-flex; flex-direction: column; justify-content: space-between;
-  width: calc(100vw - 48rpx); min-height: 188rpx; margin-right: 20rpx; background: var(--card); border-radius: 16rpx; border: 1rpx solid var(--line); padding: 24rpx; vertical-align: top; position: relative; overflow: hidden; white-space: normal;
+.error-icon-shape {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 50%;
+  background: rgba(255, 59, 48, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  margin-bottom: 20rpx;
 }
-.site-card-strip { position: absolute; left: 0; top: 24rpx; bottom: 24rpx; width: 6rpx; background: var(--brand); border-radius: 0 4rpx 4rpx 0; }
-.site-card-main { padding-left: 14rpx; min-width: 0; }
-.site-card-name { font-size: 28rpx; font-weight: 500; color: var(--text); display: block; white-space: normal; word-break: break-all; line-height: 1.35; }
-.site-card-type { font-size: 22rpx; color: var(--text-3); margin-top: 8rpx; display: block; }
-.site-carryover { display: block; margin-top: 10rpx; color: var(--red); font-size: 21rpx; }
-.site-card-foot { margin-top: 24rpx; padding-left: 14rpx; display: flex; align-items: baseline; }
-.site-card-num { font-size: 40rpx; font-weight: 500; color: var(--brand); }
-.site-card-unit { font-size: 22rpx; color: var(--text-3); margin-left: 8rpx; }
-.site-card-summary { color: var(--brand); font-size: 26rpx; font-weight: 500; }
+.error-icon-shape::before {
+  content: '!';
+  font-size: 44rpx;
+  font-weight: 600;
+  color: var(--destructive);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
 
-.responsible-section { margin: 16rpx 24rpx 0; }
-.responsible-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12rpx; }
-.responsible-title { color: var(--text); font-size: 28rpx; font-weight: 600; }
-.responsible-note { max-width: 430rpx; color: var(--text-3); font-size: 21rpx; text-align: right; line-height: 1.4; }
-.responsible-list { display: flex; flex-wrap: wrap; gap: 12rpx; }
-.responsible-card { box-sizing: border-box; width: calc(50% - 6rpx); min-height: 112rpx; padding: 18rpx 20rpx; background: var(--fill); border: 1rpx solid var(--line); border-radius: 10rpx; }
-.responsible-name { display: block; overflow: hidden; color: var(--text); font-size: 25rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.responsible-meta { display: block; margin-top: 8rpx; overflow: hidden; color: var(--text-3); font-size: 21rpx; text-overflow: ellipsis; white-space: nowrap; }
+.error-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8rpx;
+}
 
-/* 列表行样式（.list-card/.row 族）已提升至 app.wxss 全局定义 */
+.error-subtitle {
+  font-size: 26rpx;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.error-retry-btn {
+  margin-top: 20rpx;
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--primary);
+}
+
+/* ===== 刷新失败提示条 ===== */
+.refresh-error-bar {
+  margin: 0 32rpx 16rpx;
+  background: rgba(255, 59, 48, 0.06);
+  color: var(--destructive);
+  border-radius: 16rpx;
+  padding: 16rpx 20rpx;
+  font-size: 24rpx;
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.re-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: var(--destructive);
+  flex-shrink: 0;
+}
+
+.re-retry {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+/* ===== 今日行动卡片 ===== */
+.action-card {
+  display: flex;
+  align-items: center;
+  padding: 28rpx;
+  margin: 0 32rpx 20rpx;
+}
+
+.action-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.action-tags {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.action-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-top: 14rpx;
+  display: block;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-subtitle {
+  font-size: 24rpx;
+  color: var(--text-secondary);
+  margin-top: 6rpx;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-chevron {
+  font-size: 40rpx;
+  color: var(--text-quaternary);
+  font-weight: 300;
+  margin-left: 12rpx;
+  flex-shrink: 0;
+}
+
+/* ===== 今日作业包 ===== */
+.plan-card {
+  margin: 0 32rpx 20rpx;
+  padding: 28rpx;
+}
+
+.plan-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+  margin-bottom: 24rpx;
+}
+
+.site-chip {
+  font-size: 22rpx;
+  color: #8e8e93;
+  background: #f2f2f7;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+/* 进度 */
+.plan-progress {
+  margin-bottom: 24rpx;
+}
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10rpx;
+}
+
+.progress-label {
+  font-size: 26rpx;
+  color: var(--text-secondary);
+}
+
+.progress-percent {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.progress-track {
+  height: 12rpx;
+  background: #e5e5ea;
+  border-radius: 6rpx;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 6rpx;
+  transition: width 0.3s ease;
+}
+
+/* 资源行 */
+.plan-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16rpx 28rpx;
+  margin-bottom: 28rpx;
+}
+
+.res-item {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.res-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-green { background: var(--success); }
+.dot-orange { background: var(--warning); }
+.dot-blue { background: var(--primary); }
+.dot-gray { background: var(--text-tertiary); }
+
+.res-text {
+  font-size: 24rpx;
+  color: var(--text-secondary);
+}
+
+.plan-action-btn {
+  width: 100%;
+  height: 96rpx;
+  border-radius: 24rpx;
+  font-size: 32rpx;
+  font-weight: 500;
+}
+
+/* ===== 无作业包空态（对齐 empty-state 组件） ===== */
+.plan-empty-card {
+  margin: 0 32rpx 20rpx;
+  padding: 56rpx 32rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.empty-icon-shape {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 50%;
+  background: #f2f2f7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20rpx;
+  position: relative;
+}
+.empty-icon-shape::before {
+  content: '';
+  width: 44rpx;
+  height: 52rpx;
+  border: 3rpx solid #c7c7cc;
+  border-radius: 6rpx;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.empty-icon-shape::after {
+  content: '';
+  width: 22rpx;
+  height: 3rpx;
+  background: #c7c7cc;
+  position: absolute;
+  top: calc(50% - 12rpx);
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 10rpx 0 #c7c7cc, 0 20rpx 0 #c7c7cc;
+}
+
+.empty-title-sm {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8rpx;
+}
+
+.plan-empty-card .link-btn {
+  margin-top: 8rpx;
+}
+
+/* ===== 全部工单入口（低强调导航行） ===== */
+.workorder-entry {
+  margin: 0 32rpx 20rpx;
+  padding: 20rpx 24rpx;
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  background: var(--card);
+  border-radius: 16rpx;
+}
+
+.wo-entry-icon {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 14rpx;
+  background: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.wo-icon-doc {
+  width: 22rpx;
+  height: 26rpx;
+  border: 2.5rpx solid var(--text-tertiary);
+  border-radius: 3rpx;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.wo-icon-lines {
+  position: absolute;
+  top: calc(50% - 6rpx);
+  left: calc(50% - 8rpx);
+  width: 16rpx;
+  height: 2rpx;
+  background: var(--text-tertiary);
+  box-shadow: 0 5rpx 0 var(--text-tertiary), 0 10rpx 0 var(--text-tertiary);
+}
+
+.wo-entry-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.wo-entry-title {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: block;
+  line-height: 1.3;
+}
+
+.wo-entry-subtitle {
+  font-size: 22rpx;
+  color: var(--text-tertiary);
+  margin-top: 4rpx;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wo-entry-chevron {
+  font-size: 36rpx;
+  color: var(--text-quaternary);
+  font-weight: 300;
+  flex-shrink: 0;
+}
+
+/* ===== 待我审核 ===== */
+.review-card {
+  margin: 0 32rpx 24rpx;
+  padding: 28rpx;
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+}
+
+.review-icon-circle {
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 18rpx;
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.review-checkmark {
+  width: 32rpx;
+  height: 18rpx;
+  border-left: 5rpx solid var(--primary);
+  border-bottom: 5rpx solid var(--primary);
+  transform: rotate(-45deg);
+  margin-top: -6rpx;
+}
+
+.review-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.review-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: block;
+}
+
+.review-subtitle {
+  font-size: 24rpx;
+  color: var(--text-tertiary);
+  margin-top: 6rpx;
+  display: block;
+}
+
+.review-chevron {
+  font-size: 40rpx;
+  color: var(--text-quaternary);
+  font-weight: 300;
+  flex-shrink: 0;
+}
+
+/* ===== 底部 tabBar 占位 ===== */
+.tabbar-spacer {
+  height: calc(120rpx + env(safe-area-inset-bottom));
+}

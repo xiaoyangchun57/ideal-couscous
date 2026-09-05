@@ -146,6 +146,37 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_vehicle_and_parts_confirmations_preserve_the_unsubmitted_field(self):
+        url = '/api/mobile/execution-plans/42/departure-confirmation'
+
+        vehicle = self.client.post(
+            url, headers=self.owner_headers, json={'vehicle_confirmed': True})
+        parts = self.client.post(
+            url, headers=self.owner_headers, json={'parts_confirmed': True})
+        stale_vehicle_retry = self.client.post(
+            url, headers=self.owner_headers, json={'vehicle_confirmed': True})
+
+        self.assertEqual(vehicle.status_code, 200)
+        self.assertEqual(vehicle.json['confirmation']['vehicle_confirmed'], 1)
+        self.assertEqual(vehicle.json['confirmation']['parts_confirmed'], 0)
+        self.assertEqual(parts.status_code, 200)
+        self.assertEqual(parts.json['confirmation']['vehicle_confirmed'], 1)
+        self.assertEqual(parts.json['confirmation']['parts_confirmed'], 1)
+        self.assertEqual(stale_vehicle_retry.status_code, 200)
+        self.assertEqual(stale_vehicle_retry.json['confirmation']['vehicle_confirmed'], 1)
+        self.assertEqual(stale_vehicle_retry.json['confirmation']['parts_confirmed'], 1)
+
+        db = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(db.execute(
+                'SELECT vehicle_confirmed FROM plan_departure_confirmations').fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                'SELECT parts_confirmed FROM plan_departure_confirmations').fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM plan_schedule_events').fetchone()[0], 2)
+        finally:
+            db.close()
+
     def test_reagent_inventory_is_only_visible_inside_own_execution_site(self):
         response = self.client.get(
             '/api/mobile/execution-plans/42/sites/1/reagents', headers=self.owner_headers)

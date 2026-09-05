@@ -111,7 +111,7 @@
 }
 
 .alert-station {
-  font-size: 32rpx;
+  font-size: 30rpx;
   font-weight: 600;
   color: var(--color-text-primary);
   line-height: 1.3;
@@ -147,13 +147,21 @@
 .chip-blue { background: var(--color-info-surface); color: var(--color-info); }
 .chip-gray { background: var(--color-type-bg); color: var(--color-type-text); }
 
-/* 指标名（卡片核心语义，第二行） */
+/* 告警数值按级别分色（父级 level-* 驱动）
+   严重=红 / 警告=橙 / 提醒=黄 / 提示=蓝 */
+.alert-card.level-red    .alert-value-text { color: var(--color-error); }
+.alert-card.level-orange .alert-value-text { color: var(--color-warning); }
+.alert-card.level-yellow .alert-value-text { color: var(--color-notice); }
+.alert-card.level-blue   .alert-value-text { color: var(--color-info); }
+
+/* 指标名（卡片核心语义，第二行，次级锚点） */
 .alert-metric {
   font-size: 28rpx;
-  color: var(--color-text-secondary);
+  font-weight: 600;
+  color: var(--color-text-primary);
   line-height: 1.4;
   display: block;
-  margin-top: 6rpx;
+  margin-top: 4rpx;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -186,9 +194,9 @@
 }
 
 .alert-value-text {
-  font-size: 30rpx;
-  font-weight: 600;
-  color: var(--color-text-primary);
+  font-size: 32rpx;
+  font-weight: 700;
+  color: var(--color-primary);
   line-height: 1.2;
   word-break: break-all;
   text-align: right;
@@ -211,9 +219,12 @@
 
 .alert-value-na {
   font-size: 26rpx;
-  color: var(--color-text-tertiary);
-  font-style: italic;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+  font-style: normal;
   text-align: right;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .alert-card-bottom {
@@ -225,7 +236,7 @@
 }
 
 .alert-time {
-  font-size: 24rpx;
+  font-size: 22rpx;
   color: var(--color-text-tertiary);
 }
 
@@ -236,7 +247,7 @@
 }
 
 .alert-phase-text {
-  font-size: 26rpx;
+  font-size: 24rpx;
   font-weight: 500;
 }
 
@@ -911,4 +922,427 @@
   color: var(--color-text-tertiary);
   margin-bottom: 12rpx;
   line-height: 1.4;
+}
+
+/* ============================================================
+ *  告警详情 Sheet · 只读或可执行详情类
+ *  设计系统：水质运维-Apple
+ *  类型特征：监测值大字突出 + 状态 + 关联信息 + 详情分组
+ * ============================================================ */
+
+/* --- Sheet 容器 --- */
+.alert-detail-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* --- 关闭按钮（绝对定位右上角） --- */
+.alert-detail-close {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  z-index: 2;
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.alert-detail-close .ico-close::before,
+.alert-detail-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 滚动正文区 --- */
+.alert-detail-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28rpx 0 8rpx;
+  box-sizing: border-box;
+}
+
+.alert-detail-scroll .sheet-content-spacer {
+  height: 24rpx;
+  flex-shrink: 0;
+}
+
+/* --- 主事实区：监测值大字突出 --- */
+.alert-detail-sheet .adt-main-fact {
+  padding: 0 40rpx 24rpx;
+  padding-right: 120rpx; /* 避让关闭按钮 */
+}
+
+/* 严重程度 chip：仅在主事实区内有下边距，不影响处置进展和关联工单 */
+.alert-detail-sheet .adt-main-fact .status-chip {
+  margin-bottom: 16rpx;
+}
+
+.alert-detail-sheet .adt-station {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 6rpx;
+  word-break: break-all;
+}
+
+.alert-detail-sheet .adt-metric {
+  display: block;
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  margin-bottom: 20rpx;
+  word-break: break-all;
+}
+
+.alert-detail-sheet .adt-value-block {
+  display: flex;
+  align-items: baseline;
+  gap: 8rpx;
+  margin-bottom: 10rpx;
+}
+
+.alert-detail-sheet .adt-value-num {
+  font-size: 64rpx;
+  font-weight: 700;
+  color: var(--color-primary);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.alert-detail-sheet .adt-value-unit {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.alert-detail-sheet .adt-value-na {
+  font-size: 36rpx;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  line-height: 1.2;
+  font-style: italic;
+}
+
+.alert-detail-sheet .adt-threshold {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* --- 当前状态行：灰底卡片 --- */
+.alert-detail-sheet .adt-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18rpx 24rpx;
+  background: var(--color-type-bg);
+  margin: 0 40rpx 20rpx;
+  border-radius: var(--radius-md);
+  gap: 20rpx;
+}
+
+.alert-detail-sheet .adt-status-label {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+/* --- 流转阶段信息行 --- */
+.alert-detail-sheet .adt-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 14rpx 40rpx;
+  gap: 20rpx;
+}
+
+.alert-detail-sheet .adt-info-row--last {
+  padding-bottom: 0;
+}
+
+.alert-detail-sheet .adt-info-label {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.alert-detail-sheet .adt-info-value {
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  line-height: 1.5;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-detail-sheet .adt-info-value--multi {
+  text-align: right;
+  flex: 1;
+}
+
+/* --- 分隔条：粗灰条 --- */
+.alert-detail-sheet .adt-divider {
+  height: 8rpx;
+  background: var(--color-type-bg);
+  margin: 20rpx 40rpx;
+  border-radius: 4rpx;
+}
+
+/* --- 关联工单卡片 --- */
+.alert-detail-sheet .adt-related {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20rpx 24rpx;
+  margin: 0 40rpx 24rpx;
+  background: var(--color-primary-surface);
+  border-radius: var(--radius-md);
+  gap: 16rpx;
+}
+
+.alert-detail-sheet .adt-related-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+
+.alert-detail-sheet .adt-related-no {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-primary);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.alert-detail-sheet .adt-related-handler {
+  font-size: 24rpx;
+  color: var(--color-primary);
+  opacity: 0.8;
+  line-height: 1.4;
+}
+
+/* --- 内容分组 --- */
+.alert-detail-sheet .adt-group {
+  padding: 0 40rpx 24rpx;
+}
+
+.alert-detail-sheet .adt-group-title {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  margin-bottom: 12rpx;
+  line-height: 1.4;
+}
+
+/* --- 底部操作栏：单主按钮 --- */
+.alert-detail-sheet .sheet-bottom-bar {
+  padding: 12rpx 40rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+.alert-detail-sheet .sheet-bottom-bar .btn-primary {
+  width: 100%;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+  border-radius: var(--radius-lg);
+  font-size: 28rpx;
+  font-weight: 500;
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  border: none;
+}
+
+.alert-detail-sheet .sheet-bottom-bar .btn-primary::after {
+  border: none;
+}
+
+.alert-detail-sheet .sheet-bottom-bar .btn-primary[disabled] {
+  opacity: 0.6;
+  color: var(--color-primary-foreground);
+}
+
+/* ============================================================
+ *  10.2 返修：告警详情视觉收口
+ *  - 人工上报：现场说明文本化，不保留数值占位视觉
+ *  - 首屏层级：指标名提升为标题，三段式信息架构
+ *  - 关联工单：中性灰底卡 + 明确身份归属
+ * ============================================================ */
+
+/* --- 首屏主事实区层级重构 ---
+   三段式：[级别chip + 站点] → [指标名（主标题）] → [当前值/现场说明] */
+
+/* 指标名：次级标题，回答"什么异常"，比站点名小一档 */
+.alert-detail-sheet .adt-metric {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  margin-bottom: 14rpx;
+}
+
+/* 站点名：首屏最大最显著，第一扫描锚点 */
+.alert-detail-sheet .adt-station {
+  font-size: 36rpx;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-bottom: 10rpx;
+  line-height: 1.25;
+  word-break: break-all;
+}
+
+/* 主事实区级别 chip 间距微调（不影响处置进展和关联工单） */
+.alert-detail-sheet .adt-main-fact .status-chip {
+  margin-bottom: 12rpx;
+}
+
+/* --- 监测告警数值：按告警级别分色 ---
+   通过父级 level-* 类控制，与 level_cls 一一对应
+   严重=红 / 警告=橙 / 提醒=黄 / 提示=蓝 */
+.alert-detail-sheet .adt-main-fact.level-red    .adt-value-num { color: var(--color-error); }
+.alert-detail-sheet .adt-main-fact.level-orange .adt-value-num { color: var(--color-warning); }
+.alert-detail-sheet .adt-main-fact.level-yellow .adt-value-num { color: var(--color-notice); }
+.alert-detail-sheet .adt-main-fact.level-blue   .adt-value-num { color: var(--color-info); }
+
+/* 数值区整体与下方阈值拉开距离 */
+.alert-detail-sheet .adt-value-block {
+  margin-bottom: 8rpx;
+}
+
+/* --- 人工上报：现场说明文本化 ---
+   WXML 中 wx:else 分支渲染 <text class="adt-value-na">{{display_summary}}</text>
+   不再用大号斜体灰色（数值占位感），改为正常正文样式 */
+.alert-detail-sheet .adt-value-na {
+  font-size: 28rpx;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  font-style: normal;
+  display: block;
+  word-break: break-all;
+}
+
+/* --- 阈值行：辅助信息 --- */
+.alert-detail-sheet .adt-threshold {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  margin-top: 6rpx;
+}
+
+/* --- 告警属性信息行组 ---
+   处置进展 / 说明 / 触发时间 / 告警说明 均为告警自身属性
+   统一信息行形式：左标签 + 右值，两端对齐
+   处置进展行右侧为 status-chip，与其他行右值对齐 */
+
+.alert-detail-sheet .adt-info-group {
+  padding: 0 40rpx;
+}
+
+/* 信息行：标签左、值右，两端对齐（处置进展的 chip 在右侧） */
+.alert-detail-sheet .adt-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16rpx 0;
+  border-bottom: 1rpx solid var(--color-divider);
+  gap: 16rpx;
+  min-height: 44rpx;
+}
+
+.alert-detail-sheet .adt-info-row--last {
+  border-bottom: none;
+}
+
+.alert-detail-sheet .adt-info-label {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+/* 信息行右侧值：右对齐，支持 chip（处置进展行）和文字（其他行） */
+.alert-detail-sheet .adt-info-value {
+  font-size: 24rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  line-height: 1.5;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-detail-sheet .adt-info-value--multi {
+  text-align: right;
+  flex: 1;
+}
+
+/* 处置进展行右侧的 status-chip：与右值对齐 */
+.alert-detail-sheet .adt-info-row .status-chip {
+  flex-shrink: 0;
+}
+
+/* --- 关联工单：中性灰底卡 + 明确身份归属 ---
+   用中性色而非主色浅底，避免与告警状态混淆；
+   "关联工单"标题加粗，让用户一眼知道这是另一个实体 */
+
+.alert-detail-sheet .adt-related {
+  background: var(--color-type-bg);
+  padding: 20rpx 24rpx;
+  margin: 0 40rpx 24rpx;
+  border-radius: var(--radius-md);
+}
+
+.alert-detail-sheet .adt-related-handler {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.alert-detail-sheet .adt-related-no {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  margin: 4rpx 0;
+}
+
+/* 工单状态 chip 直接消费语义色（开发已接线 chip-{{workorder_status}}）
+   —— 身份归属由"关联工单"标题 + 灰底卡建立，状态本身保留真实语义色 */
+
+/* --- 告警详情分组：降级为次要信息 --- */
+.alert-detail-sheet .adt-group {
+  padding: 0 40rpx 24rpx;
+}
+
+.alert-detail-sheet .adt-group-title {
+  font-size: 24rpx;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  margin-bottom: 10rpx;
 }

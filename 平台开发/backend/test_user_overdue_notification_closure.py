@@ -48,7 +48,8 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                     generate_date TEXT, status TEXT, plan_schedule_id INTEGER
                 );
                 CREATE TABLE insp_plan_items (
-                    id INTEGER PRIMARY KEY, plan_id INTEGER, result TEXT, execution_status TEXT DEFAULT 'active'
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, result TEXT,
+                    execution_status TEXT DEFAULT 'active', site_id INTEGER DEFAULT 1
                 );
                 CREATE TABLE plan_schedules (
                     id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, period_start TEXT, period_end TEXT
@@ -73,7 +74,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY, site_id INTEGER, is_deleted INTEGER DEFAULT 0,
                     review_required INTEGER DEFAULT 1, review_status TEXT DEFAULT 'pending',
-                    source_type TEXT DEFAULT 'inspection'
+                    source_type TEXT DEFAULT 'inspection', source_id INTEGER DEFAULT 0
                 );
                 INSERT INTO users VALUES (1,'admin','管理员','x','admin','管理员','','active',1,NULL,CURRENT_TIMESTAMP);
                 INSERT INTO users VALUES (2,'source','原运维','x','operator','原运维','','active',1,NULL,CURRENT_TIMESTAMP);
@@ -84,9 +85,9 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 INSERT INTO sites VALUES (1,'测试站');
                 INSERT INTO user_sites VALUES (2,1);
                 INSERT INTO insp_plans VALUES (10,2,'原运维','逾期巡检','2026-01-01','active',20);
-                INSERT INTO insp_plan_items VALUES (100,10,NULL,'active');
-                INSERT INTO insp_plan_items VALUES (101,10,'已完成','active');
-                INSERT INTO insp_plan_items VALUES (102,10,NULL,'active');
+                INSERT INTO insp_plan_items VALUES (100,10,NULL,'active',1);
+                INSERT INTO insp_plan_items VALUES (101,10,'已完成','active',1);
+                INSERT INTO insp_plan_items VALUES (102,10,NULL,'active',1);
                 INSERT INTO plan_schedules VALUES (20,2,'approved','2026-01-01','2026-01-07');
                 INSERT INTO work_orders VALUES (30,'原运维','in_progress');
                 INSERT INTO notifications (user_id,source_type,source_id,title,content)

@@ -3,6 +3,7 @@ const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
+const { inventoryOptions, inventoryErrorMessage, buildPartsPayload } = require('../../utils/partsApplication.js');
 
 const app = getApp();
 
@@ -14,8 +15,9 @@ const PARTS_FULFILLMENT_OPTIONS = [
 
 Page({
   data: {
-    siteId: null, site: null, checkingIn: false, online: true, syncCount: 0,
-    partsOptions: [{ id: 0, label: '手动输入（自定义名称）' }],
+    siteId: null, site: null, readOnlySource: false, checkingIn: false, online: true, syncCount: 0,
+    partsOptions: [],
+    partsInventoryStatus: 'idle', partsInventoryError: '',
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
     partsApply: {
       open: false, fulfillmentIndex: 0, fulfillment_type: 'stock',
@@ -26,7 +28,8 @@ Page({
 
   onLoad(options) {
     const id = options.site_id || app.globalData.selSiteId;
-    this.setData({ siteId: id });
+    const readOnlySource = options.source === 'inspection_readonly';
+    this.setData({ siteId: id, readOnlySource });
     if (id) this.loadSite(id);
   },
 
@@ -64,18 +67,31 @@ Page({
   },
 
   loadSite(id) {
-    Promise.all([api.siteTasks(id), api.partsInventory().catch(() => [])])
-      .then(([res, parts]) => {
-        const partsOptions = [{ id: 0, label: '手动输入（自定义名称）' }].concat((parts || []).map(part => ({
-          id: part.id,
-          part_name: part.part_name,
-          label: (part.part_name || '备件') + (part.part_code ? '（' + part.part_code + '）' : '') + ' 余' + (part.quantity || 0)
-        })));
+    api.siteTasks(id)
+      .then(res => {
         const checkedIn = !!(res.site && res.site.checked_in);
-        this.setData({ site: Object.assign({}, res.site || {}, { checked_in: checkedIn, can_check_in: !!(res.site && res.site.can_check_in && !checkedIn), checkin_sync_pending: false }), partsOptions });
+        this.setData({ site: Object.assign({}, res.site || {}, { checked_in: checkedIn, can_check_in: !!(res.site && res.site.can_check_in && !checkedIn), checkin_sync_pending: false }) });
       })
       .catch(() => wx.showToast({ title: '加载失败', icon: 'none' }));
+    if (!this.data.readOnlySource) this.loadPartsInventory();
   },
+
+  loadPartsInventory() {
+    if (this.data.partsInventoryStatus === 'loading') return;
+    const requestId = (this._partsInventoryRequest || 0) + 1;
+    this._partsInventoryRequest = requestId;
+    this.setData({ partsInventoryStatus: 'loading', partsInventoryError: '' });
+    api.partsInventory().then(parts => {
+      if (this._partsInventoryRequest !== requestId) return;
+      const partsOptions = inventoryOptions(parts);
+      this.setData({ partsOptions, partsInventoryStatus: partsOptions.length ? 'ready' : 'empty' });
+    }).catch(error => {
+      if (this._partsInventoryRequest !== requestId) return;
+      this.setData({ partsInventoryStatus: 'error', partsInventoryError: inventoryErrorMessage(error) });
+    });
+  },
+
+  onRetryPartsInventory() { this.loadPartsInventory(); },
 
   onNavigate() {
     const s = this.data.site;
@@ -156,28 +172,40 @@ Page({
   },
 
   onOpenPartsApply() {
+    const site = this.data.site;
+    if (!site) return;
     this.setData({
       partsApply: {
         open: true, fulfillmentIndex: 0, fulfillment_type: 'stock',
         part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0,
-        submitting: false
+        submitting: false, requestKey: 'parts_site_' + site.id + '_' + Date.now()
       }
     });
+    if (this.data.partsInventoryStatus === 'idle' || this.data.partsInventoryStatus === 'error') this.loadPartsInventory();
   },
 
   onClosePartsApply() {
-    if (!this.data.partsApply.submitting) this.setData({ 'partsApply.open': false });
+    if (this.data.partsApply.submitting) { wx.showToast({ title: '提交中，请稍候', icon: 'none' }); return; }
+    this.setData({ 'partsApply.open': false });
   },
 
   onPartsFulfillmentPick(e) {
+    if (this.data.partsApply.submitting) return;
     const index = parseInt(e.detail.value, 10) || 0;
     const selected = this.data.partsFulfillmentOptions[index] || this.data.partsFulfillmentOptions[0];
+    const previousType = this.data.partsApply.fulfillment_type;
+    const resetManualFields = selected.key === 'stock' || previousType === 'stock';
     this.setData({
       'partsApply.fulfillmentIndex': index,
       'partsApply.fulfillment_type': selected.key,
       'partsApply.index': 0,
-      'partsApply.part_name': selected.key === 'stock' ? '' : this.data.partsApply.part_name
+      'partsApply.part_name': resetManualFields ? '' : this.data.partsApply.part_name,
+      'partsApply.specification': resetManualFields ? '' : this.data.partsApply.specification,
+      'partsApply.estimated_amount': resetManualFields ? '' : this.data.partsApply.estimated_amount
     });
+  },
+  onPartsFulfillmentSelect(e) {
+    this.onPartsFulfillmentPick({ detail: { value: e.currentTarget.dataset.index } });
   },
 
   onPartsPick(e) {
@@ -197,27 +225,14 @@ Page({
   onSubmitPartsApply() {
     const site = this.data.site;
     const form = this.data.partsApply;
-    const partName = (form.part_name || '').trim();
-    const reason = (form.reason || '').trim();
-    const option = this.data.partsOptions[form.index];
-    const sparePartId = form.fulfillment_type === 'stock' && option && option.id ? option.id : null;
+    if (form.submitting) return;
     if (!site) return;
-    if (!partName) { wx.showToast({ title: '请填写备件名称', icon: 'none' }); return; }
-    if (!reason) { wx.showToast({ title: '请填写申请事由', icon: 'none' }); return; }
-    if (form.fulfillment_type === 'stock' && !sparePartId) { wx.showToast({ title: '请选择库存备件', icon: 'none' }); return; }
+    const result = buildPartsPayload(form, this.data.partsOptions, this.data.partsInventoryStatus);
+    if (result.error) { wx.showToast({ title: result.error, icon: 'none' }); return; }
     this.setData({ 'partsApply.submitting': true });
-    api.applyParts({
-      site_id: site.id,
-      part_name: partName,
-      specification: (form.specification || '').trim(),
-      quantity: form.quantity || 1,
-      reason,
-      spare_part_id: sparePartId,
-      fulfillment_type: form.fulfillment_type,
-      estimated_amount: form.estimated_amount === '' ? null : Number(form.estimated_amount)
-    }).then(() => {
+    api.applyParts(Object.assign({ site_id: site.id, _idempotency_key: form.requestKey }, result.payload)).then(() => {
       this.setData({ 'partsApply.open': false, 'partsApply.submitting': false });
-      wx.showToast({ title: '备件需求已提交', icon: 'success' });
+      wx.showToast({ title: '已提交审批', icon: 'success' });
     }).catch(err => {
       this.setData({ 'partsApply.submitting': false });
       wx.showToast({ title: (err && err.error) || '提交失败', icon: 'none' });

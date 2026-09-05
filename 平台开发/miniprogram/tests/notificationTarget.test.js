@@ -1,4 +1,6 @@
 const assert = require('assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   planScheduleDetailUrl,
   resolveNotificationTarget,
@@ -25,9 +27,9 @@ assert.deepEqual(planReviewTarget, {
   kind: 'review', reviewType: 'plan_schedule', sourceId: '44', attachmentIds: [],
   page: '/pages/review/view?target_type=plan_schedule&target_id=44'
 });
-['inspection_due_suggestion', 'inspection_follow_up_suggestion'].forEach(sourceType => {
+['inspection_due_suggestion'].forEach(sourceType => {
   assert.deepEqual(resolveNotificationTarget({ source_type: sourceType, source_id: 710 }), {
-    kind: 'page', page: '/pages/plan/plan'
+    kind: 'tab', page: '/pages/plan/plan'
   });
 });
 
@@ -56,11 +58,50 @@ assert.match(imageTarget.page, /target_attachment_ids=101%2C102/);
 assert.equal(resolveNotificationTarget({ source_type: 'parts_request' }).kind, 'invalid');
 assert.equal(resolveNotificationTarget({ source_type: 'unknown', source_id: 1 }).kind, 'invalid');
 
+assert.deepEqual(resolveNotificationTarget({ source_type: 'alert', source_id: 77 }), {
+  kind: 'tab', page: '/pages/alert/alert', alertId: '77'
+});
+assert.equal(resolveNotificationTarget({ source_type: 'alert', source_id: '' }).kind, 'invalid');
+assert.deepEqual(resolveNotificationTarget({ source_type: 'vehicle_use_expiry', source_id: 91 }), {
+  kind: 'page', page: '/pages/vehicle/vehicle',
+  vehicleTarget: { applicationId: 91, expectedAction: 'extend', source: 'vehicle_use_expiry' }
+});
+['', 0, -1, 'abc', '1.5'].forEach(sourceId => {
+  const target = resolveNotificationTarget({ source_type: 'vehicle_use_expiry', source_id: sourceId });
+  assert.equal(target.kind, 'invalid');
+  assert.match(target.message, /申请编号/);
+});
+const alertPage = fs.readFileSync(path.join(__dirname, '../pages/alert/alert.js'), 'utf8');
+const messagePage = fs.readFileSync(path.join(__dirname, '../pages/message/message.js'), 'utf8');
+const planDetailPage = fs.readFileSync(path.join(__dirname, '../pages/plan-detail/plan-detail.js'), 'utf8');
+const reportsPage = fs.readFileSync(path.join(__dirname, '../pages/reports/reports.js'), 'utf8');
+assert.match(alertPage, /selAlertId != null \? ''/);
+assert.match(alertPage, /selAlertId = null[\s\S]*openAlertDetail\(\{ id: focusedId \}\)/);
+assert.match(messagePage, /target\.executionTarget[\s\S]*globalData\.executionTarget[\s\S]*target\.kind === 'tab'/);
+assert.match(messagePage, /target\.vehicleTarget[\s\S]*writeTarget\('vehicleTarget', target\.vehicleTarget\)/);
+assert.match(planDetailPage, /buildScheduleExecutionTarget\([\s\S]*_navigateToExecution\(target\)/);
+assert.match(planDetailPage, /_navigateToExecution\(target\)[\s\S]*globalData\.executionTarget = target[\s\S]*navigateTo\(\{/);
+assert.match(planDetailPage, /fail:[\s\S]*globalData\.executionTarget === target[\s\S]*globalData\.executionTarget = null/);
+assert.match(reportsPage, /onGoReport\(\)[\s\S]*loadAuthorizedReportSites/);
+assert.doesNotMatch(reportsPage, /onGoReport\(\)[\s\S]{0,500}(?:inspection|executionTarget|selSiteId)/);
+assert.doesNotMatch([messagePage, planDetailPage, reportsPage].join('\n'), /switchTab\(\{ url: '\/pages\/inspection\/inspection'/);
+
 const voidTarget = resolveNotificationTarget({
   source_type: 'attachment_void', source_id: 10,
   payload_json: JSON.stringify({ plan_id: 990201, item_id: 990301, site_id: 990101 })
 });
-assert.deepEqual(voidTarget, { kind: 'tab', page: '/pages/inspection/inspection', planId: 990201, itemId: 990301, siteId: 990101 });
+assert.deepEqual(voidTarget, {
+  kind: 'page', page: '/pages/inspection/inspection',
+  executionTarget: { executionPlanId: 990201, itemId: 990301, siteId: 990101, source: 'attachment_void' }
+});
+assert.deepEqual(resolveNotificationTarget({ source_type: 'inspection_rework', source_id: 990201 }), {
+  kind: 'page', page: '/pages/inspection/inspection',
+  executionTarget: { executionPlanId: 990201, source: 'inspection_rework' }
+});
+assert.deepEqual(resolveNotificationTarget({ source_type: 'reagent_qc', source_id: 990101 }), {
+  kind: 'page', page: '/pages/inspection/inspection',
+  executionTarget: { siteId: 990101, source: 'reagent_qc' }
+});
 assert.equal(resolveNotificationTarget({ source_type: 'attachment_void', source_id: 10,
   payload_json: JSON.stringify({ plan_id: 990201, item_id: 0, site_id: 990101 }) }).kind, 'invalid');
 

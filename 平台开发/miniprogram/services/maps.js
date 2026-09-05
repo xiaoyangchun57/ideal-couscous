@@ -10,12 +10,12 @@ const WORKORDER_SOURCE = {
   auto: '自动派发', auto_created: '自动派发', patrol: '巡检生成',
   inspection: '巡检生成', manual: '手动创建', report: '上报工单', hotline: '热线',
   escalation: '告警升级', alert_convert: '告警转工单', alert_auto: '告警自动派发',
-  superior: '上级派发', auto_inspection: '巡检自动'
+  superior: '上级派发', auto_inspection: '巡检自动', manual_report: '人工上报'
 };
-// 工单状态→配色后缀（蓝=待处理/已受理、橙=处置中、黄=审核中、绿=已完成、灰=未知）
+// 工单状态→详情和列表共用的 WXSS 状态类后缀。
 const WORKORDER_STATUS_CLS = {
-  pending: 'blue', accepted: 'blue', dispatched: 'blue',
-  in_progress: 'orange', reviewing: 'yellow', resolved: 'green', closed: 'green'
+  pending: 'pending', accepted: 'accepted', dispatched: 'dispatched',
+  in_progress: 'in_progress', reviewing: 'reviewing', resolved: 'resolved', closed: 'closed'
 };
 // 工单等级→配色后缀（红=严重、橙=紧急、灰=普通/未知）
 const WORKORDER_LEVEL_CLS = { critical: 'red', urgent: 'orange', normal: 'gray' };
@@ -23,27 +23,26 @@ const WORKORDER_LEVEL_CLS = { critical: 'red', urgent: 'orange', normal: 'gray' 
 function workorderCn(w) {
   if (!w) return w;
   const s = WORKORDER_SOURCE[w.source];
+  const displayTitle = String(w.display_title || '').trim() || '工单事项';
   let imagesArr = [];
   try { imagesArr = w.images ? JSON.parse(w.images) : []; } catch (e) { imagesArr = []; }
   if (!Array.isArray(imagesArr)) imagesArr = [];
   return Object.assign({}, w, {
     level_cn: map(WORKORDER_LEVEL, w.level, '未知'),
     status_cn: map(WORKORDER_STATUS, w.status, '未知'),
-    status_cls: WORKORDER_STATUS_CLS[w.status] || 'gray',
+    status_cls: WORKORDER_STATUS_CLS[w.status] || 'default',
     level_cls: WORKORDER_LEVEL_CLS[w.level] || 'gray',
     source_cn: s != null ? s : '其他来源',
+    display_title: displayTitle,
     checked_in: !!(w.checked_in || w.effective_check_in_time || w.check_in_time),
     images_arr: imagesArr.map(resolveUploadUrl),
     has_images: imagesArr.length > 0
   });
 }
 
-// 巡检页中的关联工单来自执行包接口，同样必须使用中文状态和统一标题前缀。
+// 巡检页中的关联工单只消费服务端权威显示标题，不在客户端重复清洗。
 function linkedWorkorderCn(w) {
-  const mapped = workorderCn(w);
-  return Object.assign({}, mapped, {
-    display_title: String(mapped.title || '').replace(/^\[([^\]]+)\]/, '【$1】')
-  });
+  return workorderCn(w);
 }
 // 巡检分类中文映射（严禁 wxml 直接写英文 category）
 const INSPECTION_CATEGORY = {
@@ -71,7 +70,7 @@ const METRIC = {
   ph: 'pH', ammonia: '氨氮', nh3: '氨氮', tp: '总磷', tn: '总氮',
   cod: '化学需氧量', codmn: '高锰酸盐指数', do: '溶解氧',
   turbidity: '浊度', conductivity: '电导率', wtemp: '水温', flow: '流量',
-  level: '水位', rainfall: '雨量', cyanobacteria: '蓝藻'
+  level: '水位', rainfall: '雨量', cyanobacteria: '蓝藻', manual_report: '人工上报'
 };
 function metricCn(key) {
   if (!key) return '';
@@ -81,11 +80,13 @@ function metricCn(key) {
 // 计划调度状态
 const PLAN_SCHEDULE_STATUS = {
   draft: '草稿', submitted: '待审批', approved: '已通过',
-  rejected: '已退回', modifying: '变更中', change_submitted: '变更待审', archived: '已归档'
+  rejected: '已退回', modifying: '变更中', change_submitted: '变更待审',
+  cancelled: '已取消', archived: '已归档'
 };
 const PLAN_SCHEDULE_STATUS_CLS = {
   draft: 'gray', submitted: 'blue', approved: 'green',
-  rejected: 'red', modifying: 'orange', change_submitted: 'orange', archived: 'gray'
+  rejected: 'red', modifying: 'orange', change_submitted: 'orange',
+  cancelled: 'gray', archived: 'gray'
 };
 // 排程类型
 const SCHEDULE_TYPE = { weekly: '周检', monthly: '月检', quarterly: '季检', yearly: '年检' };

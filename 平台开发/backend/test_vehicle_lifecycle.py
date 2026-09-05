@@ -43,7 +43,11 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         })
         with temporary_db() as db:
             db.executescript('''
-                CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, role TEXT);
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, real_name TEXT, role TEXT,
+                    status TEXT DEFAULT 'active'
+                );
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE vehicles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, plate_no TEXT UNIQUE, model TEXT, seats INTEGER,
@@ -67,7 +71,13 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
                     start_at TEXT, end_at TEXT, destination TEXT, reason TEXT, status TEXT DEFAULT 'pending',
                     approver_id INTEGER, approved_at TEXT, reject_reason TEXT, created_at TEXT,
                     site_id TEXT, work_order_no TEXT, no_vehicle_required INTEGER DEFAULT 0,
-                    vehicle_exception_reason TEXT DEFAULT ''
+                    vehicle_exception_reason TEXT DEFAULT '', rework_plan_id INTEGER
+                );
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
+                    source_id INTEGER, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
+                    dedupe_key TEXT DEFAULT '', payload_json TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE vehicle_use_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, application_id INTEGER, start_mileage REAL,
@@ -87,7 +97,8 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER, maint_type TEXT, maint_at TEXT,
                     mileage_at REAL, next_maint_mileage REAL, items TEXT, cost REAL, remark TEXT,
                     maint_status TEXT, vendor TEXT, expected_return_at TEXT, actual_return_at TEXT,
-                    fault_description TEXT, evidence_expected_count INTEGER DEFAULT 0,
+                    fault_description TEXT, affects_safe_operation INTEGER,
+                    evidence_expected_count INTEGER DEFAULT 0,
                     evidence_status TEXT DEFAULT 'not_required'
                 );
                 CREATE TABLE operation_attachments (
@@ -106,6 +117,16 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
                 );
                 INSERT INTO vehicles (id, plate_no, model, seats, status, current_mileage)
                     VALUES (1, '赣A测试1', '皮卡', 5, 'idle', 1000);
+                INSERT INTO users (id,real_name,role,status) VALUES
+                    (1,'管理员','admin','active'),
+                    (2,'运维员','operator','active'),
+                    (3,'其他运维','operator','active'),
+                    (4,'审核员','reviewer','active'),
+                    (5,'附角色管理员','operator','active'),
+                    (6,'停用管理员','admin','inactive');
+                INSERT INTO user_roles VALUES
+                    (1,'admin'),(1,'operator'),(2,'operator'),(3,'operator'),
+                    (4,'reviewer'),(5,'operator'),(5,'admin'),(6,'admin');
             ''')
         self.client = app_module.app.test_client()
 
@@ -128,6 +149,21 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 201, response.json)
         return response.json['id']
+
+    def active_use(self, applicant_id=2, vehicle_id=1, start_mileage=1000, returned_at=None):
+        with app_module.get_db() as db:
+            db.execute(
+                "INSERT INTO vehicle_applications (vehicle_id,applicant_id,reason,status) VALUES (?,?,?,'approved')",
+                (vehicle_id, applicant_id, '途中业务测试'),
+            )
+            application_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            db.execute(
+                """INSERT INTO vehicle_use_records
+                   (application_id,start_mileage,checked_out_at,returned_at,status)
+                   VALUES (?,?,'2026-09-04 08:00:00',?,?)""",
+                (application_id, start_mileage, returned_at, 'returned' if returned_at else 'checked_out'),
+            )
+            return db.execute('SELECT last_insert_rowid()').fetchone()[0]
 
     def test_mobile_operator_can_read_vehicle_choices_but_reviewer_cannot(self):
         operator = self.client.get('/api/vehicles', headers=self.headers('operator-token'))
@@ -197,13 +233,508 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         self.assertEqual(forced_operator.json['total'], 1)
         self.assertEqual(forced_operator.json['items'][0]['application_id'], 1)
 
+    def test_application_id_filter_is_exact_validated_and_keeps_applicant_scope(self):
+        with app_module.get_db() as db:
+            db.executemany(
+                "INSERT INTO vehicle_applications (id,vehicle_id,applicant_id,status,reason) VALUES (?,?,?,?,?)",
+                [
+                    (101, 1, 2, 'approved', '本人目标'),
+                    (102, 1, 2, 'approved', '本人其他申请'),
+                    (103, 1, 3, 'approved', '其他运维申请'),
+                ],
+            )
+
+        exact = self.client.get(
+            '/api/vehicle/applications?application_id=101',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(exact.status_code, 200, exact.json)
+        self.assertEqual([row['id'] for row in exact.json], [101])
+
+        hidden = self.client.get(
+            '/api/vehicle/applications?application_id=103',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(hidden.status_code, 200, hidden.json)
+        self.assertEqual(hidden.json, [])
+
+        admin_scoped = self.client.get(
+            '/api/vehicle/applications?application_id=103&applicant_id=2',
+            headers=self.headers('admin-token'),
+        )
+        self.assertEqual(admin_scoped.status_code, 200, admin_scoped.json)
+        self.assertEqual(admin_scoped.json, [])
+
+        for raw in ('0', '-1', 'abc', '1.5', '01'):
+            with self.subTest(raw=raw):
+                invalid = self.client.get(
+                    '/api/vehicle/applications?application_id=' + raw,
+                    headers=self.headers('operator-token'),
+                )
+                self.assertEqual(invalid.status_code, 400, invalid.json)
+                self.assertEqual(invalid.json['code'], 'VEHICLE_APPLICATION_ID_INVALID')
+
+    def test_application_validates_cross_day_time_site_scope_and_idempotency(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
+                INSERT INTO sites VALUES (1,'授权水站'),(2,'越权水站');
+                INSERT INTO user_sites VALUES (2,1);
+            """)
+        payload = {
+            'vehicle_id': 1,
+            'start_at': '2026-09-04T18:00',
+            'end_at': '2026-09-05 08:00:00',
+            'destination_mode': 'site',
+            'site_id': 1,
+            'destination': '客户端伪造名称',
+            'reason': '跨日巡检',
+            '_idempotency_key': 'application-cross-day-1',
+        }
+        created = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json=payload)
+        repeated = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertEqual(created.json['id'], repeated.json['id'])
+        with app_module.get_db() as db:
+            row = db.execute('SELECT * FROM vehicle_applications').fetchone()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 1)
+        self.assertEqual((row['start_at'], row['end_at']),
+                         ('2026-09-04 18:00:00', '2026-09-05 08:00:00'))
+        self.assertEqual((row['site_id'], row['destination']), ('1', '授权水站'))
+
+        conflict = dict(payload, start_at='2026-09-04 20:00:00', end_at='2026-09-05 07:00:00',
+                        _idempotency_key='application-cross-day-2')
+        response = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json=conflict)
+        self.assertEqual(response.status_code, 409, response.json)
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO vehicles (id,plate_no,status,current_mileage) VALUES (2,'赣A测试2','idle',0)")
+        applicant_conflict = dict(payload, vehicle_id=2, _idempotency_key='application-applicant-conflict')
+        response = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'),
+                                    json=applicant_conflict)
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertIn('申请人', response.json['error'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 1)
+
+    def test_application_rejects_invalid_time_destination_and_site_without_writes(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
+                INSERT INTO sites VALUES (1,'授权水站'),(2,'越权水站');
+                INSERT INTO user_sites VALUES (2,1);
+            """)
+        base = {
+            'vehicle_id': 1, 'start_at': '2026-09-04 08:00:00',
+            'end_at': '2026-09-04 18:00:00', 'reason': '巡检',
+            'destination_mode': 'other', 'destination': '其他地点',
+        }
+        invalid_cases = [
+            ({'start_at': None}, 400),
+            ({'start_at': '2026-09-04 08:00:00junk'}, 400),
+            ({'end_at': '2026-09-04 08:00:00'}, 400),
+            ({'destination': '   '}, 400),
+            ({'destination': '地' * 101}, 400),
+            ({'_idempotency_key': ''}, 400),
+            ({'destination_mode': 'site', 'site_id': None, 'destination': ''}, 400),
+            ({'destination_mode': 'other', 'site_id': 1}, 400),
+            ({'destination_mode': 'site', 'site_id': 999, 'destination': ''}, 404),
+            ({'destination_mode': 'site', 'site_id': 2, 'destination': ''}, 403),
+            ({'vehicle_id': 999}, 409),
+        ]
+        for index, (changes, status) in enumerate(invalid_cases):
+            with self.subTest(changes=changes):
+                payload = dict(base, **changes)
+                if '_idempotency_key' not in changes:
+                    payload['_idempotency_key'] = f'invalid-application-{index}'
+                response = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json=payload)
+                self.assertEqual(response.status_code, status, response.json)
+        reviewer = self.client.post('/api/vehicle/applications', headers=self.headers('reviewer-token'), json=base)
+        self.assertEqual(reviewer.status_code, 403, reviewer.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 0)
+
+        other_place = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json=dict(
+            base, destination='  临时维修点  ', _idempotency_key='valid-other-place'))
+        self.assertEqual(other_place.status_code, 201, other_place.json)
+        with app_module.get_db() as db:
+            stored = db.execute('SELECT destination FROM vehicle_applications').fetchone()['destination']
+        self.assertEqual(stored, '临时维修点')
+
+    def test_application_rolls_back_when_idempotency_write_fails(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TABLE mobile_idempotency (
+                    idempotency_key TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
+                    response_json TEXT NOT NULL, created_at TEXT
+                );
+                CREATE TRIGGER fail_application_idempotency BEFORE INSERT ON mobile_idempotency
+                BEGIN SELECT RAISE(ABORT, 'forced application idempotency failure'); END;
+            """)
+        response = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-09-04 08:00:00',
+            'end_at': '2026-09-04 18:00:00', 'destination_mode': 'other',
+            'destination': '临时地点', 'reason': '巡检',
+            '_idempotency_key': 'application-rollback-1',
+        })
+        self.assertEqual(response.status_code, 503, response.json)
+        self.assertEqual(response.json['code'], 'VEHICLE_APPLICATION_RETRYABLE')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 0)
+
+    def test_pending_application_notifies_only_active_primary_and_secondary_admins_once(self):
+        payload = {
+            'vehicle_id': 1, 'start_at': '2026-09-04 08:00:00',
+            'end_at': '2026-09-04 18:00:00', 'destination_mode': 'other',
+            'destination': '临时维修点', 'reason': '现场巡检',
+            '_idempotency_key': 'notify-admins-once',
+        }
+        created = self.client.post('/api/vehicle/applications',
+                                   headers=self.headers('operator-token'), json=payload)
+        repeated = self.client.post('/api/vehicle/applications',
+                                    headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        with app_module.get_db() as db:
+            applications = db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0]
+            notices = db.execute("""SELECT user_id,source_type,source_id,title,content,is_read,dedupe_key
+                FROM notifications ORDER BY user_id""").fetchall()
+        self.assertEqual(applications, 1)
+        self.assertEqual([row['user_id'] for row in notices], [1, 5])
+        self.assertTrue(all(row['source_type'] == 'vehicle_application' for row in notices))
+        self.assertTrue(all(row['source_id'] == created.json['id'] for row in notices))
+        self.assertTrue(all(row['title'] == '用车申请待审核' for row in notices))
+        self.assertTrue(all(row['is_read'] == 0 for row in notices))
+        self.assertTrue(all(row['dedupe_key'] == f'vehicle_application:{created.json["id"]}'
+                            for row in notices))
+        self.assertIn('申请人：运维员', notices[0]['content'])
+        self.assertIn('车辆：赣A测试1 皮卡', notices[0]['content'])
+        self.assertIn('使用时段：2026-09-04 08:00:00 至 2026-09-04 18:00:00', notices[0]['content'])
+        self.assertIn('目的地：临时维修点', notices[0]['content'])
+        self.assertNotIn('None', notices[0]['content'])
+
+    def test_admin_applicant_still_receives_pending_application_notification(self):
+        response = self.client.post('/api/vehicle/applications', headers=self.headers('admin-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-09-05 08:00:00',
+            'end_at': '2026-09-05 18:00:00', 'destination_mode': 'other',
+            'destination': '仓库', 'reason': '管理员现场任务',
+            '_idempotency_key': 'admin-self-application',
+        })
+        self.assertEqual(response.status_code, 201, response.json)
+        with app_module.get_db() as db:
+            recipients = db.execute("""SELECT user_id FROM notifications
+                WHERE source_type='vehicle_application' AND source_id=? ORDER BY user_id""",
+                                    (response.json['id'],)).fetchall()
+        self.assertEqual([row['user_id'] for row in recipients], [1, 5])
+
+    def test_notification_failure_rolls_back_application_idempotency_and_partial_notices(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TRIGGER fail_secondary_admin_vehicle_notice
+                BEFORE INSERT ON notifications
+                WHEN NEW.source_type='vehicle_application' AND NEW.user_id=5
+                BEGIN SELECT RAISE(ABORT, 'forced vehicle notification failure'); END;
+            """)
+        response = self.client.post('/api/vehicle/applications',
+                                    headers=self.headers('operator-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-09-06 08:00:00',
+            'end_at': '2026-09-06 18:00:00', 'destination_mode': 'other',
+            'destination': '故障注入点', 'reason': '通知事务测试',
+            '_idempotency_key': 'notification-rollback',
+        })
+        self.assertEqual(response.status_code, 503, response.json)
+        self.assertEqual(response.json['code'], 'VEHICLE_APPLICATION_RETRYABLE')
+        self.assertNotIn('notifications', response.json['error'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 0)
+            idempotency_table = db.execute("""SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='mobile_idempotency'""").fetchone()
+            self.assertIsNone(idempotency_table)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
+
+    def test_rework_resource_request_notifies_admins_and_failure_rolls_back(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, assignee_id INTEGER, rework_of_plan_id INTEGER,
+                    resource_state TEXT
+                );
+                INSERT INTO insp_plans VALUES (10,2,9,'arrangement_required');
+            """)
+        response = self.client.post('/api/inspection-v2/rework-plans/10/resource-request',
+                                    headers=self.headers('operator-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-09-07 08:00:00',
+            'end_at': '2026-09-07 18:00:00',
+        })
+        self.assertEqual(response.status_code, 201, response.json)
+        application_id = response.json['application']['id']
+        duplicate = self.client.post('/api/inspection-v2/rework-plans/10/resource-request',
+                                     headers=self.headers('operator-token'), json={
+            'vehicle_id': 1, 'start_at': '2026-09-07 08:00:00',
+            'end_at': '2026-09-07 18:00:00',
+        })
+        self.assertEqual(duplicate.status_code, 409, duplicate.json)
+        with app_module.get_db() as db:
+            recipients = db.execute("""SELECT user_id FROM notifications
+                WHERE source_type='vehicle_application' AND source_id=? ORDER BY user_id""",
+                                    (application_id,)).fetchall()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 1)
+        self.assertEqual([row['user_id'] for row in recipients], [1, 5])
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plans SET resource_state='arrangement_required' WHERE id=10")
+            db.execute("DELETE FROM vehicle_applications")
+            db.execute("DELETE FROM notifications")
+            db.executescript("""
+                CREATE TRIGGER fail_rework_vehicle_notice BEFORE INSERT ON notifications
+                WHEN NEW.source_type='vehicle_application'
+                BEGIN SELECT RAISE(ABORT, 'forced rework notification failure'); END;
+            """)
+        failed = self.client.post('/api/inspection-v2/rework-plans/10/resource-request',
+                                  headers=self.headers('operator-token'), json={
+            'no_vehicle_required': True, 'vehicle_exception_reason': '步行可达',
+            'start_at': '2026-09-08 08:00:00', 'end_at': '2026-09-08 18:00:00',
+        })
+        self.assertEqual(failed.status_code, 503, failed.json)
+        with app_module.get_db() as db:
+            plan = db.execute('SELECT resource_state FROM insp_plans WHERE id=10').fetchone()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
+        self.assertEqual(plan['resource_state'], 'arrangement_required')
+
+    def test_vehicle_approval_and_rejection_archive_notices_but_failures_do_not(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                INSERT INTO vehicle_applications
+                    (id,vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                    VALUES
+                    (201,1,2,'2026-09-09 08:00:00','2026-09-09 18:00:00','甲站','审批','pending'),
+                    (202,NULL,2,NULL,NULL,'乙站','驳回','pending'),
+                    (203,NULL,2,NULL,NULL,'丙站','已处理','approved');
+                INSERT INTO notifications
+                    (user_id,source_type,source_id,title,content,dedupe_key) VALUES
+                    (1,'vehicle_application',201,'待审核','甲','vehicle_application:201'),
+                    (5,'vehicle_application',201,'待审核','甲','vehicle_application:201'),
+                    (1,'vehicle_application',202,'待审核','乙','vehicle_application:202'),
+                    (1,'vehicle_application',203,'待审核','丙','vehicle_application:203'),
+                    (1,'vehicle_application',999,'待审核','不存在','vehicle_application:999');
+            """)
+        invalid = self.client.post('/api/vehicle/applications/201/approve',
+                                   headers=self.headers('admin-token'), json={'action': 'invalid'})
+        forbidden = self.client.post('/api/vehicle/applications/201/approve',
+                                     headers=self.headers('operator-token'), json={'action': 'approve'})
+        missing = self.client.post('/api/vehicle/applications/999/approve',
+                                   headers=self.headers('admin-token'), json={'action': 'approve'})
+        stale = self.client.post('/api/vehicle/applications/203/approve',
+                                 headers=self.headers('admin-token'), json={'action': 'approve'})
+        self.assertEqual((invalid.status_code, forbidden.status_code, missing.status_code, stale.status_code),
+                         (400, 403, 404, 409))
+        approved = self.client.post('/api/vehicle/applications/201/approve',
+                                    headers=self.headers('admin-token'), json={'action': 'approve'})
+        rejected = self.client.post('/api/vehicle/applications/202/approve',
+                                    headers=self.headers('admin-token'),
+                                    json={'action': 'reject', 'reject_reason': '资源调整'})
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(rejected.status_code, 200, rejected.json)
+        repeated = self.client.post('/api/vehicle/applications/201/approve',
+                                    headers=self.headers('admin-token'), json={'action': 'approve'})
+        self.assertEqual(repeated.status_code, 409, repeated.json)
+        with app_module.get_db() as db:
+            states = db.execute('SELECT id,status FROM vehicle_applications WHERE id>=201 ORDER BY id').fetchall()
+            notices = db.execute("""SELECT source_id,is_read FROM notifications
+                WHERE source_type='vehicle_application' ORDER BY source_id,user_id""").fetchall()
+        self.assertEqual([(row['id'], row['status']) for row in states],
+                         [(201, 'approved'), (202, 'rejected'), (203, 'approved')])
+        self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
+                         [(201, 1), (201, 1), (202, 1), (203, 0), (999, 0)])
+
+    def test_approval_revalidation_and_database_failure_keep_application_pending_and_notice_unread(self):
+        with app_module.get_db() as db:
+            db.executescript("""
+                INSERT INTO vehicle_applications
+                    (id,vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                    VALUES
+                    (211,1,2,'2026-09-10 08:00:00','2026-09-10 18:00:00','甲站','复验冲突','pending'),
+                    (212,NULL,2,NULL,NULL,'乙站','数据库失败','pending');
+                INSERT INTO notifications
+                    (user_id,source_type,source_id,title,content,dedupe_key) VALUES
+                    (1,'vehicle_application',211,'待审核','甲','vehicle_application:211'),
+                    (1,'vehicle_application',212,'待审核','乙','vehicle_application:212');
+                UPDATE vehicles SET status='restricted' WHERE id=1;
+            """)
+        conflict = self.client.post('/api/vehicle/applications/211/approve',
+                                    headers=self.headers('admin-token'), json={'action': 'approve'})
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TRIGGER fail_vehicle_notice_archive BEFORE UPDATE ON notifications
+                WHEN OLD.source_type='vehicle_application' AND OLD.source_id=212
+                BEGIN SELECT RAISE(ABORT, 'forced notification archive failure'); END;
+            """)
+        failed = self.client.post('/api/vehicle/applications/212/approve',
+                                  headers=self.headers('admin-token'), json={'action': 'reject'})
+        self.assertEqual(failed.status_code, 503, failed.json)
+        self.assertEqual(failed.json['code'], 'VEHICLE_APPROVAL_RETRYABLE')
+        with app_module.get_db() as db:
+            states = db.execute("""SELECT id,status FROM vehicle_applications
+                WHERE id IN (211,212) ORDER BY id""").fetchall()
+            notices = db.execute("""SELECT source_id,is_read FROM notifications
+                WHERE source_id IN (211,212) ORDER BY source_id""").fetchall()
+        self.assertEqual([(row['id'], row['status']) for row in states],
+                         [(211, 'pending'), (212, 'pending')])
+        self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
+                         [(211, 0), (212, 0)])
+
+    def test_direct_approved_vehicle_arrangement_does_not_generate_review_notification(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                VALUES (1,2,'2026-09-11 08:00:00','2026-09-11 18:00:00',
+                        '计划站点','计划直接安排','approved')""")
+            notices = db.execute("""SELECT COUNT(*) FROM notifications
+                WHERE source_type='vehicle_application'""").fetchone()[0]
+        self.assertEqual(notices, 0)
+
+    def test_mobile_refueling_requires_complete_values_scope_and_stable_idempotency(self):
+        record_id = self.active_use()
+        endpoint = f'/api/mobile/vehicle-use-records/{record_id}/refueling'
+        base = {
+            'energy_quantity': 20, 'amount': 150, 'mileage_at': 1010,
+            '_idempotency_key': 'refuel-complete-1', 'energy_unit': 'fake',
+        }
+        for changes, status in [
+            ({'amount': None}, 400), ({'amount': 0}, 400),
+            ({'energy_quantity': 0}, 400), ({'mileage_at': 999}, 400),
+            ({'_idempotency_key': ''}, 400),
+        ]:
+            with self.subTest(changes=changes):
+                response = self.client.post(endpoint, headers=self.headers('operator-token'), json=dict(base, **changes))
+                self.assertEqual(response.status_code, status, response.json)
+        forbidden = self.client.post(endpoint, headers=self.headers('other-token'), json=base)
+        self.assertEqual(forbidden.status_code, 403, forbidden.json)
+        missing = self.client.post('/api/mobile/vehicle-use-records/999/refueling', headers=self.headers('operator-token'),
+                                   json=dict(base, _idempotency_key='missing-refuel'))
+        self.assertEqual(missing.status_code, 404, missing.json)
+
+        created = self.client.post(endpoint, headers=self.headers('operator-token'), json=base)
+        repeated = self.client.post(endpoint, headers=self.headers('operator-token'), json=base)
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertEqual(created.json, repeated.json)
+        with app_module.get_db() as db:
+            row = db.execute('SELECT * FROM vehicle_refueling_records').fetchone()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_refueling_records').fetchone()[0], 1)
+        self.assertEqual((row['energy_quantity'], row['amount'], row['energy_unit']), (20, 150, 'L'))
+
+        returned_id = self.active_use(returned_at='2026-09-04 18:00:00')
+        returned = self.client.post(f'/api/mobile/vehicle-use-records/{returned_id}/refueling',
+                                    headers=self.headers('operator-token'),
+                                    json=dict(base, _idempotency_key='returned-refuel'))
+        self.assertEqual(returned.status_code, 409, returned.json)
+
+    def test_mobile_refueling_rolls_back_when_idempotency_write_fails(self):
+        record_id = self.active_use()
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TABLE mobile_idempotency (
+                    idempotency_key TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
+                    response_json TEXT NOT NULL, created_at TEXT
+                );
+                CREATE TRIGGER fail_refuel_idempotency BEFORE INSERT ON mobile_idempotency
+                BEGIN SELECT RAISE(ABORT, 'forced idempotency failure'); END;
+            """)
+        response = self.client.post(f'/api/mobile/vehicle-use-records/{record_id}/refueling',
+                                    headers=self.headers('operator-token'), json={
+                                        'energy_quantity': 20, 'amount': 150, 'mileage_at': 1010,
+                                        '_idempotency_key': 'refuel-rollback-1',
+                                    })
+        self.assertEqual(response.status_code, 500)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_refueling_records').fetchone()[0], 0)
+
+    def test_mobile_fault_uses_explicit_safety_fact_and_preserves_restricted_status(self):
+        record_id = self.active_use()
+        with app_module.get_db() as db:
+            db.execute("UPDATE vehicles SET status='in_use' WHERE id=1")
+        endpoint = f'/api/mobile/vehicle-use-records/{record_id}/faults'
+        base = {
+            'fault_type': '异响', 'mileage_at': 1010, 'description': '低速异响',
+            'affects_safe_operation': False, '_idempotency_key': 'fault-safe-1',
+        }
+        for changes, status in [
+            ({'mileage_at': None}, 400), ({'mileage_at': 999}, 400),
+            ({'affects_safe_operation': None}, 400), ({'affects_safe_operation': 0}, 400),
+            ({'_idempotency_key': ''}, 400),
+        ]:
+            with self.subTest(changes=changes):
+                response = self.client.post(endpoint, headers=self.headers('operator-token'), json=dict(base, **changes))
+                self.assertEqual(response.status_code, status, response.json)
+        forbidden = self.client.post(endpoint, headers=self.headers('other-token'), json=base)
+        self.assertEqual(forbidden.status_code, 403, forbidden.json)
+        missing = self.client.post('/api/mobile/vehicle-use-records/999/faults',
+                                   headers=self.headers('operator-token'),
+                                   json=dict(base, _idempotency_key='missing-fault'))
+        self.assertEqual(missing.status_code, 404, missing.json)
+        returned_id = self.active_use(returned_at='2026-09-04 18:00:00')
+        returned = self.client.post(f'/api/mobile/vehicle-use-records/{returned_id}/faults',
+                                    headers=self.headers('operator-token'),
+                                    json=dict(base, _idempotency_key='returned-fault'))
+        self.assertEqual(returned.status_code, 409, returned.json)
+
+        created = self.client.post(endpoint, headers=self.headers('operator-token'), json=base)
+        repeated = self.client.post(endpoint, headers=self.headers('operator-token'), json=base)
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertEqual(created.json['vehicle_status'], 'in_use')
+        with app_module.get_db() as db:
+            row = db.execute('SELECT affects_safe_operation,maint_status FROM vehicle_maintenance_records').fetchone()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_maintenance_records').fetchone()[0], 1)
+        self.assertEqual((row['affects_safe_operation'], row['maint_status']), (0, 'open'))
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE vehicles SET status='restricted' WHERE id=1")
+        restricted_use = self.active_use()
+        still_restricted = self.client.post(f'/api/mobile/vehicle-use-records/{restricted_use}/faults',
+                                             headers=self.headers('operator-token'), json=dict(
+                                                 base, mileage_at=1020,
+                                                 _idempotency_key='fault-safe-restricted'))
+        self.assertEqual(still_restricted.status_code, 201, still_restricted.json)
+        self.assertEqual(still_restricted.json['vehicle_status'], 'restricted')
+
+        dangerous_use = self.active_use()
+        dangerous = self.client.post(f'/api/mobile/vehicle-use-records/{dangerous_use}/faults',
+                                     headers=self.headers('operator-token'), json=dict(
+                                         base, mileage_at=1030, affects_safe_operation=True,
+                                         _idempotency_key='fault-dangerous'))
+        self.assertEqual(dangerous.status_code, 201, dangerous.json)
+        self.assertEqual(dangerous.json['vehicle_status'], 'restricted')
+
+    def test_mobile_fault_rolls_back_record_when_vehicle_restriction_fails(self):
+        record_id = self.active_use()
+        with app_module.get_db() as db:
+            db.executescript("""
+                CREATE TRIGGER fail_vehicle_restriction BEFORE UPDATE ON vehicles
+                BEGIN SELECT RAISE(ABORT, 'forced vehicle update failure'); END;
+            """)
+        response = self.client.post(f'/api/mobile/vehicle-use-records/{record_id}/faults',
+                                    headers=self.headers('operator-token'), json={
+                                        'fault_type': '制动', 'mileage_at': 1010,
+                                        'description': '制动异常', 'affects_safe_operation': True,
+                                        '_idempotency_key': 'fault-rollback-1',
+                                    })
+        self.assertEqual(response.status_code, 500)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_maintenance_records').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT status FROM vehicles WHERE id=1').fetchone()['status'], 'idle')
+
     def test_expired_document_blocks_application_and_schedule_check(self):
         response = self.client.post('/api/vehicle/documents', headers=self.headers('admin-token'), json={
             'vehicle_id': 1, 'document_type': 'insurance', 'valid_until': '2000-01-01',
         })
         self.assertEqual(response.status_code, 201)
         response = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json={
-            'vehicle_id': 1, 'start_at': '2026-07-28 08:00:00', 'end_at': '2026-07-28 17:00:00', 'reason': '巡检',
+            'vehicle_id': 1, 'start_at': '2026-07-28 08:00:00', 'end_at': '2026-07-28 17:00:00',
+            'destination': '测试地点', 'reason': '巡检',
         })
         self.assertEqual(response.status_code, 409)
         with app_module.get_db() as db:
@@ -240,6 +771,40 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             'application_id': 1, 'start_mileage': 1025, 'out_inspection_id': out_check,
         })
         self.assertEqual(retry.status_code, 409, retry.json)
+
+    def test_vehicle_check_and_trip_writes_replay_one_stable_key(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO vehicle_applications (vehicle_id, applicant_id, reason, status) VALUES (1,2,'稳定重试','approved')")
+        inspection_payload = {
+            'vehicle_id': 1, 'inspection_type': 'dispatch', 'overall_status': 'normal',
+            'items': [], 'odometer': 1000, '_idempotency_key': 'dispatch-check-replay-1',
+        }
+        first_check = self.client.post('/api/vehicle/inspections', headers=self.headers('operator-token'), json=inspection_payload)
+        replay_check = self.client.post('/api/vehicle/inspections', headers=self.headers('operator-token'), json=inspection_payload)
+        self.assertEqual(first_check.status_code, 201, first_check.json)
+        self.assertEqual(replay_check.status_code, 200, replay_check.json)
+        self.assertEqual(first_check.json, replay_check.json)
+
+        checkout_payload = {'application_id': 1, 'start_mileage': 1000,
+                            'out_inspection_id': first_check.json['id'], '_idempotency_key': 'checkout-replay-1'}
+        first_checkout = self.client.post('/api/vehicle/use-records', headers=self.headers('operator-token'), json=checkout_payload)
+        replay_checkout = self.client.post('/api/vehicle/use-records', headers=self.headers('operator-token'), json=checkout_payload)
+        self.assertEqual(first_checkout.status_code, 201, first_checkout.json)
+        self.assertEqual(replay_checkout.status_code, 200, replay_checkout.json)
+        self.assertEqual(first_checkout.json, replay_checkout.json)
+
+        return_check = self.client.post('/api/vehicle/inspections', headers=self.headers('operator-token'), json={
+            'vehicle_id': 1, 'inspection_type': 'return', 'overall_status': 'normal',
+            'items': [], 'odometer': 1010, '_idempotency_key': 'return-check-replay-1',
+        })
+        self.assertEqual(return_check.status_code, 201, return_check.json)
+        return_payload = {'end_mileage': 1010, 'return_inspection_id': return_check.json['id'],
+                          '_idempotency_key': 'return-replay-1'}
+        first_return = self.client.post('/api/vehicle/use-records/1/return', headers=self.headers('operator-token'), json=return_payload)
+        replay_return = self.client.post('/api/vehicle/use-records/1/return', headers=self.headers('operator-token'), json=return_payload)
+        self.assertEqual(first_return.status_code, 200, first_return.json)
+        self.assertEqual(replay_return.status_code, 200, replay_return.json)
+        self.assertEqual(first_return.json, replay_return.json)
 
     def test_blocked_return_check_restricts_vehicle_and_refuel_captures_operator(self):
         with app_module.get_db() as db:
@@ -395,10 +960,12 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         }).json['id']
         refuel = self.client.post(f'/api/mobile/vehicle-use-records/{record_id}/refueling', headers=self.headers('operator-token'), json={
             'liters': 20, 'amount': 150, 'mileage_at': 1010, 'remark': '途中加油',
+            '_idempotency_key': 'trip-refuel-1',
         })
         self.assertEqual(refuel.status_code, 201, refuel.json)
         fault = self.client.post(f'/api/mobile/vehicle-use-records/{record_id}/faults', headers=self.headers('operator-token'), json={
             'fault_type': '轮胎', 'mileage_at': 1015, 'description': '右前轮胎压报警',
+            'affects_safe_operation': True, '_idempotency_key': 'trip-fault-1',
         })
         self.assertEqual(fault.status_code, 201, fault.json)
         return_check = self.inspect('return', 'normal')
@@ -433,6 +1000,7 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         }).json['id']
         charged = self.client.post(f'/api/mobile/vehicle-use-records/{record_id}/refueling', headers=self.headers('operator-token'), json={
             'energy_quantity': 32.5, 'amount': 42, 'mileage_at': 1010,
+            '_idempotency_key': 'electric-refuel-1',
         })
         self.assertEqual(charged.status_code, 201, charged.json)
         with app_module.get_db() as db:
@@ -450,7 +1018,8 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         self.assertFalse(vehicles.json[0]['dispatchable'])
         self.assertTrue(vehicles.json[0]['active_use_needs_extension'])
         application = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'), json={
-            'vehicle_id': 1, 'start_at': '2026-08-07 08:00:00', 'end_at': '2026-08-07 18:00:00', 'reason': '巡检',
+            'vehicle_id': 1, 'start_at': '2026-08-07 08:00:00', 'end_at': '2026-08-07 18:00:00',
+            'destination': '测试地点', 'reason': '巡检',
         })
         self.assertEqual(application.status_code, 409, application.json)
 
@@ -477,10 +1046,6 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, plan_id INTEGER, result TEXT,
                     check_out_time TEXT, execution_status TEXT
                 );
-                CREATE TABLE notifications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
-                    source_id INTEGER, title TEXT, content TEXT, is_read INTEGER DEFAULT 0
-                );
                 INSERT INTO plan_schedules VALUES (99,'approved');
                 INSERT INTO insp_plans VALUES (99,99,'active');
                 INSERT INTO insp_plan_items VALUES (1,99,NULL,NULL,'active');
@@ -506,7 +1071,7 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
 
         rebook = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'), json={
             'vehicle_id': 1, 'start_at': '2026-08-10 08:00:00',
-            'end_at': '2026-08-10 18:00:00', 'reason': '其他巡检',
+            'end_at': '2026-08-10 18:00:00', 'destination': '测试地点', 'reason': '其他巡检',
         })
         self.assertEqual(rebook.status_code, 409, rebook.json)
 

@@ -1,5 +1,7 @@
 {
-  "navigationBarTitleText": "告警",
+  "navigationStyle": "custom",
   "enablePullDownRefresh": true,
-  "usingComponents": {}
+  "usingComponents": {
+    "custom-navbar": "/components/custom-navbar/custom-navbar"
+  }
 }

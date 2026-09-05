@@ -1,43 +1,60 @@
 <view class="login-wrap">
-  <view class="login-brand">
-    <view class="login-logo">{{mustChangePassword ? '设置新密码' : '水质智慧运维'}}</view>
-    <view class="login-sub">{{mustChangePassword ? '临时密码验证成功，修改后进入系统' : '移动巡检 · 实地作业'}}</view>
+  <!-- 品牌区 -->
+  <view class="brand-area">
+    <image class="brand-logo" src="/images/home-logo.png" mode="aspectFit" />
+    <text class="brand-name">{{mustChangePassword ? '设置新密码' : '水质智慧运维'}}</text>
+    <text class="brand-sub">{{mustChangePassword ? '临时密码验证成功，修改后进入系统' : '专业水质监测运维管理'}}</text>
   </view>
 
-  <view class="card login-card" wx:if="{{!mustChangePassword}}">
-    <view class="field">
-      <text class="label">工号</text>
-      <input class="input" placeholder="请输入工号" placeholder-class="ph"
+  <!-- 表单区 -->
+  <view class="form-card" wx:if="{{!mustChangePassword}}">
+    <view class="form-field">
+      <image class="field-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTEwIDEwQzEyLjIwOTEgMTAgMTQgOC4yMDkxNCAxNCA2QzE0IDMuNzkwODYgMTIuMjA5MSAyIDEwIDJDNy43OTA4NiAyIDYgMy43OTA4NiA2IDZDNiA4LjIwOTE0IDcuNzkwODYgMTAgMTAgMTBaIiBmaWxsPSIjOEU4RTkzIi8+CiAgPHBhdGggZD0iTTEwIDExLjVDNS44NTc4NiAxMS41IDIuNSAxNC4wNjcgMi41IDE3LjI1QzIuNSAxNy42NjQyIDIuODM1NzkgMTggMy4yNSAxOEgxNi43NUMxNy4xNjQyIDE4IDE3LjUgMTcuNjY0MiAxNy41IDE3LjI1QzE3LjUgMTQuMDY3IDE0LjE0MjEgMTEuNSAxMCAxMS41WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      <input class="field-input" placeholder="用户名" placeholder-class="ph"
              value="{{username}}" bindinput="onUser" confirm-type="next" />
     </view>
-    <view class="hairline"></view>
-    <view class="field password-field" bindtap="focusPassword">
-      <text class="label">密码</text>
-      <input class="input" placeholder="请输入密码" placeholder-class="ph"
-             password focus="{{passwordFocused}}" value="{{password}}" bindinput="onPass"
-             bindfocus="onPassFocus" bindblur="onPassBlur" confirm-type="done" bindconfirm="onLogin" />
+    <view class="form-field">
+      <image class="field-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTE0LjE2NjcgNy41SDEzLjMzMzNWNS44MzMzM0MxMy4zMzMzIDMuOTkyMzggMTEuODQwOSAyLjUgMTAgMi41QzguMTU5MDUgMi41IDYuNjY2NjcgMy45OTIzOCA2LjY2NjY3IDUuODMzMzNWNy41SDUuODMzMzNDNC45MTI4NiA3LjUgNC4xNjY2NyA4LjI0NjE5IDQuMTY2NjcgOS4xNjY2N1YxNS44MzMzQzQuMTY2NjcgMTYuNzUzOCA0LjkxMjg2IDE3LjUgNS44MzMzMyAxNy41SDE0LjE2NjdDMTUuMDg3MSAxNy41IDE1LjgzMzMgMTYuNzUzOCAxNS44MzMzIDE1LjgzMzNWOS4xNjY2N0MxNS44MzMzIDguMjQ2MTkgMTUuMDg3MSA3LjUgMTQuMTY2NyA3LjVaTTguMzMzMzMgNS44MzMzM0M4LjMzMzMzIDQuOTEyODYgOS4wNzk1MiA0LjE2NjY3IDEwIDQuMTY2NjdDMTAuOTIwNSA0LjE2NjY3IDExLjY2NjcgNC45MTI4NiAxMS42NjY3IDUuODMzMzNWNy41SDguMzMzMzNWNS44MzMzM1pNMTAgMTQuMTY2N0M5LjA3OTUyIDE0LjE2NjcgOC4zMzMzMyAxMy40MjA1IDguMzMzMzMgMTIuNUM4LjMzMzMzIDExLjU3OTUgOS4wNzk1MiAxMC44MzMzIDEwIDEwLjgzMzNDMTAuOTIwNSAxMC44MzMzIDExLjY2NjcgMTEuNTc5NSAxMS42NjY3IDEyLjVDMTEuNjY2NyAxMy40MjA1IDEwLjkyMDUgMTQuMTY2NyAxMCAxNC4xNjY3WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      <input class="field-input" placeholder="密码" placeholder-class="ph"
+             password="{{!showPassword}}" value="{{password}}" bindinput="onPass"
+             confirm-type="done" bindconfirm="onLogin" />
+      <view class="field-toggle" bindtap="onTogglePassword">
+        <image class="toggle-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTEwIDQuMTY2NjdDNS44MzMzMyA0LjE2NjY3IDIuMjUgNi43NSAwLjgzMzMzMyAxMEMyLjI1IDEzLjI1IDUuODMzMzMgMTUuODMzMyAxMCAxNS44MzMzQzE0LjE2NjcgMTUuODMzMyAxNy43NSAxMy4yNSAxOS4xNjY3IDEwQzE3Ljc1IDYuNzUgMTQuMTY2NyA0LjE2NjY3IDEwIDQuMTY2NjdaTTEwIDE0LjE2NjdDNy43MDgzMyAxNC4xNjY3IDUuODMzMzMgMTIuMjkxNyA1LjgzMzMzIDEwQzUuODMzMzMgNy43MDgzMyA3LjcwODMzIDUuODMzMzMgMTAgNS44MzMzM0MxMi4yOTE3IDUuODMzMzMgMTQuMTY2NyA3LjcwODMzIDE0LjE2NjcgMTBDMTQuMTY2NyAxMi4yOTE3IDEyLjI5MTcgMTQuMTY2NyAxMCAxNC4xNjY3Wk0xMCA3LjVDOC42MTY2NyA3LjUgNy41IDguNjE2NjcgNy41IDEwQzcuNSAxMS4zODMzIDguNjE2NjcgMTIuNSAxMCAxMi41QzExLjM4MzMgMTIuNSAxMi41IDExLjM4MzMgMTIuNSAxMEMxMi41IDguNjE2NjcgMTEuMzgzMyA3LjUgMTAgNy41WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      </view>
     </view>
   </view>
 
-  <view class="card login-card" wx:else>
-    <view class="field">
-      <text class="label label-wide">新密码</text>
-      <input class="input" placeholder="至少8位" placeholder-class="ph"
-             password value="{{newPassword}}" bindinput="onNewPassword" confirm-type="next" />
+  <view class="form-card" wx:else>
+    <view class="form-field">
+      <image class="field-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTE0LjE2NjcgNy41SDEzLjMzMzNWNS44MzMzM0MxMy4zMzMzIDMuOTkyMzggMTEuODQwOSAyLjUgMTAgMi41QzguMTU5MDUgMi41IDYuNjY2NjcgMy45OTIzOCA2LjY2NjY3IDUuODMzMzNWNy41SDUuODMzMzNDNC45MTI4NiA3LjUgNC4xNjY2NyA4LjI0NjE5IDQuMTY2NjcgOS4xNjY2N1YxNS44MzMzQzQuMTY2NjcgMTYuNzUzOCA0LjkxMjg2IDE3LjUgNS44MzMzMyAxNy41SDE0LjE2NjdDMTUuMDg3MSAxNy41IDE1LjgzMzMgMTYuNzUzOCAxNS44MzMzIDE1LjgzMzNWOS4xNjY2N0MxNS44MzMzIDguMjQ2MTkgMTUuMDg3MSA3LjUgMTQuMTY2NyA3LjVaTTguMzMzMzMgNS44MzMzM0M4LjMzMzMzIDQuOTEyODYgOS4wNzk1MiA0LjE2NjY3IDEwIDQuMTY2NjdDMTAuOTIwNSA0LjE2NjY3IDExLjY2NjcgNC45MTI4NiAxMS42NjY3IDUuODMzMzNWNy41SDguMzMzMzNWNS44MzMzM1pNMTAgMTQuMTY2N0M5LjA3OTUyIDE0LjE2NjcgOC4zMzMzMyAxMy40MjA1IDguMzMzMzMgMTIuNUM4LjMzMzMzIDExLjU3OTUgOS4wNzk1MiAxMC44MzMzIDEwIDEwLjgzMzNDMTAuOTIwNSAxMC44MzMzIDExLjY2NjcgMTEuNTc5NSAxMS42NjY3IDEyLjVDMTEuNjY2NyAxMy40MjA1IDEwLjkyMDUgMTQuMTY2NyAxMCAxNC4xNjY3WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      <input class="field-input" placeholder="至少8位" placeholder-class="ph"
+             password="{{!showNewPassword}}" value="{{newPassword}}" bindinput="onNewPassword" confirm-type="next" />
+      <view class="field-toggle" bindtap="onToggleNewPassword">
+        <image class="toggle-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTEwIDQuMTY2NjdDNS44MzMzMyA0LjE2NjY3IDIuMjUgNi43NSAwLjgzMzMzMyAxMEMyLjI1IDEzLjI1IDUuODMzMzMgMTUuODMzMyAxMCAxNS44MzMzQzE0LjE2NjcgMTUuODMzMyAxNy43NSAxMy4yNSAxOS4xNjY3IDEwQzE3Ljc1IDYuNzUgMTQuMTY2NyA0LjE2NjY3IDEwIDQuMTY2NjdaTTEwIDE0LjE2NjdDNy43MDgzMyAxNC4xNjY3IDUuODMzMzMgMTIuMjkxNyA1LjgzMzMzIDEwQzUuODMzMzMgNy43MDgzMyA3LjcwODMzIDUuODMzMzMgMTAgNS44MzMzM0MxMi4yOTE3IDUuODMzMzMgMTQuMTY2NyA3LjcwODMzIDE0LjE2NjcgMTBDMTQuMTY2NyAxMi4yOTE3IDEyLjI5MTcgMTQuMTY2NyAxMCAxNC4xNjY3Wk0xMCA3LjVDOC42MTY2NyA3LjUgNy41IDguNjE2NjcgNy41IDEwQzcuNSAxMS4zODMzIDguNjE2NjcgMTIuNSAxMCAxMi41QzExLjM4MzMgMTIuNSAxMi41IDExLjM4MzMgMTIuNSAxMEMxMi41IDguNjE2NjcgMTEuMzgzMyA3LjUgMTAgNy41WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      </view>
     </view>
-    <view class="hairline"></view>
-    <view class="field">
-      <text class="label label-wide">确认密码</text>
-      <input class="input" placeholder="再次输入新密码" placeholder-class="ph"
-             password value="{{confirmPassword}}" bindinput="onConfirmPassword"
+    <view class="form-field">
+      <image class="field-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTE0LjE2NjcgNy41SDEzLjMzMzNWNS44MzMzM0MxMy4zMzMzIDMuOTkyMzggMTEuODQwOSAyLjUgMTAgMi41QzguMTU5MDUgMi41IDYuNjY2NjcgMy45OTIzOCA2LjY2NjY3IDUuODMzMzNWNy41SDUuODMzMzNDNC45MTI4NiA3LjUgNC4xNjY2NyA4LjI0NjE5IDQuMTY2NjcgOS4xNjY2N1YxNS44MzMzQzQuMTY2NjcgMTYuNzUzOCA0LjkxMjg2IDE3LjUgNS44MzMzMyAxNy41SDE0LjE2NjdDMTUuMDg3MSAxNy41IDE1LjgzMzMgMTYuNzUzOCAxNS44MzMzIDE1LjgzMzNWOS4xNjY2N0MxNS44MzMzIDguMjQ2MTkgMTUuMDg3MSA3LjUgMTQuMTY2NyA3LjVaTTguMzMzMzMgNS44MzMzM0M4LjMzMzMzIDQuOTEyODYgOS4wNzk1MiA0LjE2NjY3IDEwIDQuMTY2NjdDMTAuOTIwNSA0LjE2NjY3IDExLjY2NjcgNC45MTI4NiAxMS42NjY3IDUuODMzMzNWNy41SDguMzMzMzNWNS44MzMzM1pNMTAgMTQuMTY2N0M5LjA3OTUyIDE0LjE2NjcgOC4zMzMzMyAxMy40MjA1IDguMzMzMzMgMTIuNUM4LjMzMzMzIDExLjU3OTUgOS4wNzk1MiAxMC44MzMzIDEwIDEwLjgzMzNDMTAuOTIwNSAxMC44MzMzIDExLjY2NjcgMTEuNTc5NSAxMS42NjY3IDEyLjVDMTEuNjY2NyAxMy40MjA1IDEwLjkyMDUgMTQuMTY2NyAxMCAxNC4xNjY3WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      <input class="field-input" placeholder="再次输入新密码" placeholder-class="ph"
+             password="{{!showConfirmPassword}}" value="{{confirmPassword}}" bindinput="onConfirmPassword"
              confirm-type="done" bindconfirm="onChangePassword" />
+      <view class="field-toggle" bindtap="onToggleConfirmPassword">
+        <image class="toggle-icon" src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjAgMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHBhdGggZD0iTTEwIDQuMTY2NjdDNS44MzMzMyA0LjE2NjY3IDIuMjUgNi43NSAwLjgzMzMzMyAxMEMyLjI1IDEzLjI1IDUuODMzMzMgMTUuODMzMyAxMCAxNS44MzMzQzE0LjE2NjcgMTUuODMzMyAxNy43NSAxMy4yNSAxOS4xNjY3IDEwQzE3Ljc1IDYuNzUgMTQuMTY2NyA0LjE2NjY3IDEwIDQuMTY2NjdaTTEwIDE0LjE2NjdDNy43MDgzMyAxNC4xNjY3IDUuODMzMzMgMTIuMjkxNyA1LjgzMzMzIDEwQzUuODMzMzMgNy43MDgzMyA3LjcwODMzIDUuODMzMzMgMTAgNS44MzMzM0MxMi4yOTE3IDUuODMzMzMgMTQuMTY2NyA3LjcwODMzIDE0LjE2NjcgMTBDMTQuMTY2NyAxMi4yOTE3IDEyLjI5MTcgMTQuMTY2NyAxMCAxNC4xNjY3Wk0xMCA3LjVDOC42MTY2NyA3LjUgNy41IDguNjE2NjcgNy41IDEwQzcuNSAxMS4zODMzIDguNjE2NjcgMTIuNSAxMCAxMi41QzExLjM4MzMgMTIuNSAxMi41IDExLjM4MzMgMTIuNSAxMEMxMi41IDguNjE2NjcgMTEuMzgzMyA3LjUgMTAgNy41WiIgZmlsbD0iIzhFOEU5MyIvPgo8L3N2Zz4=" mode="aspectFit" />
+      </view>
     </view>
   </view>
 
-  <button class="btn-primary login-btn" wx:if="{{!mustChangePassword}}"
+  <!-- 登录按钮 -->
+  <button class="btn-login" wx:if="{{!mustChangePassword}}"
           loading="{{loading}}" disabled="{{loading}}" bindtap="onLogin">登 录</button>
-  <button class="btn-primary login-btn" wx:else
+  <button class="btn-login" wx:else
           loading="{{loading}}" disabled="{{loading}}" bindtap="onChangePassword">保存并进入系统</button>
 
+  <!-- 错误提示 -->
   <view class="login-error" wx:if="{{error}}">{{error}}</view>
+
+  <!-- 底部 -->
+  <view class="login-footer">
+    <text class="footer-text">请联系管理员获取账号</text>
+  </view>
 </view>

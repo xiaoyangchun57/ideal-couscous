@@ -1,0 +1,97 @@
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 96rpx 48rpx;
+}
+
+.empty-state__icon {
+  margin-bottom: 24rpx;
+}
+
+.icon-shape {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.icon-shape--empty {
+  background: var(--color-muted, #f2f2f7);
+}
+
+.icon-shape--task {
+  background: var(--color-success-surface, rgba(52,199,89,0.12));
+}
+
+.icon-shape--error {
+  background: var(--color-error-surface, rgba(255,59,48,0.12));
+}
+
+/* 文档图标（纯 CSS 绘制） */
+.icon-doc {
+  width: 44rpx;
+  height: 52rpx;
+  border: 3rpx solid var(--color-icon-tertiary, #c7c7cc);
+  border-radius: 6rpx;
+  position: relative;
+}
+
+.icon-doc::before {
+  content: '';
+  width: 22rpx;
+  height: 3rpx;
+  background: var(--color-icon-tertiary, #c7c7cc);
+  position: absolute;
+  top: 12rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 10rpx 0 var(--color-icon-tertiary, #c7c7cc),
+              0 20rpx 0 var(--color-icon-tertiary, #c7c7cc);
+}
+
+.empty-state--task .icon-doc {
+  border-color: var(--color-success, #34c759);
+}
+
+.empty-state--task .icon-doc::before {
+  background: var(--color-success, #34c759);
+  box-shadow: 0 10rpx 0 var(--color-success, #34c759),
+              0 20rpx 0 var(--color-success, #34c759);
+}
+
+/* 错误感叹号 */
+.icon-exclaim {
+  font-size: 44rpx;
+  font-weight: 600;
+  color: var(--color-error, #ff3b30);
+  line-height: 1;
+}
+
+.empty-state__title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+  margin-bottom: 8rpx;
+}
+
+.empty-state__desc {
+  font-size: 26rpx;
+  color: var(--color-text-secondary, #3c3c43);
+  line-height: 1.5;
+  max-width: 480rpx;
+}
+
+.empty-state__action {
+  margin-top: 24rpx;
+}
+
+.action-btn {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-primary, #007aff);
+}

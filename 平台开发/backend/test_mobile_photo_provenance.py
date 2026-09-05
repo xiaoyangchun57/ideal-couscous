@@ -24,6 +24,17 @@ def jpeg_bytes(color='white'):
     return buffer.getvalue()
 
 
+def patterned_jpeg_bytes():
+    buffer = io.BytesIO()
+    image = Image.new('RGB', (64, 48), 'black')
+    for x in range(64):
+        for y in range(48):
+            value = (x * 37 + y * 73 + x * y * 11) % 256
+            image.putpixel((x, y), (value, (value * 3) % 256, (255 - value)))
+    image.save(buffer, format='JPEG')
+    return buffer.getvalue()
+
+
 class MobilePhotoProvenanceTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -40,6 +51,10 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             db.row_factory = sqlite3.Row
             try:
                 yield db
+            except Exception:
+                db.rollback()
+                raise
+            else:
                 db.commit()
             finally:
                 db.close()
@@ -57,6 +72,13 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 INSERT INTO sites VALUES (1,'测试站',28.071303,115.539684);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 INSERT INTO user_sites VALUES (2,1);
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, real_name TEXT, role TEXT, status TEXT
+                );
+                INSERT INTO users VALUES (3,'审核员','reviewer','active');
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
+                INSERT INTO user_roles VALUES (3,'reviewer');
+                INSERT INTO user_sites VALUES (3,1);
                 CREATE TABLE plan_schedules (id INTEGER PRIMARY KEY, status TEXT);
                 INSERT INTO plan_schedules VALUES (5,'approved');
                 CREATE TABLE insp_plans (
@@ -119,8 +141,9 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     rework_required_at TEXT, capture_source TEXT DEFAULT ''
                 );
                 CREATE TABLE notifications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT,
-                    source_id INTEGER, is_read INTEGER DEFAULT 0
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+                    source_type TEXT, source_id INTEGER, title TEXT, content TEXT,
+                    is_read INTEGER DEFAULT 0
                 );
             ''')
             db.execute('INSERT INTO inspection_checkins VALUES (1,1,2,?)',
@@ -148,10 +171,10 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         }
         return self.client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
 
-    def set_valid_watermark(self):
+    def set_valid_watermark(self, code='WRWYCRY1K14X34'):
         now = datetime.now().strftime('%Y.%m.%d %H:%M')
         app_module._recognize_watermark = lambda _: {
-            'text': f'时间:{now}\n经纬度:28.071303 N,115.539684 E\n防伪WRWYCRY1K14X34',
+            'text': f'时间:{now}\n经纬度:28.071303 N,115.539684 E\n防伪{code}',
             'confidence': 0.99,
             'status': 'recognized',
         }
@@ -188,6 +211,29 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         photo_dir = os.path.join(self.upload_dir, 'site_photos')
         self.assertFalse(os.path.isdir(photo_dir) and os.listdir(photo_dir))
 
+    def create_pending_site_photo(self, *, filename='pending.jpg', uploader_id=2,
+                                  source_type='site_photo', source_id=0, stored_path=None,
+                                  material_role=None, raw_extra_json=None):
+        photo_dir = os.path.join(self.upload_dir, 'site_photos')
+        os.makedirs(photo_dir, exist_ok=True)
+        path = stored_path or f'/uploads/site_photos/{filename}'
+        file_path = os.path.join(photo_dir, filename)
+        with open(file_path, 'wb') as photo_file:
+            photo_file.write(b'pending-photo')
+        with app_module.get_db() as db:
+            cursor = db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,source_type,source_id,site_id,uploader_id,is_deleted,extra_json)
+                VALUES (?,?,?,?,?,?,0,?)""",
+                (filename, path, source_type, source_id, 1, uploader_id,
+                 raw_extra_json if raw_extra_json is not None else
+                 (json.dumps({'material_role': material_role}) if material_role else '{}')))
+            attachment_id = cursor.lastrowid
+        return attachment_id, path, file_path
+
+    def delete_pending_site_photo(self, path):
+        return self.client.post('/api/mobile/site-photos/delete', headers=self.headers(),
+                                json={'url': path})
+
     def test_unreadable_album_does_not_create_business_attachment(self):
         app_module._recognize_watermark = lambda _: {
             'text': '', 'confidence': None, 'status': 'unreadable',
@@ -215,7 +261,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             self.assertEqual(json.loads(row['extra_json'])['material_role'], 'supplement')
             self.assertEqual(app_module._qualified_evidence_count(db, 'inspection', 100), 0)
 
-    def test_valid_watermark_album_enters_review_and_binds_server_item(self):
+    def test_valid_watermark_album_stays_pending_until_item_submission(self):
         self.set_valid_watermark()
         response = self.upload(jpeg_bytes('orange'), capture_source='watermark_album',
                                _idempotency_key='album-qualified')
@@ -223,9 +269,15 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertTrue(response.json['accepted_for_review'])
         with app_module.get_db() as db:
             row = db.execute('SELECT * FROM operation_attachments').fetchone()
-        self.assertEqual((row['source_type'], row['source_id'], row['review_status']),
-                         ('inspection', 100, 'pending'))
-        self.assertEqual(json.loads(row['extra_json'])['item_name'], '浊度仪表读数')
+        self.assertEqual((row['source_type'], row['source_id'], row['review_status'],
+                          row['review_required']), ('site_photo', 0, 'pending', 0))
+        extra = json.loads(row['extra_json'])
+        self.assertEqual((extra['item_name'], extra['material_role']),
+                         ('浊度仪表读数', 'pending_inspection'))
+        self.assertTrue(response.json['pending_submission'])
+        self.assertFalse(response.json['is_effective_evidence'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
 
     def test_duplicate_and_idempotent_replay_do_not_create_more_formal_rows(self):
         self.set_valid_watermark()
@@ -316,6 +368,8 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             '_idempotency_key': 'submit-return-watermark-qualified',
         })
         self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['photo_urls'], [uploaded.json['url']])
+        self.assertEqual(submitted.json['actual_photos'], 1)
         with app_module.get_db() as db:
             item = db.execute("""SELECT review_status,evidence_status,rework_required_at,
                 check_out_time,photo_urls FROM insp_plan_items WHERE id=100""").fetchone()
@@ -335,6 +389,80 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                          ('watermark_album', 'pending'))
         self.assertEqual(facts['rework_required_at'], required_at)
         self.assertLessEqual(facts['distance_m'], 500)
+
+    def test_site_review_opens_only_after_last_retake_and_replay_does_not_notify_twice(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,item_name,category,result,review_status,evidence_status,
+                 rework_required_at,execution_status,required_photos,photo_urls)
+                VALUES (101,10,1,'第二补拍项','设备检查','normal',3,'supplement_required',
+                        datetime('now','localtime','-1 minute'),'active',0,'[]')""")
+        self.set_retake_required(100)
+        self.set_valid_watermark()
+
+        first_upload = self.upload(jpeg_bytes('red'), capture_source='watermark_album',
+                                   _idempotency_key='first-retake-upload')
+        first = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps([first_upload.json['url']]),
+            '_idempotency_key': 'first-retake-submit',
+        })
+        self.assertEqual(first.status_code, 200, first.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
+
+        self.set_valid_watermark('WRWYCRY9Z87Q65')
+        second_upload = self.upload(patterned_jpeg_bytes(), item_id=101, item_name='第二补拍项',
+                                    capture_source='watermark_album',
+                                    _idempotency_key='second-retake-upload')
+        self.assertEqual(second_upload.status_code, 200, second_upload.json)
+        self.assertTrue(second_upload.json['accepted_for_review'], second_upload.json)
+        payload = {
+            'item_id': 101, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps([second_upload.json['url']]),
+            '_idempotency_key': 'second-retake-submit',
+        }
+        second = self.client.post('/api/mobile/submit-item', headers=self.headers(), json=payload)
+        replay = self.client.post('/api/mobile/submit-item', headers=self.headers(), json=payload)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        with app_module.get_db() as db:
+            states = db.execute("""SELECT review_status,evidence_status FROM insp_plan_items
+                WHERE id IN (100,101) ORDER BY id""").fetchall()
+            notifications = db.execute("""SELECT source_type,source_id FROM notifications
+                WHERE source_type='inspection_review_batch'""").fetchall()
+        self.assertEqual([(row['review_status'], row['evidence_status']) for row in states],
+                         [(1, 'replacement_submitted'), (1, 'replacement_submitted')])
+        self.assertEqual([(row['source_type'], row['source_id']) for row in notifications],
+                         [('inspection_review_batch', 'insp_batch_10_1')])
+
+    def test_final_retake_notification_failure_rolls_back_item_attachment_and_idempotency(self):
+        self.set_retake_required()
+        self.set_valid_watermark()
+        uploaded = self.upload(jpeg_bytes('green'), capture_source='watermark_album',
+                               _idempotency_key='rollback-retake-upload')
+        with mock.patch.object(
+                app_module, '_notify_inspection_batch_reviewers',
+                side_effect=sqlite3.OperationalError('notify failed')):
+            submitted = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+                'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+                'photo_urls': json.dumps([uploaded.json['url']]),
+                '_idempotency_key': 'rollback-retake-submit',
+            })
+        self.assertEqual(submitted.status_code, 500, submitted.json)
+        with app_module.get_db() as db:
+            item = db.execute("""SELECT review_status,evidence_status,photo_urls
+                FROM insp_plan_items WHERE id=100""").fetchone()
+            attachment = db.execute("""SELECT source_type,source_id,review_required
+                FROM operation_attachments""").fetchone()
+            submit_idempotency = db.execute("""SELECT COUNT(*) FROM mobile_idempotency
+                WHERE endpoint='submit-item'""").fetchone()[0]
+            notification_count = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+        self.assertEqual((item['review_status'], item['evidence_status'], json.loads(item['photo_urls'])),
+                         (3, 'supplement_required', []))
+        self.assertEqual((attachment['source_type'], attachment['source_id'], attachment['review_required']),
+                         ('site_photo', 0, 0))
+        self.assertEqual((submit_idempotency, notification_count), (0, 0))
 
     def test_capture_session_is_camera_only_and_camera_requires_current_location(self):
         self.set_retake_required()
@@ -822,7 +950,6 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
     def test_inspection_upload_faults_leave_no_database_rows_cache_or_orphan_file(self):
         failure_points = (
             ('evaluation', '_record_attachment_evaluation'),
-            ('association', '_persist_inspection_attachment_link'),
             ('flagging', '_flag_attachment'),
         )
         for index, (label, target) in enumerate(failure_points):
@@ -858,6 +985,110 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(app_module._attachment_storage_path(
             'http://127.0.0.1:5021/uploads/site_photos/a.jpg?display=1'),
             '/uploads/site_photos/a.jpg')
+
+    def test_pending_site_photo_delete_cleans_row_and_file_with_confirmed_receipt(self):
+        attachment_id, path, file_path = self.create_pending_site_photo()
+        response = self.delete_pending_site_photo(path)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json, {
+            'success': True, 'deleted': True, 'already_deleted': False,
+            'attachment_id': attachment_id, 'path': path,
+        })
+        with app_module.get_db() as db:
+            self.assertIsNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=?',
+                (attachment_id,)).fetchone())
+        self.assertFalse(os.path.exists(file_path))
+
+        replay = self.delete_pending_site_photo(path)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertEqual(replay.json, {
+            'success': True, 'deleted': False, 'already_deleted': True,
+            'attachment_id': None, 'path': path,
+        })
+
+    def test_pending_inspection_site_photo_is_deletable(self):
+        attachment_id, path, file_path = self.create_pending_site_photo(
+            filename='pending-inspection.jpg', material_role='pending_inspection')
+        response = self.delete_pending_site_photo(path)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['deleted'])
+        with app_module.get_db() as db:
+            self.assertIsNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=?', (attachment_id,)).fetchone())
+        self.assertFalse(os.path.exists(file_path))
+
+    def test_pending_site_photo_delete_rejects_unsafe_or_protected_targets(self):
+        cases = (
+            ('other-user.jpg', 3, 'site_photo', 0),
+            ('inspection.jpg', 2, 'inspection', 100),
+            ('workorder.jpg', 2, 'workorder', 200),
+            ('manual-report.jpg', 2, 'manual_report', 300),
+        )
+        for filename, uploader_id, source_type, source_id in cases:
+            with self.subTest(source_type=source_type, uploader_id=uploader_id):
+                attachment_id, path, file_path = self.create_pending_site_photo(
+                    filename=filename, uploader_id=uploader_id,
+                    source_type=source_type, source_id=source_id)
+                response = self.delete_pending_site_photo(path)
+                self.assertEqual(response.status_code, 404, response.json)
+                with app_module.get_db() as db:
+                    self.assertIsNotNone(db.execute(
+                        'SELECT id FROM operation_attachments WHERE id=?',
+                        (attachment_id,)).fetchone())
+                self.assertTrue(os.path.exists(file_path))
+
+        for invalid in (
+                '', '/uploads/site_photos/', '/uploads/site_photos/../outside.jpg',
+                '/uploads/site_photos/a.jpg?x=1', 'https://evil.example/uploads/site_photos/a.jpg'):
+            with self.subTest(invalid=invalid):
+                response = self.delete_pending_site_photo(invalid)
+                self.assertEqual(response.status_code, 400, response.json)
+
+    def test_pending_site_photo_file_delete_failure_keeps_row_and_file(self):
+        attachment_id, path, file_path = self.create_pending_site_photo(
+            filename='locked.jpg')
+        real_remove = os.remove
+
+        def fail_target(candidate):
+            if os.path.normcase(candidate) == os.path.normcase(file_path):
+                raise PermissionError('injected file lock')
+            return real_remove(candidate)
+
+        with mock.patch.object(app_module.os, 'remove', side_effect=fail_target):
+            response = self.delete_pending_site_photo(path)
+        self.assertEqual(response.status_code, 500, response.json)
+        self.assertEqual(response.json['code'], 'PENDING_PHOTO_FILE_DELETE_FAILED')
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=?',
+                (attachment_id,)).fetchone())
+        self.assertTrue(os.path.exists(file_path))
+
+    def test_supplement_site_photo_cannot_be_physically_deleted(self):
+        attachment_id, path, file_path = self.create_pending_site_photo(
+            filename='supplement.jpg', material_role='supplement')
+        response = self.delete_pending_site_photo(path)
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'PENDING_PHOTO_MATERIAL_PROTECTED')
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=?', (attachment_id,)).fetchone())
+        self.assertTrue(os.path.exists(file_path))
+
+    def test_non_object_site_photo_metadata_cannot_be_physically_deleted(self):
+        for index, raw_extra_json in enumerate(('[]', '["pending_inspection"]', '"legacy"')):
+            with self.subTest(raw_extra_json=raw_extra_json):
+                attachment_id, path, file_path = self.create_pending_site_photo(
+                    filename=f'non-object-{index}.jpg', raw_extra_json=raw_extra_json)
+                response = self.delete_pending_site_photo(path)
+                self.assertEqual(response.status_code, 409, response.json)
+                self.assertEqual(response.json['code'], 'PENDING_PHOTO_MATERIAL_PROTECTED')
+                with app_module.get_db() as db:
+                    self.assertIsNotNone(db.execute(
+                        'SELECT id FROM operation_attachments WHERE id=?',
+                        (attachment_id,)).fetchone())
+                self.assertTrue(os.path.exists(file_path))
 
 
 if __name__ == '__main__':

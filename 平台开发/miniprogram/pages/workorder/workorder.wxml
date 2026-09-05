@@ -17,17 +17,20 @@
   <!-- 工单列表 -->
   <view class="wo-list" wx:if="{{loaded && list.length > 0}}">
     <view class="wo-card" wx:for="{{list}}" wx:key="order_no" bindtap="onOpen" data-no="{{item.order_no}}">
-      <view class="wo-card-top">
-        <text class="wo-title">{{item.display_title}}</text>
+      <view class="wo-card-head">
+        <text class="wo-site">{{item.site_name}}</text>
         <view class="wo-status-chip wschip-{{item.status_cls}}">{{item.status_cn}}</view>
       </view>
-      <view class="wo-card-mid">
-        <text class="wo-site">{{item.site_name}}</text>
-        <text class="wo-source">{{item.source_cn}}<text wx:if="{{item.level_cn && item.level_cn !== '未知'}}" class="{{item.level_cn === '紧急' ? 'wo-level-urgent' : ''}}"> · {{item.level_cn}}</text></text>
-      </view>
-      <view class="wo-card-bottom">
-        <text class="wo-sla" wx:if="{{item.sla_deadline}}">时限 {{item.sla_deadline}}</text>
-        <view class="wo-arrow ico ico-chevron-right"></view>
+      <text class="wo-title">{{item.display_title}}</text>
+      <view class="wo-card-foot">
+        <view class="wo-foot-left">
+          <text wx:if="{{item.level_cn && item.level_cn !== '未知'}}" class="wo-level wo-level-{{item.level_cls}}">{{item.level_cn}}</text>
+          <text class="wo-sla" wx:if="{{item.sla_deadline}}">时限 {{item.sla_deadline}}</text>
+        </view>
+        <view class="wo-foot-right">
+          <text class="wo-source">{{item.source_cn}}</text>
+          <view class="wo-arrow ico ico-chevron-right"></view>
+        </view>
       </view>
     </view>
   </view>
@@ -124,7 +127,7 @@
         <view class="wos-group-title">流转记录</view>
         <block wx:if="{{sheet.item.flowEvents.length}}">
           <view class="wos-timeline">
-            <view wx:for="{{sheet.item.flowEvents}}" wx:key="index" class="wos-timeline-item {{index === sheet.item.flowEvents.length - 1 ? 'wos-timeline-item--last' : ''}}">
+            <view wx:for="{{sheet.item.flowEvents}}" wx:key="index" class="wos-timeline-item wos-timeline-item--{{item.tone}}">
               <view class="wos-timeline-dot"></view>
               <view class="wos-timeline-line" wx:if="{{index < sheet.item.flowEvents.length - 1}}"></view>
               <view class="wos-timeline-content">

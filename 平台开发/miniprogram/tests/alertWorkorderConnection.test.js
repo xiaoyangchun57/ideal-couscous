@@ -102,6 +102,52 @@ test('workorder filters form five exhaustive groups while cards keep exact stage
     ['待受理', '已受理', '已派发', '处置中', '审核中', '已解决', '已完成']);
 });
 
+test('workorder display classes and timeline tones use server and WXSS contracts', () => {
+  const workorderView = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.wxml'), 'utf8');
+  const workorderStyles = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.wxss'), 'utf8');
+  const workorderPage = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.js'), 'utf8');
+  const expectedClasses = {
+    pending: 'pending', accepted: 'accepted', dispatched: 'dispatched',
+    in_progress: 'in_progress', reviewing: 'reviewing', resolved: 'resolved', closed: 'closed',
+  };
+  for (const [status, statusCls] of Object.entries(expectedClasses)) {
+    assert.equal(maps.workorderCn({ status }).status_cls, statusCls, status);
+  }
+  assert.equal(maps.workorderCn({ status: 'unknown' }).status_cls, 'default');
+  assert.deepEqual(['critical', 'urgent', 'normal'].map(level => maps.workorderCn({ level }).level_cls),
+    ['red', 'orange', 'gray']);
+  assert.equal(maps.workorderCn({ level: 'unknown' }).level_cls, 'gray');
+  assert.match(workorderView, /class="wo-level wo-level-\{\{item\.level_cls\}\}"/);
+  assert.doesNotMatch(workorderView, /class="[^"]*\{\{[^}]*level_cn\s*===/);
+  assert.match(workorderView, /wos-chip-\{\{sheet\.item\.status_cls\}\}/);
+  assert.match(workorderView, /wos-timeline-item--\{\{item\.tone\}\}/);
+  assert.doesNotMatch(workorderView, /index === sheet\.item\.flowEvents\.length - 1/);
+  for (const tone of ['completed', 'current']) {
+    assert.match(workorderStyles,
+      new RegExp(`\\.workorder-detail-sheet \\.wos-timeline-item--${tone}\\b`), tone);
+  }
+  assert.doesNotMatch(workorderStyles, /wos-timeline-item--done\b/);
+  assert.match(workorderPage, /const flowEvents = Array\.isArray\(mapped\.flow_events\) \? mapped\.flow_events : \[\]/);
+  assert.doesNotMatch(workorderPage, /flowEvents\.map\(/);
+});
+
+test('alert display bindings consume the server projection and retain a real zero', () => {
+  const view = fs.readFileSync(path.join(__dirname, '../pages/alert/alert.wxml'), 'utf8');
+  assert.match(view, /wx:if="\{\{item\.has_monitoring_value\}\}"/);
+  assert.match(view, /\{\{item\.monitoring_value\}\}/);
+  assert.match(view, /\{\{sheet\.item\.monitoring_value\}\}/);
+  assert.match(view, /adt-value-block[\s\S]*当前值[\s\S]*sheet\.item\.monitoring_value/);
+  assert.doesNotMatch(view, /\{\{item\.value\}\}|\{\{sheet\.item\.value\}\}/);
+  assert.match(view, /\{\{item\.display_title\}\}/);
+  assert.match(view, /\{\{sheet\.item\.display_summary\}\}/);
+  assert.match(view, /处置进展/);
+  assert.doesNotMatch(view, /当前状态|流转阶段/);
+  assert.match(view, /关联工单/);
+  assert.match(view, /class="status-chip chip-\{\{sheet\.item\.workorder_status\}\}"[^>]*wx:if="\{\{sheet\.item\.workorder_status_cn\}\}"[^>]*>\{\{sheet\.item\.workorder_status_cn\}\}<\/view>/);
+  assert.doesNotMatch(view, /class="status-chip chip-info"[^>]*wx:if="\{\{sheet\.item\.workorder_status_cn\}\}"/);
+  assert.doesNotMatch(view, /工单状态/);
+});
+
 test('alert primary action follows the visible WXML button into one exact workorder without writes', () => {
   const view = fs.readFileSync(path.join(__dirname, '../pages/alert/alert.wxml'), 'utf8');
   assert.match(view, /related_workorder_target\.order_no[\s\S]*class="sheet-bottom-bar"/);

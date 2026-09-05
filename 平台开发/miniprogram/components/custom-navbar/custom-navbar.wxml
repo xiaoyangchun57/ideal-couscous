@@ -1,0 +1,24 @@
+<!-- components/custom-navbar/custom-navbar.wxml -->
+<view class="custom-nav">
+  <!-- 状态栏占位 -->
+  <view style="height: {{statusBarHeight}}px;"></view>
+
+  <!-- 导航栏内容区 -->
+  <view class="nav-content" style="height: {{navBarHeight}}px;">
+    <!-- 左侧内容 -->
+    <view class="nav-left">
+      <slot name="left"></slot>
+    </view>
+    <!-- 居中内容（可选） -->
+    <view class="nav-center" style="right: {{rightPadding}}px;">
+      <slot name="center"></slot>
+    </view>
+    <!-- 右侧内容 -->
+    <view class="nav-right" style="padding-right: {{rightPadding}}px;">
+      <slot name="right"></slot>
+    </view>
+  </view>
+
+  <!-- 底部分隔线 -->
+  <view wx:if="{{showBorder}}" class="nav-border"></view>
+</view>

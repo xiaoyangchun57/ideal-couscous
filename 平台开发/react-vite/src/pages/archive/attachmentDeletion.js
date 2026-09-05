@@ -112,3 +112,15 @@ export function normalizeDeleteReason(value) {
 export function canSubmitAttachmentDelete(target, reason, submitting = false) {
   return Boolean(target?.can_delete && !submitting && normalizeDeleteReason(reason));
 }
+
+export function rejectedPurgeEligibility(target, user, submitting = false) {
+  if (submitting) return { allowed: false, reason: '正在提交彻底删除请求' };
+  if (!hasAdminRole(user)) return { allowed: false, reason: '仅管理员可彻底删除已驳回影像' };
+  if (target?.source_type !== 'inspection' || target?.review_status !== 'rejected') {
+    return { allowed: false, reason: '仅已驳回的巡检影像可以彻底删除' };
+  }
+  if (target?.association_status !== 'linked') {
+    return { allowed: false, reason: '影像关联不完整，不能彻底删除' };
+  }
+  return { allowed: true, reason: '' };
+}

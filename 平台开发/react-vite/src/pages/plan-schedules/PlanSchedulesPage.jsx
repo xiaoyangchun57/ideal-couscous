@@ -7,7 +7,6 @@ import {
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
   CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
-  MobileOutlined,
   StarOutlined, FolderOpenOutlined, DeleteOutlined,
   ClearOutlined, EditOutlined, PlusOutlined,
 } from '@ant-design/icons';
@@ -21,7 +20,17 @@ import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planSchedu
 import {
   DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
 } from './planRecommendationScope';
-import { groupExecutionPackagesByDate, planExecutionPresentation } from './planExecutionPackages';
+import {
+  canCancelPlanSchedule,
+  groupExecutionPackagesByDate,
+  itineraryRowSiteIds,
+  normalizePlanCancelReason,
+  normalizePlanPurgeReason,
+  planDetailItineraryRows,
+  planExecutionPresentation,
+  sitePriorityPresentation,
+  shouldShowPreExecutionRisks,
+} from './planExecutionPackages';
 import {
   cleanupCandidateFactRows, cleanupCandidateIdentityRows, reconcileCleanupSelection,
 } from './cleanupCandidateFacts';
@@ -38,6 +47,7 @@ const SCHEDULE_STATUS_MAP = {
   rejected: { label: '已退回', color: 'error' },
   modifying: { label: '变更中', color: 'warning' },
   change_submitted: { label: '变更待审', color: 'processing' },
+  cancelled: { label: '已取消', color: 'default' },
   archived: { label: '已归档', color: 'default' },
 };
 
@@ -91,11 +101,18 @@ export default function PlanSchedulesPage() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [acting, setActing] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelError, setCancelError] = useState('');
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeReason, setPurgeReason] = useState('');
+  const [purgeError, setPurgeError] = useState('');
+  const [purgeLoading, setPurgeLoading] = useState(false);
   const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpExpanded, setFollowUpExpanded] = useState(false);
   const [teamOverviewExpanded, setTeamOverviewExpanded] = useState(false);
-  const [executionGuide, setExecutionGuide] = useState(null);
   const [closingExecution, setClosingExecution] = useState(null);
   const [overdueCloseReason, setOverdueCloseReason] = useState('');
   const [overdueClosing, setOverdueClosing] = useState(false);
@@ -131,6 +148,8 @@ export default function PlanSchedulesPage() {
   const cleanupRequestRef = useRef(0);
   const followUpRequestRef = useRef(0);
   const cleanupActionRef = useRef(false);
+  const cancelActionRef = useRef(false);
+  const purgeActionRef = useRef(false);
   const mountedRef = useRef(true);
 
   const loadList = useCallback(async () => {
@@ -672,15 +691,10 @@ export default function PlanSchedulesPage() {
     return () => { cancelled = true; };
   }, [searchParams, setSearchParams]);
 
-  const showExecutionGuide = (task) => {
-    setExecutionGuide(task);
-  };
-
   const handleOverdueAction = async (task, action, reason = '') => {
     try {
       const result = await api.postStrict(`/insp-plans/${task.id}/overdue-action`, { action, reason });
       message.success(action === 'remind' ? '已发送逾期催办' : `已异常关闭，取消 ${result.cancelled_items || 0} 个未完成检查项`);
-      setExecutionGuide(null);
       refreshAll();
       if (detail?.id) openDetail(detail.id);
       return true;
@@ -741,6 +755,79 @@ export default function PlanSchedulesPage() {
     }
   };
 
+  const openPlanCancellation = () => {
+    if (!canCancelPlanSchedule(detail, user) || cancelActionRef.current) return;
+    setCancelReason('');
+    setCancelError('');
+    setCancelOpen(true);
+  };
+
+  const submitPlanCancellation = async () => {
+    const normalized = normalizePlanCancelReason(cancelReason);
+    if (normalized.error) {
+      setCancelError(normalized.error);
+      return;
+    }
+    if (!detail || !canCancelPlanSchedule(detail, user) || cancelActionRef.current) return;
+    const scheduleId = detail.id;
+    const version = Number(detail.version || 1);
+    cancelActionRef.current = true;
+    setCancelReason(normalized.value);
+    setCancelError('');
+    setCancelLoading(true);
+    try {
+      await api.postStrict(`/plan-schedules/${detail.id}/cancel`, { reason: normalized.value, version });
+      message.success('计划已取消');
+      setCancelOpen(false);
+      setCancelReason('');
+      refreshAll();
+      await openDetail(scheduleId);
+    } catch (error) {
+      setCancelError(error?.message || '取消计划失败，请稍后重试');
+    } finally {
+      cancelActionRef.current = false;
+      if (mountedRef.current) setCancelLoading(false);
+    }
+  };
+
+  const openPlanPurge = () => {
+    if (!detail || !isAdmin || purgeActionRef.current) return;
+    setPurgeReason('');
+    setPurgeError('');
+    setPurgeOpen(true);
+  };
+
+  const submitPlanPurge = async () => {
+    const normalized = normalizePlanPurgeReason(purgeReason);
+    if (normalized.error) {
+      setPurgeError(normalized.error);
+      return;
+    }
+    if (!detail || !isAdmin || purgeActionRef.current) return;
+    purgeActionRef.current = true;
+    setPurgeReason(normalized.value);
+    setPurgeError('');
+    setPurgeLoading(true);
+    try {
+      await api.postStrict(`/plan-schedules/${detail.id}/purge`, {
+        reason: normalized.value,
+        version: Number(detail.version || 1),
+      });
+      message.success('无效计划已彻底删除');
+      setPurgeOpen(false);
+      setPurgeReason('');
+      detailRequestRef.current += 1;
+      setDrawerOpen(false);
+      setDetail(null);
+      refreshAll();
+    } catch (error) {
+      setPurgeError(error?.message || '彻底删除失败，请稍后重试');
+    } finally {
+      purgeActionRef.current = false;
+      if (mountedRef.current) setPurgeLoading(false);
+    }
+  };
+
   // 顶部指标
   const stats = useMemo(() => ({
     draft: list.filter(r => r.status === 'draft').length,
@@ -762,49 +849,50 @@ export default function PlanSchedulesPage() {
     { title: '逾期执行', dataIndex: 'overdue_executions', width: 90, align: 'center', render: v => v ? <Tag color="red">{v}</Tag> : '0' },
   ];
 
-  // 详情内：按日期排序的行程
-  const dayRows = useMemo(() => {
-    if (!detail?.plan_data) return [];
-    return Object.entries(detail.plan_data)
-      .filter(([, v]) => v && Array.isArray(v.sites) && v.sites.length > 0)
-      .sort(([a], [b]) => a.localeCompare(b));
-  }, [detail]);
-
-  const hasScheduledSites = Number(detail?.site_count || 0) > 0 || dayRows.length > 0;
-  const generatedPlanCount = (detail?.generated_site_tasks || []).length;
-  const executionByDate = useMemo(() => (detail?.generated_site_tasks || []).reduce((result, task) => {
-    const date = task.date || '';
-    if (!result[date]) result[date] = [];
-    result[date].push(task);
-    return result;
-  }, {}), [detail]);
-  const executionPackagesByDate = useMemo(
-    () => groupExecutionPackagesByDate(detail?.generated_site_tasks || []),
-    [detail],
+  // 详情内：生成后的日期×站点事实优先；未生成的日期才展示排程站点。
+  const generatedSiteTasks = detail?.generated_site_tasks || [];
+  const itineraryRows = useMemo(
+    () => planDetailItineraryRows(detail?.plan_data || {}, generatedSiteTasks),
+    [detail, generatedSiteTasks],
   );
-  const isApprovedSchedule = ['approved', 'archived'].includes(detail?.status);
+  const hasScheduledSites = Number(detail?.site_count || 0) > 0 || itineraryRows.length > 0;
+  const generatedPlanCount = generatedSiteTasks.length;
+  const executionPackagesByDate = useMemo(
+    () => groupExecutionPackagesByDate(generatedSiteTasks),
+    [generatedSiteTasks],
+  );
+  const showPreExecutionRisks = shouldShowPreExecutionRisks(detail || {});
+  const shouldWarnMissingExecution = detail?.status === 'approved'
+    && planExecutionPresentation(detail).key !== 'completed';
+  const canCancelDetail = canCancelPlanSchedule(detail, user);
+  const canEditDetail = detail && ['draft', 'rejected', 'modifying'].includes(detail.status)
+    && (Number(detail.user_id) === Number(user?.id) || canApprove);
+  const canReviewDetail = detail && canApprove
+    && (detail.status === 'submitted' || detail.status === 'change_submitted');
+  const canPurgeDetail = Boolean(detail && isAdmin);
 
   // 详情内：风险预警汇总（校验警告 + 高危排序提示）
   const riskWarnings = useMemo(() => {
+    if (!showPreExecutionRisks) return [];
     const warns = [];
     (validation?.warnings || []).forEach(w => warns.push({ type: 'coverage', text: w }));
     (validation?.errors || []).forEach(w => warns.push({ type: 'conflict', text: w }));
     // 高危站点排在周期后半段 → 提示
-    if (detail && suggestions?.site_scores && dayRows.length >= 2) {
-      const midDate = dayRows[Math.floor(dayRows.length / 2)][0];
-      dayRows.forEach(([date, dayData]) => {
-        if (date < midDate) return;
-        (dayData.sites || []).forEach(sid => {
+    if (detail && suggestions?.site_scores && itineraryRows.length >= 2) {
+      const midDate = itineraryRows[Math.floor(itineraryRows.length / 2)].date;
+      itineraryRows.forEach(row => {
+        if (row.date < midDate) return;
+        itineraryRowSiteIds(row).forEach(sid => {
           const score = suggestions.site_scores[String(sid)] || 0;
           if (score >= 30) {
             const name = detail.site_map?.[sid]?.name || `站点${sid}`;
-            warns.push({ type: 'priority', text: `${name}优先级高（评分${score}）但排在${date}（${weekdayOf(date)}），建议提前` });
+            warns.push({ type: 'priority', text: `${name}优先级高（评分${score}）但排在${row.date}（${weekdayOf(row.date)}），建议提前` });
           }
         });
       });
     }
     return warns;
-  }, [validation, suggestions, detail, dayRows]);
+  }, [showPreExecutionRisks, validation, suggestions, detail, itineraryRows]);
 
   const columns = [
     { title: '排程人', dataIndex: 'user_name', width: 90 },
@@ -868,12 +956,16 @@ export default function PlanSchedulesPage() {
 
   const scoreBadge = (sid) => {
     const score = suggestions?.site_scores?.[String(sid)];
-    if (score === undefined || score === null) return null;
-    const lv = scoreLevel(score, tokens);
+    const reasons = suggestions?.site_reasons?.[String(sid)] || [];
+    const presentation = sitePriorityPresentation(showPreExecutionRisks, score, reasons);
+    if (!presentation) return null;
+    const color = presentation.tone === 'warning'
+      ? tokens.colorWarning
+      : scoreLevel(presentation.score, tokens).color;
     return (
-      <Tooltip title={`优先级评分 ${score}：${(suggestions?.site_reasons?.[String(sid)] || []).join('；') || '无特殊事项'}`}>
-        <Tag style={{ marginLeft: 4, color: lv.color, borderColor: lv.color, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
-          {lv.label}·{score}
+      <Tooltip title={presentation.tooltip}>
+        <Tag style={{ marginLeft: 4, color, borderColor: color, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>
+          {presentation.label}
         </Tag>
       </Tooltip>
     );
@@ -1007,18 +1099,29 @@ export default function PlanSchedulesPage() {
       <Drawer
         title={detail ? `${detail.user_name || ''}的${TYPE_MAP[detail.schedule_type] || '巡检'}计划（${detail.period_start} ~ ${detail.period_end}）` : '计划详情'}
         open={drawerOpen} onClose={() => {
+          if (cancelLoading) return;
           detailRequestRef.current += 1;
           setDrawerOpen(false);
-        }} width={680} destroyOnHidden
-        footer={detail && ['draft', 'rejected', 'modifying'].includes(detail.status)
-          && (Number(detail.user_id) === Number(user?.id) || canApprove) ? (
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(detail)}>编辑计划</Button>
-          </div>
-        ) : detail && canApprove && (detail.status === 'submitted' || detail.status === 'change_submitted') ? (
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-            <Button danger icon={<CloseOutlined />} onClick={() => setRejectOpen(true)} loading={acting}>退回</Button>
-            <Button type="primary" icon={<CheckOutlined />} onClick={() => onApprove(detail.id)} loading={acting}>审批通过</Button>
+        }} width={680} destroyOnHidden closable={!cancelLoading}
+        footer={detail && (canCancelDetail || canEditDetail || canReviewDetail || canPurgeDetail) ? (
+          <div className="plan-detail-actions">
+            {canPurgeDetail && (
+              <Button danger icon={<DeleteOutlined />} onClick={openPlanPurge}
+                loading={purgeLoading}>彻底删除无效计划</Button>
+            )}
+            {canCancelDetail && (
+              <Button danger icon={<CloseOutlined />} onClick={openPlanCancellation}
+                loading={cancelLoading}>取消计划</Button>
+            )}
+            {canEditDetail && (
+              <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(detail)}>编辑计划</Button>
+            )}
+            {canReviewDetail && (
+              <>
+                <Button danger icon={<CloseOutlined />} onClick={() => setRejectOpen(true)} loading={acting}>退回</Button>
+                <Button type="primary" icon={<CheckOutlined />} onClick={() => onApprove(detail.id)} loading={acting}>审批通过</Button>
+              </>
+            )}
           </div>
         ) : null}
       >
@@ -1027,23 +1130,31 @@ export default function PlanSchedulesPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {!hasScheduledSites ? (
               <Alert type="warning" showIcon message="该排程尚未安排站点，无法生成现场执行任务。请补充站点后重新提交。" />
-            ) : isApprovedSchedule && generatedPlanCount === 0 ? (
+            ) : shouldWarnMissingExecution && generatedPlanCount === 0 ? (
               <Alert type="error" showIcon message={`该排程已安排 ${detail.site_count} 个站点，但尚未生成现场执行任务。请联系管理员核对审批流转。`} />
             ) : null}
             {/* 基本信息 */}
             <Descriptions size="small" column={2} bordered>
               <Descriptions.Item label="排程人">{detail.user_name}</Descriptions.Item>
-              <Descriptions.Item label="状态">
+              <Descriptions.Item label="排程状态">
                 <Badge status={(SCHEDULE_STATUS_MAP[detail.status] || {}).color} text={(SCHEDULE_STATUS_MAP[detail.status] || {}).label || detail.status} />
               </Descriptions.Item>
-              <Descriptions.Item label="现场状态">
+              <Descriptions.Item label="周期">{detail.period_start} ~ {detail.period_end}</Descriptions.Item>
+              <Descriptions.Item label="执行进度">
                 <Badge status={planExecutionPresentation(detail).color} text={planExecutionPresentation(detail).label} />
               </Descriptions.Item>
-              <Descriptions.Item label="周期">{detail.period_start} ~ {detail.period_end}</Descriptions.Item>
-              <Descriptions.Item label="版本">v{detail.version || 1}</Descriptions.Item>
-              <Descriptions.Item label="提交时间">{detail.submitted_at || '-'}</Descriptions.Item>
-              <Descriptions.Item label="审批人" span={2}>{detail.approver_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="备注" span={2}>{detail.remarks || '-'}</Descriptions.Item>
+              {Number(detail.version || 1) > 1 && (
+                <Descriptions.Item label="变更版本"><Text type="secondary">v{detail.version}</Text></Descriptions.Item>
+              )}
+              {detail.submitted_at && (
+                <Descriptions.Item label="提交时间"><Text type="secondary">{detail.submitted_at}</Text></Descriptions.Item>
+              )}
+              {detail.approver_name && (
+                <Descriptions.Item label="审批人" span={2}><Text type="secondary">{detail.approver_name}</Text></Descriptions.Item>
+              )}
+              {detail.remarks?.trim() && (
+                <Descriptions.Item label="备注" span={2}>{detail.remarks}</Descriptions.Item>
+              )}
               {detail.coverage_exception_reason && (
                 <Descriptions.Item label="漏站例外说明" span={2}>
                   <Text type="warning">{detail.coverage_exception_reason}</Text>
@@ -1075,23 +1186,21 @@ export default function PlanSchedulesPage() {
               </div>
             )}
 
-            {/* 每日行程 + 站点情况 */}
+            {/* 行程与执行事实 */}
             <div>
-              <Text strong style={{ fontSize: 13 }}>
-                每日行程与站点情况{generatedPlanCount ? `（已生成 ${generatedPlanCount} 个日期×站点任务）` : ''}
-              </Text>
+              <Text strong style={{ fontSize: 13 }}>行程与执行进度</Text>
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {dayRows.length === 0 && <Empty description="未安排站点" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-                {dayRows.map(([date, dayData]) => (
-                  <Card key={date} size="small"
+                {itineraryRows.length === 0 && <Empty description="未安排站点" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                {itineraryRows.map(row => (
+                  <Card key={row.date} size="small"
                     styles={{ body: { padding: '8px 12px', borderLeft: `3px solid ${tokens.colorPrimary}` } }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                       <Space size={8}>
-                        <Text strong style={{ fontSize: 13 }}>{date}</Text>
-                        <Tag style={{ fontSize: 10 }}>{weekdayOf(date)}</Tag>
+                        <Text strong style={{ fontSize: 13 }}>{row.date}</Text>
+                        <Tag style={{ fontSize: 10 }}>{weekdayOf(row.date)}</Tag>
                       </Space>
-                      {detail.vehicle_days?.[date] && (() => {
-                        const vehicleId = detail.vehicle_days[date];
+                      {detail.vehicle_days?.[row.date] && (() => {
+                        const vehicleId = detail.vehicle_days[row.date];
                         const vehicle = detail.vehicle_map?.[vehicleId];
                         return (
                           <Space size={4}>
@@ -1103,93 +1212,53 @@ export default function PlanSchedulesPage() {
                         );
                       })()}
                     </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {(dayData.sites || []).slice(0, 10).map(sid => {
-                        const s = detail.site_map?.[sid];
-                        return (
-                          <span key={sid} style={{
-                            padding: '2px 8px', borderRadius: 4, fontSize: 12,
-                            background: tokens.colorPrimaryBg, border: `1px solid ${tokens.colorBorder}`,
-                          }}>
-                            {s?.name || `站点${sid}`}
-                            {scoreBadge(sid)}
-                          </span>
-                        );
-                      })}
-                      {(dayData.sites || []).length > 10 && <Tag>其余 {(dayData.sites || []).length - 10} 站</Tag>}
-                    </div>
-                    {dayData.notes && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>{dayData.notes}</Text>}
-                    {(executionByDate[date] || []).length > 0 && (
-                      <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${tokens.colorBorderSecondary}` }}>
-                        {(executionByDate[date] || []).map(task => (
+                    {row.tasks.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {row.tasks.map(task => (
                           <div key={`${task.date}-${task.site_id}`} style={{
                             display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
-                            padding: '4px 0',
+                            padding: '4px 0', minWidth: 0,
                           }}>
-                            <Text style={{ fontSize: 12 }}>{task.site_name}</Text>
+                            <Text strong style={{ fontSize: 12 }}>{task.site_name}{scoreBadge(task.site_id)}</Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>{task.assignee || '未指定负责人'}</Text>
                             <Tag color={task.status === 'completed' ? 'green' : task.status === 'change_pending' ? 'gold' : task.status === 'partial' ? 'blue' : 'default'}>
-                              {task.status_cn}
+                              {task.status_cn || task.status}
                             </Tag>
                             <Text type="secondary" style={{ fontSize: 11 }}>完成 {task.completed_items}/{task.total_items}（{Math.round(task.completion_rate || 0)}%）</Text>
-                            {task.attention && <Text type="secondary" style={{ fontSize: 11 }}>{task.attention}</Text>}
+                            {task.attention && <Text type="warning" style={{ fontSize: 11 }}>{task.attention}</Text>}
                           </div>
                         ))}
-                        {(executionPackagesByDate[date] || []).map(task => (
-                          <div key={`package-${task.plan_id}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, paddingTop: 4 }}>
-                            <Text type="secondary" style={{ fontSize: 11 }}>当日任务（含 {task.site_count} 个站点）</Text>
-                            <Button size="small" type="link" icon={<MobileOutlined />}
-                              aria-label={`查看${date}当日任务执行说明`}
-                              onClick={() => showExecutionGuide({ ...task, plan_name: `${date} 当日任务`, generate_date: date })}>执行说明</Button>
-                            {canApprove && task.can_handle_overdue && <>
-                              <Button size="small" type="link" aria-label={`催办${date}当日任务`}
-                                onClick={() => handleOverdueAction(task, 'remind')}>催办当日任务</Button>
-                              <Button size="small" type="link" danger aria-label={`登记${date}当日任务未执行原因并关闭`}
-                                onClick={() => closeOverdueExecution(task)}>登记并关闭当日任务</Button>
-                            </>}
+                        {(executionPackagesByDate[row.date] || []).filter(task => canApprove && task.can_handle_overdue).map(task => (
+                          <div key={`package-${task.plan_id}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
+                            <Button size="small" type="link" aria-label={`催办${row.date}逾期执行`}
+                              onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>
+                            <Button size="small" type="link" danger aria-label={`登记${row.date}未执行原因并关闭`}
+                              onClick={() => closeOverdueExecution(task)}>登记并关闭</Button>
                           </div>
                         ))}
                       </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {row.planned_site_ids.slice(0, 10).map(sid => {
+                          const site = detail.site_map?.[sid];
+                          return (
+                            <span key={sid} style={{
+                              padding: '2px 8px', borderRadius: 4, fontSize: 12,
+                              background: tokens.colorPrimaryBg, border: `1px solid ${tokens.colorBorder}`,
+                            }}>
+                              {site?.name || `站点${sid}`}
+                              {scoreBadge(sid)}
+                            </span>
+                          );
+                        })}
+                        {row.planned_site_ids.length > 10 && <Tag>其余 {row.planned_site_ids.length - 10} 站</Tag>}
+                      </div>
                     )}
+                    {row.notes && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>{row.notes}</Text>}
                   </Card>
                 ))}
               </div>
             </div>
-
-            {/* 站点情况卡（审批决策支撑） */}
-            {suggestions && Object.keys(suggestions.site_scores || {}).length > 0 && (
-              <div>
-                <Text strong style={{ fontSize: 13 }}>站点情况（优先级与近期问题）</Text>
-                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {Object.entries(suggestions.site_scores)
-                    .sort(([, a], [, b]) => b - a)
-                    .map(([sid, score]) => {
-                      const s = detail.site_map?.[Number(sid)];
-                      const reasons = suggestions.site_reasons?.[sid] || [];
-                      const lv = scoreLevel(score, tokens);
-                      return (
-                        <Card key={sid} size="small" styles={{ body: { padding: '6px 12px' } }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Space size={8}>
-                              <Text strong style={{ fontSize: 12 }}>{s?.name || `站点${sid}`}</Text>
-                              <Tag style={{ color: lv.color, borderColor: lv.color, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>优先级{lv.label}·{score}</Tag>
-                            </Space>
-                          </div>
-                          {reasons.length > 0 ? (
-                            <div style={{ marginTop: 4 }}>
-                              {reasons.map((r, i) => (
-                                <div key={i} style={{ fontSize: 11, color: tokens.colorTextSecondary, lineHeight: '18px' }}>· {r}</div>
-                              ))}
-                            </div>
-                          ) : (
-                            <Text type="secondary" style={{ fontSize: 11 }}>近期无异常记录</Text>
-                          )}
-                        </Card>
-                      );
-                    })}
-                </div>
-              </div>
-            )}
 
             {/* 备件需求 */}
             {(detail.spare_parts || []).length > 0 && (
@@ -1206,6 +1275,66 @@ export default function PlanSchedulesPage() {
           </div>
         )}
       </Drawer>
+
+      <Modal
+        open={cancelOpen}
+        title="取消计划"
+        okText="确认取消计划"
+        cancelText="返回"
+        okButtonProps={{ danger: true }}
+        confirmLoading={cancelLoading}
+        maskClosable={!cancelLoading}
+        closable={!cancelLoading}
+        onOk={submitPlanCancellation}
+        onCancel={() => { if (!cancelLoading) setCancelOpen(false); }}
+        destroyOnHidden
+      >
+        <Alert type="warning" showIcon
+          message="取消后保留审批和操作记录；已有现场或实际资源事实时服务端会拒绝。"
+          style={{ marginBottom: 12 }} />
+        {cancelError && <Alert type="error" showIcon message={cancelError} style={{ marginBottom: 12 }} />}
+        <div className="plan-destructive-reason">
+          <Input.TextArea
+            value={cancelReason}
+            onChange={(event) => { setCancelReason(event.target.value); setCancelError(''); }}
+            placeholder="请填写取消原因"
+            maxLength={500}
+            showCount
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            disabled={cancelLoading}
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        open={purgeOpen}
+        title="彻底删除无效计划"
+        okText="确认彻底删除"
+        cancelText="返回"
+        okButtonProps={{ danger: true }}
+        confirmLoading={purgeLoading}
+        maskClosable={!purgeLoading}
+        closable={!purgeLoading}
+        onOk={submitPlanPurge}
+        onCancel={() => { if (!purgeLoading) setPurgeOpen(false); }}
+        destroyOnHidden
+      >
+        <Alert type="error" showIcon
+          message="此操作不可恢复。计划、现场任务、审核记录和计划专属影像将被彻底删除。"
+          style={{ marginBottom: 12 }} />
+        {purgeError && <Alert type="error" showIcon message={purgeError} style={{ marginBottom: 12 }} />}
+        <div className="plan-destructive-reason">
+          <Input.TextArea
+            value={purgeReason}
+            onChange={(event) => { setPurgeReason(event.target.value); setPurgeError(''); }}
+            placeholder="请填写彻底删除原因"
+            maxLength={500}
+            showCount
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            disabled={purgeLoading}
+          />
+        </div>
+      </Modal>
 
       <Modal
         open={editOpen}
@@ -1371,21 +1500,6 @@ export default function PlanSchedulesPage() {
           onChange={(event) => setOverdueCloseReason(event.target.value)}
           style={{ marginTop: 12 }}
         />
-      </Modal>
-
-      <Modal open={Boolean(executionGuide)} title="现场执行请在小程序完成" footer={null}
-        onCancel={() => setExecutionGuide(null)} destroyOnHidden>
-        <div style={{ lineHeight: 1.8 }}>
-          <div><Text strong>{executionGuide?.plan_name || '巡检任务'}</Text></div>
-          <div><Text type="secondary">执行日期：{executionGuide?.generate_date || '-'}</Text></div>
-          {Number(executionGuide?.site_count || executionGuide?.total_sites || 0) > 0 && (
-            <div><Text type="secondary">本站任务：{executionGuide.site_count || executionGuide.total_sites} 个站点</Text></div>
-          )}
-          <div style={{ marginTop: 10 }}>请打开微信小程序，在“今日执行”中下拉刷新后选择该任务；到站打卡、检查项、现场照片和车辆记录均在小程序内完成。</div>
-          <div style={{ marginTop: 16, textAlign: 'right' }}>
-            <Button type="primary" onClick={() => setExecutionGuide(null)}>我知道了</Button>
-          </div>
-        </div>
       </Modal>
 
       {canCleanup && <Modal open={cleanupOpen} title="处理无效数据" okText="确认处理所选" cancelText="取消"

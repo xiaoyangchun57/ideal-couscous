@@ -1,27 +1,58 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
-const { todayStr } = require('../../utils/util.js');
-const maps = require('../../services/maps.js');
-const { homeSummary, homeSite, homeSiteSelection } = require('../../utils/homeTaskState.js');
+const {
+  errorMessage,
+  formatHomeDate,
+  projectHome,
+  projectIdentity,
+  projectReview,
+  projectUnread
+} = require('../../utils/homeTaskState.js');
+const { currentUnreadRevision } = require('../../utils/notificationCount.js');
+const {
+  buildPackageOption,
+  normalizeExecutionTarget,
+  uniqueExecutableTarget,
+} = require('../../utils/executionTarget.js');
+
+function todayStr() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
 
 const app = getApp();
 
 Page({
   data: {
-    realName: '', today: '', loaded: false,
-    summary: null, sites: [], upcoming: [], workorders: [], alerts: [], reviewCount: 0, canReview: false,
-    workPackage: null
+    displayName: '',
+    greeting: '',
+    dateLabel: '',
+    canReview: false,
+
+    mainState: 'initial_loading',
+    mainError: '',
+    actions: [],
+    workPackage: null,
+
+    notificationsState: 'loading',
+    unreadCount: null,
+    unreadDisplay: '',
+
+    reviewVisible: false,
+    reviewState: 'hidden',
+    reviewCount: null,
+    reviewDisplay: '',
   },
 
   onLoad() {
-    const u = getUser();
-    const reviewRoles = ['admin', 'reviewer'];
-    const roles = (u && u.roles) || [u && u.role];
-    this.setData({
-      realName: (u && u.real_name) || '运维人员',
-      today: todayStr(),
-      canReview: reviewRoles.some(role => roles.includes(role)),
-    });
+    this._alive = true;
+    this._requestGeneration = { main: 0, notifications: 0, review: 0 };
+    this._unreadRevision = currentUnreadRevision();
+    this._navigationInFlight = false;
+    this._hasMainData = false;
+    this.setData(projectIdentity(getUser(), todayStr(), new Date().getHours()));
   },
 
   onShow() {
@@ -29,65 +60,203 @@ Page({
       wx.reLaunch({ url: '/pages/login/login' });
       return;
     }
-    this.load();
+    this._navigationInFlight = false;
+    this._prepareUnreadRefresh();
+    this.loadMain();
+    this.loadNotifications();
+    if (this.data.canReview) this.loadReview();
+  },
+
+  onUnload() {
+    this._alive = false;
+    this._navigationInFlight = false;
   },
 
   onPullDownRefresh() {
-    this.load(() => wx.stopPullDownRefresh());
+    const tasks = [this.loadMain(true)];
+    tasks.push(this.loadNotifications(true));
+    if (this.data.canReview) tasks.push(this.loadReview(true));
+
+    Promise.all(tasks).then(() => wx.stopPullDownRefresh(), () => wx.stopPullDownRefresh());
   },
 
-  load(done) {
-    api.myToday()
+  _beginRequest(kind) {
+    if (!this._requestGeneration) this._requestGeneration = { main: 0, notifications: 0, review: 0 };
+    this._requestGeneration[kind] += 1;
+    return this._requestGeneration[kind];
+  },
+
+  _isCurrentRequest(kind, generation) {
+    return this._alive !== false && this._requestGeneration && this._requestGeneration[kind] === generation;
+  },
+
+  _prepareUnreadRefresh() {
+    const revision = currentUnreadRevision();
+    if (this._unreadRevision === revision) return;
+    this._unreadRevision = revision;
+    this.setData({ notificationsState: 'loading', unreadCount: null, unreadDisplay: '' });
+  },
+
+  loadMain(isRefresh) {
+    const generation = this._beginRequest('main');
+    const preserveExisting = !!this._hasMainData;
+    if (this._alive !== false) {
+      this.setData({ mainState: preserveExisting ? 'refreshing' : 'initial_loading', mainError: '' });
+    }
+    return api.myToday()
       .then(res => {
-        const summary4 = homeSummary(res.summary);
-        const workPackage = res.work_package || null;
-        const planEntrySummary = workPackage && workPackage.has_plan
-          ? `今日作业 ${workPackage.sites.length} 个站点${workPackage.readiness.departure_confirmed ? ' · 已准备' : ` · ${workPackage.readiness.departure_pending_count} 项待确认`}`
-          : '今日暂无作业包 · 查看全部计划';
-        this.setData({
-          loaded: true,
-          summary4,
-          sites: (res.sites || []).map(homeSite),
-          upcoming: (res.upcoming || []).map(item => Object.assign({}, item, {
-            site_names_text: (item.site_names || []).join('、')
-          })),
-          workorders: (res.workorders || []).map(maps.workorderCn),
-          alerts: (res.alerts || []).map(a => Object.assign({}, a, { level_cls: maps.alertLevelCls(a.level) })),
-          workPackage,
-          planEntrySummary
-        });
-        if (this.data.canReview) {
-          api.auditPending()
-            .then(r => this.setData({ reviewCount: Array.isArray(r) ? r.length : 0 }))
-            .catch(() => {});
-        }
-        if (done) done();
+        if (!this._isCurrentRequest('main', generation)) return;
+        const vm = projectHome(res);
+        this._hasMainData = true;
+        this.setData({ mainState: 'ready', mainError: '', actions: vm.actions, workPackage: vm.workPackage });
       })
-      .catch(() => {
-        this.setData({ loaded: true });
-        if (done) done();
-        wx.showToast({ title: '加载失败', icon: 'none' });
+      .catch(err => {
+        if (!this._isCurrentRequest('main', generation)) return;
+        this.setData({
+          mainState: preserveExisting ? 'refresh_error' : 'blocking_error',
+          mainError: errorMessage(err, '今日任务加载失败，请重试')
+        });
       });
   },
 
-  onSiteTap(e) {
-    const id = e.currentTarget.dataset.id;
-    const site = (this.data.sites || []).find(item => String(item.site_id) === String(id));
-    const target = homeSiteSelection(site || { site_id: id });
-    app.globalData.selSiteId = target.siteId;
-    app.globalData.selPlanId = target.planId;
-    app.globalData.selItemId = target.itemId;
-    api.trackEvent('inspection.station_opened', { site_id: id, entry: 'home' });
-    wx.switchTab({ url: '/pages/inspection/inspection' });
+  onRetryMain() {
+    return this.loadMain(this._hasMainData);
   },
-  onUpcomingTap(e) {
-    wx.navigateTo({ url: '/pages/plan-detail/plan-detail?id=' + e.currentTarget.dataset.id });
+
+  loadNotifications(isRefresh) {
+    const generation = this._beginRequest('notifications');
+    const unreadRevision = currentUnreadRevision();
+    return api.unreadCount()
+      .then(res => {
+        if (!this._isCurrentRequest('notifications', generation)
+          || unreadRevision !== currentUnreadRevision()) return;
+        this._unreadRevision = unreadRevision;
+        this.setData(projectUnread(res));
+      })
+      .catch(() => {
+        if (!this._isCurrentRequest('notifications', generation)
+          || unreadRevision !== currentUnreadRevision()) return;
+        this._unreadRevision = unreadRevision;
+        this.setData({ notificationsState: 'unavailable', unreadCount: null, unreadDisplay: '' });
+      });
   },
-  goInspection() { wx.switchTab({ url: '/pages/inspection/inspection' }); },
-  goWorkorder() { wx.navigateTo({ url: '/pages/workorder/workorder' }); },
-  goAlert() { wx.navigateTo({ url: '/pages/alert/alert' }); },
-  goReview() { wx.navigateTo({ url: '/pages/review/view' }); },
-  goPlan() { wx.navigateTo({ url: '/pages/plan/plan' }); }
-  ,
-  goVehicle() { wx.navigateTo({ url: '/pages/vehicle/vehicle' }); }
+
+  loadReview(isRefresh) {
+    if (!this.data.canReview) return Promise.resolve();
+    const generation = this._beginRequest('review');
+    if (this.data.reviewCount === null && this._alive !== false) {
+      this.setData({ reviewState: 'loading', reviewDisplay: '加载中' });
+    }
+    return api.auditPending()
+      .then(rows => {
+        if (!this._isCurrentRequest('review', generation)) return;
+        this.setData(projectReview(rows));
+      })
+      .catch(() => {
+        if (!this._isCurrentRequest('review', generation)) return;
+        this.setData({ reviewState: 'unavailable', reviewCount: null, reviewDisplay: '数量暂不可用' });
+      });
+  },
+
+  _navigateLocked(method, url, onFailure) {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      this._navigationInFlight = false;
+    };
+    const fail = () => {
+      if (onFailure) onFailure();
+      finish();
+    };
+    try {
+      wx[method]({ url, fail, complete: finish });
+    } catch (error) {
+      fail();
+    }
+    return true;
+  },
+
+  _navigateOnce(method, url, onFailure) {
+    if (this._navigationInFlight || this._alive === false) return false;
+    this._navigationInFlight = true;
+    return this._navigateLocked(method, url, onFailure);
+  },
+
+  goMessages() {
+    return this._navigateOnce('navigateTo', '/pages/message/message');
+  },
+
+  goInspection() {
+    if (!this.data.workPackage || !this.data.workPackage.hasPlan
+        || this._navigationInFlight || this._alive === false) return false;
+    this._navigationInFlight = true;
+    const requestId = (this._inspectionTargetRequestId || 0) + 1;
+    this._inspectionTargetRequestId = requestId;
+    const navigate = target => {
+      if (this._alive === false || requestId !== this._inspectionTargetRequestId) return false;
+      app.globalData.executionTarget = target;
+      return this._navigateLocked('navigateTo', '/pages/inspection/inspection', () => {
+        if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+      });
+    };
+    return api.todayExecution().then(res => {
+      const packages = (res && Array.isArray(res.packages) ? res.packages : [])
+        .map(buildPackageOption);
+      return navigate(uniqueExecutableTarget(packages, 'home'));
+    }).catch(() => navigate(null));
+  },
+
+  goWorkorder() {
+    if (this._navigationInFlight || this._alive === false) return false;
+    // 清除精确工单目标，确保"全部工单"入口始终打开列表态
+    app.globalData.selWorkorderNo = null;
+    return this._navigateOnce('navigateTo', '/pages/workorder/workorder', () => {
+      wx.showToast({ title: '打开工单列表失败，请重试', icon: 'none' });
+    });
+  },
+
+  goReview() {
+    if (!this.data.canReview) return;
+    return this._navigateOnce('navigateTo', '/pages/review/view');
+  },
+
+  goPlan() {
+    return this._navigateOnce('switchTab', '/pages/plan/plan');
+  },
+
+  onActionTap(e) {
+    const idx = Number(e.currentTarget.dataset.index);
+    const action = this.data.actions[idx];
+    if (!action || !action.target) return false;
+
+    if (action.target.kind === 'workorder') {
+      const objectId = String(action.target.objectId || '').trim();
+      if (!objectId || this._navigationInFlight || this._alive === false) return false;
+      app.globalData.selWorkorderNo = objectId;
+      return this._navigateOnce('navigateTo', '/pages/workorder/workorder', () => {
+        if (app.globalData.selWorkorderNo === objectId) app.globalData.selWorkorderNo = null;
+      });
+    }
+    if (action.target.kind === 'alert') {
+      const objectId = Number(action.target.objectId);
+      if (!Number.isFinite(objectId) || objectId <= 0 || this._navigationInFlight || this._alive === false) return false;
+      app.globalData.selAlertId = objectId;
+      return this._navigateOnce('switchTab', '/pages/alert/alert', () => {
+        if (app.globalData.selAlertId === objectId) app.globalData.selAlertId = null;
+      });
+    }
+    if (action.target.kind === 'inspection_rework') {
+      if (this._navigationInFlight || this._alive === false) return false;
+      const target = normalizeExecutionTarget(action.target);
+      if (!target.siteId) return false;
+      app.globalData.executionTarget = target;
+      return this._navigateOnce('navigateTo', '/pages/inspection/inspection', () => {
+        if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+      });
+    }
+    return false;
+  },
 });
+
+module.exports = { formatHomeDate };

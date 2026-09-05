@@ -10,31 +10,15 @@ function flushPendingOperations() {
   flushLocalOps().catch(() => {});
 }
 
-function refreshNotificationBadge() {
-  if (!getToken()) return;
-  api.unreadCount()
-    .then(res => {
-      const count = Number(res && res.count) || 0;
-      if (count > 0) {
-        wx.setTabBarBadge({ index: 2, text: count > 99 ? '99+' : String(count) });
-      } else {
-        wx.removeTabBarBadge({ index: 2 });
-      }
-    })
-    .catch(() => {});
-}
-
 App({
   globalData: {
     token: '',
     user: null,
     sites: [],
     selSiteId: null,   // 首页/巡检站间跳转的临时选中站点
-    selPlanId: null,   // 排程详情跳入现场页时的临时预选执行包
-    selItemId: null,   // 补传通知精确定位的检查项
-    baseUrl: '',        // 运行时可由开发者工具注入，缺省读 config
-    refreshNotificationBadge,
-    notificationBadgeTimer: null
+    executionTarget: null, // 巡检入口的精确执行包/日期/站点/检查项快照
+    vehicleTarget: null, // “我的用车”一次性精确申请/动作目标
+    baseUrl: ''        // 运行时可由开发者工具注入，缺省读 config
   },
 
   onLaunch() {
@@ -55,13 +39,10 @@ App({
     });
     // 网络在小程序启动前已经恢复时不会触发 onNetworkStatusChange，启动时也要回放一次。
     flushPendingOperations();
-    refreshNotificationBadge();
-    this.globalData.notificationBadgeTimer = setInterval(refreshNotificationBadge, 30000);
   },
 
   onShow() {
     // 从后台返回或登录后 reLaunch 时重试，避免弱网队列只等网络事件而长期不动。
     flushPendingOperations();
-    refreshNotificationBadge();
   }
 });

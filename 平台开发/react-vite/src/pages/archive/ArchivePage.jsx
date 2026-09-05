@@ -13,7 +13,10 @@ import WorkspacePage, {
   FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
 } from '../../components/WorkspacePage';
 import { api } from '../../services/api';
-import { archiveHistoryStatus } from './attachmentDeletion';
+import { useAuth } from '../../hooks/useAuth';
+import {
+  archiveHistoryStatus, rejectedPurgeEligibility,
+} from './attachmentDeletion';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -83,6 +86,7 @@ function historyStatus(item) {
 
 export default function ArchivePage() {
   const { message } = App.useApp();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
@@ -96,6 +100,12 @@ export default function ArchivePage() {
   const [view, setView] = useState(() => searchParams.get('view') === 'grid' ? 'grid' : 'table');
   const [archiveMode, setArchiveMode] = useState(() => searchParams.get('scope') === 'history' ? 'history' : 'current');
   const [detail, setDetail] = useState(null);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgePreview, setPurgePreview] = useState(null);
+  const [purgePreviewLoading, setPurgePreviewLoading] = useState(false);
+  const [purgeError, setPurgeError] = useState('');
+  const [purgeLoading, setPurgeLoading] = useState(false);
+  const purgeRef = useRef(false);
   const requestRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -176,6 +186,37 @@ export default function ArchivePage() {
     setFilters(next);
     setApplied(next);
     writeUrl(next);
+  };
+
+  const submitRejectedPurge = async () => {
+    if (!rejectedPurgeEligibility(detail, user).allowed || !purgePreview?.count || purgeRef.current) return;
+    purgeRef.current = true;
+    setPurgeError('');
+    setPurgeLoading(true);
+    try {
+      const result = await api.postStrict(`/attachments/${detail.id}/purge-rejected-batch`, {});
+      message.success(`已清理本次整改 ${result.count || purgePreview.count} 张已驳回照片`);
+      setPurgeOpen(false); setDetail(null);
+      await load(page);
+    } catch (requestError) {
+      setPurgeError(requestError?.message || '彻底删除失败，请重试');
+    } finally {
+      purgeRef.current = false;
+      if (mountedRef.current) setPurgeLoading(false);
+    }
+  };
+
+  const openRejectedPurge = async () => {
+    if (!rejectedPurgeEligibility(detail, user).allowed || purgePreviewLoading) return;
+    setPurgeOpen(true); setPurgePreview(null); setPurgeError(''); setPurgePreviewLoading(true);
+    try {
+      const preview = await api.getStrict(`/attachments/${detail.id}/purge-rejected-batch`);
+      setPurgePreview(preview);
+    } catch (requestError) {
+      setPurgeError(requestError?.message || '整改包范围读取失败，请重试');
+    } finally {
+      if (mountedRef.current) setPurgePreviewLoading(false);
+    }
   };
 
   const columns = useMemo(() => [
@@ -275,7 +316,9 @@ export default function ArchivePage() {
 
       <Modal title={detail ? displayTitle(detail) : '影像详情'} open={Boolean(detail)}
         onCancel={() => setDetail(null)} width={760}
-        footer={<Space><Button onClick={() => setDetail(null)}>关闭</Button>
+        footer={<Space>{rejectedPurgeEligibility(detail, user, purgeLoading).allowed &&
+          <Button danger onClick={openRejectedPurge}>清理本次整改已驳回照片</Button>}
+          <Button onClick={() => setDetail(null)}>关闭</Button>
           <Button type="primary" icon={<DownloadOutlined />} onClick={() => {
             if (!detail?.stored_path) return message.error('文件地址不可用');
             window.open(detail.stored_path, '_blank');
@@ -300,6 +343,19 @@ export default function ArchivePage() {
             <Descriptions.Item label="原始文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
           </Descriptions>
         </>}
+      </Modal>
+      <Modal open={purgeOpen} title="清理本次整改已驳回照片"
+        okText={purgePreview?.count ? `清理全部 ${purgePreview.count} 张` : '确认清理'}
+        cancelText="返回" okButtonProps={{ danger: true, disabled: !purgePreview?.count || purgePreviewLoading }}
+        confirmLoading={purgeLoading || purgePreviewLoading}
+        closable={!purgeLoading && !purgePreviewLoading} maskClosable={!purgeLoading && !purgePreviewLoading} destroyOnHidden
+        onOk={submitRejectedPurge} onCancel={() => { if (!purgeLoading) setPurgeOpen(false); }}>
+        <Typography.Paragraph type="danger">
+          {purgePreview?.count
+            ? `将清理本次整改全部 ${purgePreview.count} 张已驳回照片。此操作不可恢复，仅保留文字删除摘要。`
+            : '正在读取本次整改范围…'}
+        </Typography.Paragraph>
+        {purgeError && <Typography.Paragraph type="danger">{purgeError}</Typography.Paragraph>}
       </Modal>
     </WorkspacePage>
   );

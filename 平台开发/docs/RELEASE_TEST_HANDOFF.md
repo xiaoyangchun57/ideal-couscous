@@ -1,3 +1,45 @@
+# r11 frozen candidate gate (2026-09-05)
+
+Target candidate tag: `release-20260905-cross-module-freeze-r11`
+
+r11 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r10 are immutable historical tags and remain rejected. The gate used only isolated test databases, temporary uploads and test configuration. It did not start or reuse the fixed local service and did not touch real business data.
+
+## r11 final automated evidence
+
+| Check | Result | Time | Exit |
+| --- | --- | --- | ---: |
+| Backend unittest discover | 509/509 passed | 11:20:18–11:22:37 | 0 |
+| Miniprogram Node tests | 209/209 passed across all 39 `*.test.js` files | 11:22:46 | 0 |
+| Combined syntax gate | 163 JavaScript/Python files passed | 11:23:04–11:23:15 | 0 |
+| React Node tests | 93/93 passed across all 15 `src/**/*.test.js` files | 11:23:05–11:23:06 | 0 |
+| React ESLint | PASS | 11:23:24–11:23:50 | 0 |
+| React production build | PASS; 1746 modules transformed | 11:23:57–11:24:08 | 0 |
+| Backup archive and candidate guard unittest | 6/6 passed; archived backup script retains LF | 11:24:28–11:24:32 | 0 |
+| Direct candidate verification | r11 accepted; r10 rejected as historical | 11:24:32 | 0 |
+| Cached diff and boundary checks | No whitespace errors, no private candidate files and no half-staged critical paths | final freeze check | 0 |
+
+## r11 first-run failures and permitted test-only corrections
+
+The first complete backend run (11:05:13–11:07:28) ran 509 tests and failed with 2 failures and 16 errors. No production defect was found. Seven isolated test fixtures were behind already-reviewed contracts: one new test leaked Flask `TESTING` state; evidence-history called the current row-based helper with a legacy integer; two replacement-photo fixtures omitted the current submitted photo path; and minimal audit, vehicle, notification and work-order databases lacked current columns or empty support tables. Only those tests were corrected. The next complete backend run passed 509/509.
+
+The first all-file miniprogram run (11:18:52–11:18:53) ran 209 tests and had 3 stale assertions: the reviewed inspection feedback typography is 30rpx/24rpx, exact remediation navigation carries `reworkOnly: true`, and an approved plan without an explicit execution status safely projects as waiting for field execution. Only the three tests were updated. Because the candidate changed, the complete gate was restarted from backend discovery; the final results are the table above. Intentional fault-injection 500 traces remained visible while their rollback assertions passed.
+
+## r11 UI and product evidence boundary
+
+Previously accepted real-UI results remain **PASS** only for their recorded scopes: plan editing; common plans, field reporting, work-order and alert lists/details; reachability of the six vehicle sheets and vehicle inspection items; message/mine icons, empty states and subscription action; and review-photo grouping and its accepted visual rework.
+
+The following remain exactly as authorized and are not promoted by this automated gate:
+
+- Responsible sites to site archive redesign: **DEFERRED**; current implementation is frozen without executing the deferred handoff.
+- Review return-context verification after remediation blocking: **NOT RUN**.
+- Complete real-data chain after vehicle checkout, including vehicle-use record and arrival gate: **NOT RUN**.
+- Specified real-object checks for plan #46 continuation and plan #43 remediation continuation: **NOT RUN**.
+- Scenarios without natural data and DOCX/XLSX download visuals: retain their recorded **NOT RUN** / **SKIPPED** status.
+
+No package, push, server connection, deployment, fixed-service operation or real-database operation is part of this freeze evidence.
+
+---
+
 # r10 candidate gate (2026-08-19)
 
 Target candidate tag: `release-20260819-cross-module-freeze-r10`

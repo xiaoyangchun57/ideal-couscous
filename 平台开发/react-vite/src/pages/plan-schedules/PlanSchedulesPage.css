@@ -38,6 +38,13 @@
   overflow-x: auto;
 }
 
+.plan-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .plan-edit-form,
 .plan-edit-days,
 .plan-edit-parts {
@@ -69,6 +76,10 @@
   gap: 12px;
 }
 
+.plan-destructive-reason {
+  padding-bottom: 40px;
+}
+
 @media (max-width: 760px) {
   .plan-attention-strip {
     align-items: flex-start;
@@ -77,5 +88,9 @@
 
   .plan-edit-form__row {
     grid-template-columns: 1fr;
+  }
+
+  .plan-destructive-reason {
+    padding-bottom: 44px;
   }
 }

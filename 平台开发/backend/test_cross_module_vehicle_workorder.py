@@ -36,7 +36,11 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
         })
         with temporary_db() as db:
             db.executescript('''
-                CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, username TEXT, role TEXT);
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, real_name TEXT, username TEXT, role TEXT,
+                    status TEXT DEFAULT 'active'
+                );
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
                 CREATE TABLE work_orders (
@@ -46,7 +50,7 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
                     review_submitted_at TEXT
                 );
                 CREATE TABLE vehicles (
-                    id INTEGER PRIMARY KEY, plate_no TEXT, status TEXT, current_mileage REAL,
+                    id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT, status TEXT, current_mileage REAL,
                     insurance_expiry TEXT, annual_inspection_expiry TEXT
                 );
                 CREATE TABLE vehicle_documents (
@@ -76,11 +80,25 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
                 CREATE TABLE timeline_events (
                     source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT
                 );
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
+                    source_id INTEGER, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
+                    dedupe_key TEXT DEFAULT '', payload_json TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE UNIQUE INDEX uq_notifications_unread_dedupe
+                    ON notifications(user_id,dedupe_key)
+                    WHERE is_read=0 AND COALESCE(dedupe_key,'')!='';
+                INSERT INTO users (id,real_name,username,role,status) VALUES
+                    (1,'Admin','admin','admin','active'),
+                    (2,'Operator','operator','operator','active'),
+                    (3,'Other operator','other','operator','active');
+                INSERT INTO user_roles VALUES (1,'admin'),(2,'operator'),(3,'operator');
                 INSERT INTO sites VALUES (1, 'Test site', 28.6800, 115.7300);
                 INSERT INTO user_sites VALUES (2, 1);
                 INSERT INTO work_orders (id,order_no,site_id,status,assignee,title)
                     VALUES (1, 'WO-CROSS-1', 1, 'in_progress', 'Operator', 'Cross-module test');
-                INSERT INTO vehicles VALUES (1, 'TEST-001', 'idle', 1000, NULL, NULL);
+                INSERT INTO vehicles VALUES (1, 'TEST-001', 'Service vehicle', 'idle', 1000, NULL, NULL);
             ''')
         self.client = app_module.app.test_client()
 
@@ -178,22 +196,46 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
             'end_at': '2099-08-10 18:00:00', 'reason': 'First request',
         })
         self.assertEqual(first.status_code, 201, first.json)
+        with app_module.get_db() as db:
+            first_notices = db.execute("""SELECT user_id,source_type,source_id,title,is_read,dedupe_key
+                FROM notifications ORDER BY id""").fetchall()
+        self.assertEqual(len(first_notices), 1)
+        self.assertEqual(
+            (first_notices[0]['user_id'], first_notices[0]['source_type'],
+             first_notices[0]['source_id'], first_notices[0]['title'], first_notices[0]['is_read']),
+            (1, 'vehicle_application', first.json['id'], '用车申请待审核', 0),
+        )
+        self.assertEqual(first_notices[0]['dedupe_key'],
+                         f"vehicle_application:{first.json['id']}")
         conflict = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'), json={
             'vehicle_id': 1, 'start_at': '2099-08-10 09:00:00',
             'end_at': '2099-08-10 17:00:00', 'reason': 'Concurrent request',
         })
         self.assertEqual(conflict.status_code, 409, conflict.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 1)
 
         rejected = self.client.post(
             f"/api/vehicle/applications/{first.json['id']}/approve", headers=self.headers('admin-token'),
             json={'action': 'reject', 'reject_reason': 'Reassigned'},
         )
         self.assertEqual(rejected.status_code, 200, rejected.json)
+        with app_module.get_db() as db:
+            archived = db.execute("""SELECT is_read FROM notifications
+                WHERE source_type='vehicle_application' AND source_id=?""",
+                                  (first.json['id'],)).fetchone()
+        self.assertEqual(archived['is_read'], 1)
         replacement = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'), json={
             'vehicle_id': 1, 'start_at': '2099-08-10 09:00:00',
             'end_at': '2099-08-10 17:00:00', 'reason': 'Replacement request',
         })
         self.assertEqual(replacement.status_code, 201, replacement.json)
+        with app_module.get_db() as db:
+            notices = db.execute("""SELECT source_id,is_read FROM notifications
+                WHERE source_type='vehicle_application' ORDER BY id""").fetchall()
+        self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
+                         [(first.json['id'], 1), (replacement.json['id'], 0)])
 
     def test_return_marks_application_terminal_and_allows_a_new_reservation(self):
         application_id = self.create_application(vehicle_id=1, status='approved')
@@ -216,6 +258,11 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
             'end_at': '2099-08-10 17:00:00', 'reason': 'Subsequent reservation',
         })
         self.assertEqual(replacement.status_code, 201, replacement.json)
+        with app_module.get_db() as db:
+            notice = db.execute("""SELECT user_id,source_id,is_read FROM notifications
+                WHERE source_type='vehicle_application'""").fetchone()
+        self.assertEqual((notice['user_id'], notice['source_id'], notice['is_read']),
+                         (1, replacement.json['id'], 0))
 
 
 if __name__ == '__main__':

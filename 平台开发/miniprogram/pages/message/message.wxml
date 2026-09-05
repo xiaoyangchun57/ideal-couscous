@@ -1,49 +1,75 @@
-<view class="page message-page">
-  <view class="topbar">
-    <view class="tb-btn" wx:if="{{view === 'current'}}" bindtap="onReadAll">全部已读</view>
-    <view class="tb-btn tb-brand" bindtap="onSubscribe">订阅消息</view>
+<view class="msg-page">
+  <!-- 分段控件 -->
+  <view class="msg-seg-wrap">
+    <view class="msg-seg">
+      <view class="msg-seg-item {{view === 'current' ? 'msg-seg-active' : ''}}" data-view="current" bindtap="onSwitchView">当前消息</view>
+      <view class="msg-seg-item {{view === 'history' ? 'msg-seg-active' : ''}}" data-view="history" bindtap="onSwitchView">历史消息</view>
+    </view>
   </view>
 
-  <view class="message-tabs">
-    <view class="message-tab {{view === 'current' ? 'message-tab-active' : ''}}" data-view="current" bindtap="onSwitchView">当前消息</view>
-    <view class="message-tab {{view === 'history' ? 'message-tab-active' : ''}}" data-view="history" bindtap="onSwitchView">历史消息</view>
+  <!-- 加载中 -->
+  <view wx:if="{{viewState === 'loading'}}" class="msg-empty">
+    <image class="msg-empty-ico" src="/images/message/empty-inbox.svg" mode="aspectFit"/>
+    <text class="msg-empty-tx">加载中…</text>
   </view>
 
-  <view wx:if="{{viewState === 'loading'}}" class="empty">加载中…</view>
-
-  <view wx:elif="{{viewState === 'error'}}" class="empty message-error">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">加载失败</text>
-    <text class="message-error-detail">{{errorMessage}}</text>
-    <button class="btn-primary btn-sm message-retry" size="mini" bindtap="onRetry">重试</button>
+  <!-- 首次加载失败 -->
+  <view wx:elif="{{viewState === 'error'}}" class="msg-empty">
+    <image class="msg-empty-ico" src="/images/message/empty-error.svg" mode="aspectFit"/>
+    <text class="msg-empty-tx">加载失败</text>
+    <text class="msg-empty-sub">{{errorMessage}}</text>
+    <view class="msg-retry-btn" bindtap="onRetry">重试</view>
   </view>
 
-  <view wx:elif="{{viewState === 'empty'}}" class="empty">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">{{view === 'history' ? '暂无历史消息' : '暂无未读消息'}}</text>
+  <!-- 空态 -->
+  <view wx:elif="{{viewState === 'empty'}}" class="msg-empty">
+    <image class="msg-empty-ico" src="/images/message/empty-inbox.svg" mode="aspectFit"/>
+    <text class="msg-empty-tx">{{view === 'history' ? '暂无历史消息' : '暂无未读消息'}}</text>
   </view>
 
-  <view wx:else>
-    <view class="message-stale" wx:if="{{errorMessage}}">
-      <view class="message-stale-main">
-        <text class="message-stale-title">当前消息可能不是最新</text>
-        <text class="message-stale-detail">{{errorMessage}}</text>
-      </view>
-      <button class="btn-ghost btn-sm message-retry-inline" size="mini" bindtap="onRetry">重试</button>
+  <!-- 消息列表 -->
+  <view wx:else class="msg-list-wrap">
+    <!-- 当前消息操作区 -->
+    <view class="msg-list-actions" wx:if="{{view === 'current'}}">
+      <view class="msg-readall" bindtap="onReadAll">全部已读</view>
     </view>
 
-    <view class="list-card">
-      <view class="msg-row {{item.is_read ? '' : 'msg-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
+    <!-- 旧内容刷新失败提示 -->
+    <view class="msg-stale" wx:if="{{errorMessage}}">
+      <view class="msg-stale-dot"></view>
+      <view class="msg-stale-body">
+        <text class="msg-stale-title">当前消息可能不是最新</text>
+        <text class="msg-stale-detail">{{errorMessage}}</text>
+      </view>
+      <view class="msg-stale-action" bindtap="onRetry">重试</view>
+    </view>
+
+    <!-- 消息卡片 -->
+    <view class="msg-card">
+      <view class="msg-row {{item.is_read ? '' : 'msg-row-unread'}}" wx:for="{{list}}" wx:key="id" bindtap="onTap" data-id="{{item.id}}">
         <view class="msg-dot" wx:if="{{!item.is_read}}"></view>
         <view class="msg-main">
-          <text class="msg-title">{{item.title}}</text>
-          <text class="msg-sub">{{item.content}}</text>
-          <text class="msg-time">{{item.time}}</text>
+          <view class="msg-head">
+            <text class="msg-title">{{item.title}}</text>
+            <text class="msg-time">{{item.time}}</text>
+          </view>
+          <text class="msg-content">{{item.content}}</text>
         </view>
+        <view class="msg-arrow" wx:if="{{item.is_read}}"></view>
+        <view class="msg-arrow msg-arrow-unread" wx:else></view>
       </view>
     </view>
 
-    <view class="list-foot" wx:if="{{showLoadMore}}">上拉加载更多</view>
-    <view class="list-foot" wx:if="{{showNoMore}}">没有更多了</view>
+    <!-- 分页状态 -->
+    <view class="msg-foot" wx:if="{{showLoadMore}}">上拉加载更多</view>
+    <view class="msg-foot" wx:if="{{showNoMore}}">没有更多了</view>
+  </view>
+
+  <!-- 订阅消息入口（直接动作） -->
+  <view class="msg-sub-wrap">
+    <view class="msg-sub-btn" bindtap="onSubscribe">
+      <text class="msg-sub-tx">订阅消息通知</text>
+    </view>
+    <text class="msg-sub-hint">订阅后可接收巡检审核、计划审批等消息提醒</text>
   </view>
 </view>

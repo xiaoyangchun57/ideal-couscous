@@ -100,37 +100,39 @@
 .wo-card {
   background: var(--color-card);
   border-radius: var(--radius-xl);
-  padding: 28rpx 32rpx;
-  margin-bottom: 20rpx;
+  padding: 24rpx 28rpx;
+  margin-bottom: 16rpx;
   display: flex;
   flex-direction: column;
-  gap: 14rpx;
+  gap: 10rpx;
 }
 
-.wo-card-top {
+/* 第一行：站点名（主锚点） + 状态 chip */
+.wo-card-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 16rpx;
 }
 
-.wo-title {
-  font-size: 32rpx;
+.wo-site {
+  font-size: 30rpx;
   font-weight: 600;
   color: var(--color-text-primary);
   line-height: 1.3;
   flex: 1;
   min-width: 0;
+  word-break: break-all;
 }
 
-/* 状态标签（surface 样式，对齐 status-chip 规范） */
+/* 状态标签（surface 样式，对齐设计系统 status-chip 规范） */
 .wo-status-chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 22rpx;
   font-weight: 500;
-  padding: 4rpx 16rpx;
+  padding: 4rpx 14rpx;
   border-radius: var(--radius-xs);
   line-height: 1.4;
   flex-shrink: 0;
@@ -145,45 +147,100 @@
 .wschip-resolved { background: var(--color-success-surface); color: var(--color-success); }
 .wschip-default { background: var(--color-type-bg); color: var(--color-type-text); }
 
-.wo-card-mid {
-  display: flex;
-  flex-direction: column;
-  gap: 4rpx;
-}
-
-.wo-site {
-  font-size: 28rpx;
+/* 第二行：工单标题（次级信息） */
+.wo-title {
+  font-size: 26rpx;
+  font-weight: 400;
   color: var(--color-text-secondary);
   line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.wo-source {
-  font-size: 24rpx;
+/* 第三行：底部元信息 */
+.wo-card-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 8rpx;
+  gap: 12rpx;
+}
+
+.wo-foot-left {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  flex-shrink: 0;
+}
+
+.wo-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* 紧急级别：独立标签，红色突出 */
+.wo-level {
+  font-size: 22rpx;
+  font-weight: 500;
   color: var(--color-text-tertiary);
   line-height: 1.4;
+  padding: 2rpx 10rpx;
+  border-radius: 4rpx;
+  background: var(--color-type-bg);
 }
 
 .wo-level-urgent {
   color: var(--color-error);
-  font-weight: 500;
+  background: var(--color-error-surface);
+  font-weight: 600;
 }
 
-.wo-card-bottom {
-  display: flex;
-  align-items: center;
-  padding-top: 12rpx;
-  border-top: 1rpx solid var(--color-divider);
+/* 工单等级稳定后缀：red/orange/gray（由 level_cls 映射，非中文文案判断）
+   red = 严重（最高） / orange = 紧急 / gray = 普通（最低）
+   开发接线到 level_cls 前，wo-level-urgent 继续用于当前 WXML */
+.wo-level-red {
+  color: var(--color-error);
+  background: var(--color-error-surface);
+  font-weight: 600;
+}
+.wo-level-orange {
+  color: var(--color-warning);
+  background: var(--color-warning-surface);
+  font-weight: 500;
+}
+.wo-level-gray {
+  color: var(--color-text-tertiary);
+  background: var(--color-type-bg);
+  font-weight: 400;
 }
 
 .wo-sla {
-  font-size: 24rpx;
+  font-size: 22rpx;
   color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+.wo-source {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+  max-width: 200rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wo-arrow {
-  margin-left: auto;
-  border-right-color: var(--color-icon-primary);
-  border-bottom-color: var(--color-icon-primary);
+  border-right-color: var(--color-icon-tertiary);
+  border-bottom-color: var(--color-icon-tertiary);
+  width: 12rpx;
+  height: 12rpx;
+  flex-shrink: 0;
 }
 
 /* ===== 空态（对齐 empty-state 组件规范） ===== */
@@ -1591,3 +1648,517 @@
 .wos-btn-gap {
   margin-top: 16rpx;
 }
+
+/* ============================================================
+ *  工单详情 Sheet · 可执行详情类
+ *  设计系统：水质运维-Apple
+ *  类型特征：状态 + 任务信息 + 当前阶段 + 处置区 + 流转记录 + 主/次动作
+ * ============================================================ */
+
+/* --- Sheet 容器 --- */
+.workorder-detail-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* --- 关闭按钮（绝对定位右上角） --- */
+.workorder-detail-close {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  z-index: 2;
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.workorder-detail-close .ico-close::before,
+.workorder-detail-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 滚动正文区 --- */
+.workorder-detail-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28rpx 0 8rpx;
+  box-sizing: border-box;
+}
+
+.workorder-detail-scroll .sheet-content-spacer {
+  height: 24rpx;
+  flex-shrink: 0;
+}
+
+/* --- 任务头部：状态 + 标题 + 站点 + 级别 --- */
+.workorder-detail-sheet .wos-header {
+  padding: 0 40rpx 24rpx;
+  padding-right: 120rpx; /* 避让关闭按钮 */
+}
+
+.workorder-detail-sheet .wos-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rpx 16rpx;
+  border-radius: var(--radius-xs);
+  font-size: 22rpx;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  margin-bottom: 14rpx;
+}
+
+.workorder-detail-sheet .wos-chip-pending { background: var(--color-warning-surface); color: var(--color-warning); }
+.workorder-detail-sheet .wos-chip-accepted { background: var(--color-info-surface); color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-dispatched { background: var(--color-info-surface); color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-in_progress { background: var(--color-info-surface); color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-reviewing { background: var(--color-warning-surface); color: var(--color-warning); }
+.workorder-detail-sheet .wos-chip-closed { background: var(--color-success-surface); color: var(--color-success); }
+.workorder-detail-sheet .wos-chip-resolved { background: var(--color-success-surface); color: var(--color-success); }
+.workorder-detail-sheet .wos-chip-rejected { background: var(--color-error-surface); color: var(--color-error); }
+
+.workorder-detail-sheet .wos-title {
+  display: block;
+  font-size: 38rpx;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  line-height: 1.25;
+  margin-bottom: 10rpx;
+  word-break: break-all;
+}
+
+.workorder-detail-sheet .wos-site {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 12rpx;
+}
+
+.workorder-detail-sheet .wos-level {
+  display: inline-flex;
+}
+
+.workorder-detail-sheet .wos-level-chip {
+  font-size: 22rpx;
+  font-weight: 500;
+  padding: 4rpx 14rpx;
+  border-radius: 6rpx;
+  background: var(--color-warning-surface);
+  color: var(--color-warning);
+  line-height: 1.4;
+}
+
+/* --- 当前阶段：灰底卡片 --- */
+.workorder-detail-sheet .wos-phase {
+  padding: 20rpx 24rpx;
+  background: var(--color-type-bg);
+  margin: 0 40rpx 24rpx;
+  border-radius: var(--radius-md);
+}
+
+.workorder-detail-sheet .wos-phase-label {
+  display: block;
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  margin-bottom: 6rpx;
+  font-weight: 500;
+}
+
+.workorder-detail-sheet .wos-phase-content {
+  display: flex;
+  align-items: flex-start;
+}
+
+.workorder-detail-sheet .wos-phase-text {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.55;
+  font-weight: 500;
+}
+
+/* --- 分隔条：粗灰条 --- */
+.workorder-detail-sheet .wos-divider {
+  height: 8rpx;
+  background: var(--color-type-bg);
+  margin: 0 40rpx 24rpx;
+  border-radius: 4rpx;
+}
+
+/* --- 内容分组 --- */
+.workorder-detail-sheet .wos-group {
+  padding: 0 40rpx 28rpx;
+}
+
+.workorder-detail-sheet .wos-group-title {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  margin-bottom: 14rpx;
+  line-height: 1.4;
+}
+
+/* 问题描述 */
+.workorder-detail-sheet .wos-desc {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.65;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.workorder-detail-sheet .wos-empty {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+/* --- 表单字段（处置区） --- */
+.workorder-detail-sheet .wos-field {
+  margin-bottom: 20rpx;
+}
+
+.workorder-detail-sheet .wos-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10rpx;
+}
+
+.workorder-detail-sheet .wos-field-label {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  margin-bottom: 8rpx;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.workorder-detail-sheet .wos-field-header .wos-field-label {
+  margin-bottom: 0;
+}
+
+.workorder-detail-sheet .wos-textarea {
+  width: 100%;
+  min-height: 160rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+.workorder-detail-sheet .wos-upload-btn {
+  min-height: 56rpx;
+  line-height: 56rpx;
+  font-size: 24rpx;
+  padding: 0 20rpx;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--color-background);
+  color: var(--color-primary);
+  font-weight: 500;
+  border: none;
+  margin: 0;
+}
+
+.workorder-detail-sheet .wos-upload-btn::after {
+  border: none;
+}
+
+/* --- 影像网格（处置影像） --- */
+.workorder-detail-sheet .wos-img-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.workorder-detail-sheet .wos-img-wrap {
+  width: calc((100% - 36rpx) / 4);
+  aspect-ratio: 1;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-muted);
+}
+
+.workorder-detail-sheet .wos-img-cell {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* --- 流转时间线 --- */
+.workorder-detail-sheet .wos-timeline {
+  position: relative;
+  padding-left: 32rpx;
+}
+
+.workorder-detail-sheet .wos-timeline-item {
+  position: relative;
+  padding-bottom: 24rpx;
+}
+
+.workorder-detail-sheet .wos-timeline-item--last {
+  padding-bottom: 0;
+}
+
+.workorder-detail-sheet .wos-timeline-dot {
+  position: absolute;
+  left: -32rpx;
+  top: 6rpx;
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 3rpx solid var(--color-card);
+  box-shadow: 0 0 0 2rpx var(--color-primary-surface);
+  z-index: 1;
+}
+
+.workorder-detail-sheet .wos-timeline-item--last .wos-timeline-dot {
+  background: var(--color-success);
+  box-shadow: 0 0 0 2rpx var(--color-success-surface);
+}
+
+.workorder-detail-sheet .wos-timeline-line {
+  position: absolute;
+  left: -25rpx;
+  top: 22rpx;
+  bottom: 0;
+  width: 2rpx;
+  background: var(--color-divider);
+}
+
+.workorder-detail-sheet .wos-timeline-content {
+  padding-left: 4rpx;
+}
+
+.workorder-detail-sheet .wos-timeline-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 4rpx;
+}
+
+.workorder-detail-sheet .wos-timeline-phase {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.workorder-detail-sheet .wos-timeline-time {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.workorder-detail-sheet .wos-timeline-operator {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+  margin-bottom: 4rpx;
+}
+
+.workorder-detail-sheet .wos-timeline-remark {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+/* --- 信息行（基本信息 / 关联资源） --- */
+.workorder-detail-sheet .wos-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 14rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 20rpx;
+}
+
+.workorder-detail-sheet .wos-info-row--last {
+  border-bottom: none;
+}
+
+.workorder-detail-sheet .wos-info-label {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.workorder-detail-sheet .wos-info-value {
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  line-height: 1.4;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- 底部操作栏 --- */
+.workorder-detail-sheet .sheet-bottom-bar {
+  padding: 12rpx 40rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+.workorder-detail-sheet .sheet-bottom-bar .btn-primary {
+  width: 100%;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+  border-radius: var(--radius-lg);
+  font-size: 28rpx;
+  font-weight: 500;
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  border: none;
+}
+
+.workorder-detail-sheet .sheet-bottom-bar .btn-primary::after {
+  border: none;
+}
+
+.workorder-detail-sheet .sheet-bottom-bar .btn-primary[disabled] {
+  opacity: 0.6;
+  color: var(--color-primary-foreground);
+}
+
+/* 次动作按钮区 */
+.workorder-detail-sheet .wos-sub-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 12rpx;
+}
+
+.workorder-detail-sheet .wos-sub-btn {
+  flex: 1;
+  min-height: 72rpx;
+  line-height: 72rpx;
+  font-size: 26rpx;
+  border-radius: var(--radius-md);
+  border: 1.5rpx solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.workorder-detail-sheet .wos-sub-btn::after {
+  border: none;
+}
+
+.workorder-detail-sheet .wos-btn-gap {
+  margin-top: 12rpx;
+}
+
+/* ============================================================
+ *  10.2 返修：工单详情视觉收口
+ *  - 双类选择器覆盖全局 88vh，短内容紧凑、长内容单滚动
+ *  - 时间线按 tone 语义着色（done/current/pending）
+ *  - 状态标签：设计系统 surface chip 兜底
+ * ============================================================ */
+
+/* --- 根容器高度：内容驱动，上限 85vh ---
+   双类选择器（特异性 0,2,0）覆盖全局 .om-sheet 单类（0,1,0）
+   短内容随内容收束，消除底部空白；长内容到上限后原生 scroll-view 接管 */
+.om-sheet.workorder-detail-sheet {
+  height: auto;
+  max-height: 85vh;
+}
+
+/* --- 滚动层：flex-basis:auto 让高度随内容，min-height:0 允许收缩时滚动 ---
+   4 类选择器（0,4,0）> 全局 .om-sheet.om-sheet .om-sheet-scroll（0,3,0）
+   不修改 overflow-y，单滚动责任仍由原生 scroll-view 承担 */
+.om-sheet.workorder-detail-sheet .om-sheet-scroll.workorder-detail-scroll {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+/* --- 时间线 tone 语义 ---
+   服务端权威 tone 只有 completed / current
+   completed：已完成节点 → 成功色（绿色）实心
+   current：当前进行中 → 主色（蓝色）实心 + 光晕
+   末项间距用 :last-child 结构方式处理，不改变业务 tone */
+
+/* 已完成：绿色实心圆点 + 淡绿色连接线 */
+.workorder-detail-sheet .wos-timeline-item--completed .wos-timeline-dot {
+  background: var(--color-success);
+  box-shadow: 0 0 0 2rpx var(--color-success-surface);
+}
+.workorder-detail-sheet .wos-timeline-item--completed .wos-timeline-line {
+  background: var(--color-success);
+  opacity: 0.3;
+}
+.workorder-detail-sheet .wos-timeline-item--completed .wos-timeline-phase {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+/* 当前进行中：主色实心圆点 + 光晕 + 连接线为灰色（后续未完成） */
+.workorder-detail-sheet .wos-timeline-item--current .wos-timeline-dot {
+  background: var(--color-primary);
+  box-shadow: 0 0 0 3rpx var(--color-primary-surface), 0 0 12rpx rgba(0, 122, 255, 0.3);
+}
+.workorder-detail-sheet .wos-timeline-item--current .wos-timeline-line {
+  background: var(--color-divider);
+}
+.workorder-detail-sheet .wos-timeline-item--current .wos-timeline-phase {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* 末项去掉底边距（结构方式 :last-child，与 tone 正交）
+   连接线已由 WXML 的 wx:if 控制，此处仅处理间距 */
+.workorder-detail-sheet .wos-timeline-item:last-child {
+  padding-bottom: 0;
+}
+
+/* --- 状态标签兜底：确保设计系统 surface 样式生效 ---
+   与 WXML 的 wos-chip-{{status_cls}} 类名对齐，8 种状态全覆盖 */
+.workorder-detail-sheet .wos-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rpx 16rpx;
+  border-radius: var(--radius-xs);
+  font-size: 22rpx;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  margin-bottom: 14rpx;
+}
+.workorder-detail-sheet .wos-chip-pending    { background: var(--color-warning-surface);  color: var(--color-warning); }
+.workorder-detail-sheet .wos-chip-accepted   { background: var(--color-info-surface);     color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-dispatched { background: var(--color-info-surface);     color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-in_progress { background: var(--color-info-surface);    color: var(--color-info); }
+.workorder-detail-sheet .wos-chip-reviewing  { background: var(--color-warning-surface);  color: var(--color-warning); }
+.workorder-detail-sheet .wos-chip-closed     { background: var(--color-success-surface);  color: var(--color-success); }
+.workorder-detail-sheet .wos-chip-resolved   { background: var(--color-success-surface);  color: var(--color-success); }
+.workorder-detail-sheet .wos-chip-rejected   { background: var(--color-error-surface);    color: var(--color-error); }

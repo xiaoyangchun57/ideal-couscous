@@ -1,135 +1,185 @@
-<view class="page" wx:if="{{loaded && detail}}">
-  <!-- 状态头 -->
-  <view class="status-header status-{{statusCls}}">
-    <text class="status-main">{{statusCn}}</text>
-    <text class="status-sub">{{typeCn}} · {{detail.period_start}} ~ {{detail.period_end}}</text>
-  </view>
+﻿<view class="plan-detail-page">
 
-  <!-- 退回原因 -->
-  <view class="card reject-card" wx:if="{{detail.status === 'rejected' && detail.reject_reason}}">
-    <text class="reject-label">退回原因</text>
-    <text class="reject-text">{{detail.reject_reason}}</text>
-  </view>
-
-  <!-- 变更信息 -->
-  <view class="card change-card" wx:if="{{(detail.status === 'modifying' || detail.status === 'change_submitted') && detail.change_reason}}">
-    <view class="change-head">
-      <text class="change-label">变更原因</text>
-      <text class="tag tag-orange">v{{detail.version}}</text>
+  <!-- ===== 状态头部区 ===== -->
+  <view class="status-header" wx:if="{{loaded && detail}}">
+    <view class="status-main-row">
+      <view class="status-chip chip-{{statusCls}}">{{statusCn}}</view>
+      <view class="status-tag-sub tag-{{statusCls}}" wx:if="{{statusSubCn}}">{{statusSubCn}}</view>
     </view>
-    <text class="change-text">{{detail.change_reason}}</text>
-    <text class="change-hint" wx:if="{{detail.status === 'modifying'}}">计划变更中，请修改后重新提交审核</text>
-    <text class="change-hint" wx:if="{{detail.status === 'change_submitted'}}">变更已提交，等待管理员审核</text>
+    <view class="plan-meta">
+      <view class="plan-type-period">{{typeCn}} · {{detail.period_start}} ~ {{detail.period_end}}</view>
+      <view class="plan-name">{{detail.plan_name || '巡检计划'}}</view>
+    </view>
+    <view class="progress-wrap" wx:if="{{detail.status === 'approved'}}">
+      <view class="progress-summary">
+        <text class="progress-stat"><text class="progress-num">{{completedSites || 0}}</text>/{{totalSites || 0}} 站</text>
+        <text class="progress-stat"><text class="progress-num">{{completedItems || 0}}</text>/{{totalItems || 0}} 项</text>
+      </view>
+      <view class="progress-bar-wrap">
+        <view class="progress-bar-fill" style="{{progressFillStyle}}"></view>
+      </view>
+    </view>
   </view>
 
-  <!-- 审批信息 -->
-  <view class="card info-card" wx:if="{{detail.approved_at || detail.submitted_at}}">
+  <!-- 加载骨架屏 -->
+  <view class="status-header status-header-loading" wx:elif="{{!loaded}}">
+    <view class="status-main-row">
+      <view class="status-chip loading-skeleton"></view>
+    </view>
+    <view class="plan-meta">
+      <view class="plan-type-period loading-skeleton"></view>
+      <view class="plan-name loading-skeleton"></view>
+    </view>
+    <view class="progress-wrap">
+      <view class="progress-summary">
+        <view class="progress-stat loading-skeleton"></view>
+        <view class="progress-stat loading-skeleton"></view>
+      </view>
+      <view class="progress-bar-wrap loading-skeleton"></view>
+    </view>
+  </view>
+
+  <!-- 驳回提示 -->
+  <view class="reject-banner" wx:if="{{loaded && detail && detail.status === 'rejected' && detail.reject_reason}}">
+    <view class="reject-icon">!</view>
+    <view class="reject-content">
+      <text class="reject-title">退回原因</text>
+      <text class="reject-text">{{detail.reject_reason}}</text>
+    </view>
+  </view>
+
+  <!-- ===== 卡片1：作业路线 ===== -->
+  <view class="info-card" wx:if="{{loaded && (generatedPlans.length > 0 || days.length > 0)}}">
+    <view class="card-header">作业路线</view>
+    <view class="site-list">
+      <!-- site-task 模式：时间线站点行 -->
+      <block wx:if="{{generatedTaskMode === 'site'}}">
+        <view class="site-list-row" wx:for="{{generatedPlans}}" wx:key="key">
+          <view class="site-list-left">
+            <view class="site-list-name">{{item.site_name || '站点'}}</view>
+            <view class="site-list-date">{{item.execution_date || ''}}</view>
+          </view>
+          <view class="site-list-right">
+            <view class="site-list-status sstat-{{item.status_cls}}">{{item.status_cn || '状态未知'}}</view>
+            <view class="site-list-items">{{item.item_counts_text}}</view>
+          </view>
+        </view>
+      </block>
+      <!-- legacy 模式 -->
+      <block wx:elif="{{generatedTaskMode === 'legacy'}}">
+        <view class="site-list-row" wx:for="{{generatedPlans}}" wx:key="key">
+          <view class="site-list-left">
+            <view class="site-list-name">{{item.display_name}}</view>
+          </view>
+          <view class="site-list-right">
+            <view class="site-list-status sstat-{{item.status_cls}}">{{item.status_cn}}</view>
+          </view>
+        </view>
+      </block>
+    </view>
+  </view>
+
+  <!-- ===== 卡片2：审批信息 ===== -->
+  <view class="info-card" wx:if="{{loaded && detail && (detail.user_name || detail.submitted_at || detail.approver_name || detail.approved_at || detail.remarks)}}">
+    <view class="card-header">审批信息</view>
+    <view class="info-row" wx:if="{{detail.user_name}}">
+      <text class="info-label">负责人</text>
+      <text class="info-value">{{detail.user_name}}</text>
+    </view>
     <view class="info-row" wx:if="{{detail.submitted_at}}">
       <text class="info-label">提交时间</text>
-      <text class="info-val">{{detail.submitted_at}}</text>
+      <text class="info-value info-value-secondary">{{detail.submitted_at}}</text>
+    </view>
+    <view class="info-row" wx:if="{{detail.approver_name}}">
+      <text class="info-label">审批人</text>
+      <text class="info-value">{{detail.approver_name}}</text>
     </view>
     <view class="info-row" wx:if="{{detail.approved_at}}">
-      <text class="info-label">审批通过</text>
-      <text class="info-val">{{detail.approved_at}}</text>
+      <text class="info-label">审批时间</text>
+      <text class="info-value info-value-secondary">{{detail.approved_at}}</text>
     </view>
     <view class="info-row" wx:if="{{detail.remarks}}">
-      <text class="info-label">备注</text>
-      <text class="info-val">{{detail.remarks}}</text>
+      <text class="info-label">计划备注</text>
+      <text class="info-value info-value-secondary info-value-multiline">{{detail.remarks}}</text>
     </view>
   </view>
 
-  <view class="reuse-entry" wx:if="{{canFavorite}}" bindtap="onFavoriteAction">
-    <view>
-      <text class="reuse-title">{{favorite ? '由常用计划生成新草稿' : '收藏为常用计划'}}</text>
-      <text class="reuse-hint">{{favorite ? '复用站点、相对日期、车辆和备件并继续编辑' : '保存本站点组合、相对日期、车辆和备件'}}</text>
-    </view>
-    <text class="reuse-action">{{favoriting ? '保存中…' : (favorite ? '生成草稿 ›' : '收藏 ›')}}</text>
-  </view>
-
-  <!-- 出发前准备：车辆、备件、顺路工单集中呈现，避免临出发再切换多个页面核对。 -->
-  <block wx:if="{{resourceDays.length || resourceParts.length || linkedWorkorders.length}}">
-    <view class="section">
-      <view class="section-title">出发前准备</view>
-    </view>
-    <view class="card prep-card">
-      <view class="prep-block" wx:if="{{resourceDays.length}}">
-        <text class="prep-label">用车安排</text>
-        <view class="prep-row" wx:for="{{resourceDays}}" wx:key="date">
-          <text class="prep-main">{{item.date_short}} {{item.weekday_cn}}</text>
-          <text class="prep-value {{item.vehicle_name === '未安排用车' ? 'prep-warn' : ''}}">{{item.vehicle_name}}</text>
-        </view>
-      </view>
-      <view class="prep-block" wx:if="{{resourceParts.length}}">
-        <text class="prep-label">备件</text>
-        <view class="prep-row" wx:for="{{resourceParts}}" wx:key="part_id">
-          <text class="prep-main">{{item.part_name}}</text>
-          <text class="prep-value">{{item.quantity_text}} · {{item.status_cn}}</text>
-        </view>
-      </view>
-      <view class="prep-block" wx:if="{{linkedWorkorders.length}}">
-        <text class="prep-label">顺路工单</text>
-        <view class="prep-row" wx:for="{{linkedWorkorders}}" wx:key="id">
-          <text class="prep-main">{{item.site_name || '关联站点'}} · {{item.title}}</text>
-          <text class="prep-value">{{item.order_no}}</text>
-        </view>
+  <!-- ===== 卡片3：出发准备 ===== -->
+  <view class="info-card" wx:if="{{loaded && (resourceDays.length > 0 || resourceParts.length > 0 || linkedWorkorders.length > 0)}}">
+    <view class="card-header">出发准备</view>
+    <view class="info-row" wx:if="{{resourceDays.length > 0}}">
+      <text class="info-label">车辆</text>
+      <view class="info-value info-value-multiline info-value-right">
+        <text class="prep-line" wx:for="{{resourceDays}}" wx:for-item="day" wx:key="date">{{day.date_short}} {{day.weekday_cn}} {{day.vehicle_name}}</text>
       </view>
     </view>
-  </block>
-
-  <!-- 逐日行程 -->
-  <view class="section">
-    <view class="section-title">行程安排</view>
-  </view>
-  <view class="card day-row" wx:for="{{days}}" wx:key="date" wx:if="{{item.sites.length}}">
-    <view class="day-row-head">
-      <text class="day-row-weekday">{{item.weekday_cn}}</text>
-      <text class="day-row-date">{{item.date}}</text>
-      <text class="day-vehicle" wx:if="{{item.vehicle_name}}">{{item.vehicle_name}}</text>
-    </view>
-    <view class="day-sites">
-      <text class="tag tag-brand site-tag" wx:for="{{item.sites}}" wx:key="id" wx:for-item="s">{{s.name}}</text>
-    </view>
-  </view>
-  <view class="empty" wx:if="{{!days.length}}">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">暂无行程安排</text>
-  </view>
-
-  <!-- 已生成任务 -->
-  <block wx:if="{{generatedPlans.length}}">
-    <view class="section">
-      <view class="section-title">已生成巡检任务</view>
-      <text class="section-hint" wx:if="{{generatedTaskMode === 'legacy'}}">旧版执行包数据，状态沿用原任务口径</text>
-    </view>
-    <view class="card task-list">
-      <view class="task-item" wx:for="{{generatedPlans}}" wx:key="key">
-        <text class="task-name">{{item.display_name}}</text>
-        <text class="tag tag-{{item.status_cls}} task-status">{{item.status_cn}}</text>
+    <view class="info-row" wx:if="{{resourceParts.length > 0}}">
+      <text class="info-label">备件</text>
+      <view class="info-value info-value-multiline info-value-right">
+        <text class="prep-line" wx:for="{{resourceParts}}" wx:for-item="part" wx:key="part_name">{{part.part_name}} {{part.quantity_text}}</text>
       </view>
     </view>
-  </block>
-
-  <!-- 底部操作 -->
-  <view class="bottom-bar" wx:if="{{canEdit}}">
-    <button class="btn-ghost bottom-btn" bindtap="onEdit">编辑</button>
-    <button class="btn-primary bottom-btn" bindtap="onSubmit" wx:if="{{detail.status === 'draft' || detail.status === 'rejected'}}">提交审批</button>
-  </view>
-  <view class="bottom-bar" wx:if="{{canChange || canExecute}}">
-    <button class="btn-warn bottom-btn" wx:if="{{canChange}}" bindtap="onChangeRequest">发起变更</button>
-    <button class="btn-primary bottom-btn" wx:if="{{canExecute}}" bindtap="onGoExecution">进入现场执行</button>
+    <view class="info-row" wx:if="{{linkedWorkorders.length > 0}}">
+      <text class="info-label">顺路工单</text>
+      <view class="info-value info-value-multiline info-value-right">
+        <text class="prep-line" wx:for="{{linkedWorkorders}}" wx:for-item="wo" wx:key="id">{{wo.display_title}}</text>
+      </view>
+    </view>
   </view>
 
-  <view class="sheet-mask" wx:if="{{favoriteSheet.open}}" bindtap="onCloseFavoriteSheet"></view>
-  <view class="sheet favorite-sheet" wx:if="{{favoriteSheet.open}}">
+  <!-- 底部安全区占位 -->
+  <view class="bottom-spacer"></view>
+
+  <!-- ===== 底部固定操作栏 ===== -->
+  <view class="bottom-bar" wx:if="{{loaded}}">
+    <!-- 草稿状态 -->
+    <block wx:if="{{canEdit}}">
+      <button class="btn-primary-main" bindtap="onSubmit">提交审批</button>
+      <button class="btn-secondary-outline" bindtap="onEdit">编辑</button>
+    </block>
+    <!-- 可执行：主=进入现场，次=发起变更 -->
+    <block wx:elif="{{canExecute}}">
+      <button class="btn-primary-main" bindtap="onGoExecution">{{executionActionText}}</button>
+      <button class="btn-secondary-outline" bindtap="onChangeRequest" wx:if="{{canChange}}">变更</button>
+    </block>
+    <!-- 已批准不可执行：主=发起变更，次=收藏 -->
+    <block wx:elif="{{canChange}}">
+      <button class="btn-primary-main" bindtap="onChangeRequest">发起变更</button>
+      <button class="btn-secondary-outline" bindtap="onFavoriteAction">{{favorite ? '复用' : '收藏'}}</button>
+    </block>
+    <!-- 其他状态（已完成/已取消）：主=收藏/复用，次=取消（如果有权限） -->
+    <block wx:else>
+      <button class="btn-primary-main" bindtap="onFavoriteAction" wx:if="{{canFavorite}}">{{favorite ? '复用计划' : '收藏为常用'}}</button>
+    </block>
+    <button class="btn-secondary-outline btn-destructive-outline" bindtap="onOpenCancel" wx:if="{{canCancel}}">取消</button>
+  </view>
+
+  <!-- 取消原因弹层 -->
+  <view class="sheet-mask" wx:if="{{cancelSheet.open}}" bindtap="onCloseCancel"></view>
+  <view class="sheet" wx:if="{{cancelSheet.open}}"><view class="sheet-handle"></view>
     <view class="sheet-head">
-      <text class="sheet-title">生成新计划草稿</text>
-      <text class="sheet-close" bindtap="onCloseFavoriteSheet">×</text>
+      <text class="sheet-title">取消计划</text>
+      <view class="sheet-close" bindtap="onCloseCancel"></view>
     </view>
-    <text class="favorite-label">新周期开始日期</text>
+    <textarea class="form-textarea" placeholder="请填写取消原因（必填，最多500字）" value="{{cancelSheet.reason}}" bindinput="onCancelReasonInput" maxlength="500"></textarea>
+    <text class="form-error" wx:if="{{cancelSheet.error}}">{{cancelSheet.error}}</text>
+    <view class="sheet-actions">
+      <button class="btn-secondary-outline" bindtap="onCloseCancel">返回</button>
+      <button class="btn-primary-main btn-destructive-fill" loading="{{cancelSheet.submitting}}" bindtap="onConfirmCancel">确认取消</button>
+    </view>
+  </view>
+
+  <!-- 复用计划弹层 -->
+  <view class="sheet-mask" wx:if="{{favoriteSheet.open}}" bindtap="onCloseFavoriteSheet"></view>
+  <view class="sheet" wx:if="{{favoriteSheet.open}}"><view class="sheet-handle"></view>
+    <view class="sheet-head">
+      <text class="sheet-title">从常用计划创建</text>
+      <view class="sheet-close" bindtap="onCloseFavoriteSheet"></view>
+    </view>
+    <text class="field-label">作业起始日期</text>
     <picker mode="date" value="{{favoriteSheet.periodStart}}" bindchange="onFavoriteDate">
-      <view class="favorite-picker">{{favoriteSheet.periodStart || '请选择日期'}} ›</view>
+      <view class="input-field">{{favoriteSheet.periodStart || '请选择日期'}}</view>
     </picker>
-    <text class="favorite-hint">按收藏中的相对日期复用站点、车辆和备件；生成后直接进入编辑页。</text>
-    <button class="btn-primary favorite-submit" loading="{{favoriteSheet.submitting}}" disabled="{{favoriteSheet.submitting}}" bindtap="onCreateFavoriteDraft">生成并编辑草稿</button>
+    <button class="btn-primary-main sheet-primary-btn" loading="{{favoriteSheet.submitting}}" bindtap="onCreateFavoriteDraft">创建草稿</button>
   </view>
 </view>

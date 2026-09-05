@@ -16,10 +16,9 @@ function activeUseFromRows(rows) {
 }
 
 function effectiveVehicleCanReturn(item, today) {
-  if (item && item.can_return !== undefined) return !!item.can_return;
-  const tripEnd = item && item.end_at ? String(item.end_at).slice(0, 10) : '';
-  const isPlanTrip = String((item && item.reason) || '').indexOf('巡检计划#') >= 0;
-  return !isPlanTrip || !tripEnd || tripEnd <= today || (item && item.vehicle_status === 'restricted');
+  // Return authority is a server fact. Local dates and text cannot safely
+  // represent plan completion, replacement vehicles, or restricted returns.
+  return !!(item && item.can_return);
 }
 
 module.exports = { myVehicleQuery, isReturnedUse, activeUseFromRows, effectiveVehicleCanReturn };

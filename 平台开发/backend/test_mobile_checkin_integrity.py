@@ -1,10 +1,12 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -39,11 +41,12 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, code TEXT, type TEXT, gps_lat REAL, gps_lng REAL);
+                CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE work_orders (
-                    order_no TEXT PRIMARY KEY, site_id INTEGER, status TEXT, assignee TEXT,
+                    id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER, status TEXT, assignee TEXT,
                     check_in_lat REAL, check_in_lng REAL, check_in_time TEXT, check_in_user TEXT,
-                    created_at TEXT
+                    created_at TEXT, source TEXT
                 );
                 CREATE TABLE plan_schedules (id INTEGER PRIMARY KEY, status TEXT);
                 CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, assignee_id INTEGER, generate_date TEXT, status TEXT, plan_schedule_id INTEGER);
@@ -52,7 +55,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     execution_status TEXT, result TEXT, category TEXT, item_name TEXT,
                     frequency TEXT, remark TEXT, check_time TEXT, calibrator TEXT,
                     calibration_values TEXT, photo_urls TEXT, required_photos INTEGER DEFAULT 0,
-                    actual_photos INTEGER DEFAULT 0, check_out_time TEXT
+                    actual_photos INTEGER DEFAULT 0, check_out_time TEXT, completed_at TEXT
                 );
                 CREATE TABLE inspection_checkins (site_id INTEGER, site_name TEXT, user_id INTEGER, user_name TEXT, check_time TEXT, lat REAL, lng REAL);
                 CREATE TABLE photo_capture_sessions (
@@ -62,12 +65,21 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     used_at TEXT, attachment_id INTEGER, gps_lat REAL, gps_lng REAL,
                     distance_m REAL, rework_required_at TEXT, capture_source TEXT DEFAULT ''
                 );
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY, item_id INTEGER, source_type TEXT, source_id INTEGER,
+                    site_id INTEGER, uploader_id INTEGER, uploader_name TEXT,
+                    is_deleted INTEGER DEFAULT 0, created_at TEXT, extra_json TEXT DEFAULT '{}',
+                    recognized_category TEXT DEFAULT '', category TEXT DEFAULT ''
+                );
                 CREATE TABLE mobile_idempotency (idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT, created_at TEXT);
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
                 INSERT INTO sites (id,name,code,type,gps_lat,gps_lng) VALUES (1, '测试站一', 'S-1', 'water_quality', 28.6800, 115.7300);
                 INSERT INTO sites (id,name,code,type,gps_lat,gps_lng) VALUES (2, '测试站二', 'S-2', 'water_quality', 28.6900, 115.7400);
                 INSERT INTO sites (id,name,code,type,gps_lat,gps_lng) VALUES (3, '测试站三', 'S-3', 'water_quality', 28.7000, 115.7500);
                 INSERT INTO sites (id,name,code,type,gps_lat,gps_lng) VALUES (4, '无坐标站', 'S-4', 'water_quality', NULL, NULL);
+                INSERT INTO users VALUES (1, '管理员');
+                INSERT INTO users VALUES (2, '现场运维');
+                INSERT INTO users VALUES (3, '其他运维');
                 INSERT INTO user_sites VALUES (2, 1);
                 INSERT INTO user_sites VALUES (3, 1);
                 INSERT INTO plan_schedules VALUES (10, 'approved');
@@ -75,7 +87,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                 INSERT INTO insp_plan_items (id,plan_id,site_id,execution_status,result,item_name,category,frequency) VALUES (30, 20, 1, 'active', NULL, '水质检查', '设备', 'daily');
                 INSERT INTO insp_plan_items (id,plan_id,site_id,execution_status,result,item_name,category,frequency) VALUES (31, 20, 2, 'active', NULL, '水质检查', '设备', 'daily');
                 INSERT INTO insp_plan_items (id,plan_id,site_id,execution_status,result,item_name,category,frequency) VALUES (32, 20, 4, 'active', NULL, '水质检查', '设备', 'daily');
-                INSERT INTO work_orders VALUES ('WO-1', 1, 'in_progress', '现场运维', NULL, NULL, NULL, NULL, datetime('now','localtime'));
+                INSERT INTO work_orders VALUES (1, 'WO-1', 1, 'in_progress', '现场运维', NULL, NULL, NULL, NULL, datetime('now','localtime'), 'manual');
             ''' % today)
         self.client = app_module.app.test_client()
 
@@ -88,6 +100,41 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
     @staticmethod
     def headers(token):
         return {'Authorization': 'Bearer ' + token}
+
+    def _prepare_plan_vehicle(self, *, active_use=False):
+        today = datetime.now().strftime('%Y-%m-%d')
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE plan_schedules ADD COLUMN vehicle_days TEXT DEFAULT '{}'")
+            db.execute('UPDATE plan_schedules SET vehicle_days=? WHERE id=10',
+                       (json.dumps({today: 7}),))
+            db.executescript('''
+                CREATE TABLE vehicles (
+                    id INTEGER PRIMARY KEY, status TEXT
+                );
+                CREATE TABLE vehicle_documents (
+                    vehicle_id INTEGER, document_type TEXT, valid_until TEXT
+                );
+                CREATE TABLE vehicle_applications (
+                    id INTEGER PRIMARY KEY, vehicle_id INTEGER, applicant_id INTEGER,
+                    start_at TEXT, end_at TEXT, reason TEXT, status TEXT
+                );
+                CREATE TABLE vehicle_use_records (
+                    id INTEGER PRIMARY KEY, application_id INTEGER,
+                    returned_at TEXT, status TEXT
+                );
+                INSERT INTO vehicles (id,status) VALUES (7,'idle');
+            ''')
+            db.execute('''INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (50,7,2,?,?,?,'approved')''', (
+                    today + ' 08:00:00', tomorrow + ' 18:00:00', '巡检计划#10用车',
+                ))
+            if active_use:
+                db.execute("""INSERT INTO vehicle_use_records
+                    (id,application_id,returned_at,status)
+                    VALUES (60,50,NULL,'checked_out')""")
+        return today, tomorrow
 
     def test_inspection_checkin_requires_assigned_site_and_nearby_position(self):
         remote = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
@@ -105,6 +152,200 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         })
         self.assertEqual(checked.status_code, 200, checked.json)
         self.assertTrue(checked.json['location_verified'])
+
+    def test_inspection_vehicle_arrival_gate_blocks_direct_checkin_until_current_trip_exists(self):
+        today, tomorrow = self._prepare_plan_vehicle()
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        headers = self.headers('operator-token')
+        payload = {
+            'site_id': 1, 'site_name': '测试站一', 'plan_id': 20,
+            'lat': 28.6801, 'lng': 115.7301,
+        }
+        blocked_payload = dict(payload, _idempotency_key='blocked-vehicle-gate')
+        blocked = self.client.post('/api/mobile/check-in', headers=headers, json=blocked_payload)
+        self.assertEqual(blocked.status_code, 409, blocked.json)
+        self.assertEqual(blocked.json['code'], 'VEHICLE_CHECKOUT_REQUIRED')
+        legacy_bypass = self.client.post('/api/mobile/check-in', headers=headers, json={
+            key: value for key, value in payload.items() if key != 'plan_id'
+        })
+        self.assertEqual(legacy_bypass.status_code, 409, legacy_bypass.json)
+        self.assertEqual(legacy_bypass.json['code'], 'VEHICLE_CHECKOUT_REQUIRED')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 0)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM mobile_idempotency
+                WHERE idempotency_key='2:blocked-vehicle-gate' AND endpoint='check-in'""").fetchone()[0], 0)
+
+        exact = self.client.get('/api/mobile/execution-plans/20/sites/1', headers=headers)
+        self.assertEqual(exact.status_code, 200, exact.json)
+        self.assertFalse(exact.json['arrival_gate']['allowed'])
+        self.assertEqual(exact.json['arrival_gate']['code'], 'VEHICLE_CHECKOUT_REQUIRED')
+
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO vehicle_use_records
+                (id,application_id,returned_at,status) VALUES (60,50,NULL,'checked_out')""")
+        exact = self.client.get('/api/mobile/execution-plans/20/sites/1', headers=headers)
+        self.assertTrue(exact.json['arrival_gate']['allowed'])
+        allowed = self.client.post('/api/mobile/check-in', headers=headers, json=payload)
+        self.assertEqual(allowed.status_code, 200, allowed.json)
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM inspection_checkins')
+            db.execute("UPDATE vehicle_use_records SET returned_at=datetime('now'),status='returned' WHERE id=60")
+        returned = self.client.post('/api/mobile/check-in', headers=headers, json=payload)
+        self.assertEqual(returned.status_code, 409, returned.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 0)
+            db.execute("UPDATE vehicle_applications SET status='cancelled' WHERE id=50")
+        invalid = self.client.post('/api/mobile/check-in', headers=headers, json=payload)
+        self.assertEqual(invalid.status_code, 409, invalid.json)
+        self.assertEqual(invalid.json['code'], 'VEHICLE_APPLICATION_INVALID')
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE plan_schedules SET vehicle_days='{}' WHERE id=10")
+        no_vehicle = self.client.get('/api/mobile/execution-plans/20/sites/1', headers=headers)
+        self.assertTrue(no_vehicle.json['arrival_gate']['allowed'])
+
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plans SET generate_date=? WHERE id=20', (yesterday,))
+            db.execute('UPDATE plan_schedules SET vehicle_days=? WHERE id=10',
+                       (json.dumps({yesterday: 7}),))
+            db.execute("UPDATE vehicle_applications SET status='approved',start_at=?,end_at=? WHERE id=50",
+                       (yesterday + ' 08:00:00', tomorrow + ' 18:00:00'))
+            db.execute("UPDATE vehicle_use_records SET returned_at=NULL,status='checked_out' WHERE id=60")
+        carryover = self.client.get('/api/mobile/execution-plans/20/sites/1', headers=headers)
+        self.assertTrue(carryover.json['arrival_gate']['allowed'])
+
+        with app_module.get_db() as db:
+            db.execute('UPDATE vehicle_applications SET end_at=? WHERE id=50',
+                       (yesterday + ' 18:00:00',))
+        expired = self.client.get('/api/mobile/execution-plans/20/sites/1', headers=headers)
+        self.assertFalse(expired.json['arrival_gate']['allowed'])
+        self.assertEqual(expired.json['arrival_gate']['code'], 'VEHICLE_EXTENSION_REQUIRED')
+
+    def test_vehicle_state_cannot_write_between_gate_read_and_checkin_insert(self):
+        self._prepare_plan_vehicle(active_use=True)
+        original_gate = app_module._inspection_arrival_resource_state
+        gate_read = threading.Event()
+        release_gate = threading.Event()
+        mutation_started = threading.Event()
+        mutation_finished = threading.Event()
+        response_box = {}
+
+        def paused_gate(db, plan_id, user_id):
+            result = original_gate(db, plan_id, user_id)
+            gate_read.set()
+            if not release_gate.wait(3):
+                raise RuntimeError('test did not release the arrival gate')
+            return result
+
+        def request_checkin():
+            client = app_module.app.test_client()
+            response_box['response'] = client.post(
+                '/api/mobile/check-in', headers=self.headers('operator-token'), json={
+                    'site_id': 1, 'site_name': '测试站一', 'plan_id': 20,
+                    'lat': 28.6801, 'lng': 115.7301,
+                })
+
+        def return_vehicle():
+            db = sqlite3.connect(self.db_path, timeout=3)
+            try:
+                mutation_started.set()
+                db.execute("""UPDATE vehicle_use_records
+                    SET returned_at=datetime('now'),status='returned' WHERE id=60""")
+                db.commit()
+                mutation_finished.set()
+            finally:
+                db.close()
+
+        app_module._inspection_arrival_resource_state = paused_gate
+        request_thread = threading.Thread(target=request_checkin)
+        mutation_thread = threading.Thread(target=return_vehicle)
+        try:
+            request_thread.start()
+            self.assertTrue(gate_read.wait(2), 'check-in must reach the authoritative gate')
+            mutation_thread.start()
+            self.assertTrue(mutation_started.wait(1))
+            self.assertFalse(mutation_finished.wait(0.2),
+                             'vehicle mutation must wait for the check-in transaction')
+            release_gate.set()
+            request_thread.join(3)
+            mutation_thread.join(3)
+            self.assertFalse(request_thread.is_alive())
+            self.assertFalse(mutation_thread.is_alive())
+        finally:
+            release_gate.set()
+            app_module._inspection_arrival_resource_state = original_gate
+            request_thread.join(3)
+            mutation_thread.join(3)
+
+        response = response_box['response']
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 1)
+            use = db.execute(
+                'SELECT status,returned_at FROM vehicle_use_records WHERE id=60').fetchone()
+            self.assertEqual(use['status'], 'returned')
+            self.assertTrue(use['returned_at'])
+
+    def test_same_idempotency_key_concurrently_creates_one_inspection_checkin(self):
+        original_get = app_module._mobile_idempotency_get
+        first_cache_read = threading.Event()
+        second_cache_read = threading.Event()
+        release_first = threading.Event()
+        calls_lock = threading.Lock()
+        responses = {}
+        call_count = 0
+
+        def paused_get(db, key, endpoint):
+            nonlocal call_count
+            result = original_get(db, key, endpoint)
+            with calls_lock:
+                call_count += 1
+                current_call = call_count
+            if current_call == 1:
+                first_cache_read.set()
+                if not release_first.wait(3):
+                    raise RuntimeError('test did not release the first idempotency read')
+            else:
+                second_cache_read.set()
+            return result
+
+        def request_checkin(name):
+            client = app_module.app.test_client()
+            responses[name] = client.post(
+                '/api/mobile/check-in', headers=self.headers('operator-token'), json={
+                    'site_id': 1, 'site_name': '测试站一',
+                    'lat': 28.6801, 'lng': 115.7301,
+                    '_idempotency_key': 'concurrent-checkin',
+                })
+
+        app_module._mobile_idempotency_get = paused_get
+        first = threading.Thread(target=request_checkin, args=('first',))
+        second = threading.Thread(target=request_checkin, args=('second',))
+        try:
+            first.start()
+            self.assertTrue(first_cache_read.wait(2))
+            second.start()
+            self.assertFalse(second_cache_read.wait(0.2),
+                             'the second request must not read idempotency before the first commits')
+            release_first.set()
+            first.join(3)
+            second.join(3)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+        finally:
+            release_first.set()
+            app_module._mobile_idempotency_get = original_get
+            first.join(3)
+            second.join(3)
+
+        self.assertEqual(responses['first'].status_code, 200, responses['first'].json)
+        self.assertEqual(responses['second'].status_code, 200, responses['second'].json)
+        self.assertEqual(responses['first'].json, responses['second'].json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 1)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM mobile_idempotency
+                WHERE idempotency_key='2:concurrent-checkin' AND endpoint='check-in'""").fetchone()[0], 1)
 
     def test_workorder_checkin_requires_assignee(self):
         response = self.client.post('/api/mobile/check-in', headers=self.headers('other-token'), json={
@@ -193,6 +434,62 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400, response.json)
         self.assertIn('打卡', response.json['error'])
 
+    def test_submit_item_consumes_calibration_only_for_qaqc_category(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE insp_plan_items ADD COLUMN review_status INTEGER DEFAULT 0')
+            db.execute('ALTER TABLE insp_plans ADD COLUMN completion_rate REAL DEFAULT 0')
+        checked = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'site_name': '测试站一', 'lat': 28.6801, 'lng': 115.7301,
+        })
+        self.assertEqual(checked.status_code, 200, checked.json)
+
+        calibration_only = self.client.post('/api/mobile/submit-item',
+            headers=self.headers('operator-token'), json={
+                'item_id': 30, 'plan_id': 20, 'result': 'normal',
+                'calibrator': '伪造校准人', 'calibration_values': '7.00',
+                '_idempotency_key': 'ordinary-calibration-only',
+            })
+        self.assertEqual(calibration_only.status_code, 400, calibration_only.json)
+        with app_module.get_db() as db:
+            ordinary = db.execute("""SELECT result,check_time,calibrator,calibration_values
+                FROM insp_plan_items WHERE id=30""").fetchone()
+            writes = db.execute("""SELECT COUNT(*) FROM mobile_idempotency
+                WHERE endpoint='submit-item'""").fetchone()[0]
+        self.assertEqual(tuple(ordinary), (None, None, None, None))
+        self.assertEqual(writes, 0, 'invalid ordinary submission must be zero-write')
+
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency)
+                VALUES (?,?,1,'active',NULL,?,?,'daily')""", [
+                    (33, 20, 'pH 标准液校准', 'qaqc_calibration'),
+                    (34, 20, '剩余常规项', '设备'),
+                ])
+
+        ordinary_with_remark = self.client.post('/api/mobile/submit-item',
+            headers=self.headers('operator-token'), json={
+                'item_id': 30, 'plan_id': 20, 'result': 'normal', 'remark': '现场记录正常',
+                'calibrator': '伪造校准人', 'calibration_values': '7.00',
+                '_idempotency_key': 'ordinary-calibration-ignored',
+            })
+        self.assertEqual(ordinary_with_remark.status_code, 200, ordinary_with_remark.json)
+        with app_module.get_db() as db:
+            ordinary = db.execute("""SELECT result,remark,calibrator,calibration_values
+                FROM insp_plan_items WHERE id=30""").fetchone()
+        self.assertEqual(tuple(ordinary), ('normal', '现场记录正常', None, None))
+
+        calibration = self.client.post('/api/mobile/submit-item',
+            headers=self.headers('operator-token'), json={
+                'item_id': 33, 'plan_id': 20, 'result': 'normal',
+                'calibrator': '王工', 'calibration_values': '7.00',
+                '_idempotency_key': 'qaqc-calibration',
+            })
+        self.assertEqual(calibration.status_code, 200, calibration.json)
+        with app_module.get_db() as db:
+            qaqc = db.execute("""SELECT result,calibrator,calibration_values
+                FROM insp_plan_items WHERE id=33""").fetchone()
+        self.assertEqual(tuple(qaqc), ('normal', '王工', '7.00'))
+
     def test_photo_capture_session_rejects_a_stale_ordinary_checkin(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO inspection_checkins
@@ -259,6 +556,141 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         db = sqlite3.connect(self.db_path)
         try:
             self.assertIsNotNone(db.execute('SELECT check_out_time FROM insp_plan_items WHERE id=30').fetchone()[0])
+        finally:
+            db.close()
+
+    def test_checkout_closes_shared_site_visit_until_a_new_checkin(self):
+        today = datetime.now().strftime('%Y-%m-%d')
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO insp_plans VALUES (21, 2, ?, 'active', 10)", (today,))
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency)
+                VALUES (40,21,1,'active',NULL,'第二计划检查项','设备','daily')""")
+
+        checked = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'site_name': '测试站一', 'lat': 28.6801, 'lng': 115.7301,
+        })
+        self.assertEqual(checked.status_code, 200, checked.json)
+        for plan_id in (20, 21):
+            detail = self.client.get(f'/api/mobile/execution-plans/{plan_id}/sites/1',
+                                     headers=self.headers('operator-token'))
+            self.assertEqual(detail.status_code, 200, detail.json)
+            self.assertTrue(detail.json['checked_in'])
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=30")
+        closed = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
+            headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
+        self.assertEqual(closed.status_code, 200, closed.json)
+        replay = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
+            headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['already_closed'])
+
+        detail = self.client.get('/api/mobile/execution-plans/21/sites/1',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertFalse(detail.json['checked_in'])
+        site_tasks = self.client.get('/api/mobile/site-tasks/1',
+                                     headers=self.headers('operator-token'))
+        self.assertEqual(site_tasks.status_code, 200, site_tasks.json)
+        self.assertFalse(site_tasks.json['site']['checked_in'])
+
+        with app_module.get_db() as db:
+            before = {
+                'item': tuple(db.execute(
+                    'SELECT result,check_time,photo_urls FROM insp_plan_items WHERE id=40').fetchone()),
+                'sessions': db.execute('SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0],
+                'attachments': db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0],
+                'workorder': tuple(db.execute(
+                    "SELECT status,check_in_time FROM work_orders WHERE order_no='WO-1'").fetchone()),
+            }
+        submitted = self.client.post('/api/mobile/submit-item',
+            headers=self.headers('operator-token'), json={
+                'item_id': 40, 'plan_id': 21, 'result': 'normal', 'remark': '不得写入',
+            })
+        self.assertEqual(submitted.status_code, 400, submitted.json)
+        self.assertIn('打卡', submitted.json['error'])
+        capture = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'plan_id': 21, 'item_id': 40,
+                'gps_lat': 28.6801, 'gps_lng': 115.7301,
+            })
+        self.assertEqual((capture.status_code, capture.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+        workorder_capture = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-1',
+                'gps_lat': 28.6801, 'gps_lng': 115.7301,
+            })
+        self.assertEqual((workorder_capture.status_code, workorder_capture.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+        with app_module.get_db() as db:
+            after = {
+                'item': tuple(db.execute(
+                    'SELECT result,check_time,photo_urls FROM insp_plan_items WHERE id=40').fetchone()),
+                'sessions': db.execute('SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0],
+                'attachments': db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0],
+                'workorder': tuple(db.execute(
+                    "SELECT status,check_in_time FROM work_orders WHERE order_no='WO-1'").fetchone()),
+            }
+            self.assertEqual(after, before)
+
+            checkout_time = db.execute(
+                'SELECT check_out_time FROM insp_plan_items WHERE id=30').fetchone()[0]
+            db.execute("UPDATE inspection_checkins SET check_time=datetime(?,'-2 minutes')", (checkout_time,))
+            db.execute("UPDATE insp_plan_items SET check_out_time=datetime(?,'-1 minute') WHERE id=30",
+                       (checkout_time,))
+        reopened = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'site_name': '测试站一', 'lat': 28.6801, 'lng': 115.7301,
+            })
+        self.assertEqual(reopened.status_code, 200, reopened.json)
+        detail = self.client.get('/api/mobile/execution-plans/21/sites/1',
+                                 headers=self.headers('operator-token'))
+        self.assertTrue(detail.json['checked_in'])
+
+        with app_module.get_db() as db:
+            latest_checkin = db.execute("""SELECT check_time FROM inspection_checkins
+                WHERE user_id=2 AND site_id=1 ORDER BY datetime(check_time) DESC LIMIT 1""").fetchone()[0]
+            db.execute("INSERT INTO insp_plans VALUES (22, 3, ?, 'active', 10)", (today,))
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency,check_out_time)
+                VALUES (41,22,1,'active','normal','他人已离站','设备','daily',datetime(?,'+1 minute'))""",
+                       (latest_checkin,))
+            db.execute("INSERT INTO insp_plans VALUES (23, 2, ?, 'active', 10)", (today,))
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency,check_out_time)
+                VALUES (42,23,2,'active','normal','他站已离站','设备','daily',datetime(?,'+1 minute'))""",
+                       (latest_checkin,))
+            self.assertEqual(app_module._inspection_effective_checkin_time(db, 1, 2), latest_checkin)
+
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,execution_status,result,item_name,category,frequency,check_out_time)
+                VALUES (43,21,1,'active','normal','等时离站','设备','daily',?)""",
+                       (latest_checkin,))
+            self.assertIsNone(app_module._inspection_effective_checkin_time(db, 1, 2))
+            db.execute("UPDATE work_orders SET check_in_time=? WHERE order_no='WO-1'", (latest_checkin,))
+
+        direct_workorder = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-1',
+                'gps_lat': 28.6801, 'gps_lng': 115.7301,
+            })
+        self.assertEqual(direct_workorder.status_code, 200, direct_workorder.json)
+
+    def test_legacy_item_schema_without_checkout_keeps_same_day_checkin(self):
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        try:
+            db.executescript("""
+                CREATE TABLE inspection_checkins (
+                    site_id INTEGER, user_id INTEGER, check_time TEXT
+                );
+                CREATE TABLE insp_plan_items (id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER);
+                INSERT INTO inspection_checkins VALUES (1, 2, datetime('now','localtime'));
+            """)
+            self.assertTrue(app_module._inspection_effective_checkin_time(db, 1, 2))
         finally:
             db.close()
 

@@ -54,7 +54,8 @@ class B0BTruthAndClosureTest(unittest.TestCase):
                 );
                 CREATE TABLE alerts (
                     id INTEGER PRIMARY KEY, site_id INTEGER, message TEXT, level TEXT, status TEXT,
-                    created_at TEXT, metric TEXT, resolved_at TEXT, resolve_reason TEXT
+                    created_at TEXT, metric TEXT, resolved_at TEXT, resolve_reason TEXT,
+                    related_order_no TEXT
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER, event_type TEXT,
@@ -66,7 +67,9 @@ class B0BTruthAndClosureTest(unittest.TestCase):
                     created_at TEXT, generate_date TEXT
                 );
                 CREATE TABLE insp_plan_items (
-                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, review_status INTEGER DEFAULT 0
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    review_status INTEGER DEFAULT 0, execution_status TEXT DEFAULT 'active',
+                    result TEXT
                 );
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, stored_path TEXT,

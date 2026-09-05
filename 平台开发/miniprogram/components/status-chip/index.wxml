@@ -1,0 +1,3 @@
+<view class="chip chip--{{type}} chip--{{variant}} chip--{{size}}">
+  <text>{{text}}</text>
+</view>

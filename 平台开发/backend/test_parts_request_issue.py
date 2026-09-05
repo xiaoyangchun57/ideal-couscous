@@ -180,6 +180,54 @@ class PartsRequestIssueTest(unittest.TestCase):
         self.assertEqual(ledger.json['generated_records']['purchase_application']['site'], '测试站点')
         self.assertEqual(len(ledger.json['generated_records']['issue_record']), 1)
 
+    def test_non_stock_request_with_an_inventory_name_keeps_no_inventory_association(self):
+        created = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'spare_part_id': None, 'part_name': '采样泵', 'specification': '临时采购',
+            'quantity': 1, 'reason': '原库存不可用', 'fulfillment_type': 'vendor_order',
+        })
+        self.assertEqual(created.status_code, 200, created.json)
+        request_id = created.json['id']
+        self.assertEqual(self.read_one('SELECT part_id FROM parts_request_items WHERE request_id=?', (request_id,))[0], None)
+        self.assertEqual(self.read_one('SELECT part_sku FROM parts_request_items WHERE request_id=?', (request_id,))[0], '采样泵')
+
+    def test_non_stock_request_rejects_a_forged_inventory_reference(self):
+        response = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'spare_part_id': 1, 'part_name': '采样泵', 'quantity': 1,
+            'reason': '原库存不可用', 'fulfillment_type': 'local_purchase',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json['error'], '非库存履约不得关联库存备件')
+
+    def test_stock_request_uses_inventory_identity_and_ignores_client_text(self):
+        response = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'spare_part_id': 1, 'part_name': '伪造名称', 'specification': '伪造规格',
+            'estimated_amount': 999, 'quantity': 1, 'reason': '现场更换', 'fulfillment_type': 'stock',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        request_id = response.json['id']
+        stored = self.read_one('SELECT requested_part_name,specification,estimated_amount FROM parts_requests WHERE id=?', (request_id,))
+        self.assertEqual(stored[0], '采样泵')
+        self.assertNotEqual(stored[1], '伪造规格')
+        self.assertIsNone(stored[2])
+
+    def test_invalid_quantity_has_zero_request_item_and_event_writes(self):
+        for quantity in (1.5, 2.9, float('inf'), float('nan'), True, '1.5', '无效', 0, -1):
+            response = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+                'site_id': 1, 'spare_part_id': 1, 'quantity': quantity, 'reason': '现场更换',
+            })
+            self.assertEqual(response.status_code, 400, (quantity, response.json))
+        self.assertEqual(self.read_one('SELECT COUNT(*) FROM parts_requests')[0], 0)
+        self.assertEqual(self.read_one('SELECT COUNT(*) FROM parts_request_items')[0], 0)
+        self.assertEqual(self.read_one('SELECT COUNT(*) FROM parts_request_events')[0], 0)
+
+    def test_json_whole_number_float_is_accepted_as_one(self):
+        response = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
+            'site_id': 1, 'spare_part_id': 1, 'quantity': 1.0, 'reason': '现场更换',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(self.read_one('SELECT quantity FROM parts_request_items WHERE request_id=?',
+                                       (response.json['id'],))[0], 1)
+
     def test_workorder_related_returns_current_parts_and_recycle_records(self):
         created = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json={
             'site_id': 1, 'spare_part_id': 1, 'quantity': 2, 'reason': '工单处置',
@@ -201,6 +249,16 @@ class PartsRequestIssueTest(unittest.TestCase):
         self.assertEqual(related.json['parts'][0]['part_name'], '采样泵')
         self.assertEqual(related.json['parts'][0]['quantity'], 2)
         self.assertEqual(related.json['recycles'][0]['device_code'], 'DEV-007')
+
+    def test_create_parts_request_replays_one_stable_client_key(self):
+        payload = {'site_id': 1, 'spare_part_id': 1, 'quantity': 2,
+                   'reason': '稳定重试', '_idempotency_key': 'parts-test-replay-1'}
+        first = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json=payload)
+        second = self.client.post('/api/parts/requests', headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertEqual(first.json, second.json)
+        self.assertEqual(self.read_one('SELECT COUNT(*) FROM parts_requests WHERE reason=?', ('稳定重试',))[0], 1)
 
     def test_legacy_pending_requests_are_migrated_or_preserved_readonly(self):
         db = sqlite3.connect(self.db_path)

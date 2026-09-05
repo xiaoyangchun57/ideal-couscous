@@ -852,7 +852,7 @@ export default function AuditPage() {
   }, [items, loading, message, pendingError, pendingLoaded, searchParams]);
 
   // ===== 审核弹窗 =====
-  function ReviewModal() {
+  function renderReviewModal() {
     if (!reviewModalOpen) return null;
     const item = reviewingItem;
     if (!item) return null;
@@ -892,7 +892,6 @@ export default function AuditPage() {
           message="当前证据不满足办结条件，只能退回现场补充"
           description={[missingResolution ? '未记录现场处置说明' : '', missingRequiredPhotos ? '处置影像数量不足' : ''].filter(Boolean).join('；')} />}
         {failedApproveIds.length > 0 && <Alert type="error" showIcon style={{ marginBottom: 12 }} message="影像加载失败，无法审核" description="请重新加载失败影像；驳回仍可用。" />}
-        {rejectionReasonMissing && <Alert type="info" showIcon style={{ marginBottom: 12 }} message="已选择驳回照片，请填写统一驳回原因后提交" />}
         <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="类型">
             <Tag color={['inspection', 'inspection_batch'].includes(item.source_type) ? 'orange' : item.source_type === 'plan_schedule' ? 'gold' : 'blue'} style={{ borderRadius: 4, fontSize: 11 }}>
@@ -993,9 +992,9 @@ export default function AuditPage() {
                         ? [...ids, photo.id] : ids.filter(id => id !== photo.id))}>
                       需替换此照片
                     </Checkbox>
-                    <Text strong style={{ display: 'block', fontSize: 11, marginTop: 5 }}>检查项：{itemLabel}</Text>
-                    <Text type="secondary" ellipsis={{ tooltip: photo.archive_name || photo.original_filename }} style={{ display: 'block', fontSize: 11 }}>档案名称：{photo.archive_name || itemLabel}</Text>
-                    <Text type="secondary" ellipsis={{ tooltip: photo.original_filename || photo.filename }} style={{ display: 'block', fontSize: 11 }}>原始文件名：{photo.original_filename || photo.filename || '-'}</Text>
+                    <Text strong style={{ display: 'block', fontSize: 13, marginTop: 6 }}>{itemLabel}</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄时间：{photo.taken_at || '未记录'}</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄者：{photo.uploader_name || '未记录'}</Text>
                   </div>;
                 })}
               </div>
@@ -1048,6 +1047,11 @@ export default function AuditPage() {
           : ['workorder_review', 'inspection', 'inspection_batch', 'plan_schedule'].includes(item.source_type)
             ? '通过可留空；退回时必须填写需补充或整改内容'
             : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
+          <div data-review-reason-slot style={{ height: 22, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+            <Text type={rejectionReasonMissing ? 'danger' : 'secondary'}>
+              {rejectionReasonMissing ? '已选择驳回照片，请填写统一驳回原因' : ' '}
+            </Text>
+          </div>
         </div>
       </Modal>
     );
@@ -1201,7 +1205,7 @@ export default function AuditPage() {
         tabBarStyle={{ marginBottom: 16 }}
       />
 
-      <ReviewModal />
+      {renderReviewModal()}
     </div>
   );
 }

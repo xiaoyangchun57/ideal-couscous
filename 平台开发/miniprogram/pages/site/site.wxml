@@ -1,6 +1,6 @@
 <view class="page" wx:if="{{site}}">
-  <view class="sync-bar" wx:if="{{!online}}">当前离线，打卡会暂存并在联网后自动同步</view>
-  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
+  <view class="sync-bar" wx:if="{{!readOnlySource && !online}}">当前离线，打卡会暂存并在联网后自动同步</view>
+  <view class="sync-bar" wx:elif="{{!readOnlySource && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
   <view class="card site-summary">
     <view class="site-name">{{site.name}}</view>
     <view class="site-tags">
@@ -9,7 +9,7 @@
     </view>
   </view>
 
-  <view class="task-status {{site.task_state === 'carryover' ? 'task-status-carryover' : (site.can_check_in ? 'task-status-ready' : 'task-status-blocked')}}">
+  <view wx:if="{{!readOnlySource}}" class="task-status {{site.task_state === 'carryover' ? 'task-status-carryover' : (site.can_check_in ? 'task-status-ready' : 'task-status-blocked')}}">
     <view class="task-status-copy">
       <text class="task-status-title">{{site.task_state === 'carryover' ? '逾期结转任务' : (site.can_check_in ? '今日可执行任务' : '当前无可执行任务')}}</text>
       <text class="task-status-desc">{{site.checked_in ? '已完成到站打卡，可继续处理本站任务' : (site.task_state === 'carryover' ? '结转任务已获原计划批准，到站后可继续巡检' : (site.can_check_in ? '到站打卡后即可开始现场巡检' : site.checkin_block_reason))}}</text>
@@ -17,18 +17,18 @@
     <text class="task-status-count" wx:if="{{site.task_state === 'carryover'}}">{{site.carryover_items}} 项待检</text>
   </view>
 
-  <view class="rework-status" wx:if="{{site.rework_count > 0}}">
+  <view class="rework-status" wx:if="{{!readOnlySource && site.rework_count > 0}}">
     <text class="rework-status-title">影像补拍待整改 · {{site.rework_count}} 项</text>
     <text class="rework-status-desc">{{site.rework_reason || '现场照片未通过审核，请在巡检页面补拍并重新提交该检查项。'}}</text>
   </view>
 
   <view class="ops">
-    <button class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.checked_in ? '已完成到站打卡' : (site.can_check_in ? (site.has_carryover ? '到站打卡并继续' : '到站打卡') : '暂不可打卡')}}</button>
+    <button wx:if="{{!readOnlySource}}" class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.checked_in ? '已完成到站打卡' : (site.can_check_in ? (site.has_carryover ? '到站打卡并继续' : '到站打卡') : '暂不可打卡')}}</button>
     <view class="secondary-ops">
       <button class="btn-ghost op-btn" bindtap="onNavigate">导航到站</button>
-      <button wx:if="{{site.can_calibrate}}" class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
+      <button wx:if="{{!readOnlySource && site.can_calibrate}}" class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
     </view>
-    <button class="btn-ghost parts-apply-btn" bindtap="onOpenPartsApply">申请备品备件</button>
+    <button wx:if="{{!readOnlySource}}" class="btn-ghost parts-apply-btn" bindtap="onOpenPartsApply">申请备品备件</button>
   </view>
 
   <view class="section site-info-heading"><text class="section-title">站点资料</text></view>
@@ -40,25 +40,93 @@
     <view class="info-row"><text class="info-k">类型</text><text class="info-v">{{site.type_cn}}</text></view>
   </view>
 
-  <view class="sheet-mask" wx:if="{{partsApply.open}}" bindtap="onClosePartsApply"></view>
-  <view class="sheet" wx:if="{{partsApply.open}}">
-    <view class="sheet-head"><text class="sheet-title">备品备件需求</text><text class="sheet-close" bindtap="onClosePartsApply">×</text></view>
-    <view class="parts-linked-site">关联站点：{{site.name}}</view>
-    <picker mode="selector" range="{{partsFulfillmentOptions}}" range-key="label" value="{{partsApply.fulfillmentIndex}}" bindchange="onPartsFulfillmentPick">
-      <view class="field-picker"><text>处理方式</text><text>{{partsFulfillmentOptions[partsApply.fulfillmentIndex].label}} ›</text></view>
-    </picker>
-    <view class="parts-route-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">库存领用批准后不锁库，现场实际拿到时再扣库。</view>
-    <view class="parts-route-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">买得到时先电话确认，回来补票据、金额和领用记录。</view>
-    <view class="parts-route-note" wx:else>买不到时走厂家订购，到货后再确认入库或现场直用。</view>
-    <picker wx:if="{{partsApply.fulfillment_type === 'stock'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
-      <view class="field-picker"><text>库存备件</text><text>{{partsOptions[partsApply.index].label}}</text></view>
-    </picker>
-    <view class="field"><text class="field-label">备件名称</text><input class="field-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/></view>
-    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">规格型号</text><input class="field-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/></view>
-    <view class="field"><text class="field-label">数量</text><input class="field-input" type="number" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/></view>
-    <view class="field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}"><text class="field-label">预计金额（可不填）</text><input class="field-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/></view>
-    <view class="field"><text class="field-label">申请事由</text><textarea class="field-input textarea" placeholder="说明现场发现的问题、是否影响运行" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea></view>
-    <button class="btn-primary submit-btn" loading="{{partsApply.submitting}}" disabled="{{partsApply.submitting}}" bindtap="onSubmitPartsApply">提交备件需求</button>
+  <view class="sheet-mask" wx:if="{{!readOnlySource && partsApply.open}}" bindtap="onClosePartsApply"></view>
+  <view class="sheet parts-apply-sheet" wx:if="{{!readOnlySource && partsApply.open}}">
+    <view class="sheet-handle"></view>
+    <view class="sheet-header">
+      <view class="sheet-header-title">备品备件需求</view>
+      <view class="sheet-header-close" catchtap="onClosePartsApply">
+        <view class="ico ico-close"></view>
+      </view>
+    </view>
+    <scroll-view class="sheet-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <!-- 关联信息 -->
+      <view class="wop-group">
+        <view class="wos-info-row wos-info-row--last">
+          <text class="wos-info-label">关联站点</text>
+          <text class="wos-info-value">{{site.name}}</text>
+        </view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 处理方式 -->
+      <view class="wop-group">
+        <view class="wos-group-title">处理方式</view>
+        <view class="segment-control">
+          <view wx:for="{{partsFulfillmentOptions}}" wx:key="key" class="segment-item {{partsApply.fulfillmentIndex === index ? 'active' : ''}}" bindtap="onPartsFulfillmentSelect" data-index="{{index}}">{{item.label}}</view>
+        </view>
+        <view class="wop-note" wx:if="{{partsApply.fulfillment_type === 'stock'}}">库存领用批准后不锁库，现场实际拿到时再扣库。</view>
+        <view class="wop-note" wx:elif="{{partsApply.fulfillment_type === 'local_purchase'}}">买得到时先电话确认，回来补票据、金额和领用记录。</view>
+        <view class="wop-note" wx:else>买不到时走厂家订购，到货后再确认入库或现场直用。</view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 备件信息 -->
+      <view class="wop-group">
+        <view class="wos-group-title">备件信息</view>
+
+        <!-- 库存备件 -->
+        <picker wx:if="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'ready'}}" mode="selector" range="{{partsOptions}}" range-key="label" value="{{partsApply.index}}" bindchange="onPartsPick">
+          <view class="wop-picker-row">
+            <text class="wop-picker-value">{{partsOptions[partsApply.index].label}}</text>
+            <view class="ico ico-chevron-right"></view>
+          </view>
+        </picker>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'loading'}}" class="wop-note">库存加载中</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'empty'}}" class="wop-note">暂无可领用库存</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
+
+        <!-- 非库存：备件名称 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">备件名称</text>
+          <input class="wop-input" placeholder="如：pH 电极" value="{{partsApply.part_name}}" bindinput="onPartsName" maxlength="50"/>
+        </view>
+
+        <!-- 非库存：规格型号 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">规格型号</text>
+          <input class="wop-input" placeholder="厂家、型号或可识别规格" value="{{partsApply.specification}}" bindinput="onPartsSpecification" maxlength="100"/>
+        </view>
+
+        <!-- 数量（通用） -->
+        <view class="wos-field">
+          <text class="wos-field-label">数量</text>
+          <input class="wop-input" type="number" placeholder="请输入数量" value="{{partsApply.quantity}}" bindinput="onPartsQty" maxlength="5"/>
+        </view>
+
+        <!-- 非库存：预计金额 -->
+        <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">
+          <text class="wos-field-label">预计金额（可不填）</text>
+          <input class="wop-input" type="digit" placeholder="元" value="{{partsApply.estimated_amount}}" bindinput="onPartsEstimatedAmount"/>
+        </view>
+      </view>
+
+      <view class="wos-divider"></view>
+
+      <!-- 申请事由 -->
+      <view class="wop-group">
+        <view class="wos-group-title">申请事由</view>
+        <textarea class="wos-textarea" placeholder="说明现场发现的问题、是否影响运行" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea>
+      </view>
+
+      <view class="sheet-content-spacer"></view>
+    </scroll-view>
+    <view class="sheet-bottom-bar">
+      <button class="btn-ghost btn-lg" bindtap="onClosePartsApply">取消</button>
+      <button class="btn-primary btn-lg" loading="{{partsApply.submitting}}" disabled="{{partsApply.submitting}}" bindtap="onSubmitPartsApply">提交备件需求</button>
+    </view>
   </view>
 </view>
 <view class="empty" wx:else>站点信息加载中…</view>

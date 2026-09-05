@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   Alert, Button, Form, Image, Input, Modal, Popconfirm, Select, Space, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { CheckOutlined, EyeOutlined, InboxOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CheckOutlined, CloseCircleOutlined, EyeOutlined, InboxOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import { useTheme } from '../../hooks/useTheme';
@@ -38,8 +38,11 @@ export default function ReportsPage() {
   const [evidenceRecord, setEvidenceRecord] = useState(null);
   const [verifyTarget, setVerifyTarget] = useState(null);
   const [verifySaving, setVerifySaving] = useState(false);
+  const [dismissTarget, setDismissTarget] = useState(null);
+  const [dismissSaving, setDismissSaving] = useState(false);
   const [archiveSavingId, setArchiveSavingId] = useState(null);
   const [verifyForm] = Form.useForm();
+  const [dismissForm] = Form.useForm();
   const roles = user?.roles?.length ? user.roles : [user?.role];
   const canManage = roles.includes('admin');
   const filterStatus = searchParams.get('status') || '';
@@ -91,7 +94,7 @@ export default function ReportsPage() {
       const values = await verifyForm.validateFields();
       setVerifySaving(true);
       await api.postStrict(`/manual-reports/${verifyTarget.id}/verify`, { note: values.note.trim() });
-      message.success(`已核实“${verifyTarget.site_name || '异常上报'}”，关联工单继续处置`);
+      message.success(`已确认“${verifyTarget.site_name || '异常上报'}”需继续处置`);
       setVerifyTarget(null);
       await load();
     } catch (error) {
@@ -100,6 +103,27 @@ export default function ReportsPage() {
       setVerifySaving(false);
     }
   }, [load, verifyForm, verifySaving, verifyTarget]);
+
+  const openDismiss = useCallback((record) => {
+    dismissForm.resetFields();
+    setDismissTarget(record);
+  }, [dismissForm]);
+
+  const submitDismiss = useCallback(async () => {
+    if (!dismissTarget || dismissSaving) return;
+    try {
+      const values = await dismissForm.validateFields();
+      setDismissSaving(true);
+      await api.postStrict(`/manual-reports/${dismissTarget.id}/dismiss`, { reason: values.reason.trim() });
+      message.success(`已核实消除“${dismissTarget.site_name || '异常上报'}”，原始证据和审计已保留`);
+      setDismissTarget(null);
+      await load();
+    } catch (error) {
+      if (!error?.errorFields) message.error(`核实消除失败：${error.message}`);
+    } finally {
+      setDismissSaving(false);
+    }
+  }, [dismissForm, dismissSaving, dismissTarget, load]);
 
   const archive = useCallback(async (record) => {
     if (archiveSavingId) return;
@@ -151,8 +175,9 @@ export default function ReportsPage() {
       },
     },
     ...(canManage ? [{
-      title: '操作', key: 'actions', width: 118, fixed: 'right', render: (_, record) => <Space size={4}>
-        {record.status === 'dispatched' && <Button aria-label={`核实${record.site_name || '异常上报'}异常上报#${record.id}`} size="small" icon={<CheckOutlined />} onClick={() => openVerify(record)}>核实</Button>}
+      title: '操作', key: 'actions', width: 230, fixed: 'right', render: (_, record) => <Space size={4}>
+        {record.status === 'dispatched' && <Button aria-label={`确认${record.site_name || '异常上报'}异常上报#${record.id}需处置`} size="small" icon={<CheckOutlined />} onClick={() => openVerify(record)}>确认需处置</Button>}
+        {['dispatched', 'verified'].includes(record.status) && <Button aria-label={`核实消除${record.site_name || '异常上报'}异常上报#${record.id}`} size="small" danger icon={<CloseCircleOutlined />} onClick={() => openDismiss(record)}>核实消除</Button>}
         {record.status === 'resolved' && <Popconfirm
           title={`归档“${record.site_name || '异常上报'}”？`}
           description="归档后该记录退出待办，但仍保留在历史记录中，且无法在本页撤销。"
@@ -162,10 +187,10 @@ export default function ReportsPage() {
         >
           <Button aria-label={`归档${record.site_name || '异常上报'}异常上报#${record.id}`} size="small" icon={<InboxOutlined />} loading={archiveSavingId === record.id}>归档</Button>
         </Popconfirm>}
-        {!['dispatched', 'resolved'].includes(record.status) && <Text type="secondary">—</Text>}
+        {!['dispatched', 'verified', 'resolved'].includes(record.status) && <Text type="secondary">—</Text>}
       </Space>,
     }] : []),
-  ], [archive, archiveSavingId, canManage, openVerify]);
+  ], [archive, archiveSavingId, canManage, openDismiss, openVerify]);
 
   const hasFilters = Boolean(filterStatus || filterType);
 
@@ -211,8 +236,8 @@ export default function ReportsPage() {
 
       <Modal
         open={!!verifyTarget}
-        title={verifyTarget ? `核实异常 · ${verifyTarget.site_name || '未关联站点'}` : '核实异常'}
-        okText="确认核实"
+        title={verifyTarget ? `确认需处置 · ${verifyTarget.site_name || '未关联站点'}` : '确认需处置'}
+        okText="确认需处置"
         cancelText="取消"
         onOk={submitVerify}
         onCancel={() => { if (!verifySaving) setVerifyTarget(null); }}
@@ -220,7 +245,7 @@ export default function ReportsPage() {
         destroyOnHidden
       >
         {verifyTarget && <>
-          <Text type="secondary">核实只确认上报内容与现场证据，不会替代工单处置或直接关单。</Text>
+          <Text type="secondary">此操作确认异常属实，关联工单仍需继续完成现场处置与审核。</Text>
           <div style={{ marginTop: 12, padding: 12, border: `1px solid ${tokens.colorBorder}`, borderRadius: 6, background: tokens.colorFillAlter }}>
             <Text strong>{REPORT_TYPE[verifyTarget.report_type] || '现场异常'}</Text>
             <Text style={{ display: 'block', marginTop: 4 }}>{verifyTarget.description || '未填写现场描述'}</Text>
@@ -231,6 +256,31 @@ export default function ReportsPage() {
               { max: 500, message: '核实说明不能超过 500 字' },
             ]}>
               <Input.TextArea rows={4} maxLength={500} showCount placeholder="例如：已核对现场照片和上报描述，情况属实，继续按关联工单处置。" />
+            </Form.Item>
+          </Form>
+        </>}
+      </Modal>
+
+      <Modal
+        open={!!dismissTarget}
+        title={dismissTarget ? `核实消除 · ${dismissTarget.site_name || '未关联站点'}` : '核实消除'}
+        okText="确认无需处置"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        onOk={submitDismiss}
+        onCancel={() => { if (!dismissSaving) setDismissTarget(null); }}
+        confirmLoading={dismissSaving}
+        destroyOnHidden
+      >
+        {dismissTarget && <>
+          <Alert type="warning" showIcon message="仅适用于误报或确认无需处置"
+            description="系统会终止尚未开始的派生工单并解决关联告警；原上报、照片和审计记录继续保留。工单已有现场事实时将拒绝此操作。" />
+          <Form form={dismissForm} layout="vertical" style={{ marginTop: 16 }}>
+            <Form.Item name="reason" label="消除原因" rules={[
+              { required: true, whitespace: true, message: '请填写误报或无需处置的核实原因' },
+              { max: 500, message: '消除原因不能超过 500 字' },
+            ]}>
+              <Input.TextArea rows={4} maxLength={500} showCount placeholder="例如：管理员复核原始照片和现场说明后，确认该现象为误报，无需派员处置。" />
             </Form.Item>
           </Form>
         </>}

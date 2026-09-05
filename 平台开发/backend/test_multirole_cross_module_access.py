@@ -61,7 +61,14 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
                 CREATE TABLE timeline_events (
                     source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT
                 );
-                CREATE TABLE vehicles (id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT);
+                CREATE TABLE vehicles (
+                    id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT,
+                    status TEXT DEFAULT 'idle'
+                );
+                CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY, vehicle_id INTEGER,
+                    document_type TEXT, valid_until TEXT
+                );
                 CREATE TABLE vehicle_applications (
                     id INTEGER PRIMARY KEY, vehicle_id INTEGER, applicant_id INTEGER,
                     start_at TEXT, end_at TEXT, destination TEXT, reason TEXT, status TEXT,
@@ -105,7 +112,8 @@ class MultiRoleCrossModuleAccessTest(unittest.TestCase):
                     (id,order_no,status,site_id,assignee,used_parts,images)
                     VALUES (1,'WO-CROSS-1','pending',2,'owner','[]','[]');
 
-                INSERT INTO vehicles VALUES (1,'CAR-1','SUV'), (2,'CAR-2','SUV');
+                INSERT INTO vehicles VALUES
+                    (1,'CAR-1','SUV','idle'), (2,'CAR-2','SUV','idle');
                 INSERT INTO vehicle_applications
                     (id,vehicle_id,applicant_id,start_at,end_at,destination,reason,status,created_at)
                     VALUES (1,1,1,'2099-01-01','2099-01-02','A','general','approved','2026-01-01');

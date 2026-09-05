@@ -1,0 +1,65 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* 尺寸 */
+.chip--sm {
+  font-size: 20rpx;
+  padding: 2rpx 12rpx;
+  border-radius: 6rpx;
+}
+
+.chip--md {
+  font-size: 22rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+}
+
+/* 变体 */
+.chip--pill {
+  border-radius: 9999rpx;
+}
+
+.chip--pill.chip--sm {
+  padding: 2rpx 16rpx;
+}
+
+.chip--pill.chip--md {
+  padding: 4rpx 20rpx;
+}
+
+/* 语义色 */
+.chip--default {
+  background: rgba(120, 120, 128, 0.12);
+  color: #6e6e73;
+}
+
+.chip--primary {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--color-primary, #007aff);
+}
+
+.chip--success {
+  background: rgba(52, 199, 89, 0.12);
+  color: var(--color-success, #34c759);
+}
+
+.chip--warning {
+  background: rgba(255, 149, 0, 0.12);
+  color: var(--color-warning, #ff9500);
+}
+
+.chip--error {
+  background: rgba(255, 59, 48, 0.12);
+  color: var(--color-error, #ff3b30);
+}
+
+.chip--info {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--color-info, #007aff);
+}

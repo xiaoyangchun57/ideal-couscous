@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -7,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from unittest import mock
 
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -36,6 +38,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.db_path = handle.name
         self.original_get_db = app_module.get_db
         self.original_datetime = app_module.datetime
+        self.original_upload_dir = app_module.UPLOAD_DIR
+        self.upload_dir = tempfile.mkdtemp()
+        app_module.UPLOAD_DIR = self.upload_dir
         app_module.datetime = FrozenBusinessDateTime
         self.original_tokens = dict(app_module._tokens)
 
@@ -170,6 +175,16 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT, source_id INTEGER,
                     event_type TEXT, operator TEXT, remark TEXT
                 );
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT, source_id INTEGER,
+                    plan_id INTEGER, item_id INTEGER, file_type TEXT, mime_type TEXT,
+                    review_status TEXT DEFAULT 'pending', is_deleted INTEGER DEFAULT 0
+                );
+                CREATE TABLE work_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, order_no TEXT, title TEXT,
+                    status TEXT, source TEXT, created_at TEXT, site_id INTEGER,
+                    check_in_time TEXT, related_alert_id INTEGER, images TEXT
+                );
                 INSERT INTO users VALUES
                     (1, 'Manager', 'manager', 'manager', 'active'),
                     (2, 'Operator', 'operator', 'operator', 'active'),
@@ -180,14 +195,18 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 INSERT INTO user_sites VALUES (2, 1);
                 INSERT INTO vehicles VALUES (1, 'TEST-001', 'Test vehicle', 'idle', 1000, NULL, NULL);
             ''')
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN check_in_time TEXT")
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN evidence_status TEXT DEFAULT ''")
         self.client = app_module.app.test_client()
 
     def tearDown(self):
         app_module.get_db = self.original_get_db
         app_module.datetime = self.original_datetime
+        app_module.UPLOAD_DIR = self.original_upload_dir
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
         os.unlink(self.db_path)
+        shutil.rmtree(self.upload_dir, ignore_errors=True)
 
     @staticmethod
     def headers(token):
@@ -217,6 +236,311 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
     def schedule_status(self, schedule_id):
         with self.db() as db:
             return db.execute('SELECT status FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()['status']
+
+    def test_approved_schedule_cancel_releases_unused_resources_and_is_idempotent(self):
+        self.add_submitted_schedule(801)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved', tasks_generated=1 WHERE id=801")
+            db.execute("INSERT INTO insp_plans (plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id) VALUES ('P','Operator',2,?,'active',801)", (self.day(),))
+            db.execute("INSERT INTO plan_resource_reservations (schedule_id,part_id,planned_quantity,reserved_quantity,status) VALUES (801,1,2,2,'reserved')")
+            db.execute("INSERT INTO vehicle_applications (vehicle_id,applicant_id,start_at,end_at,reason,status) VALUES (1,2,?,?,?,'approved')", (self.day(), self.day(), '巡检计划#801用车'))
+        response = self.client.post('/api/plan-schedules/801/cancel', headers=self.headers('operator-token'), json={'reason': '  站点顺序错误  ', 'version': 1})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['status'], 'cancelled')
+        repeated = self.client.post('/api/plan-schedules/801/cancel', headers=self.headers('operator-token'), json={})
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertTrue(repeated.json['already_cancelled'])
+        self.assertEqual(
+            {key: repeated.json[key] for key in ('id', 'version', 'status', 'current_status')},
+            {'id': 801, 'version': 2, 'status': 'cancelled', 'current_status': 'cancelled'})
+        forbidden = self.client.post(
+            '/api/plan-schedules/801/cancel', headers=self.headers('other-token'), json={})
+        self.assertEqual((forbidden.status_code, forbidden.json['code']),
+                         (403, 'PLAN_CANCEL_FORBIDDEN'))
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT status,version FROM plan_schedules WHERE id=801').fetchone()['status'], 'cancelled')
+            self.assertEqual(db.execute('SELECT status FROM plan_resource_reservations WHERE schedule_id=801').fetchone()['status'], 'released')
+            self.assertEqual(db.execute('SELECT status FROM vehicle_applications WHERE reason LIKE ?', ('%#801%',)).fetchone()['status'], 'cancelled')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=801 AND event_type='cancelled'").fetchone()[0], 1)
+            payload = json.loads(db.execute(
+                "SELECT payload FROM plan_schedule_events WHERE schedule_id=801 AND event_type='cancelled'"
+            ).fetchone()['payload'])
+            self.assertEqual(payload['reason'], '站点顺序错误')
+
+    def test_cancel_rejects_overlong_reason_without_side_effects(self):
+        self.add_submitted_schedule(803)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=803")
+        before = self.side_effect_snapshot(803)
+        response = self.client.post(
+            '/api/plan-schedules/803/cancel', headers=self.headers('operator-token'),
+            json={'reason': 'x' * 501, 'version': 1})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (400, 'PLAN_CANCEL_REASON_TOO_LONG'))
+        self.assertEqual(self.side_effect_snapshot(803), before)
+
+    def test_admin_cancel_closes_current_notification_preserves_history_and_notifies_owner_once(self):
+        self.add_submitted_schedule(804)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=804")
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (2,'plan_schedule',804,'current','keep',0)""")
+            current_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (2,'plan_schedule',804,'history','keep',1)""")
+            history_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+        response = self.client.post(
+            '/api/plan-schedules/804/cancel', headers=self.headers('manager-token'),
+            json={'reason': '管理员代取消', 'version': 1})
+        self.assertEqual(response.status_code, 200, response.json)
+        repeated = self.client.post(
+            '/api/plan-schedules/804/cancel', headers=self.headers('manager-token'), json={})
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        with self.db() as db:
+            preserved = db.execute(
+                'SELECT id,is_read FROM notifications WHERE id IN (?,?) ORDER BY id',
+                (current_id, history_id)).fetchall()
+            owner_notices = db.execute("""SELECT user_id,title,is_read FROM notifications
+                WHERE source_type='plan_schedule' AND source_id=804
+                  AND title='巡检计划已取消' ORDER BY id""").fetchall()
+            event_count = db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                WHERE schedule_id=804 AND event_type='cancelled'""").fetchone()[0]
+        self.assertEqual([tuple(row) for row in preserved], [(current_id, 1), (history_id, 1)])
+        self.assertEqual([tuple(row) for row in owner_notices], [(2, '巡检计划已取消', 0)])
+        self.assertEqual(event_count, 1)
+
+    def test_cancel_rejects_version_conflict_and_execution_fact_without_side_effects(self):
+        self.add_submitted_schedule(802)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved', tasks_generated=1 WHERE id=802")
+            plan_id = db.execute("INSERT INTO insp_plans (plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id) VALUES ('P','Operator',2,?,'active',802)", (self.day(),)).lastrowid
+            db.execute("INSERT INTO insp_plan_items (plan_id,site_id,item_name,result) VALUES (?,1,'I','normal')", (plan_id,))
+        conflict = self.client.post('/api/plan-schedules/802/cancel', headers=self.headers('operator-token'), json={'reason': 'x', 'version': 9})
+        self.assertEqual(conflict.status_code, 409)
+        blocked = self.client.post('/api/plan-schedules/802/cancel', headers=self.headers('operator-token'), json={'reason': 'x', 'version': 1})
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.json['code'], 'PLAN_CANCEL_HAS_FACTS')
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT status,version FROM plan_schedules WHERE id=802').fetchone()['status'], 'approved')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=802').fetchone()[0], 0)
+
+    def test_plan_detail_projects_authoritative_cancellation_capability(self):
+        self.add_submitted_schedule(805)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=805")
+
+        owner = self.client.get('/api/plan-schedules/805', headers=self.headers('operator-token'))
+        admin = self.client.get('/api/plan-schedules/805', headers=self.headers('manager-token'))
+        outsider = self.client.get('/api/plan-schedules/805', headers=self.headers('other-token'))
+        self.assertTrue(owner.json['can_cancel'], owner.json)
+        self.assertTrue(admin.json['can_cancel'], admin.json)
+        self.assertEqual(owner.json['cancel_block_reason'], '')
+        self.assertFalse(outsider.json['can_cancel'])
+        self.assertEqual(outsider.json['cancel_block_reason'], '无权取消该计划')
+
+        with self.db() as db:
+            application_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (1,2,?,?,?,'approved')""",
+                (self.day(), self.day(), '巡检计划#805用车')).lastrowid
+            db.execute("""INSERT INTO vehicle_use_records
+                (application_id,start_mileage,checked_out_at,status)
+                VALUES (?,1000,datetime('now'),'checked_out')""", (application_id,))
+
+        blocked = self.client.get('/api/plan-schedules/805', headers=self.headers('operator-token'))
+        self.assertFalse(blocked.json['can_cancel'])
+        self.assertEqual(blocked.json['cancel_block_reason'], '计划已有现场或实际资源事实，不能取消')
+
+    def test_cleanup_and_cancel_share_every_reviewed_blocking_fact(self):
+        cases = (
+            'check_out_time', 'evidence_status', 'inspection_attachment', 'completed_child',
+            'exact_checkin', 'legacy_checkin', 'issued_resource', 'vehicle_use',
+        )
+        for offset, fact in enumerate(cases, start=1):
+            with self.subTest(fact=fact):
+                schedule_id = 820 + offset
+                plan_id = 920 + offset
+                item_id = 1020 + offset
+                with self.db() as db:
+                    db.execute('''INSERT INTO plan_schedules
+                        (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                         spare_parts,work_order_ids,status,version,tasks_generated,created_at)
+                        VALUES (?,999,'monthly','2026-07-01','2026-07-02',?,'{}','[]','[]',
+                                'approved',1,1,'2026-07-01')''',
+                               (schedule_id, json.dumps({'2026-07-01': {'sites': [1]}})))
+                    db.execute('''INSERT INTO insp_plans
+                        (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                        VALUES (?,'P','Missing',999,'2026-07-01',?,?)''',
+                               (plan_id, 'completed' if fact == 'completed_child' else 'active', schedule_id))
+                    db.execute('''INSERT INTO insp_plan_items
+                        (id,plan_id,site_id,item_name,execution_status)
+                        VALUES (?,?,1,'I','active')''', (item_id, plan_id))
+                    if fact == 'check_out_time':
+                        db.execute("UPDATE insp_plan_items SET check_out_time='2026-07-01 10:00:00' WHERE id=?", (item_id,))
+                    elif fact == 'evidence_status':
+                        db.execute("UPDATE insp_plan_items SET evidence_status='supplement_required' WHERE id=?", (item_id,))
+                    elif fact == 'inspection_attachment':
+                        db.execute("INSERT INTO operation_attachments (source_type,source_id,file_type) VALUES ('inspection',?,'image')", (item_id,))
+                    elif fact == 'exact_checkin':
+                        db.execute("""INSERT INTO inspection_checkins
+                            (site_id,user_id,check_time,plan_id) VALUES (1,999,?,?)""",
+                                   ('2026-07-01 09:00:00', plan_id))
+                    elif fact == 'legacy_checkin':
+                        db.execute("""INSERT INTO inspection_checkins
+                            (site_id,user_id,check_time,plan_id) VALUES (1,999,?,0)""",
+                                   ('2026-07-01 09:00:00',))
+                    elif fact == 'issued_resource':
+                        db.execute("""INSERT INTO plan_resource_reservations
+                            (schedule_id,part_id,planned_quantity,issued_quantity,status)
+                            VALUES (?,1,1,1,'issued')""", (schedule_id,))
+                    elif fact == 'vehicle_use':
+                        application_id = db.execute("""INSERT INTO vehicle_applications
+                            (reason,status) VALUES (?,'approved')""",
+                                                    (f'巡检计划#{schedule_id}用车',)).lastrowid
+                        db.execute("""INSERT INTO vehicle_use_records
+                            (application_id,status) VALUES (?,'in_use')""", (application_id,))
+                    facts = app_module._ps_schedule_activity_facts(
+                        db, db.execute('SELECT * FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone())
+                    self.assertTrue(facts['has_blocking_facts'], facts)
+                    candidate_ids = {item['id'] for item in app_module._cleanup_candidates(db)}
+                self.assertNotIn(schedule_id, candidate_ids)
+                before = self.side_effect_snapshot(schedule_id)
+                response = self.client.post(
+                    f'/api/plan-schedules/{schedule_id}/cancel',
+                    headers=self.headers('manager-token'),
+                    json={'reason': 'test', 'version': 1})
+                self.assertEqual((response.status_code, response.json['code']),
+                                 (409, 'PLAN_CANCEL_HAS_FACTS'))
+                self.assertEqual(self.side_effect_snapshot(schedule_id), before)
+
+    def test_schedule_activity_facts_tolerates_missing_optional_columns(self):
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        try:
+            db.executescript('''
+                CREATE TABLE plan_schedules (
+                    id INTEGER PRIMARY KEY, user_id INTEGER, period_start TEXT,
+                    period_end TEXT, plan_data TEXT
+                );
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, plan_schedule_id INTEGER, status TEXT
+                );
+                CREATE TABLE insp_plan_items (id INTEGER PRIMARY KEY, plan_id INTEGER);
+                CREATE TABLE inspection_checkins (id INTEGER PRIMARY KEY, plan_id INTEGER);
+                CREATE TABLE operation_attachments (
+                    id INTEGER PRIMARY KEY, source_type TEXT, source_id INTEGER
+                );
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY, source_type TEXT, source_id INTEGER
+                );
+                CREATE TABLE plan_resource_reservations (
+                    id INTEGER PRIMARY KEY, schedule_id INTEGER, status TEXT
+                );
+                CREATE TABLE plan_departure_confirmations (
+                    id INTEGER PRIMARY KEY, schedule_id INTEGER
+                );
+                CREATE TABLE vehicle_applications (
+                    id INTEGER PRIMARY KEY, reason TEXT, status TEXT
+                );
+                CREATE TABLE vehicle_use_records (application_id INTEGER);
+                INSERT INTO plan_schedules VALUES (
+                    1, 2, '2026-07-01', '2026-07-02',
+                    '{"2026-07-01":{"sites":[1]}}'
+                );
+                INSERT INTO insp_plans VALUES (11, 1, 'active');
+                INSERT INTO insp_plan_items VALUES (21, 11);
+                INSERT INTO plan_resource_reservations VALUES (31, 1, 'planned');
+                INSERT INTO vehicle_applications VALUES (
+                    41, '巡检计划#1用车（测试）', 'approved'
+                );
+            ''')
+            schedule = db.execute('SELECT * FROM plan_schedules WHERE id=1').fetchone()
+            facts = app_module._ps_schedule_activity_facts(db, schedule)
+        finally:
+            db.close()
+        self.assertFalse(facts['has_blocking_facts'], facts)
+        self.assertEqual(facts['activity_facts']['execution_records'], 1)
+        self.assertEqual(facts['activity_facts']['resource_records'], 2)
+
+    def test_cancel_succeeds_when_only_optional_write_columns_are_missing(self):
+        self.add_submitted_schedule(840)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=840")
+            plan_id = db.execute("""INSERT INTO insp_plans
+                (plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES ('P','Operator',2,?,'active',840)""", (self.day(),)).lastrowid
+            db.executescript('''
+                DROP TABLE insp_plan_items;
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, execution_status TEXT
+                );
+                DROP TABLE plan_resource_reservations;
+                CREATE TABLE plan_resource_reservations (
+                    id INTEGER PRIMARY KEY, schedule_id INTEGER, status TEXT
+                );
+                DROP TABLE vehicle_applications;
+                CREATE TABLE vehicle_applications (
+                    id INTEGER PRIMARY KEY, reason TEXT, status TEXT
+                );
+            ''')
+            db.execute("INSERT INTO insp_plan_items VALUES (1,?,'active')", (plan_id,))
+            db.execute("INSERT INTO plan_resource_reservations VALUES (1,840,'reserved')")
+            db.execute("INSERT INTO vehicle_applications VALUES (1,'巡检计划#840用车','approved')")
+        response = self.client.post(
+            '/api/plan-schedules/840/cancel', headers=self.headers('operator-token'),
+            json={'reason': '兼容窄表', 'version': 1})
+        self.assertEqual(response.status_code, 200, response.json)
+        with self.db() as db:
+            self.assertEqual(db.execute(
+                'SELECT execution_status FROM insp_plan_items WHERE id=1').fetchone()[0], 'cancelled')
+            self.assertEqual(db.execute(
+                'SELECT status FROM insp_plans WHERE id=?', (plan_id,)).fetchone()[0], 'cancelled')
+            self.assertEqual(db.execute(
+                'SELECT status FROM plan_resource_reservations WHERE id=1').fetchone()[0], 'released')
+            self.assertEqual(db.execute(
+                'SELECT status FROM vehicle_applications WHERE id=1').fetchone()[0], 'cancelled')
+
+    def test_cancel_fails_closed_before_writes_when_core_item_status_is_missing(self):
+        self.add_submitted_schedule(841)
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=841")
+            plan_id = db.execute("""INSERT INTO insp_plans
+                (plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES ('P','Operator',2,?,'active',841)""", (self.day(),)).lastrowid
+            db.executescript('''
+                DROP TABLE insp_plan_items;
+                CREATE TABLE insp_plan_items (id INTEGER PRIMARY KEY, plan_id INTEGER);
+            ''')
+            db.execute('INSERT INTO insp_plan_items VALUES (1,?)', (plan_id,))
+            before = {
+                'schedule': tuple(db.execute(
+                    'SELECT status,version FROM plan_schedules WHERE id=841').fetchone()),
+                'plan': tuple(db.execute(
+                    'SELECT status FROM insp_plans WHERE id=?', (plan_id,)).fetchone()),
+                'item': tuple(db.execute(
+                    'SELECT * FROM insp_plan_items WHERE id=1').fetchone()),
+                'events': db.execute(
+                    'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=841').fetchone()[0],
+            }
+        response = self.client.post(
+            '/api/plan-schedules/841/cancel', headers=self.headers('operator-token'),
+            json={'reason': '应失败关闭', 'version': 1})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (503, 'PLAN_CANCEL_SCHEMA_UNAVAILABLE'))
+        with self.db() as db:
+            after = {
+                'schedule': tuple(db.execute(
+                    'SELECT status,version FROM plan_schedules WHERE id=841').fetchone()),
+                'plan': tuple(db.execute(
+                    'SELECT status FROM insp_plans WHERE id=?', (plan_id,)).fetchone()),
+                'item': tuple(db.execute(
+                    'SELECT * FROM insp_plan_items WHERE id=1').fetchone()),
+                'events': db.execute(
+                    'SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=841').fetchone()[0],
+            }
+        self.assertEqual(after, before)
 
     def add_scope_failure_schedule(self, schedule_id, status, site_id=2):
         day = self.day()
@@ -276,13 +600,18 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                     '''SELECT * FROM insp_plan_items
                        WHERE plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)
                        ORDER BY id''', (schedule_id,)).fetchall()],
+                'inspection_checkins': [tuple(row) for row in db.execute(
+                    'SELECT * FROM inspection_checkins ORDER BY id').fetchall()],
+                'vehicle_use_records': [tuple(row) for row in db.execute(
+                    'SELECT * FROM vehicle_use_records ORDER BY id').fetchall()],
             }
             return snapshot
 
     def assert_side_effect_snapshot_unchanged(self, before, after):
         self.assertEqual(after['schedule'], before['schedule'], 'plan_schedules')
         for table in ('events', 'notifications', 'vehicle_applications', 'reservations',
-                      'insp_plans', 'insp_plan_items'):
+                      'insp_plans', 'insp_plan_items', 'inspection_checkins',
+                      'vehicle_use_records'):
             self.assertEqual(after[table], before[table], table)
 
     def test_approval_revalidates_vehicle_status_and_rolls_back_every_side_effect(self):
@@ -663,6 +992,303 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.assertEqual(json.loads(schedule_after[2]), vehicle_days)
         self.assertEqual(schedule_after[3], 1)
         self.assertEqual(events_after, events_before)
+
+    def add_purge_fixture(self, schedule_id=990):
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS plan_departure_confirmations (
+                id INTEGER PRIMARY KEY, schedule_id INTEGER, user_id INTEGER,
+                work_date TEXT, vehicle_confirmed INTEGER, parts_confirmed INTEGER)""")
+            db.execute("UPDATE users SET role='admin' WHERE id=1")
+            attachment_columns = {
+                row['name'] for row in db.execute('PRAGMA table_info(operation_attachments)').fetchall()
+            }
+            if 'filename' not in attachment_columns:
+                db.execute("ALTER TABLE operation_attachments ADD COLUMN filename TEXT DEFAULT ''")
+            if 'stored_path' not in attachment_columns:
+                db.execute("ALTER TABLE operation_attachments ADD COLUMN stored_path TEXT DEFAULT ''")
+            db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=?",
+                       (schedule_id,))
+            plan_id = db.execute("""INSERT INTO insp_plans
+                (plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES ('无效测试计划','Operator',2,?,'completed',?)""",
+                (self.day(), schedule_id)).lastrowid
+            item_id = db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,check_in_time,check_time,review_status,
+                 reviewer_id,photo_urls,actual_photos)
+                VALUES (?,1,'浊度','normal',?,?,2,1,'[\"/uploads/site_photos/purge.jpg\"]',1)""",
+                (plan_id, self.business_timestamp(), self.business_timestamp())).lastrowid
+            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,plan_id) VALUES (1,2,?,?)",
+                       (self.business_timestamp(), plan_id))
+            db.execute("INSERT INTO inspection_checkins (site_id,user_id,check_time,plan_id) VALUES (1,2,?,0)",
+                       (self.business_timestamp(),))
+            photo_dir = os.path.join(self.upload_dir, 'site_photos')
+            os.makedirs(photo_dir, exist_ok=True)
+            with open(os.path.join(photo_dir, f'purge-{schedule_id}.jpg'), 'wb') as handle:
+                handle.write(b'purge-only')
+            with open(os.path.join(photo_dir, f'shared-{schedule_id}.jpg'), 'wb') as handle:
+                handle.write(b'shared')
+            db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
+                VALUES ('inspection',?,?,?,'image','image/jpeg',?,?)""",
+                (item_id, plan_id, item_id, f'purge-{schedule_id}.jpg',
+                 f'/uploads/site_photos/purge-{schedule_id}.jpg'))
+            db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
+                VALUES ('inspection',?,?,?,'image','image/jpeg',?,?)""",
+                (item_id, plan_id, item_id, f'shared-{schedule_id}.jpg',
+                 f'/uploads/site_photos/shared-{schedule_id}.jpg'))
+            db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
+                VALUES ('workorder',13058,NULL,NULL,'image','image/jpeg',?,?)""",
+                (f'shared-{schedule_id}.jpg', f'/uploads/site_photos/shared-{schedule_id}.jpg'))
+            db.execute("INSERT INTO notifications (user_id,source_type,source_id,title) VALUES (1,'plan_schedule',?,'待办')",
+                       (schedule_id,))
+            db.execute("INSERT INTO plan_resource_reservations (schedule_id,part_id,planned_quantity,status) VALUES (?,1,1,'reserved')",
+                       (schedule_id,))
+            unused_vehicle_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (1,2,?,?,?,'approved')""",
+                (self.day(), self.day(), f'巡检计划#{schedule_id}用车')).lastrowid
+            used_vehicle_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (1,2,?,?,?,'returned')""",
+                (self.day(), self.day(), f'巡检计划#{schedule_id}用车（实际履约）')).lastrowid
+            db.execute("""INSERT INTO vehicle_use_records
+                (application_id,start_mileage,end_mileage,checked_out_at,returned_at,status)
+                VALUES (?,100,110,?,?,'returned')""",
+                (used_vehicle_id, self.business_timestamp(), self.business_timestamp()))
+            rework_unused_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status,rework_plan_id)
+                VALUES (1,2,?,?,?,'approved',?)""",
+                (self.day(), self.day(), f'整改补检#{plan_id}用车', plan_id)).lastrowid
+            rework_used_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status,rework_plan_id)
+                VALUES (1,2,?,?,?,'returned',?)""",
+                (self.day(), self.day(), f'整改补检#{plan_id}用车（已履约）', plan_id)).lastrowid
+            db.execute("""INSERT INTO vehicle_use_records
+                (application_id,start_mileage,end_mileage,checked_out_at,returned_at,status)
+                VALUES (?,110,120,?,?,'returned')""",
+                (rework_used_id, self.business_timestamp(), self.business_timestamp()))
+            unrelated_vehicle_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,reason,status,rework_plan_id)
+                VALUES (1,2,?,?,?,'approved',999999)""",
+                (self.day(), self.day(), '整改补检#999999用车')).lastrowid
+            db.execute("""CREATE TABLE IF NOT EXISTS inventory_logs (
+                id INTEGER PRIMARY KEY, part_id INTEGER, type TEXT, quantity INTEGER,
+                ref_type TEXT, ref_id INTEGER, operator TEXT, remark TEXT)""")
+            db.execute("""INSERT INTO inventory_logs
+                (id,part_id,type,quantity,ref_type,ref_id,operator,remark)
+                VALUES (1,1,'out',1,'plan_schedule',?,'Operator',?)""",
+                (schedule_id, f'巡检计划#{schedule_id}现场领用'))
+            db.execute("""CREATE TABLE IF NOT EXISTS parts_requests (
+                id INTEGER PRIMARY KEY, plan_id INTEGER, status TEXT)""")
+            db.execute("INSERT INTO parts_requests (id,plan_id,status) VALUES (1,?,'issued')",
+                       (plan_id,))
+        return (plan_id, item_id, unused_vehicle_id, used_vehicle_id,
+                rework_unused_id, rework_used_id, unrelated_vehicle_id)
+
+    def test_admin_purge_removes_factual_schedule_and_releases_period_but_keeps_actual_history(self):
+        (plan_id, item_id, unused_vehicle_id, used_vehicle_id,
+         rework_unused_id, rework_used_id, unrelated_vehicle_id) = self.add_purge_fixture()
+        legacy = self.client.delete('/api/plan-schedules/990', headers=self.headers('manager-token'))
+        self.assertEqual(legacy.status_code, 409, legacy.json)
+        with self.db() as db:
+            self.assertIsNotNone(app_module._ps_period_overlap(
+                db, 2, 'monthly', self.day(), self.day()))
+
+        response = self.client.post('/api/plan-schedules/990/purge',
+                                    headers=self.headers('manager-token'),
+                                    json={'version': 1, 'reason': '  主链测试误建  '})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertFalse(response.json['already_deleted'])
+        with self.db() as db:
+            for table, column, value in (
+                    ('plan_schedules', 'id', 990), ('insp_plans', 'id', plan_id),
+                    ('insp_plan_items', 'id', item_id),
+                    ('plan_resource_reservations', 'schedule_id', 990)):
+                self.assertEqual(db.execute(
+                    f'SELECT COUNT(*) FROM {table} WHERE {column}=?', (value,)).fetchone()[0], 0)
+            self.assertIsNone(app_module._ps_period_overlap(
+                db, 2, 'monthly', self.day(), self.day()))
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM inspection_checkins WHERE plan_id=0').fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM inventory_logs WHERE ref_type='plan_schedule' AND ref_id=990"
+            ).fetchone()[0], 1)
+            self.assertIsNone(db.execute(
+                'SELECT id FROM vehicle_applications WHERE id=?', (unused_vehicle_id,)).fetchone())
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM vehicle_applications WHERE id=?', (used_vehicle_id,)).fetchone())
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM vehicle_use_records WHERE application_id=?',
+                (used_vehicle_id,)).fetchone()[0], 1)
+            self.assertIsNone(db.execute(
+                'SELECT id FROM vehicle_applications WHERE id=?', (rework_unused_id,)).fetchone())
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM vehicle_applications WHERE id=?', (rework_used_id,)).fetchone())
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM vehicle_applications WHERE id=?', (unrelated_vehicle_id,)).fetchone())
+            audit = db.execute("""SELECT remark FROM timeline_events
+                WHERE source_type='plan_schedule_purge' AND source_id=990""").fetchone()
+            summary = json.loads(audit['remark'])
+            self.assertEqual(summary['reason'], '主链测试误建')
+            self.assertEqual(summary['status'], 'approved')
+            self.assertEqual(summary['owner_name'], 'Operator')
+            self.assertEqual(summary['retained_inventory_logs'], 1)
+            self.assertEqual(summary['retained_vehicle_applications'], 2)
+            self.assertEqual(summary['retained_vehicle_uses'], 2)
+            self.assertEqual(summary['retained_parts_requests'], 1)
+            self.assertEqual(db.execute(
+                'SELECT plan_id FROM parts_requests WHERE id=1').fetchone()['plan_id'], 0)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.upload_dir, 'site_photos', 'purge-990.jpg')))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.upload_dir, 'site_photos', 'shared-990.jpg')))
+
+        replay = self.client.post('/api/plan-schedules/990/purge',
+                                  headers=self.headers('manager-token'),
+                                  json={'version': 1, 'reason': '响应丢失重试'})
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['already_deleted'])
+        with self.db() as db:
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
+                WHERE source_type='plan_schedule_purge' AND source_id=990""").fetchone()[0], 1)
+
+    def test_plan_purge_permission_reason_and_version_fail_without_writes(self):
+        self.add_purge_fixture(991)
+        cases = (
+            ('operator-token', {'version': 1, 'reason': '无权限'}, 403, 'FORBIDDEN'),
+            ('manager-token', {'version': 1, 'reason': '   '}, 400, 'PLAN_PURGE_REASON_REQUIRED'),
+            ('manager-token', {'version': 1, 'reason': 'x' * 501}, 400, 'PLAN_PURGE_REASON_TOO_LONG'),
+            ('manager-token', {'version': 2, 'reason': '旧版本'}, 409, 'PLAN_PURGE_VERSION_CONFLICT'),
+        )
+        for token, payload, status, code in cases:
+            with self.subTest(code=code):
+                response = self.client.post('/api/plan-schedules/991/purge',
+                                            headers=self.headers(token), json=payload)
+                self.assertEqual((response.status_code, response.json.get('code')), (status, code))
+                with self.db() as db:
+                    self.assertIsNotNone(db.execute(
+                        'SELECT id FROM plan_schedules WHERE id=991').fetchone())
+                    self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
+                        WHERE source_type='plan_schedule_purge' AND source_id=991""").fetchone()[0], 0)
+        missing = self.client.post('/api/plan-schedules/999999/purge',
+                                   headers=self.headers('manager-token'),
+                                   json={'version': 1, 'reason': '不存在对象'})
+        self.assertEqual((missing.status_code, missing.json.get('code')),
+                         (404, 'PLAN_PURGE_NOT_FOUND'))
+
+    def test_plan_purge_uses_exact_notification_and_timeline_id_namespaces(self):
+        plan_id, item_id, *_ = self.add_purge_fixture(1)
+        self.assertEqual((plan_id, item_id), (1, 1))
+        self.add_submitted_schedule(10)
+        with self.db() as db:
+            db.execute('UPDATE insp_plan_items SET id=10 WHERE id=1')
+            db.execute("UPDATE operation_attachments SET source_id=10,item_id=10 WHERE plan_id=1")
+            db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=10")
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES (10,'其他计划','Other',3,?,'active',10)""", (self.day(),))
+            db.executemany("""INSERT INTO timeline_events
+                (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)""", (
+                    ('inspection', 1, 'completed', 'system', '本计划执行包'),
+                    ('inspection_item', 10, 'reviewed', 'system', '本计划检查项'),
+                    ('inspection', 10, 'completed', 'system', '其他计划执行包'),
+                ))
+            db.executemany("""INSERT INTO notifications
+                (user_id,source_type,source_id,title) VALUES (1,?,?,?)""", (
+                    ('inspection_review_batch', 'insp_batch_1_1', '本计划批次'),
+                    ('inspection_review_batch', 'insp_batch_10_1', '其他计划批次'),
+                    ('inspection_rework', 1, '本计划整改'),
+                    ('inspection_rework', 10, '其他计划整改'),
+                ))
+            attachment_ids = [row['id'] for row in db.execute(
+                'SELECT id FROM operation_attachments WHERE plan_id=1').fetchall()]
+            for source_type in ('attachment_void', 'replacement_review'):
+                db.execute("""INSERT INTO notifications
+                    (user_id,source_type,source_id,title) VALUES (1,?,?,?)""",
+                    (source_type, attachment_ids[0], '本计划附件通知'))
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title) VALUES (1,'attachment_review_batch',?,'站点共享批次')""",
+                (attachment_ids[0],))
+
+        response = self.client.post('/api/plan-schedules/1/purge',
+                                    headers=self.headers('manager-token'),
+                                    json={'version': 1, 'reason': '碰撞回归'})
+        self.assertEqual(response.status_code, 200, response.json)
+        with self.db() as db:
+            remaining_titles = {row['title'] for row in db.execute(
+                'SELECT title FROM notifications').fetchall()}
+            self.assertNotIn('本计划批次', remaining_titles)
+            self.assertNotIn('本计划整改', remaining_titles)
+            self.assertNotIn('本计划附件通知', remaining_titles)
+            self.assertIn('其他计划批次', remaining_titles)
+            self.assertIn('其他计划整改', remaining_titles)
+            self.assertIn('站点共享批次', remaining_titles)
+            remaining_events = {(row['source_type'], row['source_id'], row['remark'])
+                                for row in db.execute('SELECT * FROM timeline_events').fetchall()}
+            self.assertNotIn(('inspection', 1, '本计划执行包'), remaining_events)
+            self.assertNotIn(('inspection_item', 10, '本计划检查项'), remaining_events)
+            self.assertIn(('inspection', 10, '其他计划执行包'), remaining_events)
+
+    def test_admin_can_purge_each_schedule_lifecycle_state(self):
+        states = ('draft', 'rejected', 'cancelled', 'approved')
+        with self.db() as db:
+            db.execute("UPDATE users SET role='admin' WHERE id=1")
+        for index, status in enumerate(states, start=1):
+            schedule_id = 1000 + index
+            self.add_submitted_schedule(schedule_id)
+            with self.db() as db:
+                db.execute("UPDATE plan_schedules SET status=?,field_status=? WHERE id=?",
+                           (status, 'completed' if status == 'approved' else 'active', schedule_id))
+            with self.subTest(status=status):
+                response = self.client.post(f'/api/plan-schedules/{schedule_id}/purge',
+                                            headers=self.headers('manager-token'),
+                                            json={'version': 1, 'reason': f'清理{status}'})
+                self.assertEqual(response.status_code, 200, response.json)
+                with self.db() as db:
+                    self.assertIsNone(db.execute(
+                        'SELECT id FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone())
+
+    def test_plan_purge_file_failure_rolls_back_database_and_restores_file(self):
+        plan_id, item_id, *_ = self.add_purge_fixture(992)
+        first_target = os.path.join(self.upload_dir, 'site_photos', 'purge-992.jpg')
+        target = os.path.join(self.upload_dir, 'site_photos', 'z-second-992.jpg')
+        with open(target, 'wb') as handle:
+            handle.write(b'second-exclusive')
+        with self.db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
+                VALUES ('inspection',?,?,?,'image','image/jpeg',?,?)""",
+                (item_id, plan_id, item_id, 'z-second-992.jpg',
+                 '/uploads/site_photos/z-second-992.jpg'))
+            attachments_before = db.execute(
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0]
+        real_remove = os.remove
+
+        def fail_unique_file(path):
+            if os.path.normcase(path) == os.path.normcase(target):
+                raise PermissionError('injected file lock')
+            return real_remove(path)
+
+        with mock.patch.object(app_module.os, 'remove', side_effect=fail_unique_file):
+            response = self.client.post('/api/plan-schedules/992/purge',
+                                        headers=self.headers('manager-token'),
+                                        json={'version': 1, 'reason': '文件故障测试'})
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (503, 'PLAN_PURGE_FILE_DELETE_FAILED'))
+        with self.db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM plan_schedules WHERE id=992').fetchone())
+            self.assertGreater(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments WHERE plan_id IS NOT NULL').fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], attachments_before)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
+                WHERE source_type='plan_schedule_purge' AND source_id=992""").fetchone()[0], 0)
+        self.assertTrue(os.path.exists(target))
+        self.assertTrue(os.path.exists(first_target))
 
     def test_approval_scope_failure_keeps_every_plan_resource_table_unchanged(self):
         schedule_id = 53
@@ -1451,6 +2077,158 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
 
         self.assertEqual(pending.status_code, 200, pending.json)
         self.assertIn(item_id, [row['id'] for row in pending.json])
+
+    def test_active_supplement_lazily_overrides_completed_schedule_until_replaced(self):
+        self.add_submitted_schedule(28)
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules
+                SET status='approved', tasks_generated=1, field_status='completed',
+                    field_completed_at=datetime('now') WHERE id=28""")
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES (280,'整改口径','Operator',2,?,'completed',28)""", (self.day(),))
+            rework_item_id = db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status,check_out_time,
+                 review_status,evidence_status)
+                VALUES (280,1,'结果已填但需补拍','normal','active',datetime('now'),
+                        3,'supplement_required')""").lastrowid
+
+        listed = self.client.get('/api/plan-schedules?mine=1',
+                                 headers=self.headers('operator-token'))
+        detail = self.client.get('/api/plan-schedules/28',
+                                 headers=self.headers('operator-token'))
+        listed_row = next(row for row in listed.json if row['id'] == 28)
+        self.assertEqual((listed_row['field_status'], listed_row['execution_status']),
+                         ('rework', 'rework'))
+        self.assertEqual((detail.json['field_status'], detail.json['execution_status']),
+                         ('rework', 'rework'))
+        self.assertTrue(detail.json['can_continue_rework'])
+        self.assertEqual(detail.json['rework_block_reason'], '')
+        self.assertEqual(detail.json['rework_execution_target'], {
+            'schedule_id': 28,
+            'execution_plan_id': 280,
+            'work_date': self.day(),
+            'site_id': 1,
+            'item_id': rework_item_id,
+            'source': 'plan_detail_rework',
+        })
+        admin_detail = self.client.get('/api/plan-schedules/28',
+                                       headers=self.headers('manager-token'))
+        self.assertFalse(admin_detail.json['can_continue_rework'])
+        self.assertIsNone(admin_detail.json['rework_execution_target'])
+        self.assertEqual(admin_detail.json['rework_block_reason'],
+                         '当前账号无权执行该计划整改')
+        with self.db() as db:
+            db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=1')
+        no_site_scope = self.client.get('/api/plan-schedules/28',
+                                        headers=self.headers('operator-token'))
+        self.assertFalse(no_site_scope.json['can_continue_rework'])
+        self.assertIsNone(no_site_scope.json['rework_execution_target'])
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,1)')
+        self.assertEqual(
+            [(row['status'], row['status_cn'], row['completed_items'])
+             for row in detail.json['generated_site_tasks']],
+            [('rework', '需整改', 0)])
+        with self.db() as db:
+            persisted = db.execute(
+                'SELECT field_status,field_completed_at FROM plan_schedules WHERE id=28').fetchone()
+            self.assertEqual((persisted['field_status'], persisted['field_completed_at']),
+                             ('rework', None))
+            db.execute("""UPDATE insp_plan_items
+                SET review_status=1,evidence_status='replacement_submitted'
+                WHERE plan_id=280""")
+
+        completed_detail = self.client.get('/api/plan-schedules/28',
+                                           headers=self.headers('operator-token'))
+        completed_list = self.client.get('/api/plan-schedules?mine=1',
+                                         headers=self.headers('operator-token'))
+        completed_row = next(row for row in completed_list.json if row['id'] == 28)
+        self.assertEqual((completed_detail.json['field_status'],
+                          completed_detail.json['execution_status']),
+                         ('completed', 'completed'))
+        self.assertEqual(completed_detail.json['generated_site_tasks'][0]['status'], 'completed')
+        self.assertFalse(completed_detail.json['can_continue_rework'])
+        self.assertIsNone(completed_detail.json['rework_execution_target'])
+        self.assertEqual((completed_row['field_status'], completed_row['execution_status']),
+                         ('completed', 'completed'))
+
+    def test_plan_detail_projects_authoritative_ordinary_and_carryover_execution_target(self):
+        self.add_submitted_schedule(29)
+        carryover_day = (BUSINESS_NOW - timedelta(days=1)).strftime('%Y-%m-%d')
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules
+                SET status='approved', tasks_generated=1, field_status='active'
+                WHERE id=29""")
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES (290,'结转执行','Operator',2,?,'active',29)""", (carryover_day,))
+            db.executemany("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status,check_out_time,
+                 review_status,evidence_status)
+                VALUES (290,1,?,?,'active',NULL,0,'')""", [
+                ('已完成项', 'normal'),
+                ('待执行项', None),
+            ])
+
+        carryover = self.client.get('/api/plan-schedules/29',
+                                    headers=self.headers('operator-token'))
+        self.assertEqual(carryover.status_code, 200, carryover.json)
+        self.assertEqual(carryover.json['execution_status'], 'partial')
+        self.assertTrue(carryover.json['can_continue_execution'])
+        self.assertFalse(carryover.json['execution_target_requires_selection'])
+        self.assertEqual(carryover.json['execution_target'], {
+            'schedule_id': 29,
+            'execution_plan_id': 290,
+            'work_date': carryover_day,
+            'site_id': 1,
+            'source': 'plan_detail_execution',
+        })
+
+        unauthorized = self.client.get('/api/plan-schedules/29',
+                                       headers=self.headers('manager-token'))
+        self.assertFalse(unauthorized.json['can_continue_execution'])
+        self.assertIsNone(unauthorized.json['execution_target'])
+
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,2)')
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES (291,'第二执行包','Operator',2,?,'active',29)""", (carryover_day,))
+            db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status,check_out_time,
+                 review_status,evidence_status)
+                VALUES (291,2,'第二站待执行',NULL,'active',NULL,0,'')""")
+
+        ambiguous = self.client.get('/api/plan-schedules/29',
+                                    headers=self.headers('operator-token'))
+        self.assertTrue(ambiguous.json['can_continue_execution'])
+        self.assertTrue(ambiguous.json['execution_target_requires_selection'])
+        self.assertEqual(ambiguous.json['execution_target'], {
+            'schedule_id': 29,
+            'source': 'plan_detail_execution',
+        }, '多目标只保留计划范围，不得猜测第一包或第一站')
+
+        with self.db() as db:
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal', check_out_time=datetime('now')
+                WHERE plan_id IN (290,291)""")
+        closed = self.client.get('/api/plan-schedules/29',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(closed.json['execution_status'], 'completed')
+        self.assertFalse(closed.json['can_continue_execution'])
+        self.assertIsNone(closed.json['execution_target'])
+
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules
+                SET status='cancelled', field_status='active', field_completed_at=NULL
+                WHERE id=29""")
+            db.execute("""UPDATE insp_plan_items
+                SET result=NULL, check_out_time=NULL WHERE plan_id=290 AND site_id=1""")
+        cancelled = self.client.get('/api/plan-schedules/29',
+                                    headers=self.headers('operator-token'))
+        self.assertFalse(cancelled.json['can_continue_execution'])
+        self.assertIsNone(cancelled.json['execution_target'])
 
     def test_returned_plan_review_rejection_creates_resource_gated_rework_package(self):
         self.add_submitted_schedule(22)

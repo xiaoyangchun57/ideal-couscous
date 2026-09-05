@@ -34,6 +34,6 @@ assert.equal(effectiveVehicleCanReturn({
 assert.equal(effectiveVehicleCanReturn({
   reason: '巡检计划#66用车',
   end_at: '2026-08-16 18:00:00',
-}, '2026-08-17'), true);
+}, '2026-08-17'), false);
 
 console.log('vehicleScope tests passed');

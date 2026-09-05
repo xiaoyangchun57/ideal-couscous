@@ -58,14 +58,20 @@ function resolveNotificationTarget(notification) {
   if (!sourceType) return invalidTarget('通知缺少对象类型，无法打开对应业务。');
 
   if (sourceType === 'vehicle_use_expiry') {
-    return { kind: 'page', page: '/pages/vehicle/vehicle' };
+    if (!/^[1-9]\d*$/.test(sourceId)) {
+      return invalidTarget('用车超期通知缺少有效申请编号，无法打开延续操作。');
+    }
+    return {
+      kind: 'page', page: '/pages/vehicle/vehicle',
+      vehicleTarget: { applicationId: Number(sourceId), expectedAction: 'extend', source: sourceType }
+    };
   }
   if (sourceType === 'alert' || sourceType === 'manual_report') {
-    return { kind: 'page', page: '/pages/alert/alert' };
+    if (!sourceId) return invalidTarget('通知缺少告警 ID，无法打开具体告警。');
+    return { kind: 'tab', page: '/pages/alert/alert', alertId: sourceId };
   }
-  if (sourceType === 'inspection_due_suggestion'
-      || sourceType === 'inspection_follow_up_suggestion') {
-    return { kind: 'page', page: '/pages/plan/plan' };
+  if (sourceType === 'inspection_due_suggestion') {
+    return { kind: 'tab', page: '/pages/plan/plan' };
   }
   if (!sourceId) return invalidTarget('通知缺少对象 ID，无法打开具体业务。');
 
@@ -86,7 +92,10 @@ function resolveNotificationTarget(notification) {
     return { kind: 'page', page: '/pages/workorder/workorder', workorderNo: sourceId };
   }
   if (sourceType === 'inspection' || sourceType === 'inspection_rework') {
-    return { kind: 'tab', page: '/pages/inspection/inspection', planId: sourceId };
+    return {
+      kind: 'page', page: '/pages/inspection/inspection',
+      executionTarget: { executionPlanId: Number(sourceId), source: sourceType }
+    };
   }
   if (sourceType === 'attachment_void' || sourceType === 'replacement_review') {
     const payload = notificationPayload(notification);
@@ -94,10 +103,16 @@ function resolveNotificationTarget(notification) {
     const itemId = positivePayloadId(payload, 'item_id');
     const siteId = positivePayloadId(payload, 'site_id');
     if (!planId || !itemId || !siteId) return invalidTarget('补传通知缺少可信计划、检查项或站点标识，无法精确定位。');
-    return { kind: 'tab', page: '/pages/inspection/inspection', planId, itemId, siteId };
+    return {
+      kind: 'page', page: '/pages/inspection/inspection',
+      executionTarget: { executionPlanId: planId, itemId, siteId, source: sourceType }
+    };
   }
   if (sourceType === 'reagent_qc') {
-    return { kind: 'tab', page: '/pages/inspection/inspection', siteId: sourceId };
+    return {
+      kind: 'page', page: '/pages/inspection/inspection',
+      executionTarget: { siteId: Number(sourceId), source: sourceType }
+    };
   }
 
   const reviewType = REVIEW_TARGETS[sourceType];

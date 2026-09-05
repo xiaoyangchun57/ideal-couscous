@@ -4,8 +4,6 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timedelta
-
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
 
@@ -41,12 +39,13 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, site_id INTEGER, title TEXT, level TEXT, created_at TEXT,
-                    status TEXT, source TEXT, event_type TEXT
+                    status TEXT, source TEXT, event_type TEXT, order_no TEXT
                 );
-                CREATE TABLE alerts (id INTEGER PRIMARY KEY, site_id INTEGER, level TEXT, metric TEXT, status TEXT);
+                CREATE TABLE alerts (id INTEGER PRIMARY KEY, site_id INTEGER, level TEXT, metric TEXT,
+                    status TEXT, related_order_no TEXT);
                 CREATE TABLE manual_reports (
                     id INTEGER PRIMARY KEY, site_id INTEGER, report_type TEXT, description TEXT,
-                    status TEXT, reported_at TEXT
+                    status TEXT, reported_at TEXT, order_no TEXT
                 );
                 CREATE TABLE plan_schedules (
                     id INTEGER PRIMARY KEY, user_id INTEGER, schedule_type TEXT, period_start TEXT,
@@ -63,7 +62,7 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
             db.execute('INSERT INTO user_sites VALUES (9, 1)')
             db.executemany('INSERT INTO sites VALUES (?,?)', [(1, '甲站'), (2, '乙站')])
             db.execute("""INSERT INTO manual_reports
-                VALUES (1, 1, 'equipment', '采样泵异响', 'dispatched', datetime('now'))""")
+                VALUES (1, 1, 'equipment', '采样泵异响', 'dispatched', datetime('now'), NULL)""")
         self.client = app_module.app.test_client()
         self.headers = {'Authorization': 'Bearer operator-token'}
 
@@ -76,43 +75,69 @@ class PlanScheduleRiskSignalRouteTest(unittest.TestCase):
         os.unlink(self.db_path)
 
     def test_manual_report_is_visible_as_a_priority_signal(self):
+        with app_module.get_db() as db:
+            db.executemany("INSERT INTO alerts VALUES (?,?,?,?,?,NULL)", [
+                (10, 1, 'yellow', 'manual_report', 'pending'),
+                (11, 1, 'yellow', 'turbidity', 'pending'),
+            ])
         response = self.client.get('/api/plan-schedules/suggestions?site_ids=1', headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
         report = next(item for item in response.json['suggestions'] if item['type'] == 'manual_report')
         self.assertEqual(report['ref_id'], 1)
         self.assertGreater(response.json['site_scores']['1'], 0)
+        visible_text = '\n'.join(item['text'] for item in response.json['suggestions'])
+        reason_text = '\n'.join(response.json['site_reasons']['1'])
+        for expected in ('人工上报', '浊度', '设备'):
+            self.assertIn(expected, visible_text + '\n' + reason_text)
+        for internal in ('manual_report', 'turbidity', 'equipment'):
+            self.assertNotIn(internal, visible_text + '\n' + reason_text)
+
+    def test_linked_manual_report_alert_and_active_order_count_once(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO work_orders
+                (id,site_id,title,level,created_at,status,source,event_type,order_no)
+                VALUES (20,1,'【人工上报】感官异常','urgent',datetime('now'),'pending',
+                        'manual_report','sensory','WO-MANUAL')""")
+            db.execute("""INSERT INTO manual_reports
+                VALUES (2,1,'sensory','异味','dispatched',datetime('now'),'WO-MANUAL')""")
+            db.execute("""INSERT INTO alerts
+                VALUES (30,1,'yellow','manual_report','pending','WO-MANUAL')""")
+
+        response = self.client.get('/api/plan-schedules/suggestions?site_ids=1', headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.json)
+        linked = [item for item in response.json['suggestions'] if item.get('ref_id') in (20, 30, 2)]
+        self.assertEqual([(item['type'], item['ref_id']) for item in linked], [('work_order', 20)])
+        self.assertFalse(any(item['type'] == 'priority' for item in response.json['suggestions']))
+        linked_reasons = [reason for reason in response.json['site_reasons']['1']
+                          if '感官异常' in reason or 'manual_report' in reason or 'sensory' in reason]
+        self.assertEqual(len(linked_reasons), 1)
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='closed' WHERE id=20")
+        closed = self.client.get('/api/plan-schedules/suggestions?site_ids=1', headers=self.headers)
+        self.assertEqual(closed.status_code, 200, closed.json)
+        self.assertEqual({item['type'] for item in closed.json['suggestions'] if item.get('ref_id') in (30, 2)},
+                         {'alert', 'manual_report'})
 
     def test_operator_cannot_query_another_site(self):
         response = self.client.get('/api/plan-schedules/suggestions?site_ids=2', headers=self.headers)
 
         self.assertEqual(response.status_code, 403)
 
-    def test_systemic_inspection_anomaly_can_only_create_a_follow_up_draft(self):
-        db = sqlite3.connect(self.db_path)
-        try:
-            recent = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d %H:%M:%S')
-            earlier = (datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d %H:%M:%S')
-            db.executemany("""INSERT INTO work_orders
-                (id, site_id, title, level, created_at, status, source, event_type)
-                VALUES (?,?,?,?,?,?,?,?)""", [
-                (10, 1, '巡检异常', 'normal', earlier, 'closed', 'inspection', '设备异常'),
-                (11, 1, '巡检异常', 'normal', recent, 'closed', 'inspection', '设备异常'),
-            ])
-            db.commit()
-        finally:
-            db.close()
+    def test_systemic_follow_up_routes_are_absent_without_plan_writes(self):
+        with app_module.get_db() as db:
+            before = db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0]
 
-        listed = self.client.get('/api/plan-schedules/follow-up-recommendations', headers=self.headers)
-        self.assertEqual(listed.status_code, 200)
-        item = listed.json['recommendations'][0]
         created = self.client.post('/api/plan-schedules/follow-up-recommendations', headers=self.headers, json={
-            'user_id': item['user_id'], 'site_id': item['site_id'], 'anomaly_type': item['anomaly_type'],
+            'user_id': 9, 'site_id': 1, 'anomaly_type': '设备异常',
         })
 
-        self.assertEqual(created.status_code, 201)
-        self.assertEqual(created.json['schedule']['status'], 'draft')
-        self.assertEqual(created.json['schedule']['tasks_generated'], 0)
+        route = '/api/plan-schedules/follow-up-recommendations'
+        self.assertFalse(any(str(rule) == route for rule in app_module.app.url_map.iter_rules()))
+        self.assertEqual(created.status_code, 405)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0], before)
 
 
 if __name__ == '__main__':

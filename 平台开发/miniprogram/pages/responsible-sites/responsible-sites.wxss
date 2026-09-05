@@ -1,10 +1,56 @@
 .intro { padding: 32rpx 28rpx 20rpx; }
-.intro-title { display: block; color: var(--text); font-size: 38rpx; font-weight: 600; }
-.intro-copy { display: block; margin-top: 10rpx; color: var(--text-3); font-size: 24rpx; line-height: 1.55; }
+.intro-title { display: block; color: var(--color-text-primary); font-size: 38rpx; font-weight: 600; }
+.intro-copy { display: block; margin-top: 10rpx; color: var(--color-text-tertiary); font-size: 24rpx; line-height: 1.55; }
 .site-list { padding: 0 24rpx; }
 .site-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16rpx; padding: 26rpx 28rpx; }
-.site-row:active { background: var(--fill); }
+.site-row:active { background: var(--color-muted); }
 .site-main { min-width: 0; flex: 1; }
-.site-name { display: block; overflow: hidden; color: var(--text); font-size: 29rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.site-meta { display: block; overflow: hidden; margin-top: 10rpx; color: var(--text-3); font-size: 23rpx; text-overflow: ellipsis; white-space: nowrap; }
-.site-action { flex: none; margin-left: 20rpx; color: var(--brand); font-size: 24rpx; }
+.site-name { display: block; overflow: hidden; color: var(--color-text-primary); font-size: 29rpx; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.site-meta { display: block; overflow: hidden; margin-top: 10rpx; color: var(--color-text-tertiary); font-size: 23rpx; text-overflow: ellipsis; white-space: nowrap; }
+.site-action { flex: none; margin-left: 20rpx; color: var(--color-primary); font-size: 24rpx; }
+
+/* 空态（对齐 empty-state 组件规范） */
+.empty {
+  padding: 120rpx 48rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.empty-circle {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 50%;
+  background: var(--color-muted);
+  margin-bottom: 24rpx;
+  position: relative;
+}
+.empty-circle::before {
+  content: '';
+  width: 40rpx;
+  height: 44rpx;
+  border: 3rpx solid var(--color-text-tertiary);
+  border-radius: 6rpx;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.empty-circle::after {
+  content: '';
+  width: 20rpx;
+  height: 3rpx;
+  background: var(--color-text-tertiary);
+  position: absolute;
+  top: calc(50% - 10rpx);
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 10rpx 0 var(--color-text-tertiary), 0 20rpx 0 var(--color-text-tertiary);
+}
+
+.empty-tx {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}

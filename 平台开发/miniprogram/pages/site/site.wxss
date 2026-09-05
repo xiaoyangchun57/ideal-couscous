@@ -1,19 +1,19 @@
 .site-summary { margin: 24rpx 24rpx 16rpx; padding: 28rpx; }
-.site-name { font-size: 36rpx; font-weight: 600; color: var(--text); line-height: 1.35; }
+.site-name { font-size: 36rpx; font-weight: 600; color: var(--color-text-primary); line-height: 1.35; }
 .site-tags { margin-top: 14rpx; display: flex; flex-wrap: wrap; gap: 12rpx; }
 .site-tags .tag { margin-right: 14rpx; }
 
-.task-status { display: flex; align-items: center; justify-content: space-between; gap: 20rpx; margin: 0 24rpx 20rpx; padding: 20rpx 24rpx; border: 1rpx solid var(--brand-line); border-radius: 16rpx; background: var(--brand-weak); }
-.task-status-carryover { background: var(--amber-bg); border-color: var(--amber-line); }
-.task-status-blocked { background: var(--fill); border-color: var(--line); }
+.task-status { display: flex; align-items: center; justify-content: space-between; gap: 20rpx; margin: 0 24rpx 20rpx; padding: 20rpx 24rpx; border: 1rpx solid var(--color-primary-surface); border-radius: 16rpx; background: var(--color-primary-surface); }
+.task-status-carryover { background: var(--color-warning-surface); border-color: var(--color-warning-surface); }
+.task-status-blocked { background: var(--color-muted); border-color: var(--color-divider); }
 .task-status-copy { flex: 1; min-width: 0; }
-.task-status-title { display: block; color: var(--text); font-size: 27rpx; font-weight: 600; }
-.task-status-desc { display: block; margin-top: 6rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
-.task-status-count { flex: 0 0 auto; color: var(--amber); font-size: 25rpx; font-weight: 600; }
+.task-status-title { display: block; color: var(--color-text-primary); font-size: 27rpx; font-weight: 600; }
+.task-status-desc { display: block; margin-top: 6rpx; color: var(--color-text-secondary); font-size: 23rpx; line-height: 1.45; }
+.task-status-count { flex: 0 0 auto; color: var(--color-warning); font-size: 25rpx; font-weight: 600; }
 .rework-status { margin: 0 24rpx 20rpx; padding: 20rpx 24rpx; border: 1rpx solid rgba(250,81,81,.35); border-radius: 12rpx; background: rgba(250,81,81,.06); }
 .rework-status-title, .rework-status-desc { display: block; }
-.rework-status-title { color: var(--red); font-size: 26rpx; font-weight: 600; }
-.rework-status-desc { margin-top: 8rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
+.rework-status-title { color: var(--color-error); font-size: 26rpx; font-weight: 600; }
+.rework-status-desc { margin-top: 8rpx; color: var(--color-text-secondary); font-size: 23rpx; line-height: 1.45; }
 
 .ops { margin: 0 24rpx; }
 .checkin-btn { width: 100%; }
@@ -24,13 +24,218 @@
 .site-info-heading { margin-top: 36rpx; }
 .info-card { margin: 24rpx; padding: 8rpx 28rpx; }
 .info-row { display: flex; align-items: center; justify-content: space-between; padding: 24rpx 0; }
-.info-k { font-size: 27rpx; color: var(--text-2); }
-.info-v { font-size: 27rpx; color: var(--text); }
-.parts-linked-site { margin-bottom: 16rpx; padding: 16rpx 18rpx; color: var(--text-2); background: var(--fill); border-radius: 10rpx; font-size: 24rpx; }
-.field-picker { display: flex; align-items: center; justify-content: space-between; min-height: 76rpx; margin-top: 16rpx; padding: 0 18rpx; color: var(--text); background: var(--fill-2); border-radius: 10rpx; font-size: 25rpx; }
-.parts-route-note { margin: 16rpx 0 4rpx; padding: 16rpx 18rpx; color: var(--text-2); background: var(--fill); border-left: 6rpx solid var(--brand); border-radius: 8rpx; font-size: 23rpx; line-height: 1.5; }
+.info-k { font-size: 27rpx; color: var(--color-text-secondary); }
+.info-v { font-size: 27rpx; color: var(--color-text-primary); }
+.parts-linked-site { margin-bottom: 16rpx; padding: 16rpx 18rpx; color: var(--color-text-secondary); background: var(--color-muted); border-radius: 10rpx; font-size: 24rpx; }
+.field-picker { display: flex; align-items: center; justify-content: space-between; min-height: 76rpx; margin-top: 16rpx; padding: 0 18rpx; color: var(--color-text-primary); background: var(--color-card); border-radius: 10rpx; font-size: 25rpx; }
+.parts-route-note { margin: 16rpx 0 4rpx; padding: 16rpx 18rpx; color: var(--color-text-secondary); background: var(--color-muted); border-left: 6rpx solid var(--color-primary); border-radius: 8rpx; font-size: 23rpx; line-height: 1.5; }
 .field { margin-top: 18rpx; }
-.field-label { display: block; margin-bottom: 10rpx; color: var(--text-2); font-size: 24rpx; }
-.field-input { width: auto; min-height: 76rpx; padding: 18rpx; color: var(--text); background: var(--fill-2); border-radius: 10rpx; font-size: 26rpx; }
+.field-label { display: block; margin-bottom: 10rpx; color: var(--color-text-secondary); font-size: 24rpx; }
+.field-input { width: auto; min-height: 76rpx; padding: 18rpx; color: var(--color-text-primary); background: var(--color-card); border-radius: 10rpx; font-size: 26rpx; }
 .textarea { min-height: 132rpx; }
 .submit-btn { margin-top: 24rpx; }
+
+
+/* ============================================================
+   备件申请 Sheet 样式（与工单/巡检页统一）
+   ============================================================ */
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+  overflow: hidden;
+}
+
+.sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 40rpx 20rpx;
+  flex-shrink: 0;
+}
+
+.sheet-header-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sheet-header-close {
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-right: -20rpx;
+}
+
+.sheet-scroll {
+  flex: 1 1 0;
+  height: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sheet-content-spacer {
+  height: 40rpx;
+}
+
+.sheet-bottom-bar {
+  padding: 20rpx 40rpx;
+  padding-bottom: calc(20rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+}
+
+/* 备件申请 Sheet 底栏：横向双按钮 */
+.parts-apply-sheet .sheet-bottom-bar {
+  display: flex;
+  flex-direction: row;
+  gap: 20rpx;
+}
+
+.parts-apply-sheet .btn-lg {
+  flex: 1;
+  width: auto;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+}
+
+.parts-apply-sheet .btn-primary.btn-lg {
+  flex: 2;
+}
+
+.btn-lg {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  border-radius: var(--radius-lg);
+  font-size: 30rpx;
+  font-weight: 500;
+  border: none;
+}
+
+.btn-lg::after {
+  border: none;
+}
+
+/* 分组 */
+.wop-group {
+  padding: 0 40rpx 12rpx;
+}
+
+.wos-group-title {
+  font-size: 24rpx;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 20rpx 0 16rpx;
+}
+
+/* 分隔线 */
+.wos-divider {
+  height: 0.5rpx;
+  background: var(--color-divider);
+  margin: 0 40rpx;
+}
+
+/* 信息行 */
+.wos-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 20rpx 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  gap: 24rpx;
+}
+
+.wos-info-row--last {
+  padding-bottom: 0;
+}
+
+.wos-info-label {
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.wos-info-value {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+/* Picker 行 */
+.wop-picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 0;
+  border-top: 0.5rpx solid var(--color-divider);
+  min-height: 88rpx;
+  gap: 16rpx;
+  box-sizing: border-box;
+}
+
+.wop-picker-value {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 处理方式说明 */
+.wop-note {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 12rpx 16rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-sm);
+  margin-top: 8rpx;
+}
+
+/* 表单字段 */
+.wos-field {
+  padding: 16rpx 0 4rpx;
+}
+
+.wos-field-label {
+  display: block;
+  font-size: 26rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 12rpx;
+}
+
+.wop-input {
+  width: 100%;
+  min-height: 88rpx;
+  padding: 0 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  box-sizing: border-box;
+}
+
+.wos-textarea {
+  width: 100%;
+  min-height: 160rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  box-sizing: border-box;
+}

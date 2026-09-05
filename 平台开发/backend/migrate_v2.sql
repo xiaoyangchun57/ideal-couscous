@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS vehicle_maintenance_records (
     items TEXT DEFAULT NULL,
     cost REAL DEFAULT NULL,
     remark TEXT DEFAULT NULL,
+    affects_safe_operation INTEGER DEFAULT NULL,
     FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
 );
 

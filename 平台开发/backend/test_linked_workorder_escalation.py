@@ -42,10 +42,13 @@ class LinkedWorkorderEscalationTest(unittest.TestCase):
     def test_escalation_replaces_original_auto_order_in_site_context(self):
         orders = app_module._effective_site_linked_workorders(self.db, 1)
         self.assertEqual([item['order_no'] for item in orders], ['AL-ESC', 'WO-OTHER'])
+        self.assertEqual([item['display_title'] for item in orders],
+                         ['设备状态：设备离线', '数据延迟'])
 
     def test_legacy_event_type_fallback_replaces_original_auto_order(self):
         orders = app_module._effective_site_linked_workorders(self.db, 2)
         self.assertEqual([item['order_no'] for item in orders], ['AL-LEGACY'])
+        self.assertEqual(orders[0]['display_title'], '通讯中断')
 
     def test_legacy_title_similarity_replaces_unlinked_device_offline_order(self):
         orders = app_module._effective_site_linked_workorders(self.db, 3)

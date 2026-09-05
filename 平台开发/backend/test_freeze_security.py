@@ -141,12 +141,12 @@ class FreezeSecurityTest(unittest.TestCase):
             ])
             db.executemany('''
                 INSERT INTO insp_plan_items
-                    (id, plan_id, site_id, item_name, review_status, result)
-                VALUES (?, 1, ?, ?, ?, ?)
+                    (id, plan_id, site_id, item_name, review_status, result, photo_urls)
+                VALUES (?, 1, ?, ?, ?, ?, ?)
             ''', [
-                (100, 1, 'Site 1 pending', 1, 'normal'),
-                (101, 2, 'Site 2 pending', 1, 'normal'),
-                (102, 1, 'Site 1 approved', 2, 'normal'),
+                (100, 1, 'Site 1 pending', 1, 'normal', '["/uploads/site1-a.jpg"]'),
+                (101, 2, 'Site 2 pending', 1, 'normal', '["/uploads/site2-a.jpg"]'),
+                (102, 1, 'Site 1 approved', 2, 'normal', '[]'),
             ])
             db.execute("INSERT INTO insp_plans (id,plan_name,assignee_id,status) VALUES (1,'Review plan',2,'active')")
             db.execute('''
@@ -350,10 +350,13 @@ class FreezeSecurityTest(unittest.TestCase):
 
         for payload, expected in [
             ({'attachment_ids': [10, 999], 'action': 'approve'}, 404),
+            ({'attachment_ids': [12], 'action': 'approve'}, 403),
             ({'attachment_ids': [10, 12], 'action': 'approve'}, 403),
             ({'attachment_ids': [10, 13], 'action': 'approve'}, 409),
             ({'attachment_ids': [10, 14], 'action': 'approve'}, 409),
             ({'attachment_ids': [10, 20], 'action': 'approve'}, 400),
+            ({'approve_item_ids': [102, 101]}, 403),
+            ({'approve_item_ids': [102]}, 409),
         ]:
             before = snapshot()
             response = self.status('reviewer-1', 'post',

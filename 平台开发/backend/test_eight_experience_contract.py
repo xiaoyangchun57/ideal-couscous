@@ -383,23 +383,25 @@ class EightExperienceContractTest(unittest.TestCase):
                 (id,plan_name,assignee,assignee_id,period,generate_date,status,plan_schedule_id)
                 VALUES (?,?,?,?,?,?,?,702)""", [
                 (801, '第一日', '运维甲', 2, 'weekly', '2026-08-19', 'active'),
-                (802, '第二日', '运维甲', 2, 'weekly', '2026-08-20', 'active'),
+                (802, '第二日', '运维甲', 2, 'weekly', '2026-08-20', 'completed'),
             ])
             db.executemany("""INSERT INTO insp_plan_items
-                (id,plan_id,site_id,item_name,result,execution_status)
-                VALUES (?,?,?,?,?,'active')""", [
-                (901, 801, 1, '检查A', 'normal'),
-                (902, 801, 1, '检查B', None),
-                (903, 802, 1, '检查C', 'normal'),
+                (id,plan_id,site_id,item_name,result,execution_status,review_status,
+                 evidence_status,supplement_required_at)
+                VALUES (?,?,?,?,?,'active',?,?,?)""", [
+                (901, 801, 1, '检查A', 'normal', 0, '', ''),
+                (902, 801, 1, '结果已填但待补拍', 'normal', 3,
+                 'supplement_required', '2026-08-19 12:00:00'),
+                (903, 802, 1, '检查C', 'normal', 0, '', ''),
             ])
             rows = app_module._ps_execution_site_rows(db, 702)
             change_rows = app_module._ps_execution_site_rows(db, 702, 'change_submitted')
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]['status'], 'partial')
+        self.assertEqual(rows[0]['status'], 'rework')
         self.assertEqual(rows[1]['status'], 'completed')
         self.assertEqual([row['status'] for row in change_rows], ['change_pending', 'change_pending'])
         self.assertEqual(app_module._ps_schedule_execution_status('approved', 'active', rows), {
-            'execution_status': 'partial', 'execution_status_cn': '部分完成',
+            'execution_status': 'rework', 'execution_status_cn': '需整改',
         })
         self.assertEqual(app_module._ps_schedule_execution_status(
             'approved', 'active', [{'status': 'pending'}]), {
@@ -424,10 +426,33 @@ class EightExperienceContractTest(unittest.TestCase):
         listed = self.client.get('/api/plan-schedules', headers=self.headers())
         self.assertEqual(detail.status_code, 200, detail.json)
         self.assertEqual((detail.json['execution_status'], detail.json['execution_status_cn']),
-                         ('partial', '部分完成'))
+                         ('rework', '需整改'))
         listed_row = next(item for item in listed.json if item['id'] == 702)
         self.assertEqual((listed_row['execution_status'], listed_row['execution_status_cn']),
-                         ('partial', '部分完成'))
+                         ('rework', '需整改'))
+        self.assertEqual(listed_row['execution_summary'], {
+            'available': True, 'total_tasks': 2, 'completed_tasks': 1,
+            'supplement_required_items': 1,
+        })
+        self.assertEqual(
+            [(row['status'], row['completed_items'], row['total_items'])
+             for row in detail.json['generated_site_tasks']],
+            [('rework', 1, 2), ('completed', 1, 1)],
+            '详情不得把结果已填但仍待现场补拍的检查项提前计为完成')
+
+        original_has_column = app_module._table_has_column
+        def legacy_summary_columns(db, table, column):
+            if table == 'insp_plan_items' and column == 'evidence_status':
+                return False
+            return original_has_column(db, table, column)
+        app_module._table_has_column = legacy_summary_columns
+        try:
+            with app_module.get_db() as db:
+                legacy_summary = app_module._ps_execution_item_summaries(db, [702])[702]
+            self.assertEqual(legacy_summary['execution_summary'], {})
+            self.assertEqual((legacy_summary['total_items'], legacy_summary['completed_items']), (3, 3))
+        finally:
+            app_module._table_has_column = original_has_column
 
         with app_module.get_db() as db:
             db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=702")
@@ -468,6 +493,9 @@ class EightExperienceContractTest(unittest.TestCase):
                 (813, 1, '变更项', None, None),
                 (814, 1, '整改项', None, None),
             ])
+            db.execute("""UPDATE insp_plan_items
+                SET review_status=3, evidence_status='supplement_required'
+                WHERE plan_id=814""")
 
         original_batch = app_module._ps_execution_item_summaries
         original_detail = app_module._ps_execution_site_rows
@@ -491,6 +519,8 @@ class EightExperienceContractTest(unittest.TestCase):
                 710: 'pending', 711: 'partial', 712: 'completed',
                 713: 'change_pending', 714: 'rework',
             })
+            self.assertEqual(by_id[711]['execution_summary']['completed_tasks'], 0,
+                             '已完成检查项不能伪装为已完成站点任务')
 
             with app_module.get_db() as db:
                 db.execute('DELETE FROM plan_schedules')
@@ -502,6 +532,113 @@ class EightExperienceContractTest(unittest.TestCase):
         finally:
             app_module._ps_execution_item_summaries = original_batch
             app_module._ps_execution_site_rows = original_detail
+
+    def test_plan_list_and_detail_share_pending_partial_completed_field_predicate(self):
+        cases = (
+            (720, 820, 'pending', [
+                ('尚未填写结果', '', 0, ''),
+            ]),
+            (721, 821, 'partial', [
+                ('现场已完成', 'normal', 0, ''),
+                ('尚未完成', '', 0, ''),
+            ]),
+            (722, 822, 'completed', [
+                ('现场已完成一', 'normal', 0, ''),
+                ('现场已完成二', 'abnormal', 0, 'replacement_submitted'),
+            ]),
+        )
+        with app_module.get_db() as db:
+            for schedule_id, plan_id, _expected, items in cases:
+                db.execute("""INSERT INTO plan_schedules
+                    (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                     spare_parts,work_order_ids,status,tasks_generated,field_status)
+                    VALUES (?,2,'weekly','2026-08-18','2026-08-24','{}','{}','[]','[]',
+                            'approved',1,'active')""", (schedule_id,))
+                db.execute("""INSERT INTO insp_plans
+                    (id,plan_name,assignee,assignee_id,period,generate_date,status,plan_schedule_id)
+                    VALUES (?,'状态口径验证','运维甲',2,'weekly','2026-08-19','active',?)""",
+                           (plan_id, schedule_id))
+                db.executemany("""INSERT INTO insp_plan_items
+                    (plan_id,site_id,item_name,result,execution_status,review_status,evidence_status)
+                    VALUES (?,1,?,?,'active',?,?)""",
+                               [(plan_id, *item) for item in items])
+
+        listed = self.client.get('/api/plan-schedules', headers=self.headers())
+        self.assertEqual(listed.status_code, 200, listed.json)
+        listed_by_id = {row['id']: row for row in listed.json}
+        for schedule_id, _plan_id, expected, items in cases:
+            detail = self.client.get(
+                f'/api/plan-schedules/{schedule_id}', headers=self.headers())
+            self.assertEqual(detail.status_code, 200, detail.json)
+            self.assertEqual(detail.json['execution_status'], expected)
+            self.assertEqual(listed_by_id[schedule_id]['execution_status'], expected)
+            self.assertEqual(detail.json['generated_site_tasks'][0]['status'], expected)
+            expected_completed = sum(
+                1 for _name, result, review_status, evidence_status in items
+                if result.strip() and review_status != 3
+                and evidence_status != 'supplement_required')
+            self.assertEqual(
+                detail.json['generated_site_tasks'][0]['completed_items'], expected_completed)
+            self.assertEqual(
+                listed_by_id[schedule_id]['execution_summary']['completed_tasks'],
+                1 if expected_completed == len(items) else 0)
+
+    def test_plan_list_summary_uses_current_date_site_field_completion_facts(self):
+        schedules = [(705, '2026-08-19'), (707, '2026-08-19')]
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,tasks_generated,field_status)
+                VALUES (?,2,'weekly',?,'2026-08-26','{}','{}','[]','[]','approved',1,'active')""",
+                           schedules)
+            # This schedule falls inside the old min/max interval but is not requested.
+            db.execute("""INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,tasks_generated,field_status)
+                VALUES (706,2,'weekly','2026-08-19','2026-08-26','{}','{}','[]','[]','approved',1,'active')""")
+            db.executemany("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,period,generate_date,status,plan_schedule_id)
+                VALUES (?,?, '运维甲',2,'weekly',?,'active',?)""", [
+                (850, '同日两站', '2026-08-19', 705),
+                (870, '第一日补拍', '2026-08-19', 707),
+                (871, '第二日补拍', '2026-08-20', 707),
+                (860, '无关计划', '2026-08-19', 706),
+            ])
+            db.executemany("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status,review_status,evidence_status,supplement_required_at)
+                VALUES (?,?,?,?,'active',?,?,?)""", [
+                # 同一天的两个站点：站点1完成，站点2空结果，必须是 1/2。
+                (850, 1, '站点1', 'normal', 0, '', ''),
+                (850, 2, '站点2', '', 0, '', ''),
+                # 同站跨日：当前补拍状态不完成且计数；replacement_submitted
+                # 的历史补拍时间不再算需补拍，并可按现场完成谓词完成。
+                (870, 1, '需补拍项', 'normal', 3, 'supplement_required', '2026-08-19 09:00:00'),
+                (871, 1, '已补拍项', 'normal', 0, 'replacement_submitted', '2026-08-18 09:00:00'),
+                (860, 1, '不应扫描', 'normal', 0, '', ''),
+            ])
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee,assignee_id,period,generate_date,status,plan_schedule_id)
+                VALUES (852,'已取消日包','运维甲',2,'weekly','2026-08-19','cancelled',705)""")
+            db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,item_name,result,execution_status,review_status,evidence_status,supplement_required_at)
+                VALUES (852,3,'已取消需补拍项','','active',3,'supplement_required','2026-08-19 09:00:00')""")
+            trace = []
+            db.set_trace_callback(trace.append)
+            summaries = app_module._ps_execution_item_summaries(db, [705, 707])
+            db.set_trace_callback(None)
+
+        self.assertEqual(summaries[705]['execution_summary'], {
+            'available': True, 'total_tasks': 2, 'completed_tasks': 1,
+            'supplement_required_items': 0,
+        }, '已取消日执行包中的未完成/需补拍项不得污染计划摘要')
+        self.assertEqual(summaries[707]['execution_summary'], {
+            'available': True, 'total_tasks': 2, 'completed_tasks': 1,
+            'supplement_required_items': 1,
+        })
+        self.assertEqual((summaries[707]['total_items'], summaries[707]['completed_items']), (2, 1))
+        aggregation_sql = next(sql for sql in trace if 'WITH active_items AS' in sql)
+        self.assertIn('plan_schedule_idIN(705,707)', aggregation_sql.replace(' ', ''))
+        self.assertNotIn('BETWEEN', aggregation_sql)
 
     def test_chinese_device_template_round_trips_and_site_archive_reopens(self):
         template = self.client.get('/api/import-templates/devices', headers=self.headers())

@@ -6,19 +6,16 @@ const { captureFlushedPhoto } = require('../../utils/photos.js');
 const app = getApp();
 
 function decorate(a) {
-  const metricCn = maps.metricCn(a.metric);
-  const isManual = a.metric === 'manual_report';
-  // 人工上报类告警：message 是实际内容，替代"指标名"语义
-  const display_metric = isManual
-    ? (a.message || '人工上报告警')
-    : (metricCn || a.metric || '告警详情');
+  const displayKind = a.display_kind === 'manual_report' ? 'manual_report' : 'monitoring';
   return Object.assign({}, a, {
     level_cn: maps.map(maps.ALERT_LEVEL, a.level),
     level_cls: maps.alertLevelCls(a.level),
-    status_cn: maps.map(maps.ALERT_STATUS, a.status),
-    metric_cn: metricCn,
-    display_metric: display_metric,
-    is_manual: isManual
+    display_kind: displayKind,
+    display_title: String(a.display_title || '告警详情'),
+    display_summary: String(a.display_summary || '告警信息暂不可用'),
+    has_monitoring_value: displayKind === 'monitoring' && a.has_monitoring_value === true,
+    disposition_label: String(a.disposition_label || '信息异常'),
+    disposition_detail: String(a.disposition_detail || '告警状态信息暂不可用，请刷新后重试')
   });
 }
 

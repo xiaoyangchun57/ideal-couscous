@@ -1,4 +1,7 @@
 {
-  "navigationBarTitleText": "排程编辑",
-  "enablePullDownRefresh": false
+  "navigationStyle": "custom",
+  "enablePullDownRefresh": false,
+  "usingComponents": {
+    "custom-navbar": "/components/custom-navbar/custom-navbar"
+  }
 }

@@ -254,7 +254,10 @@ class AttachmentVoidClosureTest(unittest.TestCase):
     def test_approved_replacement_closes_only_target_supplement(self):
         self.assertEqual(self.client.post('/api/attachments/10/void', headers=self.headers('reviewer-token'), json={'reason': 'TEST_MEDIA_FIX_需要替代证据'}).status_code, 200)
         with app_module.get_db() as db:
-            db.execute("UPDATE insp_plan_items SET evidence_status='replacement_submitted', review_status=1 WHERE id=101")
+            db.execute("""UPDATE insp_plan_items
+                SET evidence_status='replacement_submitted', review_status=1,
+                    photo_urls='["/uploads/TEST_MEDIA_FIX_other.jpg","/uploads/TEST_MEDIA_FIX_replacement.jpg"]'
+                WHERE id=101""")
             db.execute('''
                 INSERT INTO operation_attachments
                 (id, filename, stored_path, description, source_type, source_id, site_id,
@@ -274,7 +277,10 @@ class AttachmentVoidClosureTest(unittest.TestCase):
         self.assertEqual(self.client.post('/api/attachments/10/void', headers=self.headers('reviewer-token'), json={
             'reason': 'TEST_MEDIA_FIX_需要替代证据'}).status_code, 200)
         with app_module.get_db() as db:
-            db.execute("UPDATE insp_plan_items SET evidence_status='replacement_submitted', review_status=1 WHERE id=101")
+            db.execute("""UPDATE insp_plan_items
+                SET evidence_status='replacement_submitted', review_status=1,
+                    photo_urls='["/uploads/TEST_MEDIA_FIX_other.jpg","/uploads/TEST_MEDIA_FIX_replacement.jpg"]'
+                WHERE id=101""")
             db.execute('''
                 INSERT INTO operation_attachments
                 (id, filename, stored_path, description, source_type, source_id, site_id,

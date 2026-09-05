@@ -1,0 +1,23 @@
+<view class="empty-state empty-state--{{type}}">
+  <view class="empty-state__icon">
+    <!-- empty / task 类型用文档图标 -->
+    <block wx:if="{{type === 'empty' || type === 'task'}}">
+      <view class="icon-shape icon-shape--{{type}}">
+        <view class="icon-doc"></view>
+      </view>
+    </block>
+    <!-- error 类型用感叹号 -->
+    <block wx:if="{{type === 'error'}}">
+      <view class="icon-shape icon-shape--error">
+        <text class="icon-exclaim">!</text>
+      </view>
+    </block>
+  </view>
+
+  <view class="empty-state__title">{{title}}</view>
+  <view class="empty-state__desc" wx:if="{{description}}">{{description}}</view>
+
+  <view class="empty-state__action" wx:if="{{buttonText}}">
+    <text class="action-btn" bindtap="onButtonTap">{{buttonText}}</text>
+  </view>
+</view>

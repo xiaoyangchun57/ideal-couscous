@@ -1,6 +1,11 @@
 const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
+const {
+  normalizePlanCancelReason,
+  startPlanCancellation,
+} = require('../../utils/executionState.js');
+const { buildScheduleExecutionTarget } = require('../../utils/executionTarget.js');
 
 const app = getApp();
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -13,6 +18,14 @@ const SITE_TASK_STATUS = {
   completed: { label: '已完成', cls: 'green' },
   change_pending: { label: '变更待审', cls: 'orange' },
   rework: { label: '需整改', cls: 'orange' }
+};
+
+const STATUS_CLS_TO_TONE = {
+  green: 'success',
+  blue: 'info',
+  orange: 'warning',
+  red: 'error',
+  gray: 'default',
 };
 
 function planHeaderPresentation(detail) {
@@ -47,11 +60,19 @@ function normalizeGeneratedTasks(detail) {
         const status = SITE_TASK_STATUS[item.status] || {};
         const executionDate = item.execution_date || item.date || '日期未设置';
         const siteName = item.site_name || (item.site_id ? ('站点#' + item.site_id) : '站点未设置');
+        const totalItems = item.total_items === null || item.total_items === undefined || item.total_items === ''
+          ? null : Number(item.total_items);
+        const completedItems = item.completed_items === null || item.completed_items === undefined || item.completed_items === ''
+          ? null : Number(item.completed_items);
+        const hasItemCounts = Number.isFinite(totalItems) && Number.isFinite(completedItems);
         return Object.assign({}, item, {
           key: ['site', item.plan_id || item.id || 0, executionDate, item.site_id || 0, index].join('-'),
           display_name: executionDate + ' · ' + siteName,
           status_cn: item.status_cn || status.label || '状态未知',
           status_cls: status.cls || 'gray',
+          total_items: hasItemCounts ? totalItems : null,
+          completed_items: hasItemCounts ? completedItems : null,
+          item_counts_text: hasItemCounts ? `${completedItems}/${totalItems} 项` : '检查项未记录',
           legacy: false
         });
       })
@@ -67,6 +88,20 @@ function normalizeGeneratedTasks(detail) {
       legacy: true
     }))
   };
+}
+
+function summarizeGeneratedTasks(generatedTasks) {
+  const summary = { totalSites: 0, completedSites: 0, totalItems: 0, completedItems: 0 };
+  if (!generatedTasks || generatedTasks.mode !== 'site') return summary;
+  generatedTasks.items.forEach(task => {
+    summary.totalSites += 1;
+    if (task.status === 'completed') summary.completedSites += 1;
+    if (Number.isFinite(task.total_items) && Number.isFinite(task.completed_items)) {
+      summary.totalItems += task.total_items;
+      summary.completedItems += task.completed_items;
+    }
+  });
+  return summary;
 }
 
 function weekdayCn(dateStr) {
@@ -95,6 +130,7 @@ Page({
     days: [],          // [{date, weekday_cn, sites:[{id,name}], vehicle_name}]
     statusCn: '',
     statusCls: '',
+    statusTone: 'default',
     typeCn: '',
     generatedPlans: [],
     generatedTaskMode: 'site',
@@ -103,10 +139,19 @@ Page({
     linkedWorkorders: [],
     canEdit: false,
     canExecute: false,
+    canContinueRework: false,
+    canContinueExecution: false,
+    executionActionText: '进入现场作业',
+    executionTarget: null,
+    reworkBlockReason: '',
+    executionBlockReason: '',
     canFavorite: false,
     favoriting: false,
     favorite: null,
-    favoriteSheet: { open: false, periodStart: '', submitting: false }
+    favoriteSheet: { open: false, periodStart: '', submitting: false },
+    canCancel: false,
+    cancelBlockReason: '',
+    cancelSheet: { open: false, reason: '', submitting: false, error: '' }
   },
 
   onLoad(opts) {
@@ -115,10 +160,26 @@ Page({
       return;
     }
     this.scheduleId = opts.id;
+    this._alive = true;
+    this._executionRequestId = 0;
   },
 
   onShow() {
+    this._alive = true;
+    this._executionNavigating = false;
     if (this.scheduleId) this.load();
+  },
+
+  onHide() {
+    this._alive = false;
+    this._executionRequestId = (this._executionRequestId || 0) + 1;
+    this._executionNavigating = false;
+  },
+
+  onUnload() {
+    this._alive = false;
+    this._executionRequestId = (this._executionRequestId || 0) + 1;
+    this._executionNavigating = false;
   },
 
   onPullDownRefresh() {
@@ -180,23 +241,54 @@ Page({
         const executionCompleted = !!res.execution_completed;
         const generatedTasks = normalizeGeneratedTasks(res);
         const headerStatus = planHeaderPresentation(res);
+        const statusTone = STATUS_CLS_TO_TONE[headerStatus.cls] || 'default';
+        const { totalSites, completedSites, totalItems, completedItems } = summarizeGeneratedTasks(generatedTasks);
+        const progressPercent = totalSites > 0 ? Math.round((completedSites / totalSites) * 100) : 0;
+        const progressFillStyle = `width:${progressPercent}%`;
+        const actionTarget = buildScheduleExecutionTarget(res, this.scheduleId);
+        const isRework = res.execution_status === 'rework';
+        const canContinueRework = isRework && res.can_continue_rework === true
+          && !!(actionTarget.executionPlanId && actionTarget.siteId);
+        const canContinueExecution = !isRework && res.can_continue_execution === true
+          && !!actionTarget.scheduleId;
+        const executionActionText = canContinueRework
+          ? '继续整改'
+          : (canContinueExecution && actionTarget.workDate === todayString()
+              && res.execution_status === 'pending'
+            ? '进入现场作业' : '继续执行');
         this.setData({
           loaded: true,
           detail: res,
           days,
           statusCn: headerStatus.label,
           statusCls: headerStatus.cls,
+          statusTone,
           typeCn: maps.map(maps.SCHEDULE_TYPE, res.schedule_type, res.schedule_type),
           generatedPlans: generatedTasks.items,
           generatedTaskMode: generatedTasks.mode,
           resourceDays,
           resourceParts: plannedParts,
           linkedWorkorders: res.linked_workorders || [],
-          canEdit: res.status === 'draft' || res.status === 'rejected',
+          canEdit: ['draft', 'rejected', 'modifying'].includes(res.status),
           canChange: res.status === 'approved' && !executionCompleted,
-          canExecute: res.status === 'approved' && !executionCompleted && days.some(day => day.date === todayString() && day.sites.length > 0),
+          canExecute: canContinueRework || canContinueExecution,
+          canContinueRework,
+          canContinueExecution,
+          executionActionText,
+          executionTarget: actionTarget,
+          reworkBlockReason: res.rework_block_reason || '',
+          executionBlockReason: res.execution_block_reason || '',
           canFavorite: canUseFavorites && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0),
-          favorite
+          canCancel: res.can_cancel === true,
+          cancelBlockReason: res.can_cancel === true
+            ? '' : (res.cancel_block_reason || '当前计划不可取消'),
+          favorite,
+          totalSites,
+          completedSites,
+          totalItems,
+          completedItems,
+          progressPercent,
+          progressFillStyle
         });
         if (done) done();
       })
@@ -216,8 +308,116 @@ Page({
   },
 
   onGoExecution() {
-    app.globalData.selPlanId = this.scheduleId;
-    wx.switchTab({ url: '/pages/inspection/inspection' });
+    if (this._executionNavigating) {
+      wx.showToast({ title: '正在进入现场，请稍候', icon: 'none' });
+      return;
+    }
+    if (!this.data.canExecute) {
+      wx.showToast({
+        title: this.data.reworkBlockReason || this.data.executionBlockReason
+          || '当前任务不可执行，请刷新后重试',
+        icon: 'none'
+      });
+      if (this.data.detail) this.load();
+      return;
+    }
+    if (this.data.detail && this.data.detail.execution_status === 'rework') {
+      this._preflightReworkExecution();
+      return;
+    }
+    this._preflightFieldExecution();
+  },
+
+  _preflightReworkExecution() {
+    this._executionNavigating = true;
+    const requestId = (this._executionRequestId || 0) + 1;
+    this._executionRequestId = requestId;
+    api.planScheduleDetail(this.scheduleId).then(detail => {
+      if (!this._alive || requestId !== this._executionRequestId) return;
+      const target = buildScheduleExecutionTarget(detail, this.scheduleId);
+      const targetIsExact = !!(target.executionPlanId && target.siteId);
+      if (detail.execution_status !== 'rework'
+          || detail.can_continue_rework !== true || !targetIsExact) {
+        this._executionNavigating = false;
+        const reason = detail.rework_block_reason
+          || '整改任务已闭环或执行权限已变化，请刷新计划详情';
+        this.setData({
+          detail,
+          canExecute: false,
+          canContinueRework: false,
+          executionTarget: null,
+          reworkBlockReason: reason,
+        });
+        wx.showToast({ title: reason, icon: 'none' });
+        this.load();
+        return;
+      }
+      this._navigateToExecution(target);
+    }).catch(err => {
+      if (!this._alive || requestId !== this._executionRequestId) return;
+      this._executionNavigating = false;
+      wx.showToast({
+        title: (err && (err.error || err.message)) || '整改任务校验失败，请刷新后重试',
+        icon: 'none'
+      });
+    });
+  },
+
+  _preflightFieldExecution() {
+    this._executionNavigating = true;
+    const requestId = (this._executionRequestId || 0) + 1;
+    this._executionRequestId = requestId;
+    api.planScheduleDetail(this.scheduleId).then(detail => {
+      if (!this._alive || requestId !== this._executionRequestId) return;
+      const target = buildScheduleExecutionTarget(detail, this.scheduleId);
+      const isOrdinaryExecution = detail.execution_status === 'pending'
+        || detail.execution_status === 'partial';
+      if (!isOrdinaryExecution || detail.can_continue_execution !== true
+          || !target.scheduleId) {
+        this._executionNavigating = false;
+        const reason = detail.execution_block_reason
+          || '执行任务已闭环或执行权限已变化，请刷新计划详情';
+        this.setData({
+          detail,
+          canExecute: false,
+          canContinueExecution: false,
+          executionTarget: null,
+          executionBlockReason: reason,
+        });
+        wx.showToast({ title: reason, icon: 'none' });
+        this.load();
+        return;
+      }
+      this._navigateToExecution(target);
+    }).catch(err => {
+      if (!this._alive || requestId !== this._executionRequestId) return;
+      this._executionNavigating = false;
+      wx.showToast({
+        title: (err && (err.error || err.message)) || '执行任务校验失败，请刷新后重试',
+        icon: 'none'
+      });
+    });
+  },
+
+  _navigateToExecution(target) {
+    app.globalData.executionTarget = target;
+    try {
+      wx.navigateTo({
+        url: '/pages/inspection/inspection',
+        fail: err => {
+          if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+          this._executionNavigating = false;
+          wx.showToast({
+            title: (err && (err.errMsg || err.message)) || '进入现场失败，请重试',
+            icon: 'none'
+          });
+        }
+      });
+    } catch (err) {
+      if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+      this._executionNavigating = false;
+      wx.showToast({ title: '进入现场失败，请重试', icon: 'none' });
+    }
   },
 
   onFavorite() {
@@ -240,6 +440,82 @@ Page({
           .finally(() => this.setData({ favoriting: false }));
       }
     });
+  },
+
+  onOpenCancel() {
+    if (!this.data.canCancel) {
+      wx.showToast({
+        title: this.data.cancelBlockReason || '计划状态或权限已变化，请刷新后重试',
+        icon: 'none'
+      });
+      return;
+    }
+    if (this.data.cancelSheet.submitting) {
+      wx.showToast({ title: '取消请求正在处理中，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({
+      'cancelSheet.open': true,
+      'cancelSheet.error': ''
+    });
+  },
+
+  onCancelReasonInput(e) {
+    this.setData({
+      'cancelSheet.reason': e.detail.value,
+      'cancelSheet.error': ''
+    });
+  },
+
+  onCloseCancel() {
+    if (this.data.cancelSheet.submitting) {
+      wx.showToast({ title: '取消请求正在处理中，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({ 'cancelSheet.open': false });
+  },
+
+  onConfirmCancel() {
+    if (!this.data.canCancel) {
+      const error = this.data.cancelBlockReason || '计划状态或权限已变化，请刷新后重试';
+      this.setData({ 'cancelSheet.error': error });
+      wx.showToast({ title: error, icon: 'none' });
+      return;
+    }
+    const normalized = normalizePlanCancelReason(this.data.cancelSheet.reason);
+    if (normalized.error) {
+      this.setData({ 'cancelSheet.error': normalized.error });
+      return;
+    }
+    const detail = this.data.detail || {};
+    const action = startPlanCancellation(this, () => api.cancelPlanSchedule(
+      this.scheduleId, normalized.value, detail.version
+    ));
+    if (!action.started) {
+      wx.showToast({ title: '取消请求正在处理中，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({
+      'cancelSheet.reason': normalized.value,
+      'cancelSheet.submitting': true,
+      'cancelSheet.error': ''
+    });
+    action.promise
+      .then(() => {
+        this.setData({
+          'cancelSheet.open': false,
+          'cancelSheet.reason': '',
+          'cancelSheet.error': ''
+        });
+        wx.showToast({ title: '计划已取消', icon: 'success' });
+        this.load();
+      })
+      .catch(err => {
+        this.setData({
+          'cancelSheet.error': (err && (err.error || err.message)) || '取消失败，请稍后重试'
+        });
+      })
+      .finally(() => this.setData({ 'cancelSheet.submitting': false }));
   },
 
   onFavoriteAction() {
@@ -281,12 +557,13 @@ Page({
       });
   },
 
-  // 发起变更：已通过的计划 → modifying，随后进入编辑页修改
+  // 开始修改只会进入编辑态；正式提交仍由编辑页完成。
   onChangeRequest() {
     wx.showModal({
-      title: '发起变更',
+      title: '开始修改计划',
       editable: true,
-      placeholderText: '请填写变更原因（如车辆故障、突发任务）',
+      content: '此步只进入编辑，不会提交管理员审核。完成修改后请点“提交变更审核”。',
+      placeholderText: '请填写修改原因（如日期或站点顺序错误）',
       success: (r) => {
         if (!r.confirm) return;
         const reason = (r.content || '').trim();
@@ -296,8 +573,7 @@ Page({
         }
         api.requestPlanScheduleChange(this.scheduleId, reason)
           .then(() => {
-            wx.showToast({ title: '已发起变更', icon: 'success' });
-            // 进入编辑页修改计划
+            wx.showToast({ title: '请完成修改并提交审核', icon: 'none' });
             wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
           })
           .catch(err => {
@@ -326,4 +602,9 @@ Page({
   }
 });
 
-module.exports = { normalizeGeneratedTasks, planHeaderPresentation };
+module.exports = {
+  normalizeGeneratedTasks,
+  planHeaderPresentation,
+  summarizeGeneratedTasks,
+  buildScheduleExecutionTarget,
+};

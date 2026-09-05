@@ -4,7 +4,7 @@ const { request } = require('../utils/request.js');
 function vehicleListQuery(options) {
   if (!options) return '';
   const pairs = [];
-  ['scope', 'page', 'limit', 'offset', 'vehicle_id', 'applicant_id', 'status'].forEach(key => {
+  ['scope', 'page', 'limit', 'offset', 'vehicle_id', 'applicant_id', 'application_id', 'status'].forEach(key => {
     const value = options[key];
     if (value !== undefined && value !== null && value !== '') pairs.push(key + '=' + encodeURIComponent(value));
   });

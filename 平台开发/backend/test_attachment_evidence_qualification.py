@@ -347,7 +347,8 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 VALUES (77,'deleted.jpg','/uploads/deleted.jpg','inspection',10,10,'浊度仪检查',1,2,
                  'approved','2026-08-12 10:15:00','2026-08-12 10:16:00','qualified','camera_session','{}',1)""")
 
-            history, effective = app_module._item_attachment_history(db, 10)
+            item = db.execute('SELECT * FROM insp_plan_items WHERE id=10').fetchone()
+            history, effective = app_module._item_attachment_history(db, item)
 
         self.assertEqual([row['id'] for row in history], [71, 72, 73, 74, 75, 76])
         self.assertEqual([row['id'] for row in effective], [71])

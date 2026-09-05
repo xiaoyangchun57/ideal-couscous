@@ -6,17 +6,20 @@ const app = getApp();
 
 Page({
   data: {
-    username: '', password: '', passwordFocused: false, loading: false, error: '',
-    mustChangePassword: false, newPassword: '', confirmPassword: '', pendingSites: [],
+    username: '', password: '', passwordFocused: false, showPassword: false, loading: false, error: '',
+    mustChangePassword: false, newPassword: '', confirmPassword: '', showNewPassword: false, showConfirmPassword: false, pendingSites: [],
   },
 
   onUser(e) { this.setData({ username: e.detail.value, error: '' }); },
   onPass(e) { this.setData({ password: e.detail.value, error: '' }); },
+  onTogglePassword() { this.setData({ showPassword: !this.data.showPassword }); },
   focusPassword() { this.setData({ passwordFocused: true }); },
   onPassFocus() { this.setData({ passwordFocused: true }); },
   onPassBlur() { this.setData({ passwordFocused: false }); },
   onNewPassword(e) { this.setData({ newPassword: e.detail.value, error: '' }); },
   onConfirmPassword(e) { this.setData({ confirmPassword: e.detail.value, error: '' }); },
+  onToggleNewPassword() { this.setData({ showNewPassword: !this.data.showNewPassword }); },
+  onToggleConfirmPassword() { this.setData({ showConfirmPassword: !this.data.showConfirmPassword }); },
 
   completeLogin(token, user, sites) {
     completeLoginSession({

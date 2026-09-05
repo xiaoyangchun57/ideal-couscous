@@ -2,7 +2,8 @@ const assert = require('assert');
 const {
   approveItemIdsForPhotoSelection,
   getRiskyPhotoIds,
-  getUnqualifiedPhotoIds
+  getUnqualifiedPhotoIds,
+  groupReviewPhotosByItem
 } = require('../utils/inspectionReviewDecision.js');
 
 const itemIds = [100, 101, 101, 102];
@@ -47,5 +48,23 @@ assert.deepStrictEqual(
   [100, 101, 102],
   'An unbound photo must not block an unrelated check item.'
 );
+
+const groupedPhotos = groupReviewPhotosByItem([
+  { id: 1, item_id: 101, itemLabel: '第一个检查项' },
+  { id: 2, item_id: '101', itemLabel: '重复名称不影响分组' },
+  { id: 3, item_id: 102, itemLabel: '同名检查项' },
+  { id: 4, item_id: '103', itemLabel: '同名检查项' },
+  { id: 5, item_id: null, itemLabel: '不得使用' },
+  { id: 6, itemLabel: '不得使用' },
+]);
+assert.deepStrictEqual(groupedPhotos.map(group => ({
+  key: group.key, itemId: group.itemId, itemLabel: group.itemLabel,
+  photoIds: group.photos.map(photo => photo.id),
+})), [
+  { key: 'item:101', itemId: 101, itemLabel: '第一个检查项', photoIds: [1, 2] },
+  { key: 'item:102', itemId: 102, itemLabel: '同名检查项', photoIds: [3] },
+  { key: 'item:103', itemId: '103', itemLabel: '同名检查项', photoIds: [4] },
+  { key: 'unknown', itemId: null, itemLabel: '关联检查项暂不可用', photoIds: [5, 6] },
+], 'groups use item id, preserve encounter order, and keep unbound photos separate');
 
 console.log('inspectionReviewDecision tests passed');

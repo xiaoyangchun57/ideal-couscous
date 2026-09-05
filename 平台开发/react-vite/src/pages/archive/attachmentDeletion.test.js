@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   canSubmitAttachmentDelete,
@@ -13,6 +14,7 @@ import {
   hasReviewerRole,
   isFormalAttachment,
   normalizeDeleteReason,
+  rejectedPurgeEligibility,
   voidEligibility,
 } from './attachmentDeletion.js';
 
@@ -102,4 +104,28 @@ test('delete dialog never offers a reason field for a server-blocked formal reco
   assert.equal(attachmentDeletionDialogMode({ can_delete: true }), 'ordinary');
   assert.equal(attachmentDeletionDialogMode({ can_delete: false, source_type: 'inspection', association_status: 'linked' }), 'void');
   assert.equal(attachmentDeletionDialogMode({ can_delete: false, source_type: 'test', association_status: 'unlinked' }), 'blocked');
+});
+
+test('rejected hard purge is admin-only, inspection-only, and linked without client reason', () => {
+  const target = { source_type: 'inspection', review_status: 'rejected', association_status: 'linked' };
+  assert.equal(rejectedPurgeEligibility(target, { roles: ['admin'] }).allowed, true);
+  assert.equal(rejectedPurgeEligibility(target, { roles: ['reviewer'] }).allowed, false);
+  assert.equal(rejectedPurgeEligibility({ ...target, review_status: 'approved' }, { role: 'admin' }).allowed, false);
+  assert.equal(rejectedPurgeEligibility({ ...target, source_type: 'workorder' }, { role: 'admin' }).allowed, false);
+  assert.equal(rejectedPurgeEligibility({ ...target, association_status: 'migration_issue' }, { role: 'admin' }).allowed, false);
+});
+
+test('rejected purge confirmation uses authoritative batch preview and keeps retry context', () => {
+  const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
+  const modalStart = source.indexOf('<Modal open={purgeOpen}');
+  const modalEnd = source.indexOf('</Modal>', modalStart);
+  const modalSource = source.slice(modalStart, modalEnd);
+  assert.match(modalSource, /purgePreview\.count/);
+  assert.match(modalSource, /本次整改全部.*张已驳回照片/);
+  assert.match(modalSource, /不可恢复，仅保留文字删除摘要/);
+  assert.doesNotMatch(modalSource, /TextArea|purgeReason|请填写彻底删除原因/);
+  assert.match(source, /getStrict\(`\/attachments\/\$\{detail\.id\}\/purge-rejected-batch`\)/);
+  assert.match(source, /postStrict\(`\/attachments\/\$\{detail\.id\}\/purge-rejected-batch`, \{\}\)/);
+  assert.match(source, /catch \(requestError\) \{\s*setPurgeError/);
+  assert.doesNotMatch(source.match(/catch \(requestError\)[\s\S]*?finally/)[0], /setPurgeOpen\(false\)|setDetail\(null\)/);
 });

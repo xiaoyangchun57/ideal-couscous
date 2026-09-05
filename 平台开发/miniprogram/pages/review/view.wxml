@@ -1,147 +1,411 @@
-<view class="page">
-  <view class="hd">
-    <view class="hd-title">待办审核</view>
-    <view class="hd-sub">{{total}} 项待处理 · 管理者/审批者</view>
+<view class="rv-page">
+  <!-- 顶部轻量统计 -->
+  <view class="rv-summary" wx:if="{{loadState !== 'loading' && total > 0}}">
+    <text class="rv-summary-text">待审核 </text>
+    <text class="rv-summary-num">{{total}}</text>
+    <text class="rv-summary-text"> 项</text>
   </view>
 
-  <view wx:if="{{loading}}" class="empty">加载中…</view>
-
-  <view wx:elif="{{total === 0}}" class="empty">
-    <view class="empty-ico">✓</view>
-    <view>暂无待审核事项</view>
+  <!-- 加载中 -->
+  <view wx:if="{{loadState === 'loading'}}" class="rv-empty">
+    <view class="rv-empty-ico"></view>
+    <text class="rv-empty-tx">加载中…</text>
   </view>
 
+  <!-- 错误态 -->
+  <view wx:elif="{{loadState === 'error'}}" class="rv-empty">
+    <view class="rv-empty-ico rv-empty-ico--error"></view>
+    <text class="rv-empty-tx">{{loadError}}</text>
+    <button class="rv-btn rv-btn-primary rv-empty-btn" bindtap="onRetry">重试</button>
+  </view>
+
+  <!-- 空态 -->
+  <view wx:elif="{{loadState === 'empty'}}" class="rv-empty">
+    <view class="rv-empty-check">
+      <view class="rv-checkmark"></view>
+    </view>
+    <text class="rv-empty-tx">暂无待审核事项</text>
+    <text class="rv-empty-sub">所有审核均已处理</text>
+  </view>
+
+  <!-- 分组列表 -->
   <block wx:else>
-    <view wx:for="{{groups}}" wx:key="label" class="group">
-      <view class="group-hd">{{item.label}}（{{item.items.length}}）</view>
-      <view class="list-card review-list">
-        <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="review-row {{it.targeted ? 'review-target' : ''}}">
-          <text class="row-title">{{it.title}}</text>
-          <text class="row-sub" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
-          <text class="row-sub" wx:if="{{it.source_name}}">单号：{{it.source_name}}</text>
-          <text class="row-sub" wx:if="{{it.source_type === 'plan_schedule' && it.executor_name}}">执行人：{{it.executor_name}}</text>
-          <text class="row-sub" wx:if="{{it.source_type === 'plan_schedule' && it.requester_name}}">申报人：{{it.requester_name}}</text>
-          <text class="row-sub" wx:elif="{{it.requester_name}}">申报人：{{it.requester_name}}</text>
-          <text class="row-sub" wx:if="{{it.submit_time}}">提交：{{it.submit_time}}</text>
-          <text class="review-note" wx:if="{{it.remark}}">{{it.remark}}</text>
-          <view class="approval-summary" wx:if="{{it.source_type === 'plan_schedule'}}">
-            <text>审批重点：站点、路线、车辆与备件安排{{it.is_change ? '（计划变更）' : ''}}</text>
+    <view class="rv-summary-line rv-stale-line" wx:if="{{loadState === 'stale'}}">
+      {{loadError}}，<text bindtap="onRetry">重试</text>
+    </view>
+
+    <view wx:for="{{groups}}" wx:key="label" class="rv-group">
+      <!-- 分组标题：多类型时才显示 -->
+      <view class="rv-group-hd" wx:if="{{showGroupHeaders}}">
+        <text class="rv-group-title">{{item.label}}</text>
+        <text class="rv-group-count">{{item.items.length}}</text>
+      </view>
+
+      <view class="rv-card">
+        <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="rv-item {{it.detailOpen ? 'rv-item-open' : ''}} {{it.targeted ? 'review-target rv-item-target' : ''}}">
+          <!-- ========== 收起态摘要 ========== -->
+          <view class="rv-item-head" data-id="{{it.id}}" bindtap="onToggleDetails">
+            <view class="rv-item-main">
+              <text class="rv-item-title">{{it.title}}</text>
+              <!-- 一行上下文：按类型组装自然语言，不使用标签式表格 -->
+              <text class="rv-item-context">
+                <block wx:if="{{it.source_type === 'plan_schedule'}}">
+                  {{it.executor_name || it.requester_name || '未指定执行人'}}
+                  <block wx:if="{{it.submit_time}}"> · {{it.submit_time}}</block>
+                </block>
+                <block wx:elif="{{it.source_type === 'inspection_batch' || it.source_type === 'photo_review' || it.source_type === 'inspection'}}">
+                  {{it.site_name || it.source_name || ''}}
+                  <block wx:if="{{it.pending_item_count}}"> · {{it.pending_item_count}} 项待审</block>
+                </block>
+                <block wx:elif="{{it.source_type === 'workorder_review' || it.source_type === 'workorder_status' || it.source_type === 'workorder_photo'}}">
+                  {{it.site_name || ''}}
+                  <block wx:if="{{it.executor_name}}"> · {{it.executor_name}}</block>
+                  <block wx:if="{{it.submit_time}}"> · {{it.submit_time}}</block>
+                </block>
+                <block wx:elif="{{it.source_type === 'parts_request' || it.source_type === 'spare_part_request'}}">
+                  {{it.requester_name || '申请人'}}
+                  <block wx:if="{{it.submit_time}}"> · {{it.submit_time}}</block>
+                </block>
+                <block wx:elif="{{it.source_type === 'vehicle_application'}}">
+                  {{it.plate_no || '未指定车辆'}}
+                  <block wx:if="{{it.start_at}}"> · {{it.start_at}}</block>
+                </block>
+                <block wx:elif="{{it.source_type === 'data_review'}}">
+                  {{it.metric || '未命名指标'}}
+                  <block wx:if="{{it.recorded_at}}"> · {{it.recorded_at}}</block>
+                </block>
+                <block wx:else>
+                  {{it.site_name || it.executor_name || it.requester_name || ''}}
+                  <block wx:if="{{it.submit_time}}"> · {{it.submit_time}}</block>
+                </block>
+              </text>
+              <!-- 风险提示：只在有真实风险时显示 -->
+              <text class="rv-item-risk" wx:if="{{it.is_change}}">计划变更</text>
+              <text class="rv-item-risk" wx:elif="{{it.flag_reason}}">有风险提示</text>
+            </view>
+            <view class="rv-item-arrow {{it.detailOpen ? 'rv-arrow-up' : ''}}"></view>
           </view>
-          <view class="approval-summary" wx:elif="{{it.source_type === 'inspection_batch'}}">
-            <text>审批重点：{{it.pending_item_count}} 个检查项的结果与现场证据</text>
-          </view>
-          <view class="approval-summary" wx:elif="{{it.source_type === 'parts_request' || it.source_type === 'spare_part_request'}}">
-            <text>审批重点：备件清单、数量、履约方式与申请事由</text>
-          </view>
-          <view class="approval-summary" wx:elif="{{it.source_type === 'vehicle_application'}}">
-            <text>审批重点：车辆、使用时段、目的地与用车事由</text>
-          </view>
-          <view class="approval-summary" wx:elif="{{it.source_type === 'data_review'}}">
-            <text>审批重点：原始数值、采集时间与自动审核结论</text>
-          </view>
-          <view class="detail-toggle" data-id="{{it.id}}" bindtap="onToggleDetails">{{it.detailOpen ? '收起审批详情' : it.detailHint}}</view>
-          <view class="review-detail" wx:if="{{it.detailOpen}}">
+
+          <!-- ========== 展开详情 ========== -->
+          <view class="rv-detail" wx:if="{{it.detailOpen}}">
+
+            <!-- === 计划审批 === -->
             <block wx:if="{{it.source_type === 'plan_schedule'}}">
-              <text class="detail-label">计划周期</text>
-              <text class="detail-text">{{it.title}}</text>
-              <text class="detail-label">执行人</text>
-              <text class="detail-text">{{it.executor_name || '未记录'}}</text>
-              <text class="detail-label" wx:if="{{it.requester_name}}">申报人</text>
-              <text class="detail-text" wx:if="{{it.requester_name}}">{{it.requester_name}}</text>
-              <text class="detail-label">站点与路线</text>
-              <view wx:for="{{it.plan_days}}" wx:for-item="day" wx:key="date" class="detail-line">
-                <text class="detail-text">{{day.date}}：<text wx:for="{{day.sites}}" wx:for-item="routeSite" wx:key="id">{{routeSite.name}}{{index < day.sites.length - 1 ? ' → ' : ''}}</text></text>
-                <text class="detail-muted" wx:if="{{day.notes}}">备注：{{day.notes}}</text>
+              <!-- 1. 核心：站点与路线 -->
+              <view class="rv-detail-section">
+                <text class="rv-detail-section-title">站点与路线</text>
+                <view wx:for="{{it.plan_days}}" wx:for-item="day" wx:key="date" class="rv-day-line">
+                  <text class="rv-day-date">{{day.date}}</text>
+                  <text class="rv-day-route">
+                    <text wx:for="{{day.sites}}" wx:for-item="routeSite" wx:key="id">{{routeSite.name}}{{index < day.sites.length - 1 ? ' → ' : ''}}</text>
+                  </text>
+                  <text class="rv-day-notes" wx:if="{{day.notes}}">备注：{{day.notes}}</text>
+                </view>
+                <text class="rv-detail-empty" wx:if="{{!it.plan_days.length}}">未配置站点路线</text>
               </view>
-              <text class="detail-empty" wx:if="{{!it.plan_days.length}}">未配置站点路线</text>
+
+              <!-- 2. 变更差异（仅变更时显示） -->
               <block wx:if="{{it.is_change && it.previous_plan_days.length}}">
-                <text class="detail-label">变更前路线</text>
-                <text class="detail-text" wx:for="{{it.previous_plan_days}}" wx:for-item="oldDay" wx:key="date">{{oldDay.date}}：<text wx:for="{{oldDay.sites}}" wx:for-item="oldSite" wx:key="id">{{oldSite.name}}{{index < oldDay.sites.length - 1 ? ' → ' : ''}}</text></text>
+                <view class="rv-detail-section">
+                  <text class="rv-detail-section-title">变更前路线</text>
+                  <view wx:for="{{it.previous_plan_days}}" wx:for-item="oldDay" wx:key="date" class="rv-day-line">
+                    <text class="rv-day-date">{{oldDay.date}}</text>
+                    <text class="rv-day-route">
+                      <text wx:for="{{oldDay.sites}}" wx:for-item="oldSite" wx:key="id">{{oldSite.name}}{{index < oldDay.sites.length - 1 ? ' → ' : ''}}</text>
+                    </text>
+                  </view>
+                </view>
               </block>
-              <text class="detail-label" wx:if="{{it.vehicle_days_detail.length}}">用车安排</text>
-              <text class="detail-text" wx:for="{{it.vehicle_days_detail}}" wx:for-item="vehicleDay" wx:key="date">{{vehicleDay.date}}：{{vehicleDay.plate_no || '未指定车辆'}}{{vehicleDay.model ? ' · ' + vehicleDay.model : ''}}</text>
-              <text class="detail-label" wx:if="{{it.spare_parts.length}}">备件计划</text>
-              <text class="detail-text" wx:for="{{it.spare_parts}}" wx:for-item="part" wx:key="index">{{part.part_name || part.name || part.part_sku || '备件'}} × {{part.quantity || part.planned_quantity || 0}}</text>
-              <text class="detail-label" wx:if="{{it.is_change && it.change_reason}}">变更原因</text>
-              <text class="detail-text detail-risk" wx:if="{{it.is_change && it.change_reason}}">{{it.change_reason}}</text>
-            </block>
-            <block wx:elif="{{it.source_type === 'inspection_batch'}}">
-              <text class="detail-label">待审检查项</text>
-              <view wx:for="{{it.itemDetails}}" wx:for-item="checkItem" wx:key="id" class="inspection-item">
-                <view class="inspection-item-head"><text>{{checkItem.item_name}}</text></view>
-                <text class="detail-muted" wx:if="{{checkItem.remark}}">备注：{{checkItem.remark}}</text>
-              </view>
-            </block>
-            <block wx:elif="{{it.source_type === 'parts_request' || it.source_type === 'spare_part_request'}}">
-              <text class="detail-label">备件清单</text>
-              <text class="detail-text" wx:for="{{it.parts_detail}}" wx:for-item="part" wx:key="part_sku">{{part.part_name || part.part_sku}} × {{part.quantity || 0}}{{part.model ? ' · ' + part.model : ''}}</text>
-              <text class="detail-label" wx:if="{{it.fulfillment_label}}">履约方式</text>
-              <text class="detail-text" wx:if="{{it.fulfillment_label}}">{{it.fulfillment_label}}</text>
-              <text class="detail-label" wx:if="{{it.reason}}">申请事由</text>
-              <text class="detail-text" wx:if="{{it.reason}}">{{it.reason}}</text>
-              <text class="detail-label" wx:if="{{it.estimated_amount}}">预计金额</text>
-              <text class="detail-text" wx:if="{{it.estimated_amount}}">¥{{it.estimated_amount}}</text>
-            </block>
-            <block wx:elif="{{it.source_type === 'vehicle_application'}}">
-              <text class="detail-label">车辆</text><text class="detail-text">{{it.plate_no || '未指定'}}{{it.model ? ' · ' + it.model : ''}}</text>
-              <text class="detail-label">使用时段</text><text class="detail-text">{{it.start_at}} 至 {{it.end_at}}</text>
-              <text class="detail-label" wx:if="{{it.destination}}">目的地</text><text class="detail-text" wx:if="{{it.destination}}">{{it.destination}}</text>
-              <text class="detail-label" wx:if="{{it.reason}}">用车事由</text><text class="detail-text" wx:if="{{it.reason}}">{{it.reason}}</text>
-            </block>
-            <block wx:elif="{{it.source_type === 'data_review'}}">
-              <text class="detail-label">指标与数值</text><text class="detail-text">{{it.metric}}：{{it.value}}</text>
-              <text class="detail-label">采集时间</text><text class="detail-text">{{it.recorded_at || '未记录'}}</text>
-              <text class="detail-label">当前审核状态</text><text class="detail-text">{{it.review_status_label}}</text>
-              <text class="detail-label">自动审核结论</text><text class="detail-text">{{it.auto_reason || '未记录'}}</text>
-              <text class="detail-label">智能审核结论</text><text class="detail-text">{{it.smart_result || '未记录'}}</text>
-            </block>
-            <block wx:else>
-              <text class="detail-label" wx:if="{{it.original_description}}">现场描述</text>
-              <text class="detail-text" wx:if="{{it.original_description}}">{{it.original_description}}</text>
-              <text class="detail-label" wx:if="{{it.resolution_note}}">办结说明</text>
-              <text class="detail-text" wx:if="{{it.resolution_note}}">{{it.resolution_note}}</text>
-              <text class="detail-label" wx:if="{{it.flag_reason}}">风险提示</text>
-              <text class="detail-text detail-risk" wx:if="{{it.flag_reason}}">{{it.flag_reason}}</text>
-            </block>
-            <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch' || it.source_type === 'workorder_review') && it.reviewPhotos.length}}">
-              <text class="photo-select-hint" wx:if="{{it.source_type !== 'workorder_review'}}">勾选内容不符合要求、需要替换的照片</text>
-              <view class="review-photos">
-                <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="review-photo-wrap {{photo.selectedForReject ? 'review-photo-reject' : ''}}">
-                  <image class="review-photo" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
-                  <view class="photo-select" wx:if="{{it.source_type !== 'workorder_review'}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">{{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}</view>
-                  <text class="photo-meta photo-item-name">检查项：{{photo.itemLabel}}</text>
-                  <text class="photo-meta" wx:if="{{photo.archiveName}}">档案名称：{{photo.archiveName}}</text>
-                  <text class="photo-meta" wx:if="{{photo.originalFilename}}">原始文件名：{{photo.originalFilename}}</text>
-                  <text class="photo-meta">主状态：{{photo.primaryStatusLabel}}</text>
-                  <text class="photo-meta">拍摄时间：{{photo.takenAt || '未记录'}}</text>
+
+              <!-- 3. 用车与备件 -->
+              <view class="rv-detail-section" wx:if="{{it.vehicle_days_detail.length}}">
+                <text class="rv-detail-section-title">用车安排</text>
+                <view wx:for="{{it.vehicle_days_detail}}" wx:for-item="vehicleDay" wx:key="date" class="rv-day-line">
+                  <text class="rv-day-date">{{vehicleDay.date}}</text>
+                  <text class="rv-day-route">{{vehicleDay.plate_no || '未指定车辆'}}{{vehicleDay.model ? ' · ' + vehicleDay.model : ''}}</text>
                 </view>
               </view>
+              <view class="rv-detail-section" wx:if="{{it.spare_parts.length}}">
+                <text class="rv-detail-section-title">备件计划</text>
+                <view wx:for="{{it.spare_parts}}" wx:for-item="part" wx:key="index" class="rv-part-line">
+                  <text class="rv-part-name">{{part.part_name || part.name || part.part_sku || '备件'}}</text>
+                  <text class="rv-part-qty">× {{part.quantity || part.planned_quantity || 0}}</text>
+                </view>
+              </view>
+
+              <!-- 4. 变更原因/备注 -->
+              <view class="rv-note" wx:if="{{it.is_change && it.change_reason}}">
+                <text class="rv-note-label">变更原因</text>
+                <text class="rv-note-text">{{it.change_reason}}</text>
+              </view>
+              <view class="rv-note" wx:elif="{{it.remark}}">
+                <text class="rv-note-label">备注</text>
+                <text class="rv-note-text">{{it.remark}}</text>
+              </view>
+
+              <!-- 5. 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item">执行人：{{it.executor_name || '未记录'}}</text>
+                <text class="rv-meta-item" wx:if="{{it.requester_name}}">申报人：{{it.requester_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">计划编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
             </block>
-            <view class="review-photos" wx:elif="{{it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'workorder_photo')}}">
-              <image wx:for="{{it.photoUrls}}" wx:key="*this" wx:for-item="photo" class="review-photo" src="{{photo}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo}}" />
+
+            <!-- === 巡检/照片审核 === -->
+            <block wx:elif="{{it.source_type === 'inspection_batch' || it.source_type === 'photo_review' || it.source_type === 'inspection'}}">
+              <!-- 照片审核提示 -->
+              <view class="rv-photo-hint" wx:if="{{it.canReview && it.reviewPhotos.length && it.source_type !== 'workorder_review'}}">
+                勾选内容不符合要求、需要替换的照片
+              </view>
+
+              <!-- 检查项分组（循环 reviewItemGroups，零照片也显示结果与备注） -->
+              <block wx:if="{{it.reviewItemGroups.length}}">
+                <view wx:for="{{it.reviewItemGroups}}" wx:for-item="group" wx:key="key" class="rv-check-group">
+                  <view class="rv-check-group-hd">
+                    <text class="rv-check-group-title">{{group.itemLabel}}</text>
+                    <text class="rv-check-group-count" wx:if="{{group.photos.length}}">{{group.photos.length}} 张</text>
+                  </view>
+
+                  <!-- 检查项结果与备注 -->
+                  <view class="rv-check-result">
+                    <text class="rv-check-status">结果：{{group.result_label || group.result || '未填写'}}</text>
+                    <text class="rv-check-remark" wx:if="{{group.remark}}">备注：{{group.remark}}</text>
+                  </view>
+
+                  <!-- 照片网格 -->
+                  <view class="rv-photo-grid" wx:if="{{group.photos.length}}">
+                    <view wx:for="{{group.photos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item {{photo.selectedForReject ? 'rv-photo-reject' : ''}}">
+                      <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                      <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
+                        {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
+                      </view>
+                      <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
+                    </view>
+                  </view>
+                  <view class="rv-photo-empty" wx:else>
+                    <text class="rv-photo-empty-text">暂无现场照片</text>
+                  </view>
+                </view>
+              </block>
+
+              <!-- 无分组时的简单照片展示（兼容降级） -->
+              <block wx:elif="{{it.reviewPhotos.length}}">
+                <view class="rv-photo-grid">
+                  <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item {{photo.selectedForReject ? 'rv-photo-reject' : ''}}">
+                    <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                    <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
+                      {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
+                    </view>
+                    <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
+                  </view>
+                </view>
+              </block>
+              <text class="rv-detail-empty" wx:elif="{{it.source_type === 'inspection_batch' || it.source_type === 'photo_review' || it.source_type === 'inspection'}}">暂无可查看的影像</text>
+
+              <!-- 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">计划单号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- === 工单审核 === -->
+            <block wx:elif="{{it.source_type === 'workorder_review' || it.source_type === 'workorder_status' || it.source_type === 'workorder_photo'}}">
+              <!-- 1. 核心：原问题与处置结果 -->
+              <view class="rv-detail-section">
+                <text class="rv-detail-section-title">原问题</text>
+                <text class="rv-detail-block-text">{{it.original_description || '未填写'}}</text>
+              </view>
+              <view class="rv-detail-section">
+                <text class="rv-detail-section-title">处置结果</text>
+                <text class="rv-detail-block-text">{{it.resolution_note || '未填写'}}</text>
+              </view>
+
+              <!-- 2. 现场证据 -->
+              <view class="rv-photo-grid" wx:if="{{it.reviewPhotos.length}}">
+                <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item">
+                  <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                  <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
+                  <view class="rv-photo-flag" wx:if="{{photo.flag_reason}}">
+                    <text class="rv-photo-flag-text">{{photo.flag_reason}}</text>
+                  </view>
+                </view>
+              </view>
+
+              <!-- 3. 风险提示 -->
+              <view class="rv-note rv-note--error" wx:if="{{it.flag_reason}}">
+                <text class="rv-note-label">风险提示</text>
+                <text class="rv-note-text">{{it.flag_reason}}</text>
+              </view>
+
+              <!-- 4. 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">工单编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- === 备件申请 === -->
+            <block wx:elif="{{it.source_type === 'parts_request' || it.source_type === 'spare_part_request'}}">
+              <!-- 1. 核心：备件清单 -->
+              <view class="rv-detail-section">
+                <text class="rv-detail-section-title">备件清单</text>
+                <view wx:for="{{it.parts_detail}}" wx:for-item="part" wx:key="part_sku" class="rv-part-line">
+                  <text class="rv-part-name">{{part.part_name || part.part_sku}}{{part.model ? ' · ' + part.model : ''}}</text>
+                  <text class="rv-part-qty">× {{part.quantity || 0}}</text>
+                </view>
+              </view>
+
+              <!-- 2. 履约方式与金额 -->
+              <view class="rv-detail-row" wx:if="{{it.fulfillment_label}}">
+                <text class="rv-detail-label">履约方式</text>
+                <text class="rv-detail-value">{{it.fulfillment_label}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.estimated_amount}}">
+                <text class="rv-detail-label">预计金额</text>
+                <text class="rv-detail-value">¥{{it.estimated_amount}}</text>
+              </view>
+
+              <!-- 3. 申请原因 -->
+              <view class="rv-note" wx:if="{{it.reason}}">
+                <text class="rv-note-label">申请事由</text>
+                <text class="rv-note-text">{{it.reason}}</text>
+              </view>
+              <view class="rv-note" wx:elif="{{it.remark}}">
+                <text class="rv-note-label">备注</text>
+                <text class="rv-note-text">{{it.remark}}</text>
+              </view>
+
+              <!-- 4. 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.requester_name}}">申请人：{{it.requester_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">关联编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- === 车辆申请 === -->
+            <block wx:elif="{{it.source_type === 'vehicle_application'}}">
+              <!-- 1. 核心：车辆、时段、目的地 -->
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">车辆</text>
+                <text class="rv-detail-value">{{it.plate_no || '未指定'}}{{it.model ? ' · ' + it.model : ''}}</text>
+              </view>
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">使用时段</text>
+                <text class="rv-detail-value">{{it.start_at}} 至 {{it.end_at}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.destination}}">
+                <text class="rv-detail-label">目的地</text>
+                <text class="rv-detail-value">{{it.destination}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.verifiedRelatedTaskLabel}}">
+                <text class="rv-detail-label">关联任务</text>
+                <text class="rv-detail-value">{{it.verifiedRelatedTaskLabel}}</text>
+              </view>
+
+              <!-- 2. 用车原因 -->
+              <view class="rv-note" wx:if="{{it.reason}}">
+                <text class="rv-note-label">用车事由</text>
+                <text class="rv-note-text">{{it.reason}}</text>
+              </view>
+
+              <!-- 3. 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.requester_name}}">申请人：{{it.requester_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">申请编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- === 数据审核 === -->
+            <block wx:elif="{{it.source_type === 'data_review'}}">
+              <!-- 1. 核心：指标与数值 -->
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">指标</text>
+                <text class="rv-detail-value rv-detail-value--strong">{{it.metric}}</text>
+              </view>
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">原始数值</text>
+                <text class="rv-detail-value rv-detail-value--strong">{{it.value}}</text>
+              </view>
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">采集时间</text>
+                <text class="rv-detail-value">{{it.recorded_at || '未记录'}}</text>
+              </view>
+
+              <!-- 2. 自动/智能审核结论 -->
+              <view class="rv-detail-row">
+                <text class="rv-detail-label">自动审核结论</text>
+                <text class="rv-detail-value">{{it.auto_reason || '未记录'}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.smart_result}}">
+                <text class="rv-detail-label">智能审核结论</text>
+                <text class="rv-detail-value">{{it.smart_result}}</text>
+              </view>
+
+              <!-- 3. 降级信息 -->
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">来源编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- === 未知类型降级展示 === -->
+            <block wx:else>
+              <view class="rv-detail-row" wx:if="{{it.original_description}}">
+                <text class="rv-detail-label">现场描述</text>
+                <text class="rv-detail-value">{{it.original_description}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.resolution_note}}">
+                <text class="rv-detail-label">办结说明</text>
+                <text class="rv-detail-value">{{it.resolution_note}}</text>
+              </view>
+              <view class="rv-detail-row" wx:if="{{it.flag_reason}}">
+                <text class="rv-detail-label">风险提示</text>
+                <text class="rv-detail-value rv-risk-text">{{it.flag_reason}}</text>
+              </view>
+              <view class="rv-photo-grid rv-photo-grid-simple" wx:if="{{it.photoUrls.length}}">
+                <image wx:for="{{it.photoUrls}}" wx:key="*this" wx:for-item="photo" class="rv-photo-img rv-photo-simple" src="{{photo}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo}}" />
+              </view>
+              <view class="rv-meta-row">
+                <text class="rv-meta-item" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.source_name}}">编号：{{it.source_name}}</text>
+                <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+            </block>
+
+            <!-- ========== 决策区 ========== -->
+            <view class="rv-actions" wx:if="{{it.detailOpen && it.canReview}}">
+              <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
+                <button class="rv-btn rv-btn-primary" data-id="{{it.id}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id || loading || loadState === 'stale'}}" bindtap="onSubmitPhotoReview">
+                  {{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}
+                </button>
+              </block>
+              <block wx:else>
+                <button class="rv-btn rv-btn-danger" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id || loading || loadState === 'stale'}}" bindtap="onReject">{{it.rejectLabel}}</button>
+                <button class="rv-btn rv-btn-primary" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id || loading || loadState === 'stale'}}" bindtap="onApprove">{{it.approveLabel}}</button>
+              </block>
             </view>
-            <text class="detail-empty" wx:if="{{!it.photoUrls.length && (it.source_type === 'inspection_batch' || it.source_type === 'workorder_review' || it.source_type === 'photo_review' || it.source_type === 'workorder_photo')}}">暂无可查看的影像</text>
-          </view>
-          <view class="card-actions" wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
-            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onSubmitPhotoReview">{{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}</button>
-          </view>
-          <view class="card-actions" wx:else>
-            <button class="btn-primary btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onApprove">{{it.approveLabel}}</button>
-            <button class="btn-danger btn-sm" size="mini" data-id="{{it.id}}" data-type="{{it.source_type}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id}}" bindtap="onReject">{{it.rejectLabel}}</button>
+            <view class="rv-block-line" wx:if="{{!it.canReview}}">{{it.reviewBlockReason}}</view>
           </view>
         </view>
       </view>
     </view>
   </block>
 
-  <!-- 驳回原因弹窗 -->
-  <view wx:if="{{rejectShow}}" class="sheet-mask" bindtap="closeReject">
-    <view class="sheet" catchtap="noop">
-      <view class="sheet-title">驳回原因</view>
-      <textarea class="reason" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" />
-      <view class="sheet-actions">
-        <button class="btn-ghost btn-sm" size="mini" bindtap="closeReject">取消</button>
-        <button class="btn-danger btn-sm" size="mini" bindtap="rejectConfirm" disabled="{{!!submittingId && curAction !== 'selective'}}">确认驳回</button>
+  <!-- 驳回原因 Sheet -->
+  <view wx:if="{{rejectShow}}" class="rv-sheet-mask" bindtap="closeReject">
+    <view class="rv-sheet" catchtap="noop">
+      <view class="rv-sheet-handle"></view>
+      <view class="rv-sheet-title">驳回原因</view>
+      <textarea class="rv-reject-input" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" placeholder-class="rv-reject-placeholder" />
+      <view class="rv-sheet-actions">
+        <button class="rv-btn rv-btn-ghost" bindtap="closeReject">取消</button>
+        <button class="rv-btn rv-btn-danger" bindtap="rejectConfirm" disabled="{{!!submittingId && curAction !== 'selective'}}">确认驳回</button>
       </view>
     </view>
   </view>

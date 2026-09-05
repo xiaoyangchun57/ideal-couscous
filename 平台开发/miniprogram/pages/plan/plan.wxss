@@ -580,6 +580,205 @@
   border: 1rpx solid rgba(255, 59, 48, 0.3);
 }
 
+/* ============================================================
+ *  常用计划 Sheet · 快速选择/轻操作类
+ *  设计系统：水质运维-Apple
+ *  类型特征：字段少、操作明确、Sheet 高度紧凑
+ * ============================================================ */
+
+/* --- Sheet 容器 --- */
+.plan-favorite-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  z-index: 101;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* --- 关闭按钮（绝对定位右上角） --- */
+.plan-favorite-close {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  z-index: 2;
+  min-width: 88rpx;
+  min-height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.plan-favorite-close .ico-close::before,
+.plan-favorite-close .ico-close::after {
+  background: var(--color-text-tertiary);
+}
+
+/* --- 滚动正文区 ---
+   flex: 0 1 auto：内容少时由内容撑开，Sheet 紧凑；
+   内容多时被 max-height 限制，flex-shrink 压缩并内部滚动 */
+.plan-favorite-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28rpx 40rpx 8rpx;
+  box-sizing: border-box;
+}
+
+/* --- 标题区 --- */
+.plan-favorite-heading {
+  margin-bottom: 24rpx;
+  padding-right: 80rpx; /* 避让右上角关闭按钮 */
+}
+
+.plan-favorite-heading .sheet-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+}
+
+/* --- 表单字段 --- */
+.plan-favorite-sheet .picker-field,
+.plan-favorite-sheet .form-row {
+  margin-bottom: 20rpx;
+}
+
+.plan-favorite-sheet .field-label {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  margin-bottom: 10rpx;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.plan-favorite-sheet .input-field {
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+  padding: 0 24rpx;
+  height: 88rpx;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 500;
+  box-sizing: border-box;
+}
+
+.plan-favorite-sheet .picker-arrow {
+  font-size: 24rpx;
+  color: var(--color-icon-tertiary);
+  flex-shrink: 0;
+  margin-left: 12rpx;
+}
+
+/* --- 错误提示条 --- */
+.plan-favorite-sheet .sheet-error {
+  background: var(--color-error-surface);
+  border-radius: var(--radius-md);
+  padding: 16rpx 20rpx;
+  margin: 8rpx 0 16rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+
+.plan-favorite-sheet .error-text {
+  font-size: 24rpx;
+  color: var(--color-error);
+  line-height: 1.4;
+  flex: 1;
+}
+
+.plan-favorite-sheet .error-retry {
+  font-size: 24rpx;
+  color: var(--color-error);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* --- 底部操作栏 ---
+   双按钮：次按钮占 1 份，主按钮占 2 份
+   安全区仅在此处加一次，Sheet 容器不加 */
+.plan-favorite-sheet .sheet-actions {
+  display: flex;
+  gap: 16rpx;
+  padding: 12rpx 40rpx;
+  padding-bottom: calc(12rpx + env(safe-area-inset-bottom));
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-card);
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.plan-favorite-sheet .sheet-actions .btn-ghost {
+  flex: 1;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+  border-radius: var(--radius-lg);
+  font-size: 28rpx;
+  font-weight: 500;
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  border: none;
+}
+
+.plan-favorite-sheet .sheet-actions .btn-ghost::after {
+  border: none;
+}
+
+.plan-favorite-sheet .sheet-actions .btn-danger {
+  color: var(--color-error);
+}
+
+.plan-favorite-sheet .sheet-actions .btn-primary {
+  flex: 2;
+  min-height: 88rpx;
+  line-height: 88rpx;
+  height: auto;
+  border-radius: var(--radius-lg);
+  font-size: 28rpx;
+  font-weight: 500;
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  border: none;
+}
+
+.plan-favorite-sheet .sheet-actions .btn-primary::after {
+  border: none;
+}
+
+/* ============================================================
+ *  覆盖全局 .om-sheet 固定高度：快速选择/轻操作内容驱动紧凑化
+ *  产品裁决 8.4：仅常用计划紧凑化，详情/输入类保持 88vh 高弹层
+ * ============================================================ */
+
+/* 根容器：height:auto + max-height 替代全局固定 88vh，内容少时紧凑
+   选择器：.om-sheet.plan-favorite-sheet 双类（特异性 0,2,0）> 全局单类（0,1,0） */
+.om-sheet.plan-favorite-sheet {
+  height: auto;
+  max-height: 65vh;
+}
+
+/* 滚动层：flex-basis:auto 让高度随内容，min-height:0 允许 flex 收缩时 scroll-view 接管滚动
+   选择器：4 个类（特异性 0,4,0）> 全局 .om-sheet.om-sheet .om-sheet-scroll（0,3,0）
+   不修改 overflow-y，单滚动责任仍由原生 scroll-view 承担 */
+.om-sheet.plan-favorite-sheet .om-sheet-scroll.plan-favorite-scroll {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
 /* ===== tabBar 占位 ===== */
 .tabbar-spacer {
   height: calc(120rpx + env(safe-area-inset-bottom));

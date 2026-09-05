@@ -226,8 +226,7 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                                          'reject_ids': [],
                                          'approve_item_ids': [10, 30],
                                      })
-        self.assertEqual(site_less.status_code, 409, site_less.json)
-        self.assertEqual(site_less.json['code'], 'ATTACHMENT_ITEM_REQUIRED')
+        self.assertEqual(site_less.status_code, 403, site_less.json)
         with self.temporary_db() as db:
             attachments = db.execute('SELECT id,review_status,reviewer_id FROM operation_attachments ORDER BY id').fetchall()
             items = db.execute('SELECT id,review_status,reviewer_id FROM insp_plan_items ORDER BY id').fetchall()

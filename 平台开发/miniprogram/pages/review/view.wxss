@@ -1,44 +1,717 @@
-.page { padding: 24rpx; background: var(--bg); min-height: 100vh; box-sizing: border-box; }
-.hd { margin-bottom: 20rpx; }
-.hd-title { font-size: 36rpx; font-weight: 700; color: var(--text); }
-.hd-sub { font-size: 24rpx; color: var(--text-3); margin-top: 6rpx; }
+/* ============================================================
+ *  审核中心 · iOS 风格（v2 信息架构重构）
+ *  设计系统：水质运维-Apple v1.2.0
+ *  设计契约：MOBILE_UI_MULTI_TYPE_REVIEW_DESIGN_CONTRACT_20260901
+ * ============================================================ */
 
-.empty { text-align: center; color: var(--text-3); padding: 120rpx 0; font-size: 26rpx; }
-.empty-ico { font-size: 80rpx; margin-bottom: 16rpx; }
+.rv-page {
+  min-height: 100vh;
+  background: var(--color-background);
+  padding: 0 32rpx calc(40rpx + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+}
 
-.group { margin-bottom: 28rpx; }
-.group-hd { font-size: 26rpx; font-weight: 600; color: var(--brand); margin: 8rpx 4rpx 14rpx; }
+/* ---------- 顶部摘要（轻量一行，不大号数字） ---------- */
 
-.review-list { margin: 0; }
-.review-row { padding: 24rpx 0; border-bottom: 1rpx solid var(--line); }
-.review-row:last-child { border-bottom: none; }
-.review-note { display: block; margin-top: 12rpx; padding: 14rpx 16rpx; background: var(--fill-2); border-radius: 12rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.5; }
-.approval-summary { display: block; margin-top: 12rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
-.detail-toggle { display: inline-block; margin-top: 14rpx; color: var(--brand); font-size: 23rpx; }
-.review-detail { margin-top: 14rpx; padding: 16rpx; background: var(--fill-2); border-radius: 10rpx; }
-.detail-label, .detail-text { display: block; }
-.detail-label { margin-top: 8rpx; color: var(--text-3); font-size: 21rpx; }
-.detail-text { margin-top: 4rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.45; }
-.detail-line { margin-top: 4rpx; }
-.detail-muted { display: block; margin-top: 4rpx; color: var(--text-3); font-size: 21rpx; line-height: 1.4; }
-.detail-risk { color: var(--red); }
-.inspection-item { padding: 12rpx 0; border-bottom: 1rpx solid var(--line); }
-.inspection-item:last-child { border-bottom: none; }
-.inspection-item-head { display: flex; justify-content: space-between; gap: 16rpx; color: var(--text-2); font-size: 23rpx; line-height: 1.4; }
-.item-result { color: var(--brand); flex-shrink: 0; }
-.review-photos { display: flex; flex-wrap: wrap; gap: 12rpx; margin-top: 14rpx; }
-.review-photo { width: 100%; height: 220rpx; border-radius: 8rpx; background: var(--fill); }
-.photo-select-hint { display: block; margin-top: 14rpx; color: var(--text-2); font-size: 22rpx; }
-.review-photo-wrap { width: calc(50% - 8rpx); min-width: 0; padding: 8rpx; border: 2rpx solid transparent; border-radius: 8rpx; box-sizing: border-box; }
-.review-photo-reject { border-color: var(--red); background: var(--fill-2); }
-.photo-select { margin-top: 6rpx; padding: 8rpx 0; text-align: center; color: var(--brand); font-size: 21rpx; }
-.review-photo-reject .photo-select { color: var(--red); font-weight: 600; }
-.photo-risk { display: block; margin-top: 4rpx; color: var(--red); font-size: 19rpx; line-height: 1.35; }
-.photo-meta { display: block; margin-top: 5rpx; color: var(--text-2); font-size: 20rpx; line-height: 1.4; overflow-wrap: anywhere; }
-.photo-item-name { color: var(--text); font-weight: 600; }
-.photo-watermark { display: block; margin-top: 5rpx; color: var(--text-3); font-size: 19rpx; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
-.detail-empty { display: block; margin-top: 14rpx; color: var(--text-3); font-size: 22rpx; }
-.card-actions { display: flex; gap: 20rpx; margin-top: 20rpx; }
-.card-actions .btn-sm, .sheet-actions .btn-sm { flex: 1; margin: 0; }
-.reason { width: 100%; height: 200rpx; background: var(--fill-2); border-radius: 16rpx; padding: 20rpx; font-size: 26rpx; box-sizing: border-box; }
-.sheet-actions { display: flex; gap: 20rpx; margin-top: 28rpx; }
+.rv-summary {
+  display: flex;
+  align-items: baseline;
+  padding: 24rpx 4rpx 16rpx;
+}
+
+.rv-summary-text {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+
+.rv-summary-num {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* ---------- 空态 / 加载 ---------- */
+
+.rv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 200rpx 48rpx;
+  text-align: center;
+}
+
+.rv-empty-ico {
+  width: 128rpx;
+  height: 128rpx;
+  border-radius: 50%;
+  background: var(--color-muted);
+  margin-bottom: 32rpx;
+}
+
+.rv-empty-ico--error {
+  background: var(--color-muted);
+}
+
+.rv-empty-check {
+  width: 128rpx;
+  height: 128rpx;
+  border-radius: 50%;
+  background: var(--color-muted);
+  margin-bottom: 32rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rv-checkmark {
+  width: 48rpx;
+  height: 28rpx;
+  border-left: 5rpx solid var(--color-icon-tertiary);
+  border-bottom: 5rpx solid var(--color-icon-tertiary);
+  transform: rotate(-45deg);
+  margin-top: -8rpx;
+  margin-left: 2rpx;
+}
+
+.rv-empty-tx {
+  font-size: 32rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.rv-empty-sub {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  margin-top: 12rpx;
+}
+
+.rv-empty-btn {
+  margin-top: 40rpx;
+  max-width: 400rpx;
+  padding: 0 40rpx;
+}
+
+/* ---------- 分组 ---------- */
+
+.rv-group {
+  margin-bottom: 28rpx;
+}
+
+.rv-group-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4rpx 4rpx 14rpx;
+}
+
+.rv-group-title {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.rv-group-count {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  background: var(--color-type-bg);
+  padding: 2rpx 14rpx;
+  border-radius: 20rpx;
+  min-width: 36rpx;
+  text-align: center;
+}
+
+/* ---------- 卡片 ---------- */
+
+.rv-card {
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+
+.rv-item {
+  border-bottom: 0.5rpx solid var(--color-divider);
+  transition: background 0.15s ease;
+}
+
+.rv-item:last-child {
+  border-bottom: none;
+}
+
+.rv-item-target {
+  background: var(--color-primary-surface);
+}
+
+.rv-item-open {
+  background: var(--color-card);
+}
+
+.rv-item-target.rv-item-open {
+  background: var(--color-primary-surface);
+}
+
+.rv-item-target.rv-item-open .rv-detail,
+.rv-item-target.rv-item-open .rv-actions {
+  background: var(--color-primary-surface);
+}
+
+/* ---------- 摘要行（收起态） ---------- */
+
+.rv-item-head {
+  display: flex;
+  align-items: flex-start;
+  padding: 26rpx 28rpx 22rpx 32rpx;
+  gap: 16rpx;
+}
+
+.rv-item-head:active {
+  background: var(--color-muted);
+}
+
+.rv-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.rv-item-title {
+  font-size: 30rpx;
+  color: var(--color-text-primary);
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+/* 一行上下文：自然语言式，不使用表格标签 */
+.rv-item-context {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+/* 风险标签：仅在有真实风险时出现 */
+.rv-item-risk {
+  display: inline-block;
+  font-size: 22rpx;
+  color: var(--color-warning);
+  font-weight: 500;
+  margin-top: 2rpx;
+}
+
+.rv-item-arrow {
+  width: 16rpx;
+  height: 16rpx;
+  border-right: 2rpx solid var(--color-icon-tertiary);
+  border-bottom: 2rpx solid var(--color-icon-tertiary);
+  transform: rotate(45deg);
+  flex-shrink: 0;
+  margin-top: 10rpx;
+  transition: transform 0.2s ease;
+}
+
+.rv-arrow-up {
+  transform: rotate(-135deg);
+  margin-top: 16rpx;
+}
+
+/* ---------- 展开详情 ---------- */
+
+.rv-detail {
+  padding: 20rpx 32rpx 24rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-muted);
+}
+
+.rv-detail-section {
+  margin-bottom: 20rpx;
+}
+
+.rv-detail-section:last-child {
+  margin-bottom: 0;
+}
+
+.rv-detail-section-title {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  margin-bottom: 10rpx;
+}
+
+.rv-detail-block-text {
+  display: block;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+.rv-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+  margin-bottom: 14rpx;
+}
+
+.rv-detail-row:last-child {
+  margin-bottom: 0;
+}
+
+.rv-detail-label {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.rv-detail-value {
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.rv-detail-value--strong {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+
+.rv-risk-text {
+  color: var(--color-error);
+}
+
+.rv-detail-empty {
+  display: block;
+  padding: 20rpx 0;
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+/* 站点路线行 */
+.rv-day-line {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+  padding: 10rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+}
+
+.rv-day-line:last-child {
+  border-bottom: none;
+}
+
+.rv-day-date {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.rv-day-route {
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.rv-day-notes {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* 备件行 */
+.rv-part-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 16rpx;
+}
+
+.rv-part-line:last-child {
+  border-bottom: none;
+}
+
+.rv-part-name {
+  flex: 1;
+  font-size: 26rpx;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.rv-part-qty {
+  flex-shrink: 0;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+/* ---------- 备注/风险提示 ---------- */
+
+.rv-note {
+  margin-top: 16rpx;
+  padding: 16rpx 20rpx;
+  background: var(--color-warning-surface);
+  border-radius: var(--radius-md);
+}
+
+.rv-note--error {
+  background: var(--color-error-surface);
+}
+
+.rv-note-label {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-warning);
+  font-weight: 600;
+  margin-bottom: 4rpx;
+}
+
+.rv-note--error .rv-note-label {
+  color: var(--color-error);
+}
+
+.rv-note-text {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* ---------- 降级信息（展开内容末尾） ---------- */
+
+.rv-meta-row {
+  margin-top: 16rpx;
+  padding-top: 14rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.rv-meta-item {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* ---------- 检查项分组（巡检/照片审核整合） ---------- */
+
+.rv-check-group {
+  margin-bottom: 24rpx;
+  padding-bottom: 20rpx;
+  border-bottom: 0.5rpx solid var(--color-divider);
+}
+
+.rv-check-group:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.rv-check-group-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12rpx;
+  margin-bottom: 10rpx;
+}
+
+.rv-check-group-title {
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+  font-weight: 600;
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.rv-check-group-count {
+  flex-shrink: 0;
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+}
+
+.rv-check-result {
+  margin-bottom: 12rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+
+.rv-check-status {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.rv-check-remark {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+
+/* ---------- 照片 ---------- */
+
+.rv-photo-hint {
+  display: block;
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  margin-bottom: 14rpx;
+}
+
+.rv-photo-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16rpx;
+}
+
+.rv-photo-grid-simple {
+  margin-top: 4rpx;
+}
+
+.rv-photo-item {
+  width: calc(50% - 8rpx);
+  background: var(--color-card);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 2rpx solid transparent;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.rv-photo-reject {
+  border-color: var(--color-error);
+}
+
+.rv-photo-img {
+  width: 100%;
+  height: 300rpx;
+  background: var(--color-muted);
+  display: block;
+}
+
+.rv-photo-simple {
+  width: calc(50% - 8rpx);
+  height: 200rpx;
+  border-radius: var(--radius-sm);
+}
+
+.rv-photo-toggle {
+  margin: 10rpx 12rpx 8rpx;
+  padding: 10rpx 0;
+  text-align: center;
+  font-size: 24rpx;
+  color: var(--color-primary);
+  background: var(--color-primary-surface);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+.rv-photo-reject .rv-photo-toggle {
+  color: var(--color-error);
+  background: var(--color-error-surface);
+  font-weight: 600;
+}
+
+.rv-photo-time {
+  display: block;
+  margin: 0 14rpx 12rpx;
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.3;
+  text-align: center;
+}
+
+/* 检查项无照片空态（轻量，不隐藏整项） */
+.rv-photo-empty {
+  padding: 20rpx 24rpx 4rpx;
+}
+
+.rv-photo-empty-text {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* 工单照片风险标注（紧邻照片显示真实风险） */
+.rv-photo-flag {
+  margin: 0 14rpx 12rpx;
+  padding: 8rpx 16rpx;
+  background: var(--color-error-surface);
+  border-radius: 12rpx;
+}
+
+.rv-photo-flag-text {
+  font-size: 22rpx;
+  color: var(--color-error);
+  line-height: 1.4;
+}
+
+/* ---------- 决策区按钮 ---------- */
+
+.rv-actions {
+  display: flex;
+  gap: 20rpx;
+  padding: 20rpx 32rpx 28rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+  background: var(--color-muted);
+}
+
+.rv-btn {
+  flex: 1;
+  height: 96rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30rpx;
+  font-weight: 500;
+  border-radius: var(--radius-lg);
+  border: none;
+  line-height: 1.4;
+  transition: opacity 0.15s ease;
+  padding: 0 32rpx;
+}
+
+.rv-btn::after {
+  border: none;
+}
+
+.rv-btn:active {
+  opacity: 0.7;
+}
+
+.rv-btn[disabled] {
+  opacity: 0.4;
+}
+
+.rv-btn-primary {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.rv-btn-primary:active {
+  opacity: 0.85;
+}
+
+.rv-btn-danger {
+  background: var(--color-card);
+  color: var(--color-error);
+  border: 1rpx solid var(--color-error);
+  box-sizing: border-box;
+}
+
+.rv-btn-danger:active {
+  opacity: 0.85;
+}
+
+.rv-btn-ghost {
+  background: var(--color-muted);
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.rv-btn-ghost:active {
+  background: var(--color-type-bg);
+  opacity: 1;
+}
+
+.rv-block-line {
+  padding: 20rpx 32rpx 28rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  background: var(--color-muted);
+}
+
+/* ---------- stale 提示 ---------- */
+
+.rv-stale-line {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  padding: 8rpx 4rpx 16rpx;
+  line-height: 1.5;
+}
+
+.rv-stale-line text {
+  color: var(--color-primary);
+}
+
+/* ---------- 驳回 Sheet ---------- */
+
+.rv-sheet-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.rv-sheet {
+  width: 100%;
+  max-height: 75vh;
+  background: var(--color-card);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  padding: 16rpx 40rpx calc(24rpx + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.rv-sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  border-radius: 4rpx;
+  background: var(--color-divider);
+  margin: 0 auto 16rpx;
+  flex-shrink: 0;
+}
+
+.rv-sheet-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  text-align: center;
+  padding: 0 0 24rpx;
+  flex-shrink: 0;
+}
+
+.rv-reject-input {
+  width: 100%;
+  min-height: 200rpx;
+  background: var(--color-card);
+  border: 1rpx solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 20rpx 24rpx;
+  font-size: 30rpx;
+  color: var(--color-text-primary);
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+
+.rv-reject-placeholder {
+  color: var(--color-text-disabled);
+}
+
+.rv-sheet-actions {
+  display: flex;
+  gap: 24rpx;
+  margin-top: 28rpx;
+  flex-shrink: 0;
+}
+
+.rv-sheet-actions .rv-btn {
+  flex: 1;
+}

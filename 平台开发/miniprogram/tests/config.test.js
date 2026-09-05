@@ -16,11 +16,17 @@ test('repository root is the only WeChat project entry', () => {
   assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.private.config.json')), true);
 });
 
-function loadConfig(platform, override) {
+test('miniprogram enables required component lazy loading', () => {
+  const appConfig = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'app.json'), 'utf8'));
+  assert.equal(appConfig.lazyCodeLoading, 'requiredComponents');
+});
+
+function loadConfig(platform, envVersion, override) {
   const storage = {};
   if (override) storage.api_base_url_override = override;
   global.wx = {
     getSystemInfoSync: () => ({ platform }),
+    getAccountInfoSync: () => ({ miniProgram: { envVersion } }),
     getStorageSync: (key) => storage[key] || '',
     setStorageSync: (key, value) => { storage[key] = value; },
     removeStorageSync: (key) => { delete storage[key]; },
@@ -29,47 +35,43 @@ function loadConfig(platform, override) {
   return { config: require(configPath), storage };
 }
 
-test('devtools defaults to the online API', () => {
-  const { config } = loadConfig('devtools');
+test('develop packages use the fixed development API on simulator and real devices', () => {
+  for (const platform of ['devtools', 'ios', 'android', 'windows', 'mac']) {
+    const { config } = loadConfig(platform, 'develop');
+    assert.equal(config.BASE_URL, 'http://192.168.2.105:5000');
+    assert.equal(config.API_PROFILE, 'local');
+  }
+});
+
+test('trial and release packages always use the online API', () => {
+  for (const envVersion of ['trial', 'release']) {
+    for (const platform of ['devtools', 'ios', 'android', 'windows', 'mac']) {
+      const { config } = loadConfig(platform, envVersion);
+      assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
+      assert.equal(config.API_PROFILE, 'online');
+    }
+  }
+});
+
+test('legacy, expired, and malformed overrides do not affect the API profile', () => {
+  for (const override of [
+    'http://127.0.0.1:5020',
+    { url: 'http://127.0.0.1:5020', expires_at: Date.now() - 1 },
+    { url: 'https://ops.hhyc-tec.cn', expires_at: Date.now() + 60_000 },
+  ]) {
+    const develop = loadConfig('devtools', 'develop', override);
+    assert.equal(develop.config.BASE_URL, 'http://192.168.2.105:5000');
+    assert.equal(develop.config.API_PROFILE, 'local');
+    assert.deepEqual(develop.storage.api_base_url_override, override);
+
+    const trial = loadConfig('ios', 'trial', override).config;
+    assert.equal(trial.BASE_URL, 'https://ops.hhyc-tec.cn');
+    assert.equal(trial.API_PROFILE, 'online');
+  }
+});
+
+test('unknown account environment fails closed to the online API', () => {
+  const { config } = loadConfig('devtools', 'unknown');
   assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
   assert.equal(config.API_PROFILE, 'online');
-});
-
-test('devtools can explicitly select and clear the local API', () => {
-  const { config, storage } = loadConfig('devtools');
-  const now = Date.now();
-  assert.equal(config.setApiBaseOverride('http://127.0.0.1:5020', now), true);
-  assert.deepEqual(storage.api_base_url_override, {
-    url: 'http://127.0.0.1:5020',
-    expires_at: now + config.API_OVERRIDE_TTL_MS,
-  });
-  config.clearApiOverride();
-  assert.equal(storage.api_base_url_override, undefined);
-
-  const overridden = loadConfig('devtools', {
-    url: 'http://127.0.0.1:5020', expires_at: Date.now() + 60_000,
-  }).config;
-  assert.equal(overridden.BASE_URL, 'http://127.0.0.1:5020');
-  assert.equal(overridden.API_PROFILE, 'local');
-});
-
-test('legacy and expired local overrides are cleared without production fallback credentials', () => {
-  const legacy = loadConfig('devtools', 'http://127.0.0.1:5020');
-  assert.equal(legacy.config.BASE_URL, 'https://ops.hhyc-tec.cn');
-  assert.equal(legacy.storage.api_base_url_override, undefined);
-
-  const expired = loadConfig('devtools', {
-    url: 'http://127.0.0.1:5020', expires_at: Date.now() - 1,
-  });
-  assert.equal(expired.config.BASE_URL, 'https://ops.hhyc-tec.cn');
-  assert.equal(expired.storage.api_base_url_override, undefined);
-});
-
-test('real devices always use the online API', () => {
-  const { config } = loadConfig('ios', {
-    url: 'http://127.0.0.1:5020', expires_at: Date.now() + 60_000,
-  });
-  assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
-  assert.equal(config.API_PROFILE, 'online');
-  assert.equal(config.setApiBaseOverride('http://127.0.0.1:5020'), false);
 });

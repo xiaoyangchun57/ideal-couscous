@@ -51,7 +51,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         })
         with temporary_db() as db:
             db.executescript('''
-                CREATE TABLE users (id INTEGER PRIMARY KEY, real_name TEXT, username TEXT, role TEXT, openid TEXT DEFAULT '');
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, real_name TEXT, username TEXT, role TEXT,
+                    openid TEXT DEFAULT '', status TEXT DEFAULT 'active'
+                );
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
@@ -92,7 +95,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 );
                 CREATE TABLE hotline_events (related_order_no TEXT, status TEXT);
                 CREATE TABLE manual_reports (id INTEGER PRIMARY KEY, order_no TEXT, status TEXT, resolved_at TEXT);
-                CREATE TABLE alerts (id INTEGER PRIMARY KEY, status TEXT, resolved_at TEXT, resolve_reason TEXT, site_id INTEGER, metric TEXT);
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY, status TEXT, resolved_at TEXT, resolve_reason TEXT,
+                    site_id INTEGER, metric TEXT, related_order_no TEXT
+                );
                 CREATE TABLE data_reviews (id INTEGER PRIMARY KEY, status TEXT, site_id INTEGER, metric TEXT);
                 CREATE TABLE spare_parts_inventory (id INTEGER PRIMARY KEY, quantity REAL, updated_at TEXT);
                 CREATE TABLE inventory_logs (part_id INTEGER, type TEXT, quantity REAL, ref_type TEXT, ref_id INTEGER, operator TEXT, remark TEXT);

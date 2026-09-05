@@ -26,4 +26,39 @@ function getUnqualifiedPhotoIds(photos, rejectedPhotoIds) {
     .map(photo => photo.id)));
 }
 
-module.exports = { approveItemIdsForPhotoSelection, getRiskyPhotoIds, getUnqualifiedPhotoIds };
+function groupReviewPhotosByItem(reviewPhotos) {
+  const groups = [];
+  const groupByKey = new Map();
+  (Array.isArray(reviewPhotos) ? reviewPhotos : []).forEach(photo => {
+    const source = photo || {};
+    const rawItemId = source.item_id;
+    const hasItemId = rawItemId !== undefined && rawItemId !== null && String(rawItemId).trim() !== '';
+    const itemId = hasItemId ? rawItemId : null;
+    const key = hasItemId ? 'item:' + String(rawItemId) : 'unknown';
+    let group = groupByKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        itemId,
+        itemLabel: hasItemId ? '' : '关联检查项暂不可用',
+        photos: [],
+      };
+      groupByKey.set(key, group);
+      groups.push(group);
+    }
+    if (hasItemId && !group.itemLabel && String(source.itemLabel || '').trim()) {
+      group.itemLabel = source.itemLabel;
+    }
+    group.photos.push(source);
+  });
+  return groups.map(group => Object.assign({}, group, {
+    itemLabel: group.itemLabel || '检查项待确认',
+  }));
+}
+
+module.exports = {
+  approveItemIdsForPhotoSelection,
+  getRiskyPhotoIds,
+  getUnqualifiedPhotoIds,
+  groupReviewPhotosByItem,
+};

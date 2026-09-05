@@ -112,6 +112,93 @@ function planSubmitFingerprint(payload) {
   return JSON.stringify(businessPayload);
 }
 
+const SCHEDULE_LABELS = { weekly: '周检', monthly: '月检', quarterly: '季检', yearly: '年检' };
+const REFERENCE_LABELS = {
+  work_order: '工单', alert: '告警', manual_report: '人工上报'
+};
+
+function availableSiteIds(mySites) {
+  const seen = new Set();
+  return (Array.isArray(mySites) ? mySites : []).reduce((ids, site) => {
+    if (!site || site.id === undefined || site.id === null) return ids;
+    const key = String(site.id);
+    if (!seen.has(key)) {
+      seen.add(key);
+      ids.push(site.id);
+    }
+    return ids;
+  }, []);
+}
+
+function hasAllAvailableSites(selectedSiteIds, mySites) {
+  const allIds = availableSiteIds(mySites);
+  if (!allIds.length) return false;
+  const selected = new Set((Array.isArray(selectedSiteIds) ? selectedSiteIds : []).map(String));
+  return allIds.every(id => selected.has(String(id)));
+}
+
+function withDaySiteSelectionState(days, mySites) {
+  return (Array.isArray(days) ? days : []).map(day => Object.assign({}, day, {
+    allSitesSelected: hasAllAvailableSites(day && day.sites, mySites)
+  }));
+}
+
+function summarizeTemplateContext(context, scheduleType) {
+  const grouped = new Map();
+  (Array.isArray(context) ? context : []).forEach(item => {
+    if (!item || !item.template_name) return;
+    const itemCount = Number(item.item_count) || 0;
+    const key = JSON.stringify([item.template_name, itemCount]);
+    if (!grouped.has(key)) grouped.set(key, {
+      key, template_name: item.template_name, item_count: itemCount, siteIds: new Set()
+    });
+    grouped.get(key).siteIds.add(String(item.site_id || item.site_name || ''));
+  });
+  return [...grouped.values()].map(item => {
+    const siteCount = item.siteIds.size;
+    return {
+      key: item.key, template_name: item.template_name, item_count: item.item_count,
+      site_count: siteCount,
+      label: `${SCHEDULE_LABELS[scheduleType] || '本周期'}可选检查项：${item.item_count}项 · 适用${siteCount}个负责站点`
+    };
+  });
+}
+
+function schedulingReferencePresentation(suggestions) {
+  const source = Array.isArray(suggestions) ? suggestions : [];
+  const seen = new Set();
+  const items = [];
+  source.forEach(item => {
+    if (!item || item.type === 'priority' || item.type === 'reagent') return;
+    const key = [item.type, item.site_id, item.ref_id, item.text].join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  });
+  const counts = {};
+  items.forEach(item => { counts[item.type] = (counts[item.type] || 0) + 1; });
+  const summary = Object.keys(REFERENCE_LABELS)
+    .filter(type => counts[type])
+    .map(type => REFERENCE_LABELS[type] + counts[type])
+    .join(' · ');
+  return { items, total: items.length, summary };
+}
+
+function projectSiteNameMap(siteMap, mySites) {
+  const names = {};
+  (Array.isArray(mySites) ? mySites : []).forEach(site => {
+    if (!site || site.id === undefined || !String(site.name || '').trim()) return;
+    names[String(site.id)] = String(site.name).trim();
+  });
+  Object.keys(siteMap && typeof siteMap === 'object' ? siteMap : {}).forEach(key => {
+    const site = siteMap[key];
+    if (!site || !String(site.name || '').trim()) return;
+    const id = site.id === undefined || site.id === null ? key : site.id;
+    names[String(id)] = String(site.name).trim();
+  });
+  return names;
+}
+
 // 各频次周期计算：返回 [periodStart, periodEnd]
 function periodRange(type) {
   const now = new Date();
@@ -157,8 +244,12 @@ Page({
     selectedParts: [],  // [{part_id, part_name, quantity}]
     linkedWorkOrderIds: [],
     suggestions: [],    // [{type, site_id, site_name, text, level}]
+    displaySuggestions: [],
+    referenceSummary: '',
+    referenceExpanded: false,
     siteScores: {},     // {site_id: score}
     templateContext: [],
+    templateSummaries: [],
     inspectionItemOptions: {},
     inspectionItemsState: 'idle', // idle | loading | ready | unavailable
     inspectionItemsError: '',
@@ -170,24 +261,34 @@ Page({
     vehicleExceptionReason: '',
     submitting: false,
     submitError: '',
+    draftSaveError: '',
     loaded: false,
+    detailState: 'loading', // loading | ready | error
+    detailLoadError: '',
+    rejectReason: '',
+    siteNameById: {},
     isChange: false,      // 是否为变更编辑（modifying 状态）
     changeReason: ''
   },
 
   onLoad(opts) {
+    this._pageAlive = true;
+    this._pageActive = true;
+    this._detailLoadRequestId = 0;
+    this._detailLoadPending = false;
     if (!app.globalData.token) {
       wx.reLaunch({ url: '/pages/login/login' });
       return;
     }
     const mySites = (getSites() || []).map(s => ({ id: s.id, name: s.name }));
-    this.setData({ mySites });
+    this.setData({ mySites, siteNameById: projectSiteNameMap(null, mySites) });
 
     if (opts.id) {
       // 编辑已有排程
       this.setData({ editId: parseInt(opts.id) });
       this.loadExisting(opts.id);
     } else {
+      this.setData({ detailState: 'ready', detailLoadError: '' });
       this.initPeriod('weekly');
     }
     this.loadVehicles();
@@ -195,19 +296,54 @@ Page({
     this.loadSuggestions();
   },
 
+  onShow() {
+    this._pageActive = true;
+    if (this.data.editId && this.data.detailState === 'loading' && !this._detailLoadPending) {
+      this.loadExisting(this.data.editId);
+    }
+  },
+
+  onHide() {
+    this._pageActive = false;
+    this._detailLoadRequestId = (this._detailLoadRequestId || 0) + 1;
+    this._detailLoadPending = false;
+  },
+
+  onUnload() {
+    this._pageAlive = false;
+    this._pageActive = false;
+    this._detailLoadRequestId = (this._detailLoadRequestId || 0) + 1;
+    this._detailLoadPending = false;
+    if (this._validationTimer) clearTimeout(this._validationTimer);
+  },
+
   // 周检自动展开周期日期；月、季、年只保留用户选择的实际执行日期。
   initPeriod(type) {
     const [start, end] = periodRange(type);
     try {
-      const days = reconcilePeriodDays(start, end, [], type === 'weekly');
-      this.setData({ scheduleType: type, periodStart: start, periodEnd: end, days, loaded: true }, () => this.loadInspectionItems());
+      const days = withDaySiteSelectionState(
+        reconcilePeriodDays(start, end, [], type === 'weekly'), this.data.mySites);
+      this.setData({
+        scheduleType: type, periodStart: start, periodEnd: end, days,
+        loaded: true, detailState: 'ready', detailLoadError: ''
+      }, () => this.loadInspectionItems());
     } catch (err) {
       wx.showToast({ title: err.message || '周期日期无效', icon: 'none' });
-      this.setData({ loaded: true });
+      this.setData({ loaded: true, detailState: 'ready', detailLoadError: '' });
     }
   },
 
   // 切换频次（仅新建时可切换；编辑已有排程锁定频次）
+  onFreqChip(e) {
+    if (this.data.editId) return;
+    const type = e.currentTarget.dataset.type;
+    if (type === this.data.scheduleType) return;
+    const idx = this.data.typeKeys.indexOf(type);
+    if (idx < 0) return;
+    this.initPeriod(type);
+    this.loadSuggestions(type);
+  },
+
   onTypeChange(e) {
     if (this.data.editId) return;
     const idx = parseInt(e.detail.value);
@@ -230,8 +366,8 @@ Page({
       return;
     }
     try {
-      const days = reconcilePeriodDays(this.data.periodStart, this.data.periodEnd,
-        this.data.days.concat([{ date, sites: [], notes: '', inspection_items: {} }]), false);
+      const days = withDaySiteSelectionState(reconcilePeriodDays(this.data.periodStart, this.data.periodEnd,
+        this.data.days.concat([{ date, sites: [], notes: '', inspection_items: {} }]), false), this.data.mySites);
       this.setData({ days }, () => this.refreshValidation());
     } catch (err) {
       wx.showToast({ title: err.message || '日期无效', icon: 'none' });
@@ -265,7 +401,8 @@ Page({
       return;
     }
     try {
-      const days = reconcilePeriodDays(start, end, this.data.days, this.data.scheduleType === 'weekly');
+      const days = withDaySiteSelectionState(reconcilePeriodDays(
+        start, end, this.data.days, this.data.scheduleType === 'weekly'), this.data.mySites);
       this.setData({ [field]: value, days }, () => this.refreshValidation());
     } catch (err) {
       wx.showToast({ title: err.message || '周期日期无效', icon: 'none' });
@@ -277,8 +414,24 @@ Page({
 
   // 加载已有排程
   loadExisting(id) {
-    api.planScheduleDetail(id)
+    const editId = Number(id || this.data.editId);
+    if (!editId) return;
+    if (this._detailLoadPending && Number(this.data.editId) === editId) {
+      wx.showToast({ title: '计划详情正在加载，请稍候', icon: 'none' });
+      return;
+    }
+    const requestId = (this._detailLoadRequestId || 0) + 1;
+    this._detailLoadRequestId = requestId;
+    this._detailLoadPending = true;
+    this.setData({
+      editId, loaded: false, detailState: 'loading', detailLoadError: '',
+      draftSaveError: '', submitError: ''
+    });
+    const isCurrent = () => this._pageAlive !== false && this._pageActive !== false
+      && this._detailLoadRequestId === requestId && Number(this.data.editId) === editId;
+    api.planScheduleDetail(editId)
       .then(res => {
+        if (!isCurrent()) return;
         const planData = res.plan_data || {};
         const vehicleDays = res.vehicle_days || {};
         const legacyVehicleIds = [...new Set(Object.values(vehicleDays).filter(Boolean).map(Number))];
@@ -295,9 +448,12 @@ Page({
           };
           if (dayHasBusinessContent(day)) existingDays.push(day);
         });
-        const days = reconcilePeriodDays(start, end, existingDays, type === 'weekly');
+        const days = withDaySiteSelectionState(
+          reconcilePeriodDays(start, end, existingDays, type === 'weekly'), this.data.mySites);
         this.setData({
           loaded: true,
+          detailState: 'ready',
+          detailLoadError: '',
           editId: res.id,
           version: Number(res.version || 1),
           scheduleType: res.schedule_type || 'weekly',
@@ -307,6 +463,8 @@ Page({
           selectedParts: Array.isArray(res.spare_parts) ? res.spare_parts : [],
           linkedWorkOrderIds: Array.isArray(res.work_order_ids) ? res.work_order_ids : [],
           templateContext: Array.isArray(res.template_context) ? res.template_context : [],
+          rejectReason: res.reject_reason || '',
+          siteNameById: projectSiteNameMap(res.site_map, this.data.mySites),
           remarks: res.remarks || '',
           coverageExceptionReason: res.coverage_exception_reason || '',
           noVehicleRequired: !!res.vehicle_exception_reason,
@@ -314,12 +472,28 @@ Page({
           vehicleExceptionReason: res.vehicle_exception_reason || '',
           isChange: res.status === 'modifying',
           changeReason: res.change_reason || ''
-        }, () => { this.loadVehicles(); this.loadInspectionItems(); });
+        }, () => {
+          if (!isCurrent()) return;
+          this.loadVehicles();
+          this.loadInspectionItems();
+        });
       })
       .catch(err => {
-        wx.showToast({ title: (err && (err.error || err.message)) || '加载失败', icon: 'none' });
-        this.setData({ loaded: true });
+        if (!isCurrent()) return;
+        const reason = (err && (err.error || err.message)) || '计划详情加载失败';
+        this.setData({ loaded: false, detailState: 'error', detailLoadError: reason });
+      })
+      .finally(() => {
+        if (this._detailLoadRequestId === requestId) this._detailLoadPending = false;
       });
+  },
+
+  onRetryLoadExisting() {
+    if (this._detailLoadPending) {
+      wx.showToast({ title: '计划详情正在加载，请稍候', icon: 'none' });
+      return;
+    }
+    this.loadExisting(this.data.editId);
   },
 
   loadVehicles() {
@@ -359,13 +533,22 @@ Page({
     if (!u || !u.id) return;
     api.planSuggestions(u.id, scheduleType || this.data.scheduleType)
       .then(res => {
+        const suggestions = Array.isArray(res.suggestions) ? res.suggestions : [];
+        const templateContext = Array.isArray(res.template_context) ? res.template_context : [];
+        const reference = schedulingReferencePresentation(suggestions);
         this.setData({
-          suggestions: res.suggestions || [],
+          suggestions,
+          displaySuggestions: reference.items,
+          referenceSummary: reference.summary,
+          referenceExpanded: false,
           siteScores: res.site_scores || {},
-          templateContext: Array.isArray(res.template_context) ? res.template_context : []
+          templateContext,
+          templateSummaries: summarizeTemplateContext(templateContext,
+            scheduleType || this.data.scheduleType)
         });
       })
-      .catch(() => {});
+      .catch(() => this.setData({ suggestions: [], displaySuggestions: [], referenceSummary: '',
+        referenceExpanded: false, templateContext: [], templateSummaries: [] }));
   },
 
   // 切换某天的站点选中
@@ -383,7 +566,8 @@ Page({
     }
     this.setData({
       [key]: sites,
-      ['days[' + dayIdx + '].inspection_items']: inspectionItems
+      ['days[' + dayIdx + '].inspection_items']: inspectionItems,
+      ['days[' + dayIdx + '].allSitesSelected']: hasAllAvailableSites(sites, this.data.mySites)
     }, () => { this.loadInspectionItems(); this.refreshValidation(); });
   },
 
@@ -392,10 +576,13 @@ Page({
     const dayIdx = e.currentTarget.dataset.dayIdx;
     const key = 'days[' + dayIdx + '].sites';
     const cur = this.data.days[dayIdx].sites;
-    const allIds = this.data.mySites.map(s => s.id);
+    const allIds = availableSiteIds(this.data.mySites);
     // 如果已全选则清空，否则全选
-    const allSelected = allIds.every(id => cur.indexOf(id) > -1);
-    const updates = { [key]: allSelected ? [] : allIds.slice() };
+    const allSelected = hasAllAvailableSites(cur, this.data.mySites);
+    const updates = {
+      [key]: allSelected ? [] : allIds.slice(),
+      ['days[' + dayIdx + '].allSitesSelected']: !allSelected && allIds.length > 0
+    };
     if (allSelected) updates['days[' + dayIdx + '].inspection_items'] = {};
     this.setData(updates, () => { this.loadInspectionItems(); this.refreshValidation(); });
   },
@@ -479,8 +666,8 @@ Page({
     this.setData({ coverageExceptionReason: e.detail.value });
   },
 
-  onNoVehicleRequired(e) {
-    const enabled = !!e.detail.value;
+  onVehicleModeSelect(e) {
+    const enabled = e.currentTarget.dataset.mode === 'none';
     const updates = { noVehicleRequired: enabled };
     if (enabled) {
       updates.days = this.data.days.map(day => Object.assign({}, day, { vehicle_id: null }));
@@ -489,6 +676,30 @@ Page({
       updates.vehicleExceptionReason = '';
     }
     this.setData(updates, () => this.refreshValidation());
+  },
+
+  onToggleSchedulingReference() {
+    this.setData({ referenceExpanded: !this.data.referenceExpanded });
+  },
+
+  onNavBack() {
+    if (this._navBackPending) {
+      wx.showToast({ title: '正在返回，请稍候', icon: 'none' });
+      return;
+    }
+    this._navBackPending = true;
+    let settled = false;
+    const finish = failed => {
+      if (settled) return;
+      settled = true;
+      this._navBackPending = false;
+      if (failed) wx.showToast({ title: '暂时无法返回，请重试', icon: 'none' });
+    };
+    try {
+      wx.navigateBack({ delta: 1, success: () => finish(false), fail: () => finish(true) });
+    } catch (err) {
+      finish(true);
+    }
   },
 
   onVehicleExceptionReason(e) {
@@ -562,6 +773,13 @@ Page({
   // 提交审批
   onSubmit() {
     if (this.data.submitting) return;
+    if (this.data.detailState !== 'ready') {
+      wx.showToast({
+        title: this.data.detailState === 'error' ? '请先重试加载计划详情' : '计划详情正在加载，请稍候',
+        icon: 'none'
+      });
+      return;
+    }
     if (this.data.inspectionItemsState !== 'ready') {
       wx.showToast({ title: this.data.inspectionItemsError || '检查项尚未加载完成', icon: 'none' });
       return;
@@ -650,23 +868,35 @@ Page({
   // 存草稿
   onSaveDraft() {
     if (this.data.submitting) return;
+    if (this.data.detailState !== 'ready') {
+      wx.showToast({
+        title: this.data.detailState === 'error' ? '请先重试加载计划详情' : '计划详情正在加载，请稍候',
+        icon: 'none'
+      });
+      return;
+    }
     if (this.data.inspectionItemsState !== 'ready') {
       wx.showToast({ title: this.data.inspectionItemsError || '检查项尚未加载完成', icon: 'none' });
       return;
     }
-    this.setData({ submitting: true });
+    this.setData({ submitting: true, draftSaveError: '' });
     const payload = this.buildPayload(false);
     const p = this.data.editId
       ? api.updatePlanSchedule(this.data.editId, payload)
       : api.createPlanSchedule(payload);
     p.then(saved => {
-      if (this.data.editId && saved && saved.version) this.setData({ version: saved.version });
+      const successPatch = { draftSaveError: '' };
+      if (this.data.editId && saved && saved.version) successPatch.version = saved.version;
+      this.setData(successPatch);
       const issueCount = Number(saved && saved.draft_issue_count || 0);
       wx.showToast({ title: issueCount ? `已保存，${issueCount}项待完善` : '已保存草稿', icon: 'none' });
       setTimeout(() => wx.navigateBack(), 1000);
     })
     .catch(err => {
-      wx.showToast({ title: (err && (err.error || err.message)) || '保存失败', icon: 'none' });
+      const reason = (err && (err.error || err.message)) || '保存失败';
+      const failureText = reason + '\n内容已保留，可重试';
+      this.setData({ draftSaveError: failureText });
+      wx.showToast({ title: reason + '，请重试', icon: 'none' });
     })
     .finally(() => this.setData({ submitting: false }));
   }
@@ -674,5 +904,6 @@ Page({
 
 module.exports = {
   initializeInspectionItemSelections, dayHasBusinessContent, planSubmitFingerprint,
-  periodDates, reconcilePeriodDays
+  periodDates, reconcilePeriodDays, summarizeTemplateContext, schedulingReferencePresentation,
+  projectSiteNameMap, availableSiteIds, hasAllAvailableSites, withDaySiteSelectionState
 };

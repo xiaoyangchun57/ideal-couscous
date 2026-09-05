@@ -178,6 +178,259 @@ class AlertManagementContractTest(unittest.TestCase):
         self.assertEqual(response.json['by_status']['resolved'], 1)
         self.assertEqual(response.json['by_level']['orange'], 0)
 
+    def test_alert_action_projection_covers_workorder_stages_and_invalid_links(self):
+        alert = {
+            'id': 10, 'site_id': 1, 'status': 'pending',
+            'flow_type': 'auto', 'flow_status': 'converted',
+            'related_order_no': 'WO-10',
+        }
+        phases = {
+            'pending': 'workorder_pending',
+            'accepted': 'workorder_in_progress',
+            'dispatched': 'workorder_in_progress',
+            'in_progress': 'workorder_in_progress',
+            'reviewing': 'workorder_reviewing',
+        }
+        for status, phase in phases.items():
+            with self.subTest(status=status):
+                projected = app_module._project_alert_workorder_action(alert, {
+                    'order_no': 'WO-10', 'site_id': 1, 'status': status,
+                    'assignee': '运维员', 'related_alert_id': 10,
+                })
+                self.assertEqual(projected['phase'], phase)
+                self.assertEqual(projected['primary_action'], '查看关联工单')
+                self.assertEqual(projected['related_workorder_target'], {'order_no': 'WO-10'})
+                self.assertEqual(projected['workorder_status'], status)
+
+        terminal = dict(alert, status='resolved')
+        self.assertIsNone(app_module._project_alert_workorder_action(terminal)['primary_action'])
+        for status in ('resolved', 'closed'):
+            projected = app_module._project_alert_workorder_action(alert, {
+                'order_no': 'WO-10', 'site_id': 1, 'status': status,
+            })
+            self.assertEqual(projected['phase'], 'closed')
+            self.assertIsNone(projected['primary_action'])
+            self.assertIsNone(projected['related_workorder_target'])
+
+        management = app_module._project_alert_workorder_action({
+            'id': 11, 'site_id': 1, 'status': 'pending',
+            'flow_type': 'manual', 'flow_status': 'pending_review',
+        })
+        self.assertEqual(management['phase'], 'management_review')
+        self.assertIsNone(management['primary_action'])
+        self.assertEqual(management['block_reason'], '待管理研判，等待管理员处理')
+
+        unlinked = app_module._project_alert_workorder_action({
+            'id': 12, 'site_id': 1, 'status': 'pending',
+            'flow_type': 'auto', 'flow_status': 'detected',
+        })
+        self.assertEqual(unlinked['phase'], 'link_unavailable')
+        self.assertEqual(unlinked['block_reason'], '关联工单尚未生成，请刷新后重试')
+
+        invalid_orders = [
+            None,
+            {'order_no': 'WO-OTHER', 'site_id': 1, 'status': 'pending'},
+            {'order_no': 'WO-10', 'site_id': 2, 'status': 'pending'},
+            {'order_no': 'WO-10', 'site_id': 1, 'status': 'unknown'},
+            {'order_no': 'WO-10', 'site_id': 1, 'status': 'pending', 'related_alert_id': 99},
+        ]
+        for order in invalid_orders:
+            with self.subTest(order=order):
+                projected = app_module._project_alert_workorder_action(alert, order)
+                self.assertEqual(projected['phase'], 'link_unavailable')
+                self.assertIsNone(projected['primary_action'])
+                self.assertIsNone(projected['related_workorder_target'])
+                self.assertEqual(projected['block_reason'], '关联工单信息异常，请刷新后重试')
+
+        forbidden = app_module._project_alert_workorder_action(alert, {
+            'order_no': 'WO-10', 'site_id': 1, 'status': 'in_progress',
+        }, can_view=False)
+        self.assertFalse(forbidden['can_view'])
+        self.assertIsNone(forbidden['primary_action'])
+        self.assertEqual(forbidden['block_reason'], '当前角色无权查看关联工单')
+
+    def test_alert_display_projection_keeps_manual_placeholder_and_monitoring_zero_distinct(self):
+        manual = app_module._project_alert_display({
+            'id': 60, 'site_id': 1, 'metric': 'manual_report', 'value': 0,
+            'status': 'pending', 'flow_type': 'manual', 'flow_status': 'pending_review',
+            'message': '不应作为优先说明',
+        }, {
+            'event_type': 'equipment', 'description': '水泵异响，请现场核查',
+        })
+        self.assertEqual(manual['display_kind'], 'manual_report')
+        self.assertEqual(manual['display_title'], '设备异常')
+        self.assertEqual(manual['display_summary'], '水泵异响，请现场核查')
+        self.assertFalse(manual['has_monitoring_value'])
+        self.assertIsNone(manual['monitoring_value'])
+        self.assertIn('等待管理员', manual['disposition_detail'])
+
+        monitoring = app_module._project_alert_display({
+            'id': 61, 'site_id': 1, 'metric': 'ph', 'value': 0, 'unit': 'pH',
+            'threshold': 7, 'status': 'pending', 'flow_type': 'manual',
+            'flow_status': 'pending_review',
+        })
+        self.assertEqual(monitoring['display_kind'], 'monitoring')
+        self.assertTrue(monitoring['has_monitoring_value'])
+        self.assertEqual((monitoring['monitoring_value'], monitoring['monitoring_unit'],
+                          monitoring['monitoring_threshold']), (0, 'pH', 7))
+
+        active = app_module._project_alert_display({
+            'id': 62, 'site_id': 1, 'metric': 'ph', 'value': 8.2,
+            'status': 'pending', 'flow_type': 'auto', 'flow_status': 'converted',
+            'related_order_no': 'WO-ACTIVE',
+        }, {
+            'order_no': 'WO-ACTIVE', 'site_id': 1, 'status': 'in_progress',
+            'related_alert_id': 62,
+        })
+        self.assertEqual((active['disposition_label'], active['disposition_detail']),
+                         ('工单处理中', ''))
+
+        expected = {
+            'management_review': ('待管理研判', 'pending'),
+            'workorder_pending': ('工单待受理', 'pending'),
+            'workorder_in_progress': ('工单处理中', 'active'),
+            'workorder_reviewing': ('工单待核验', 'pending'),
+            'closed': ('已闭环', 'completed'),
+            'link_unavailable': ('关联信息异常', 'error'),
+            'unavailable': ('信息异常', 'error'),
+        }
+        self.assertEqual(app_module._ALERT_DISPOSITION, expected)
+
+    def test_closed_alert_disposition_omits_repeated_detail(self):
+        alert = {
+            'id': 63, 'site_id': 1, 'metric': 'ph', 'value': 8.2,
+            'status': 'pending', 'flow_type': 'auto', 'flow_status': 'converted',
+        }
+        closed_cases = [
+            ('alert_resolved', dict(alert, status='resolved'), None),
+            ('flow_dismissed', dict(alert, flow_status='dismissed'), None),
+            ('workorder_resolved', dict(alert, related_order_no='WO-CLOSED'), {
+                'order_no': 'WO-CLOSED', 'site_id': 1, 'status': 'resolved',
+                'assignee': '运维员', 'related_alert_id': 63,
+            }),
+            ('workorder_closed', dict(alert, related_order_no='WO-CLOSED'), {
+                'order_no': 'WO-CLOSED', 'site_id': 1, 'status': 'closed',
+                'assignee': '运维员', 'related_alert_id': 63,
+            }),
+        ]
+        for name, current_alert, linked_order in closed_cases:
+            with self.subTest(name=name):
+                projected = app_module._project_alert_display(current_alert, linked_order)
+                self.assertEqual(
+                    (projected['phase'], projected['disposition_label'],
+                     projected['disposition_tone'], projected['disposition_detail']),
+                    ('closed', '已闭环', 'completed', ''),
+                )
+                self.assertEqual(projected['block_reason'], '')
+                self.assertIsNone(projected['primary_action'])
+                self.assertIsNone(projected['related_workorder_target'])
+                if linked_order:
+                    self.assertEqual(projected['workorder_status'], linked_order['status'])
+                    self.assertEqual(projected['workorder_status_cn'],
+                                     app_module._WORKORDER_STATUS_LABELS[linked_order['status']])
+                    self.assertEqual(projected['workorder_handler_name'], '运维员')
+
+    def test_alert_list_and_detail_share_display_projection_without_read_writes(self):
+        with self.temporary_db() as db:
+            db.execute("""INSERT INTO work_orders
+                (order_no,site_id,source,event_type,level,title,description,assignee,status)
+                VALUES ('WO-MANUAL',1,'manual_report','equipment','normal','人工上报','现场水泵异响','运维员','pending')""")
+            db.executemany("""INSERT INTO alerts
+                (id,site_id,metric,value,level,message,status,flow_type,flow_status,related_order_no)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""", [
+                    (70, 1, 'manual_report', 0, 'yellow', '兼容占位', 'pending', 'manual', 'converted', 'WO-MANUAL'),
+                    (71, 1, 'ph', 0, 'yellow', '真实零值', 'pending', 'manual', 'pending_review', None),
+                ])
+            before = {
+                'alerts': [tuple(row) for row in db.execute(
+                    'SELECT id,status,flow_status,related_order_no,resolved_at FROM alerts ORDER BY id')],
+                'timeline': [tuple(row) for row in db.execute(
+                    'SELECT id,source_type,source_id,event_type,operator,remark FROM timeline_events ORDER BY id')],
+            }
+
+        listed = self.client.get('/api/alerts', headers=self.headers('operator-token'))
+        self.assertEqual(listed.status_code, 200, listed.json)
+        list_rows = {row['id']: row for row in listed.json}
+        exact_manual = self.client.get('/api/alerts/70', headers=self.headers('operator-token'))
+        exact_monitoring = self.client.get('/api/alerts/71', headers=self.headers('operator-token'))
+        exact_closed = self.client.get('/api/alerts/3', headers=self.headers('operator-token'))
+        self.assertEqual((exact_manual.status_code, exact_monitoring.status_code,
+                          exact_closed.status_code), (200, 200, 200))
+        projection_keys = ('display_kind', 'display_title', 'display_summary', 'has_monitoring_value',
+                           'monitoring_value', 'monitoring_unit', 'monitoring_threshold',
+                           'disposition_label', 'disposition_tone', 'disposition_detail')
+        for key in projection_keys:
+            self.assertEqual(list_rows[70][key], exact_manual.json[key], key)
+            self.assertEqual(list_rows[71][key], exact_monitoring.json[key], key)
+            self.assertEqual(list_rows[3][key], exact_closed.json[key], key)
+        self.assertFalse(exact_manual.json['has_monitoring_value'])
+        self.assertTrue(exact_monitoring.json['has_monitoring_value'])
+        self.assertEqual(exact_monitoring.json['monitoring_value'], 0)
+        self.assertEqual((exact_closed.json['phase'], exact_closed.json['disposition_label'],
+                          exact_closed.json['disposition_tone'], exact_closed.json['disposition_detail']),
+                         ('closed', '已闭环', 'completed', ''))
+        with self.temporary_db() as db:
+            self.assertEqual({
+                'alerts': [tuple(row) for row in db.execute(
+                    'SELECT id,status,flow_status,related_order_no,resolved_at FROM alerts ORDER BY id')],
+                'timeline': [tuple(row) for row in db.execute(
+                    'SELECT id,source_type,source_id,event_type,operator,remark FROM timeline_events ORDER BY id')],
+            }, before)
+
+    def test_alert_list_projects_only_authorized_exact_workorder_targets(self):
+        with self.temporary_db() as db:
+            db.execute(
+                """INSERT INTO work_orders
+                   (order_no,site_id,source,event_type,level,title,description,assignee,status)
+                   VALUES ('WO-LINKED',1,'auto','设备异常','normal','设备异常','','运维员','dispatched')"""
+            )
+            db.executemany(
+                """INSERT INTO alerts
+                   (id,site_id,metric,value,level,message,status,flow_type,flow_status,related_order_no)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (4, 1, 'ph', 9.1, 'yellow', '已有工单', 'pending', 'auto', 'converted', 'WO-LINKED'),
+                    (5, 1, 'ph', 9.0, 'yellow', '失效关联', 'pending', 'auto', 'converted', 'WO-MISSING'),
+                ],
+            )
+
+        admin = self.client.get('/api/alerts', headers=self.headers('admin-token'))
+        self.assertEqual(admin.status_code, 200, admin.json)
+        rows = {row['id']: row for row in admin.json}
+        self.assertEqual(rows[1]['phase'], 'management_review')
+        self.assertIsNone(rows[1]['primary_action'])
+        self.assertEqual(rows[4]['phase'], 'workorder_in_progress')
+        self.assertEqual(rows[4]['related_workorder_target'], {'order_no': 'WO-LINKED'})
+        self.assertEqual(rows[4]['workorder_status_cn'], '已派发')
+        self.assertEqual(rows[4]['workorder_handler_name'], '运维员')
+        self.assertEqual(rows[5]['phase'], 'link_unavailable')
+        self.assertIsNone(rows[5]['primary_action'])
+
+        reviewer = self.client.get('/api/alerts', headers=self.headers('reviewer-token'))
+        reviewer_rows = {row['id']: row for row in reviewer.json}
+        self.assertFalse(reviewer_rows[4]['can_view'])
+        self.assertIsNone(reviewer_rows[4]['primary_action'])
+        self.assertIsNone(reviewer_rows[4]['related_workorder_target'])
+
+        with self.temporary_db() as db:
+            states = dict(db.execute('SELECT id,status FROM alerts WHERE id IN (1,4,5)').fetchall())
+        self.assertEqual(states, {1: 'pending', 4: 'pending', 5: 'pending'})
+
+    def test_alert_exact_detail_is_not_bounded_by_list_and_preserves_projection(self):
+        with self.temporary_db() as db:
+            db.execute("""INSERT INTO work_orders
+                (order_no,site_id,source,event_type,level,title,description,assignee,status)
+                VALUES ('WO-DETAIL',1,'auto','设备异常','normal','设备异常','','运维员','in_progress')""")
+            db.execute("""INSERT INTO alerts
+                (id,site_id,metric,value,level,message,status,flow_type,flow_status,related_order_no)
+                VALUES (41,1,'ph',9.1,'yellow','精确详情','pending','auto','converted','WO-DETAIL')""")
+        detail = self.client.get('/api/alerts/41', headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(detail.json['phase'], 'workorder_in_progress')
+        self.assertEqual(detail.json['related_workorder_target'], {'order_no': 'WO-DETAIL'})
+        missing = self.client.get('/api/alerts/4041', headers=self.headers('operator-token'))
+        self.assertEqual((missing.status_code, missing.json['code']), (404, 'ALERT_NOT_FOUND'))
+
 
 if __name__ == '__main__':
     unittest.main()
