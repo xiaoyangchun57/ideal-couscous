@@ -66,6 +66,27 @@ function resolveNotificationTarget(notification) {
       vehicleTarget: { applicationId: Number(sourceId), expectedAction: 'extend', source: sourceType }
     };
   }
+  if (sourceType === 'vehicle_application_result') {
+    if (!/^[1-9]\d*$/.test(sourceId)) {
+      return invalidTarget('用车结果通知缺少有效申请编号，无法打开。');
+    }
+    return {
+      kind: 'page',
+      page: '/pages/vehicle/vehicle?application_id=' + encodeURIComponent(sourceId)
+        + '&source=approval_result',
+      vehicleTarget: { applicationId: Number(sourceId), expectedAction: 'view_result', source: 'approval_result' }
+    };
+  }
+  if (sourceType === 'parts_request_result') {
+    const notificationId = Number(notification && notification.id);
+    if (!Number.isInteger(notificationId) || notificationId <= 0) {
+      return invalidTarget('备件结果通知缺少有效消息编号，无法打开。');
+    }
+    return {
+      kind: 'page',
+      page: '/pages/message/message?notification_id=' + encodeURIComponent(notificationId)
+    };
+  }
   if (sourceType === 'alert' || sourceType === 'manual_report') {
     if (!sourceId) return invalidTarget('通知缺少告警 ID，无法打开具体告警。');
     return { kind: 'tab', page: '/pages/alert/alert', alertId: sourceId };

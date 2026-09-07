@@ -68,8 +68,8 @@
   <!-- 订阅消息入口（直接动作） -->
   <view class="msg-sub-wrap">
     <view class="msg-sub-btn" bindtap="onSubscribe">
-      <text class="msg-sub-tx">订阅消息通知</text>
+      <text class="msg-sub-tx">订阅告警与审批通知</text>
     </view>
-    <text class="msg-sub-hint">订阅后可接收巡检审核、计划审批等消息提醒</text>
+    <text class="msg-sub-hint">用于下一次待审或审批结果提醒</text>
   </view>
 </view>

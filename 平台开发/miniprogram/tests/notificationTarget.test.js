@@ -66,11 +66,21 @@ assert.deepEqual(resolveNotificationTarget({ source_type: 'vehicle_use_expiry', 
   kind: 'page', page: '/pages/vehicle/vehicle',
   vehicleTarget: { applicationId: 91, expectedAction: 'extend', source: 'vehicle_use_expiry' }
 });
+assert.deepEqual(resolveNotificationTarget({ source_type: 'vehicle_application_result', source_id: 92 }), {
+  kind: 'page',
+  page: '/pages/vehicle/vehicle?application_id=92&source=approval_result',
+  vehicleTarget: { applicationId: 92, expectedAction: 'view_result', source: 'approval_result' }
+});
+assert.deepEqual(resolveNotificationTarget({ id: 301, source_type: 'parts_request_result', source_id: 12 }), {
+  kind: 'page', page: '/pages/message/message?notification_id=301'
+});
 ['', 0, -1, 'abc', '1.5'].forEach(sourceId => {
   const target = resolveNotificationTarget({ source_type: 'vehicle_use_expiry', source_id: sourceId });
   assert.equal(target.kind, 'invalid');
   assert.match(target.message, /申请编号/);
 });
+assert.equal(resolveNotificationTarget({ source_type: 'vehicle_application_result', source_id: 'bad' }).kind, 'invalid');
+assert.equal(resolveNotificationTarget({ source_type: 'parts_request_result', source_id: 12 }).kind, 'invalid');
 const alertPage = fs.readFileSync(path.join(__dirname, '../pages/alert/alert.js'), 'utf8');
 const messagePage = fs.readFileSync(path.join(__dirname, '../pages/message/message.js'), 'utf8');
 const planDetailPage = fs.readFileSync(path.join(__dirname, '../pages/plan-detail/plan-detail.js'), 'utf8');

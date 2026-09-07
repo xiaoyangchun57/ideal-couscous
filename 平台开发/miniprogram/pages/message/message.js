@@ -11,10 +11,11 @@ const {
 } = require('../../utils/messageViewState.js');
 
 const app = getApp();
-
-// 订阅模板（首批：告警信息 + 审批结果）
-// 注意：须在小程序后台「订阅消息」配置对应模板后，将真实模板 ID 填入此处
-const SUBSCRIBE_TMPL = ['x_KtbMzoSIbxpUZGf040r9uvuNqd9pfhOynKaT72Ub4', '4MrY8lzIXYyujudoJGsG7gka5X_ySpxg5eVKVqC__mw'];
+const SUBSCRIPTION_LABELS = {
+  alert: '监测告警',
+  approval_pending: '待审批',
+  approval_result: '审批结果'
+};
 
 function decorate(n) {
   return {
@@ -36,8 +37,11 @@ Page({
     showNoMore: false, showLoadMore: false
   },
 
-  onLoad() {
+  onLoad(options) {
     this._alive = true;
+    const notificationId = Number(options && options.notification_id);
+    this._focusNotificationId = Number.isInteger(notificationId) && notificationId > 0
+      ? notificationId : null;
   },
 
   onShow() {
@@ -75,18 +79,27 @@ Page({
       errorMessage: ''
     })));
     const status = this.data.view === 'history' ? 'read' : 'unread';
-    api.notifications(page, status)
+    api.notifications(page, status, this._focusNotificationId)
       .then(res => {
         if (!this._isActiveView(viewEpoch) || loadToken !== this._loadToken) return;
         const rows = (res && res.notifications) || [];
         const decoratedRows = rows.map(decorate);
+        const focusedView = this._focusNotificationId && decoratedRows.length
+          ? (decoratedRows[0].is_read ? 'history' : 'current') : this.data.view;
+        const focusError = this._focusNotificationId && !decoratedRows.length
+          ? '该消息不存在或当前账号无权查看' : '';
         const list = reset
           ? decoratedRows
           : appendDistinctById(this.data.list, decoratedRows);
         const noMore = !hasMoreFromResponse(res, rows.length, 50);
         this.setData(Object.assign({
-          list, page, loaded: true, loading: false, noMore, errorMessage: ''
-        }, this._statePatch({ list, loaded: true, loading: false, errorMessage: '', noMore })));
+          list, page, view: focusedView, loaded: true, loading: false, noMore,
+          errorMessage: focusError
+        }, this._statePatch({ list, loaded: true, loading: false,
+          errorMessage: focusError, noMore })));
+        if (this._focusNotificationId && decoratedRows.length && !decoratedRows[0].is_read) {
+          this._markFocusedNotificationRead(decoratedRows[0].id);
+        }
         if (done) done();
       })
       .catch(err => {
@@ -117,6 +130,17 @@ Page({
 
   _isActiveView(viewEpoch) {
     return this._alive !== false && (viewEpoch === undefined || viewEpoch === (this._viewEpoch || 0));
+  },
+
+  _markFocusedNotificationRead(notificationId) {
+    if (this._focusedReadId === notificationId) return;
+    this._focusedReadId = notificationId;
+    api.readNotification(notificationId).then(() => {
+      if (this._alive === false) return;
+      invalidateUnreadCount();
+      this.setData({ list: this.data.list.map(item => Number(item.id) === Number(notificationId)
+        ? Object.assign({}, item, { is_read: true }) : item) });
+    }).catch(() => { this._focusedReadId = null; });
   },
 
   onRetry() { this.load(this.data.retryReset); },
@@ -295,24 +319,79 @@ Page({
       finished = true;
       this._subscribing = false;
     };
-    wx.requestSubscribeMessage({
-      tmplIds: SUBSCRIBE_TMPL,
-      success: result => {
+    api.subscriptionTemplates()
+      .then(config => {
+        if (!this._isActiveView(viewEpoch)) { finish(); return; }
+        const templates = Array.isArray(config && config.templates)
+          ? config.templates.filter(item => item && item.purpose && item.template_id)
+          : [];
+        if (!templates.length) throw new Error('NO_SUBSCRIPTION_TEMPLATE');
+        wx.requestSubscribeMessage({
+          tmplIds: templates.map(item => item.template_id),
+          success: result => {
+            const accepted = templates.filter(item => result && result[item.template_id] === 'accept');
+            const banned = templates.filter(item => result && result[item.template_id] === 'ban');
+            const acceptedLabels = accepted.map(item => SUBSCRIPTION_LABELS[item.purpose] || '相关通知');
+            const unacceptedLabels = templates.filter(item => result && result[item.template_id] !== 'accept')
+              .map(item => SUBSCRIPTION_LABELS[item.purpose] || '相关通知');
+            if (!accepted.length) {
+              finish();
+              if (!this._isActiveView(viewEpoch)) return;
+              wx.showModal({
+                title: '订阅提示',
+                content: (banned.length ? '消息通知已被关闭，可在小程序设置中重新开启。' : '')
+                  + '本次未订阅：' + unacceptedLabels.join('、') + '。可再次点击授权。',
+                showCancel: false
+              });
+              return;
+            }
+            if (!this._isActiveView(viewEpoch)) { finish(); return; }
+            wx.login({
+              success: loginResult => {
+                if (!loginResult || !loginResult.code) {
+                  finish();
+                  if (this._isActiveView(viewEpoch)) wx.showToast({ title: '微信账号绑定失败，请重试', icon: 'none' });
+                  return;
+                }
+                api.bindOpenId(loginResult.code)
+                  .then(boundResult => {
+                    finish();
+                    if (!this._isActiveView(viewEpoch)) return;
+                    if (!boundResult || boundResult.bound !== true) {
+                      wx.showToast({ title: (boundResult && (boundResult.error || boundResult.warn)) || '微信账号绑定失败，请重试', icon: 'none' });
+                      return;
+                    }
+                    if (accepted.length === templates.length) {
+                      wx.showModal({ title: '订阅结果',
+                        content: '已完成本次授权，可接收下一次' + acceptedLabels.join('、') + '提醒。',
+                        showCancel: false });
+                    } else {
+                      wx.showModal({ title: '订阅结果',
+                        content: '已订阅：' + acceptedLabels.join('、') + '；未订阅：'
+                          + unacceptedLabels.join('、') + '。可再次点击授权。',
+                        showCancel: false });
+                    }
+                  })
+                  .catch(() => {
+                    finish();
+                    if (this._isActiveView(viewEpoch)) wx.showToast({ title: '微信账号绑定失败，请重试', icon: 'none' });
+                  });
+              },
+              fail: () => {
+                finish();
+                if (this._isActiveView(viewEpoch)) wx.showToast({ title: '微信账号绑定失败，请重试', icon: 'none' });
+              }
+            });
+          },
+          fail: () => {
+            finish();
+            if (this._isActiveView(viewEpoch)) wx.showToast({ title: '暂时无法订阅消息，请稍后重试', icon: 'none' });
+          }
+        });
+      })
+      .catch(() => {
         finish();
-        if (!this._isActiveView(viewEpoch)) return;
-        const results = SUBSCRIBE_TMPL.map(templateId => result && result[templateId]);
-        if (results.some(value => value === 'accept')) {
-          wx.showToast({ title: '订阅成功', icon: 'success' });
-        } else if (results.length && results.every(value => value === 'reject' || value === 'ban')) {
-          wx.showModal({ title: '订阅提示', content: '可在小程序设置中重新开启消息通知', showCancel: false });
-        } else {
-          wx.showToast({ title: '暂时无法订阅消息，请稍后重试', icon: 'none' });
-        }
-      },
-      fail: () => {
-        finish();
-        if (this._isActiveView(viewEpoch)) wx.showToast({ title: '暂时无法订阅消息，请稍后重试', icon: 'none' });
-      }
-    });
+        if (this._isActiveView(viewEpoch)) wx.showToast({ title: '订阅配置加载失败，请重试', icon: 'none' });
+      });
   }
 });

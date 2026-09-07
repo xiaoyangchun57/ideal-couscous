@@ -254,6 +254,19 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'closed')
             statuses = [r['review_status'] for r in db.execute("SELECT review_status FROM operation_attachments WHERE is_deleted=0")]
             self.assertEqual(statuses, ['rejected', 'rejected', 'approved'])
+            intents = db.execute("""SELECT purpose,cycle_key,recipient_user_id,page,status,attempts
+                FROM wx_subscription_outbox WHERE business_type='workorder'
+                ORDER BY purpose,cycle_key,recipient_user_id""").fetchall()
+            self.assertEqual({row['cycle_key'] for row in intents}, {'review:1', 'review:2'})
+            pending_pages = [row['page'] for row in intents if row['purpose'] == 'approval_pending']
+            result_pages = [row['page'] for row in intents if row['purpose'] == 'approval_result']
+            self.assertTrue(all('target_type=workorder_review' in page for page in pending_pages))
+            self.assertTrue(all('/pages/workorder/workorder?order_no=' in page for page in result_pages))
+            self.assertTrue(all('/pages/review/view' not in page for page in result_pages))
+            self.assertTrue(all((row['status'], row['attempts']) == ('pending', 0) for row in intents))
+            result_notices = db.execute("""SELECT user_id,title FROM notifications
+                WHERE source_type='workorder' AND title LIKE '工单核验%' ORDER BY id""").fetchall()
+            self.assertEqual([row['user_id'] for row in result_notices], [2, 2])
 
     def test_status_endpoint_cannot_bypass_review_for_closure(self):
         with app_module.get_db() as db:

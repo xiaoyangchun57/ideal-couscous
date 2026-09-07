@@ -1,3 +1,39 @@
+# r12 frozen candidate gate (2026-09-07)
+
+Target candidate tag: `release-20260907-cross-module-freeze-r12`
+
+r12 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r11 are immutable historical tags and remain rejected. The candidate contains the post-r11 WeChat approval subscription delivery closure: server-owned templates, persistent outbox delivery, cycle-safe audit deep links, applicant result destinations, result-read synchronization, and direct regression coverage. All automated checks used isolated databases, temporary uploads and test configuration; no fixed service, real WeChat API or real business data was used.
+
+## r12 final automated evidence
+
+| Check | Result | Time | Exit |
+| --- | --- | --- | ---: |
+| Backend unittest discover | 521/521 passed | 11:01:32–11:03:45 | 0 |
+| Miniprogram Node tests | 211/211 passed across all 39 `*.test.js` files | 11:04:09 | 0 |
+| Combined syntax gate | 164 JavaScript/Python files passed | 11:04:46–11:04:57 | 0 |
+| React Node tests | 93/93 passed across all 15 `src/**/*.test.js` files | 11:04:09–11:04:10 | 0 |
+| React ESLint | PASS | 11:04:47–11:05:06 | 0 |
+| React production build | PASS; 1746 modules transformed | 11:05:27–11:05:37 | 0 |
+| Backup archive and candidate guard unittest | 6/6 passed; archived backup script retains LF | 11:05:27–11:05:32 | 0 |
+| Direct candidate verification | r12 accepted | 11:05:32 | 0 |
+| Cached diff and boundary checks | No whitespace errors, no private candidate files and no half-staged critical paths | final freeze check | 0 |
+
+## r12 product and residual evidence boundary
+
+The candidate preserves the accepted r11 real-UI evidence. The WeChat approval delivery changes have automated coverage only; actual WeChat subscription, binding and physical-device delivery are **NOT RUN** and require two real accounts after product Review.
+
+The following residual boundaries remain unchanged:
+
+- Responsible sites to site archive redesign: **DEFERRED**.
+- Review return-context verification after remediation blocking: **NOT RUN**.
+- Complete real-data chain after vehicle checkout, including vehicle-use record and arrival gate: **NOT RUN**.
+- Specified real-object checks for plan #46 continuation and plan #43 remediation continuation: **NOT RUN**.
+- Scenarios without natural data and DOCX/XLSX download visuals: retain recorded **NOT RUN** / **SKIPPED** status.
+
+No package, push, server connection, deployment, fixed-service operation or real-database operation is part of this freeze evidence.
+
+---
+
 # r11 frozen candidate gate (2026-09-05)
 
 Target candidate tag: `release-20260905-cross-module-freeze-r11`

@@ -324,3 +324,29 @@ INSERT OR IGNORE INTO anomaly_codes (code, category, severity, title, descriptio
 -- ============================================================
 -- 迁移完成
 -- ============================================================
+CREATE TABLE IF NOT EXISTS wx_subscription_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    purpose TEXT NOT NULL,
+    business_type TEXT NOT NULL,
+    business_id TEXT NOT NULL,
+    business_status TEXT NOT NULL,
+    recipient_user_id INTEGER NOT NULL,
+    template_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    context_json TEXT DEFAULT '{}',
+    cycle_key TEXT NOT NULL DEFAULT '',
+    page TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT DEFAULT '',
+    claimed_at TEXT,
+    next_attempt_at TEXT,
+    last_errcode TEXT DEFAULT '',
+    last_error TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wx_outbox_delivery
+    ON wx_subscription_outbox(status,next_attempt_at,id);

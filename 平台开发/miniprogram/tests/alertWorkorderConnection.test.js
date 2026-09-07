@@ -251,6 +251,16 @@ test('alert mask closes only while linked-workorder navigation is idle', () => {
   });
 });
 
+test('workorder cold-start query restores the exact order before onShow', () => {
+  const definition = loadPage('../pages/workorder/workorder.js');
+  const page = pageInstance(definition);
+  app.globalData.selWorkorderNo = null;
+  page.onLoad({ order_no: 'WO-RESULT-7' });
+  assert.equal(app.globalData.selWorkorderNo, 'WO-RESULT-7');
+  page.onLoad({ order_no: '' });
+  assert.equal(app.globalData.selWorkorderNo, 'WO-RESULT-7');
+});
+
 test('only current authorized actions render a detail bottom bar', () => {
   const workorderView = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.wxml'), 'utf8');
   const alertView = fs.readFileSync(path.join(__dirname, '../pages/alert/alert.wxml'), 'utf8');

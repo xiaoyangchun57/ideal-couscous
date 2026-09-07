@@ -52,7 +52,7 @@ function setPath(target, key, value) {
   current[parts[0]] = value;
 }
 
-function pageInstance() {
+function pageInstance(options) {
   const page = Object.assign({}, definition, {
     data: JSON.parse(JSON.stringify(definition.data)),
     setDataCalls: 0,
@@ -61,7 +61,7 @@ function pageInstance() {
     page.setDataCalls += 1;
     Object.keys(patch).forEach(key => setPath(page.data, key, patch[key]));
   };
-  page.onLoad();
+  page.onLoad(options);
   return page;
 }
 
@@ -134,6 +134,21 @@ test('regular entry loads current data without opening a sheet', async () => {
   await flush();
   assert.equal(page.data.loadState, 'ready');
   assert.equal(page.data.authorityFresh, true);
+  assert.equal(page.data.extensionSheet.open, false);
+  assert.equal(app.globalData.vehicleTarget, null);
+});
+
+test('cold-start approval result restores one exact application without opening an action sheet', async () => {
+  stubSuccessfulLoad({
+    applications: [],
+    exact: [application(77, { status: 'rejected', reject_reason: '车辆调整' })],
+  });
+  const page = pageInstance({ application_id: '77', source: 'approval_result' });
+  page.onShow();
+  await flush();
+  assert.equal(page.data.applications.length, 1);
+  assert.equal(page.data.applications[0].id, 77);
+  assert.equal(page.data.applications[0].status_cn, '已驳回');
   assert.equal(page.data.extensionSheet.open, false);
   assert.equal(app.globalData.vehicleTarget, null);
 });

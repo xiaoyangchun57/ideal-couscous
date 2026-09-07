@@ -6,6 +6,7 @@ const {
   startPlanCancellation,
 } = require('../../utils/executionState.js');
 const { buildScheduleExecutionTarget } = require('../../utils/executionTarget.js');
+const { invalidateUnreadCount } = require('../../utils/notificationCount.js');
 
 const app = getApp();
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -160,6 +161,8 @@ Page({
       return;
     }
     this.scheduleId = opts.id;
+    const notificationId = Number(opts && opts.notification_id);
+    this._resultNotificationId = Number.isInteger(notificationId) && notificationId > 0 ? notificationId : null;
     this._alive = true;
     this._executionRequestId = 0;
   },
@@ -290,6 +293,7 @@ Page({
           progressPercent,
           progressFillStyle
         });
+        this._markResultNotificationRead();
         if (done) done();
       })
       .catch(err => {
@@ -301,6 +305,14 @@ Page({
           showCancel: false
         });
       });
+  },
+
+  _markResultNotificationRead() {
+    const notificationId = this._resultNotificationId;
+    if (!notificationId || this._resultNotificationRead) return;
+    this._resultNotificationRead = true;
+    api.readNotification(notificationId).then(() => invalidateUnreadCount())
+      .catch(() => { this._resultNotificationRead = false; });
   },
 
   onEdit() {

@@ -2,6 +2,7 @@ const api = require('../../services/api.js');
 const { todayStr } = require('../../utils/util.js');
 const { normalizePagedList, appendPagedItems } = require('../../utils/pagedList.js');
 const { myVehicleQuery, isReturnedUse } = require('../../utils/vehicleScope.js');
+const { invalidateUnreadCount } = require('../../utils/notificationCount.js');
 
 const app = getApp();
 const CURRENT_PAGE_LIMIT = 100;
@@ -130,11 +131,13 @@ function normalizeVehicleTarget(value) {
   const applicationId = Number(value && value.applicationId);
   if (!Number.isInteger(applicationId) || applicationId <= 0) return null;
   const source = String(value.source || '');
-  if (!['inspection_departure', 'vehicle_use_expiry'].includes(source)) return null;
+  if (!['inspection_departure', 'vehicle_use_expiry', 'approval_result'].includes(source)) return null;
   return {
     applicationId,
     expectedAction: String(value.expectedAction || ''),
     source,
+    notificationId: Number.isInteger(Number(value.notificationId)) && Number(value.notificationId) > 0
+      ? Number(value.notificationId) : null,
     executionPlanId: value.executionPlanId || null,
     siteId: value.siteId || null,
   };
@@ -160,10 +163,17 @@ Page({
     applySheet: { open: false, vehicleIndex: 0, startDate: '', startTime: '08:00', endDate: '', endTime: '18:00', destinationMode: 'site', destinationModeIndex: 0, siteIndex: 0, otherDestination: '', reason: '', submitting: false }
   },
 
-  onLoad() {
+  onLoad(options) {
     this._alive = true;
     this._loadRequestId = 0;
     this._sitesRequestId = 0;
+    const applicationId = Number(options && options.application_id);
+    const notificationId = Number(options && options.notification_id);
+    if (Number.isInteger(applicationId) && applicationId > 0) {
+      app.globalData.vehicleTarget = {
+        applicationId, expectedAction: 'view_result', source: 'approval_result', notificationId
+      };
+    }
     this._vehicleTarget = this._readVehicleTarget();
   },
   onShow() {
@@ -226,7 +236,8 @@ Page({
         const exactTargetDecorated = exactTargetApplication
           ? decorateApplication(exactTargetApplication, useByApplication[exactTargetApplication.id])
           : null;
-        if (exactTargetApplication && ['pending', 'approved'].includes(exactTargetApplication.status)
+        if (exactTargetApplication && (target && target.expectedAction === 'view_result'
+          || ['pending', 'approved'].includes(exactTargetApplication.status))
           && !applicationRows.some(item => String(item.id) === String(exactTargetApplication.id))) {
           applicationRows.push(exactTargetApplication);
         }
@@ -322,6 +333,15 @@ Page({
 
   _consumeVehicleTarget(target, exactApplication, decoratedExactApplication) {
     if (!target || target !== this._vehicleTarget) return;
+    if (target.expectedAction === 'view_result') {
+      this._finishVehicleTarget(target);
+      if (!exactApplication || !decoratedExactApplication) {
+        wx.showToast({ title: '该用车申请不存在或无权查看', icon: 'none' });
+      } else if (target.notificationId) {
+        api.readNotification(target.notificationId).then(() => invalidateUnreadCount()).catch(() => {});
+      }
+      return;
+    }
     if (target.expectedAction !== 'extend') {
       this._finishVehicleTarget(target);
       wx.showToast({ title: '用车目标动作无效，已保留当前页面', icon: 'none' });

@@ -399,6 +399,8 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             applications = db.execute('SELECT COUNT(*) FROM vehicle_applications').fetchone()[0]
             notices = db.execute("""SELECT user_id,source_type,source_id,title,content,is_read,dedupe_key
                 FROM notifications ORDER BY user_id""").fetchall()
+            outbox = db.execute("""SELECT recipient_user_id,purpose,cycle_key,page
+                FROM wx_subscription_outbox ORDER BY recipient_user_id""").fetchall()
         self.assertEqual(applications, 1)
         self.assertEqual([row['user_id'] for row in notices], [1, 5])
         self.assertTrue(all(row['source_type'] == 'vehicle_application' for row in notices))
@@ -412,6 +414,11 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
         self.assertIn('使用时段：2026-09-04 08:00:00 至 2026-09-04 18:00:00', notices[0]['content'])
         self.assertIn('目的地：临时维修点', notices[0]['content'])
         self.assertNotIn('None', notices[0]['content'])
+        self.assertEqual([row['recipient_user_id'] for row in outbox], [1, 5])
+        self.assertTrue(all(row['purpose'] == 'approval_pending' for row in outbox))
+        self.assertTrue(all(row['cycle_key'] == f'application:{created.json["id"]}' for row in outbox))
+        self.assertTrue(all(f'target_id={created.json["id"]}' in row['page'] for row in outbox))
+        self.assertTrue(all(f'cycle_key=application%3A{created.json["id"]}' in row['page'] for row in outbox))
 
     def test_admin_applicant_still_receives_pending_application_notification(self):
         response = self.client.post('/api/vehicle/applications', headers=self.headers('admin-token'), json={
@@ -543,10 +550,21 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             states = db.execute('SELECT id,status FROM vehicle_applications WHERE id>=201 ORDER BY id').fetchall()
             notices = db.execute("""SELECT source_id,is_read FROM notifications
                 WHERE source_type='vehicle_application' ORDER BY source_id,user_id""").fetchall()
+            results = db.execute("""SELECT business_id,recipient_user_id,cycle_key,page,status,attempts
+                FROM wx_subscription_outbox WHERE purpose='approval_result' ORDER BY business_id""").fetchall()
+            result_notices = db.execute("""SELECT source_id,user_id,title FROM notifications
+                WHERE source_type='vehicle_application_result' ORDER BY source_id""").fetchall()
         self.assertEqual([(row['id'], row['status']) for row in states],
                          [(201, 'approved'), (202, 'rejected'), (203, 'approved')])
         self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
                          [(201, 1), (201, 1), (202, 1), (203, 0), (999, 0)])
+        self.assertEqual([(row['business_id'], row['recipient_user_id']) for row in results],
+                         [('201', 2), ('202', 2)])
+        self.assertEqual([row['cycle_key'] for row in results], ['application:201', 'application:202'])
+        self.assertTrue(all('/pages/review/view' not in row['page'] for row in results))
+        self.assertTrue(all('/pages/vehicle/vehicle?application_id=' in row['page'] for row in results))
+        self.assertTrue(all((row['status'], row['attempts']) == ('pending', 0) for row in results))
+        self.assertEqual([(row['source_id'], row['user_id']) for row in result_notices], [(201, 2), (202, 2)])
 
     def test_approval_revalidation_and_database_failure_keep_application_pending_and_notice_unread(self):
         with app_module.get_db() as db:

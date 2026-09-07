@@ -268,8 +268,9 @@ Page({
     const targetId = String(options && options.target_id || '').trim();
     const attachmentIds = String(options && options.target_attachment_ids || '')
       .split(',').map(id => id.trim()).filter(Boolean);
+    const cycleKey = String(options && options.cycle_key || '').trim();
     if (targetType && targetId) {
-      this.reviewTarget = { kind: 'review', reviewType: targetType, sourceId: targetId, attachmentIds };
+      this.reviewTarget = { kind: 'review', reviewType: targetType, sourceId: targetId, attachmentIds, cycleKey };
       this.setData({ reviewTarget: this.reviewTarget });
     }
   },
@@ -326,10 +327,15 @@ Page({
       .then(list => {
         if (!this._isCurrentLoad(requestId)) return;
         const presentation = projectReviewPresentation(list);
+        const groups = this.reviewTarget && this.reviewTarget.cycleKey
+          ? presentation.groups.map(group => Object.assign({}, group, {
+            items: group.items.map(item => Object.assign({}, item, { detailOpen: false, targeted: false }))
+          }))
+          : presentation.groups;
         this.setData({
           loading: false,
           total: list.length,
-          groups: presentation.groups,
+          groups,
           showGroupHeaders: presentation.showGroupHeaders,
           loadState: list.length ? 'data' : 'empty',
           loadError: ''
@@ -396,14 +402,66 @@ Page({
 
   _focusReviewTarget() {
     if (this._alive === false || !this.reviewTarget || this._reviewTargetHandled) return;
+    if (this.reviewTarget.cycleKey) {
+      api.auditTargetStatus(this.reviewTarget.reviewType, this.reviewTarget.sourceId, this.reviewTarget.cycleKey)
+        .then(status => {
+          if (this._alive === false || this._reviewTargetHandled) return;
+          if (status && status.state === 'processed') {
+            this._reviewTargetHandled = true;
+            const detail = status.result_detail ? '；' + status.result_detail : '';
+            wx.showModal({ title: '事项已处理',
+              content: '该事项已由其他审核人处理。当前结果：' + (status.result_label || '已处理') + detail + '（只读）',
+              showCancel: false });
+            return;
+          }
+          if (!status || status.state !== 'pending') {
+            wx.showModal({ title: '无法打开审核对象', content: '该审核事项当前不可打开，请刷新后重试。', showCancel: false });
+            return;
+          }
+          const item = findReviewItem(this.data.groups, this.reviewTarget);
+          if (!item) {
+            wx.showModal({ title: '无法打开审核对象', content: '该审核事项已刷新，请返回审核列表后重试。', showCancel: false });
+            return;
+          }
+          const groups = this.data.groups.map(group => Object.assign({}, group, {
+            items: group.items.map(row => row.id === item.id
+              ? Object.assign({}, row, { targeted: true, detailOpen: true }) : row)
+          }));
+          this._reviewTargetHandled = true;
+          this.setData({ groups }, () => wx.pageScrollTo({ selector: '.review-target', duration: 0 }));
+        })
+        .catch(err => {
+          if (this._alive === false || this._reviewTargetHandled) return;
+          const content = err && err.error === '当前账号无权查看该审批事项'
+            ? '当前账号无权访问该审核事项。'
+            : err && err.error === '该审核事项不存在' ? '该审核事项不存在。' : '该审核事项当前不可打开，请刷新后重试。';
+          wx.showModal({ title: '无法打开审核对象', content, showCancel: false });
+        });
+      return;
+    }
     const item = findReviewItem(this.data.groups, this.reviewTarget);
     if (!item) {
-      this._reviewTargetHandled = true;
-      wx.showModal({
-        title: '无法打开审核对象',
-        content: '该审核对象不存在、已处理，或当前账号无权访问。',
-        showCancel: false
-      });
+      api.auditTargetStatus(this.reviewTarget.reviewType, this.reviewTarget.sourceId, this.reviewTarget.cycleKey)
+        .then(status => {
+          if (this._alive === false || this._reviewTargetHandled) return;
+          this._reviewTargetHandled = true;
+          if (status && status.state === 'processed') {
+            const detail = status.result_detail ? '；' + status.result_detail : '';
+            wx.showModal({ title: '事项已处理',
+              content: '该事项已由其他审核人处理。当前结果：' + (status.result_label || '已处理') + detail + '（只读）',
+              showCancel: false });
+            return;
+          }
+          wx.showModal({ title: '无法打开审核对象', content: '该审核事项当前不可打开，请刷新后重试。', showCancel: false });
+        })
+        .catch(err => {
+          if (this._alive === false || this._reviewTargetHandled) return;
+          this._reviewTargetHandled = true;
+          const content = err && err.error === '当前账号无权查看该审批事项'
+            ? '当前账号无权访问该审核事项。'
+            : err && err.error === '该审核事项不存在' ? '该审核事项不存在。' : '该审核事项当前不可打开，请刷新后重试。';
+          wx.showModal({ title: '无法打开审核对象', content, showCancel: false });
+        });
       return;
     }
     const groups = this.data.groups.map(group => Object.assign({}, group, {

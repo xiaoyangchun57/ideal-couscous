@@ -10,6 +10,7 @@ const { resolveUploadUrl, uploadStoragePath } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
 const { inventoryOptions, inventoryErrorMessage, buildPartsPayload } = require('../../utils/partsApplication.js');
+const { invalidateUnreadCount } = require('../../utils/notificationCount.js');
 
 const app = getApp();
 
@@ -48,6 +49,13 @@ Page({
       { key: 'vendor_order', label: '厂家订购' }
     ],
     partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0, submitting: false, requestKey: '' }
+  },
+
+  onLoad(options) {
+    const orderNo = String(options && options.order_no || '').trim();
+    if (orderNo && orderNo.length <= 100) app.globalData.selWorkorderNo = orderNo;
+    const notificationId = Number(options && options.notification_id);
+    this._resultNotificationId = Number.isInteger(notificationId) && notificationId > 0 ? notificationId : null;
   },
 
   onShow() {
@@ -129,6 +137,7 @@ Page({
         detailLoading: false,
         resolutionNote: mapped.remark || '',
       });
+      this._markResultNotificationRead();
       return api.workorderRelated(orderNo).catch(() => ({ unavailable: true }));
     }).then(related => {
       if (!related || this._detailRequest !== requestId || !this.data.sheet.item
@@ -141,6 +150,14 @@ Page({
         'sheet.item.detailStale': hasSeed });
       wx.showToast({ title: (err && err.error) || '工单详情加载失败', icon: 'none' });
     });
+  },
+
+  _markResultNotificationRead() {
+    const notificationId = this._resultNotificationId;
+    if (!notificationId || this._resultNotificationRead) return;
+    this._resultNotificationRead = true;
+    api.readNotification(notificationId).then(() => invalidateUnreadCount())
+      .catch(() => { this._resultNotificationRead = false; });
   },
 
   load(one) {

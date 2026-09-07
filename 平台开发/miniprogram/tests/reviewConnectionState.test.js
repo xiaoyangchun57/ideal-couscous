@@ -56,6 +56,7 @@ const original = {};
   'reviewInspectionPhotoSelection', 'approveWorkorder', 'rejectWorkorder', 'reviewPhoto',
   'reviewPhotoSelection', 'approvePartsRequest', 'rejectPartsRequest', 'approveSparePart',
   'rejectSparePart', 'approveVehicle', 'approvePlanSchedule', 'rejectPlanSchedule', 'reviewDataReview'
+  , 'auditTargetStatus'
 ].forEach(key => { original[key] = api[key]; });
 
 async function main() {
@@ -66,6 +67,22 @@ async function main() {
     await flush();
     assert.equal(emptyPage.data.loadState, 'empty');
     assert.equal(emptyPage.data.total, 0);
+
+    api.auditTargetStatus = () => Promise.resolve({ state: 'processed', result_label: '已通过', result_detail: '已归档' });
+    const processedTargetPage = pageInstance();
+    processedTargetPage.onLoad({ target_type: 'vehicle_application', target_id: '55' });
+    processedTargetPage.load();
+    await flush();
+    assert.equal(modals.at(-1).title, '事项已处理');
+    assert.match(modals.at(-1).content, /已由其他审核人处理/);
+    assert.match(modals.at(-1).content, /当前结果：已通过/);
+
+    api.auditTargetStatus = () => Promise.reject({ error: '当前账号无权查看该审批事项' });
+    const forbiddenTargetPage = pageInstance();
+    forbiddenTargetPage.onLoad({ target_type: 'vehicle_application', target_id: '56' });
+    forbiddenTargetPage.load();
+    await flush();
+    assert.equal(modals.at(-1).content, '当前账号无权访问该审核事项。');
 
     api.auditPending = () => Promise.reject(new Error('offline'));
     const errorPage = pageInstance();
@@ -145,6 +162,60 @@ async function main() {
     const targetItems = targetMultiPage.data.groups.flatMap(group => group.items);
     assert.equal(targetItems.find(item => item.id === 'pr_12').detailOpen, true, 'precise targets expand after the multi-item default projection');
     assert.equal(targetItems.find(item => item.id === 'va_13').detailOpen, false);
+
+    let lookupCalls = 0;
+    const currentWorkorder = Object.assign(reviewItem('workorder_review', 'wo_82'), {
+      order_no: 'WO-82', review_cycle: 2
+    });
+    api.auditPending = () => Promise.resolve([currentWorkorder]);
+    api.auditTargetStatus = (type, id, cycle) => {
+      lookupCalls += 1;
+      assert.deepEqual([type, id, cycle], ['workorder_review', 'WO-82', 'review:1']);
+      return Promise.resolve({ state: 'processed', result_label: '已退回', result_detail: '请补拍' });
+    };
+    const oldCyclePage = pageInstance();
+    oldCyclePage.onLoad({ target_type: 'workorder_review', target_id: 'WO-82', cycle_key: 'review:1' });
+    oldCyclePage.load();
+    await flush();
+    assert.equal(lookupCalls, 1, 'cycle links always validate before matching a current list item');
+    assert.equal(oldCyclePage.data.groups[0].items[0].detailOpen, false, 'old cycle never opens the current cycle item');
+    assert.equal(modals.at(-1).title, '事项已处理');
+
+    const currentPlan = Object.assign(reviewItem('plan_schedule', 'ps_81'), { schedule_id: 81 });
+    api.auditPending = () => Promise.resolve([currentPlan]);
+    api.auditTargetStatus = (type, id, cycle) => {
+      lookupCalls += 1;
+      assert.deepEqual([type, id, cycle], ['plan_schedule', '81', 'event:811']);
+      return Promise.resolve({ state: 'pending', cycle_key: cycle });
+    };
+    const currentCyclePage = pageInstance();
+    currentCyclePage.onLoad({ target_type: 'plan_schedule', target_id: '81', cycle_key: 'event:811' });
+    currentCyclePage.load();
+    await flush();
+    assert.equal(currentCyclePage.data.groups[0].items[0].detailOpen, true, 'same-cycle pending targets still expand');
+
+    const delayedStatus = deferred();
+    api.auditPending = () => Promise.resolve([currentWorkorder]);
+    api.auditTargetStatus = () => delayedStatus.promise;
+    const failedCyclePage = pageInstance();
+    failedCyclePage.onLoad({ target_type: 'workorder_review', target_id: 'WO-82', cycle_key: 'review:1' });
+    failedCyclePage.load();
+    await flush();
+    assert.equal(failedCyclePage.data.groups[0].items[0].detailOpen, false);
+    delayedStatus.reject({ error: '当前账号无权查看该审批事项' });
+    await flush();
+    assert.equal(failedCyclePage.data.groups[0].items[0].detailOpen, false, 'failed cycle lookup never opens a target');
+
+    const hiddenCycleStatus = deferred();
+    api.auditTargetStatus = () => hiddenCycleStatus.promise;
+    const hiddenCyclePage = pageInstance();
+    hiddenCyclePage.onLoad({ target_type: 'workorder_review', target_id: 'WO-82', cycle_key: 'review:1' });
+    hiddenCyclePage.load();
+    await flush();
+    hiddenCyclePage.onHide();
+    hiddenCycleStatus.resolve({ state: 'pending' });
+    await flush();
+    assert.equal(hiddenCyclePage.data.groups[0].items[0].detailOpen, false, 'hidden cycle responses never open an old target');
 
     const inspectionProjection = {
       id: 'insp_batch_projection', source_type: 'inspection_batch', title: '巡检审核',

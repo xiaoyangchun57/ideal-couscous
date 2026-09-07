@@ -121,7 +121,7 @@ from flask import Flask, jsonify, request, g, send_from_directory, send_file, ha
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos
-import os, uuid, urllib.request, urllib.error, json as _json
+import os, uuid, urllib.request, urllib.error, urllib.parse, json as _json
 try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -165,7 +165,13 @@ ALERT_LEVEL_LABEL = {
 WX_APPID = 'wx1b28df61adae8ca1'  # 微信小程序 AppID（正式号，用户提供）
 WX_APPSECRET = os.environ.get('WX_APPSECRET', '')  # 部署环境注入，避免提交凭据
 WX_TMPL_ALERT = 'x_KtbMzoSIbxpUZGf040r9uvuNqd9pfhOynKaT72Ub4'    # 订阅消息模板 ID —— 告警信息
-WX_TMPL_APPROVE = '4MrY8lzIXYyujudoJGsG7gka5X_ySpxg5eVKVqC__mw'  # 订阅消息模板 ID —— 审批结果
+WX_TMPL_APPROVAL_PENDING = 'fQ9YrrHfvMLpcnfWJRrh-tYkVE7H5y-Hhd76POAXR00'
+WX_TMPL_APPROVAL_RESULT = '8CVoGska-FLbWBBC5rSD75ieV6A0Bz79hHUJNIL0mko'
+WX_SUBSCRIPTION_TEMPLATES = {
+    'alert': WX_TMPL_ALERT,
+    'approval_pending': WX_TMPL_APPROVAL_PENDING,
+    'approval_result': WX_TMPL_APPROVAL_RESULT,
+}
 #
 # ┌─ 订阅消息模板关键词约定（须与微信后台「申请的模板」关键词一一对应）──────────┐
 # │ 微信订阅消息的 data 字段 key 由所选模板的关键词类型+序号决定，常见类型：  │
@@ -178,10 +184,7 @@ WX_TMPL_APPROVE = '4MrY8lzIXYyujudoJGsG7gka5X_ySpxg5eVKVqC__mw'  # 订阅消息�
 # │        character_string1 站点编码                                           │
 # │        phrase2          告警等级（红/橙/黄/蓝，≤5字）                    │
 # │        time3            告警时间（2026年07月19日 12:30:00）               │
-# │   ② 审批结果（WX_TMPL_APPROVE）：                                        │
-# │        character_string1 工单编号                                          │
-# │        thing2           审批结果（核验通过/核验退回/已完成，≤20字）        │
-# │        time3            审批时间                                            │
+# │   ② 审批待办/结果：由统一 outbox 按用途模板生成并下发。                    │
 # │                                                                              │
 # │ 若你申请的模板关键词类型/数量不同，只需同步修改下面两个 push 函数里的     │
 # │ data 字典 key 与取值即可，其余推送收发逻辑无需改动。                       │
@@ -571,7 +574,9 @@ def migrate_workorder_flow_columns():
             if wo_cols:
                 for col, ctype in (('check_in_lat', 'REAL'), ('check_in_lng', 'REAL'),
                                    ('check_in_time', 'TEXT'), ('check_in_user', 'TEXT'),
-                                   ('review_submitted_at', 'TEXT')):
+                                   ('review_submitted_at', 'TEXT'),
+                                   ('review_submitter_id', 'INTEGER'),
+                                   ('review_cycle', 'INTEGER DEFAULT 0')):
                     if col not in wo_cols:
                         db.execute(f"ALTER TABLE work_orders ADD COLUMN {col} {ctype}")
             va_cols = [r['name'] for r in db.execute("PRAGMA table_info(vehicle_applications)").fetchall()]
@@ -4017,9 +4022,9 @@ def _wx_get_access_token():
             _WX_TOKEN_CACHE['token'] = data['access_token']
             _WX_TOKEN_CACHE['expire_at'] = now + int(data.get('expires_in', 7200))
             return data['access_token']
-        print('[WX] 获取 access_token 失败: %s' % data)
-    except Exception as e:
-        print('[WX] 获取 access_token 异常: %s' % e)
+        print('[WX] access token unavailable errcode=%s' % data.get('errcode', 'unknown'))
+    except Exception:
+        print('[WX] access token request failed')
     return ''
 
 def _wx_code2openid(code):
@@ -4035,9 +4040,9 @@ def _wx_code2openid(code):
             data = _json.loads(resp.read().decode('utf-8'))
         if 'openid' in data:
             return data['openid']
-        print('[WX] code2openid 失败: %s' % data)
-    except Exception as e:
-        print('[WX] code2openid 异常: %s' % e)
+        print('[WX] openid exchange unavailable errcode=%s' % data.get('errcode', 'unknown'))
+    except Exception:
+        print('[WX] openid exchange failed')
     return ''
 
 def _wx_push_subscribe(openid, template_id, data):
@@ -4060,10 +4065,316 @@ def _wx_push_subscribe(openid, template_id, data):
             result = _json.loads(resp.read().decode('utf-8'))
         if result.get('errcode', 0) == 0:
             return True
-        print('[WX] 订阅下发失败 openid=%s: %s' % (openid, result))
-    except Exception as e:
-        print('[WX] 订阅下发异常 openid=%s: %s' % (openid, e))
+        print('[WX] subscription delivery rejected errcode=%s' % result.get('errcode', 'unknown'))
+    except Exception:
+        print('[WX] subscription delivery request failed')
     return False
+
+
+def _wx_trim(value, limit):
+    text = str(value or '').strip()
+    return text[:limit]
+
+
+def _wx_page(path, **params):
+    query = urllib.parse.urlencode({key: value for key, value in params.items()
+                                    if value not in (None, '')})
+    return path + (('?' + query) if query else '')
+
+
+def _wx_pending_data(request_type, project, applicant, request_no, submitted_at):
+    return {
+        'thing9': {'value': _wx_trim(request_type, 20)},
+        'thing8': {'value': _wx_trim(project, 20)},
+        'thing4': {'value': _wx_trim(applicant, 20)},
+        'character_string7': {'value': _wx_trim(request_no, 32)},
+        'time6': {'value': _wx_trim(submitted_at, 20)},
+    }
+
+
+def _wx_result_data(review_type, project, result, reviewed_at, next_step):
+    return {
+        'thing18': {'value': _wx_trim(review_type, 20)},
+        'thing1': {'value': _wx_trim(project, 20)},
+        'thing5': {'value': _wx_trim(result, 20)},
+        'time3': {'value': _wx_trim(reviewed_at, 20)},
+        'thing4': {'value': _wx_trim(next_step, 20)},
+    }
+
+
+def _ensure_wx_outbox_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS wx_subscription_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dedupe_key TEXT NOT NULL UNIQUE,
+        purpose TEXT NOT NULL,
+        business_type TEXT NOT NULL,
+        business_id TEXT NOT NULL,
+        business_status TEXT NOT NULL,
+        recipient_user_id INTEGER NOT NULL,
+        template_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        context_json TEXT DEFAULT '{}',
+        cycle_key TEXT NOT NULL DEFAULT '',
+        page TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        claim_token TEXT DEFAULT '',
+        claimed_at TEXT,
+        next_attempt_at TEXT,
+        last_errcode TEXT DEFAULT '',
+        last_error TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime')),
+        sent_at TEXT
+    )""")
+    db.execute("""CREATE INDEX IF NOT EXISTS idx_wx_outbox_delivery
+        ON wx_subscription_outbox(status,next_attempt_at,id)""")
+    columns = {row['name'] for row in db.execute('PRAGMA table_info(wx_subscription_outbox)').fetchall()}
+    for column, definition in (
+            ('cycle_key', "TEXT NOT NULL DEFAULT ''"),
+            ('page', "TEXT NOT NULL DEFAULT ''"),
+            ('claim_token', "TEXT DEFAULT ''"),
+            ('claimed_at', 'TEXT')):
+        if column not in columns:
+            db.execute(f'ALTER TABLE wx_subscription_outbox ADD COLUMN {column} {definition}')
+
+
+def _wx_user_roles(db, user_id):
+    user = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    if not user:
+        return None, set()
+    roles = {str(user['role'] or '').strip()} if 'role' in user.keys() else set()
+    if _table_exists(db, 'user_roles'):
+        roles.update(str(row['role'] or '').strip() for row in db.execute(
+            'SELECT role FROM user_roles WHERE user_id=?', (user_id,)).fetchall())
+    return user, {role for role in roles if role}
+
+
+def _wx_pending_recipient_allowed(db, user_id, business_type, context):
+    user, roles = _wx_user_roles(db, user_id)
+    if not user or ('status' in user.keys() and user['status'] != 'active'):
+        return False
+    if business_type in ('plan_schedule', 'vehicle_application', 'parts_request'):
+        return 'admin' in roles
+    if business_type == 'workorder':
+        if 'admin' in roles:
+            return True
+        site_id = context.get('site_id')
+        return bool(roles.intersection({'reviewer', 'inspector'}) and site_id and db.execute(
+            'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?', (user_id, site_id)
+        ).fetchone())
+    return False
+
+
+def _wx_queue_intent(db, purpose, business_type, business_id, business_status,
+                     recipient_user_id, payload, context=None, cycle_key='', page=''):
+    if not recipient_user_id or purpose not in WX_SUBSCRIPTION_TEMPLATES:
+        return None
+    context = context or {}
+    user, _ = _wx_user_roles(db, recipient_user_id)
+    if not user or ('status' in user.keys() and user['status'] != 'active'):
+        return None
+    if purpose == 'approval_pending' and not _wx_pending_recipient_allowed(
+            db, recipient_user_id, business_type, context):
+        return None
+    cycle_key = str(cycle_key or business_status)
+    page = str(page or '').strip()
+    if not page.startswith('/pages/') or '://' in page or len(page) > 512:
+        return None
+    dedupe_key = ':'.join((purpose, business_type, str(business_id),
+                           cycle_key, str(recipient_user_id)))
+    _ensure_wx_outbox_schema(db)
+    db.execute("""INSERT OR IGNORE INTO wx_subscription_outbox
+        (dedupe_key,purpose,business_type,business_id,business_status,
+         recipient_user_id,template_id,payload_json,context_json,cycle_key,page)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+            dedupe_key, purpose, business_type, str(business_id), str(business_status),
+            recipient_user_id, WX_SUBSCRIPTION_TEMPLATES[purpose],
+            json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
+            json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+            cycle_key, page,
+        ))
+    row = db.execute('SELECT id FROM wx_subscription_outbox WHERE dedupe_key=?',
+                     (dedupe_key,)).fetchone()
+    return row['id'] if row else None
+
+
+def _wx_queue_pending_approval(db, business_type, business_id, business_status,
+                               recipient_ids, submitter_id, request_type, project,
+                               request_no, submitted_at, site_id=None,
+                               cycle_key='', page=''):
+    submitter = db.execute('SELECT real_name FROM users WHERE id=?', (submitter_id,)).fetchone()
+    submitter_name = (submitter['real_name'] or '').strip() if submitter else ''
+    payload = _wx_pending_data(request_type, project, submitter_name or f'用户{submitter_id}',
+                               request_no, submitted_at)
+    ids = []
+    for user_id in sorted(set(recipient_ids or [])):
+        if user_id == submitter_id:
+            continue
+        context = {'site_id': site_id, 'submitter_id': submitter_id,
+                   'cycle_key': cycle_key}
+        if business_type == 'workorder' and str(cycle_key).startswith('review:'):
+            try:
+                context['review_cycle'] = int(str(cycle_key).split(':', 1)[1])
+            except ValueError:
+                pass
+        outbox_id = _wx_queue_intent(
+            db, 'approval_pending', business_type, business_id, business_status,
+            user_id, payload, context, cycle_key=cycle_key, page=page)
+        if outbox_id:
+            ids.append(outbox_id)
+    return ids
+
+
+def _wx_queue_approval_result(db, business_type, business_id, business_status,
+                              recipient_user_id, review_type, project, result,
+                              reviewed_at, next_step, cycle_key='', page=''):
+    return _wx_queue_intent(
+        db, 'approval_result', business_type, business_id, business_status,
+        recipient_user_id,
+        _wx_result_data(review_type, project, result, reviewed_at, next_step), {},
+        cycle_key=cycle_key, page=page)
+
+
+def _wx_intent_business_current(db, row, context):
+    if row['purpose'] != 'approval_pending':
+        return True
+    business_type = row['business_type']
+    if business_type == 'plan_schedule':
+        current = db.execute('SELECT status FROM plan_schedules WHERE id=?',
+                             (row['business_id'],)).fetchone()
+        cycle_key = str(context.get('cycle_key') or '')
+        if current and cycle_key.startswith('event:'):
+            latest = db.execute("""SELECT id FROM plan_schedule_events
+                WHERE schedule_id=? AND event_type IN ('submitted','change_submitted')
+                ORDER BY id DESC LIMIT 1""", (row['business_id'],)).fetchone()
+            if not latest or cycle_key != f'event:{latest["id"]}':
+                return False
+    elif business_type == 'vehicle_application':
+        current = db.execute('SELECT status FROM vehicle_applications WHERE id=?',
+                             (row['business_id'],)).fetchone()
+    elif business_type == 'parts_request':
+        current = db.execute('SELECT status FROM parts_requests WHERE id=?',
+                             (row['business_id'],)).fetchone()
+    elif business_type == 'workorder':
+        cycle_column = ',review_cycle' if _table_has_column(db, 'work_orders', 'review_cycle') else ''
+        current = db.execute(f'SELECT status{cycle_column} FROM work_orders WHERE order_no=?',
+                             (row['business_id'],)).fetchone()
+        if current and cycle_column and int(current['review_cycle'] or 0) != int(context.get('review_cycle') or 0):
+            return False
+    else:
+        return False
+    return bool(current and str(current['status']) == str(row['business_status']))
+
+
+def _wx_send_subscribe_result(openid, template_id, data, page=''):
+    if not WX_APPID or not WX_APPSECRET or not template_id:
+        return {'ok': False, 'permanent': True, 'status': 'config_missing', 'errcode': ''}
+    if not openid:
+        return {'ok': False, 'permanent': True, 'status': 'no_openid', 'errcode': ''}
+    token = _wx_get_access_token()
+    if not token:
+        return {'ok': False, 'permanent': False, 'status': 'temporary_failure', 'errcode': 'TOKEN'}
+    try:
+        url = 'https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=%s' % token
+        request_body = _json.dumps({
+            'touser': openid, 'template_id': template_id, 'data': data, 'page': page,
+        }).encode('utf-8')
+        req = urllib.request.Request(url, data=request_body,
+                                    headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode('utf-8'))
+    except Exception:
+        return {'ok': False, 'permanent': False, 'status': 'temporary_failure', 'errcode': 'NETWORK'}
+    errcode = str(result.get('errcode', 0))
+    if errcode == '0':
+        return {'ok': True, 'permanent': True, 'status': 'sent', 'errcode': '0'}
+    if errcode in ('40001', '40014', '42001'):
+        _WX_TOKEN_CACHE['token'] = ''
+        _WX_TOKEN_CACHE['expire_at'] = 0
+        status = 'temporary_failure'
+    elif errcode == '43101':
+        status = 'no_authorization'
+    elif errcode in ('40003', '40037', '47003'):
+        status = 'permanent_failure'
+    else:
+        status = 'temporary_failure'
+    return {'ok': False, 'permanent': status != 'temporary_failure',
+            'status': status, 'errcode': errcode}
+
+
+def _wx_flush_outbox(outbox_ids=None, limit=20):
+    claim_token = uuid.uuid4().hex
+    try:
+        with get_db() as db:
+            _ensure_wx_outbox_schema(db)
+            db.execute("""UPDATE wx_subscription_outbox
+                SET status='temporary_failure',claim_token='',claimed_at=NULL,
+                    next_attempt_at=datetime('now','localtime')
+                WHERE status='sending' AND claimed_at<datetime('now','localtime','-5 minutes')""")
+            params = []
+            id_clause = ''
+            if outbox_ids:
+                ids = list(dict.fromkeys(int(item) for item in outbox_ids if item))
+                if not ids:
+                    return
+                id_clause = ' AND id IN (%s)' % ','.join('?' for _ in ids)
+                params.extend(ids)
+            candidates = db.execute("""SELECT id FROM wx_subscription_outbox
+                WHERE status IN ('pending','temporary_failure')
+                  AND attempts < 3
+                  AND (next_attempt_at IS NULL OR next_attempt_at<=datetime('now','localtime'))"""
+                + id_clause + ' ORDER BY id LIMIT ?', params + [limit]).fetchall()
+            claimed_ids = []
+            for candidate in candidates:
+                changed = db.execute("""UPDATE wx_subscription_outbox
+                    SET status='sending',claim_token=?,claimed_at=datetime('now','localtime')
+                    WHERE id=? AND status IN ('pending','temporary_failure')
+                      AND (next_attempt_at IS NULL OR next_attempt_at<=datetime('now','localtime'))""",
+                    (claim_token, candidate['id']))
+                if changed.rowcount:
+                    claimed_ids.append(candidate['id'])
+            db.commit()
+            if not claimed_ids:
+                return
+            rows = db.execute("""SELECT * FROM wx_subscription_outbox
+                WHERE claim_token=? AND status='sending' ORDER BY id""", (claim_token,)).fetchall()
+        for row in rows:
+            context = json.loads(row['context_json'] or '{}')
+            with get_db() as db:
+                if not _wx_intent_business_current(db, row, context):
+                    db.execute("""UPDATE wx_subscription_outbox
+                        SET status='superseded',claim_token='',claimed_at=NULL,
+                            updated_at=datetime('now','localtime')
+                        WHERE id=? AND status='sending' AND claim_token=?""",
+                        (row['id'], claim_token))
+                    db.commit()
+                    continue
+                user, _ = _wx_user_roles(db, row['recipient_user_id'])
+                allowed = (row['purpose'] != 'approval_pending' or _wx_pending_recipient_allowed(
+                    db, row['recipient_user_id'], row['business_type'], context))
+                openid = user['openid'] if user and 'openid' in user.keys() else ''
+            if not user or ('status' in user.keys() and user['status'] != 'active') or not allowed:
+                result = {'ok': False, 'permanent': True, 'status': 'permanent_failure',
+                          'errcode': 'RECIPIENT_INELIGIBLE'}
+            else:
+                result = _wx_send_subscribe_result(
+                    openid, row['template_id'], json.loads(row['payload_json']), row['page'])
+            with get_db() as db:
+                attempts = int(row['attempts'] or 0) + 1
+                next_retry = None if result['permanent'] else datetime.now() + timedelta(minutes=attempts)
+                db.execute("""UPDATE wx_subscription_outbox
+                    SET status=?,attempts=?,next_attempt_at=?,last_errcode=?,last_error='',
+                        claim_token='',claimed_at=NULL,
+                        updated_at=datetime('now','localtime'),
+                        sent_at=CASE WHEN ?='sent' THEN datetime('now','localtime') ELSE sent_at END
+                    WHERE id=? AND status='sending' AND claim_token=?""", (
+                        result['status'], attempts,
+                        next_retry.strftime('%Y-%m-%d %H:%M:%S') if next_retry else None,
+                        result['errcode'], result['status'], row['id'], claim_token))
+                db.commit()
+    except Exception as exc:
+        print('[WX] outbox delivery failed safely: %s' % type(exc).__name__)
 
 def _wx_push_to_site_users(site_id, template_id, data):
     """按站点群发：查该站点已绑定 openid 的用户，逐个下发订阅消息"""
@@ -4119,22 +4430,6 @@ def _wx_push_alert(site_id, metric, value, level, message):
         'thing7': {'value': site_name},
     }
     _wx_push_to_site_users(site_id, WX_TMPL_ALERT, data)
-
-def _wx_push_approve_result(site_id, order_no, result_cn):
-    """工单审批结果（通过 / 退回 / 完成）时，向该站点负责用户推送「审批结果」订阅消息
-
-    推送字段结构与微信「注册审核结果通知」模板关键词对应：
-        name1=姓名 / phrase3=审核结果 / thing6=审核详情
-    """
-    if not WX_TMPL_APPROVE or not site_id:
-        return
-    data = {
-        'name1': {'value': '运维人员'},
-        'phrase3': {'value': (result_cn or '')[:5]},
-        'thing6': {'value': (order_no or '')[:20]},
-    }
-    _wx_push_to_site_users(site_id, WX_TMPL_APPROVE, data)
-
 
 def create_alert_internal(db, site_id, metric, value, level, message):
     """创建告警——同站点合并为一条告警（不同异常追加消息），去重同站点同metric"""
@@ -4699,17 +4994,18 @@ def _create_notification(user_id, source_type, source_id, title, content='', db=
         db = get_db()
     try:
         if payload_json and _table_has_column(db, 'notifications', 'payload_json'):
-            db.execute("""INSERT INTO notifications
+            cursor = db.execute("""INSERT INTO notifications
                 (user_id,source_type,source_id,title,content,payload_json)
                 VALUES (?,?,?,?,?,?)""",
                 (user_id, source_type, source_id, title, content, payload_json))
         else:
-            db.execute(
+            cursor = db.execute(
                 "INSERT INTO notifications (user_id, source_type, source_id, title, content) VALUES (?,?,?,?,?)",
                 (user_id, source_type, source_id, title, content)
             )
         if own:
             db.commit()
+        return cursor.lastrowid
     except Exception:
         if own:
             try: db.rollback()
@@ -4763,6 +5059,7 @@ def _upsert_unread_notification(db, user_id, source_type, source_id, title, cont
 
 def _notify_workorder_reviewers(db, site_id, order_no, title):
     """Notify admins and reviewers assigned to the work-order site."""
+    recipients = []
     try:
         rows = db.execute("""SELECT DISTINCT u.id,
                     CASE WHEN u.role='admin' OR EXISTS (
@@ -4777,6 +5074,7 @@ def _notify_workorder_reviewers(db, site_id, order_no, title):
                 'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?', (row['id'], site_id)
             ).fetchone():
                 continue
+            recipients.append(row['id'])
             existing = db.execute("""SELECT 1 FROM notifications
                 WHERE user_id=? AND source_type='workorder_review' AND source_id=? AND is_read=0""",
                 (row['id'], order_no)).fetchone()
@@ -4787,6 +5085,7 @@ def _notify_workorder_reviewers(db, site_id, order_no, title):
                 )
     except sqlite3.OperationalError as exc:
         print(f'[Workorder review notify] 跳过：{exc}')
+    return sorted(set(recipients))
 
 
 def _retire_workorder_review_notifications(db, order_no):
@@ -7188,12 +7487,6 @@ def update_workorder_status(order_no):
                     print(f'[WO] 备件扣减失败: {e}')
 
         db.commit()
-        # 审批结果推送（最佳努力，不阻断主流程）
-        try:
-            if new_status == 'closed':
-                _wx_push_approve_result(cur['site_id'], order_no, '已完成')
-        except Exception as e:
-            print('[WX] 关单推送异常: %s' % e)
         return jsonify({'success': True, 'status': new_status})
 
 # --- Work Order Verification ---
@@ -7211,6 +7504,10 @@ def submit_workorder_review(order_no):
         return jsonify({'error': '请填写现场处置说明后再提交核验'}), 400
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
+        if not _table_has_column(db, 'work_orders', 'review_submitter_id'):
+            db.execute('ALTER TABLE work_orders ADD COLUMN review_submitter_id INTEGER')
+        if not _table_has_column(db, 'work_orders', 'review_cycle'):
+            db.execute('ALTER TABLE work_orders ADD COLUMN review_cycle INTEGER DEFAULT 0')
         cur = db.execute("SELECT id, status, images, assignee, site_id, title, check_in_time FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
         if not cur:
             return jsonify({'error': '工单不存在'}), 404
@@ -7232,12 +7529,23 @@ def submit_workorder_review(order_no):
         gate = _evidence_gate(db, 'workorder', cur['id'], 1)
         if gate:
             return jsonify(gate), 409
+        submitted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
         db.execute("""UPDATE work_orders
-                      SET status='reviewing', remark=?, review_submitted_at=datetime('now','localtime')
-                      WHERE order_no=?""", (resolution_note, order_no))
+                      SET status='reviewing', remark=?, review_submitted_at=?,
+                          review_submitter_id=?,review_cycle=COALESCE(review_cycle,0)+1
+                      WHERE order_no=?""",
+                   (resolution_note, submitted_at, g.current_user['id'], order_no))
+        review_cycle = db.execute('SELECT review_cycle FROM work_orders WHERE order_no=?',
+                                  (order_no,)).fetchone()['review_cycle']
         db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
                    ('order', 0, 'submit_review', _current_actor_name(), f'工单{order_no} 提交核验'))
-        _notify_workorder_reviewers(db, cur['site_id'], order_no, cur['title'])
+        recipients = _notify_workorder_reviewers(db, cur['site_id'], order_no, cur['title'])
+        outbox_ids = _wx_queue_pending_approval(
+            db, 'workorder', order_no, 'reviewing', recipients, g.current_user['id'],
+            '工单核验', cur['title'] or order_no, order_no,
+            submitted_at, site_id=cur['site_id'], cycle_key=f'review:{review_cycle}',
+            page=_wx_page('/pages/review/view', target_type='workorder_review',
+                          target_id=order_no, cycle_key=f'review:{review_cycle}'))
         db.commit()
         return jsonify({'success': True, 'status': 'reviewing'})
 
@@ -7303,7 +7611,7 @@ def approve_workorder(order_no):
     data = request.get_json(silent=True) or {}
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
-        cur = db.execute("SELECT id, status, related_alert_id, used_parts, site_id FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
+        cur = db.execute("SELECT * FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
         if not cur:
             return jsonify({'error': '工单不存在'}), 404
         cur = dict(cur)
@@ -7390,12 +7698,20 @@ def approve_workorder(order_no):
                         )
             except Exception as e:
                 print(f'[WO] 备件扣减失败: {e}')
+        result_notice_id = None
+        if cur.get('review_submitter_id'):
+            result_notice_id = _upsert_unread_notification(
+                db, cur['review_submitter_id'], 'workorder', order_no,
+                '工单核验通过', f'{order_no} 已核验通过并闭环',
+                dedupe_key=f'workorder_result:{order_no}:review:{cur.get("review_cycle") or 0}')
+        result_id = _wx_queue_approval_result(
+            db, 'workorder', order_no, 'closed', cur.get('review_submitter_id'),
+            '工单核验', cur.get('title') or order_no, '已通过',
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '工单已闭环',
+            cycle_key=f'review:{cur.get("review_cycle") or 0}',
+            page=_wx_page('/pages/workorder/workorder', order_no=order_no,
+                          notification_id=result_notice_id))
         db.commit()
-        # 审批通过推送（最佳努力，不阻断主流程）
-        try:
-            _wx_push_approve_result(cur['site_id'], order_no, '核验通过')
-        except Exception as e:
-            print('[WX] 审批通过推送异常: %s' % e)
         return jsonify({'success': True, 'status': 'closed'})
 
 @app.route('/api/workorders/<order_no>/reject', methods=['POST'])
@@ -7410,7 +7726,7 @@ def reject_workorder(order_no):
     if not reason:
         return jsonify({'error': '请填写退回原因，便于现场人员补充整改'}), 400
     with get_db() as db:
-        cur = db.execute("SELECT status, site_id FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
+        cur = db.execute("SELECT * FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
         if not cur:
             return jsonify({'error': '工单不存在'}), 404
         denied = _site_access_denied(cur['site_id'], '审核')
@@ -7426,15 +7742,22 @@ def reject_workorder(order_no):
                         AND is_deleted=0""", (g.current_user.get('id'), reason, order_no))
         db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
                    ('order', 0, 'rejected', _current_actor_name(), f'工单{order_no} 核验退回：{reason}'))
-        assignee = db.execute("SELECT id FROM users WHERE real_name=(SELECT assignee FROM work_orders WHERE order_no=?) LIMIT 1", (order_no,)).fetchone()
-        if assignee:
-            _create_notification(assignee['id'], 'workorder', order_no, '工单核验退回', f'{order_no}：{reason}', db=db)
+        result_recipient_id = cur['review_submitter_id'] if 'review_submitter_id' in cur.keys() else None
+        result_notice_id = None
+        if result_recipient_id:
+            result_notice_id = _upsert_unread_notification(
+                db, result_recipient_id, 'workorder', order_no,
+                '工单核验退回', f'{order_no}：{reason}',
+                dedupe_key=f'workorder_result:{order_no}:review:{cur["review_cycle"] if "review_cycle" in cur.keys() else 0}')
+        result_id = _wx_queue_approval_result(
+            db, 'workorder', order_no, 'in_progress',
+            result_recipient_id,
+            '工单核验', cur['title'] if 'title' in cur.keys() else order_no, '已退回',
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), reason,
+            cycle_key=f'review:{cur["review_cycle"] if "review_cycle" in cur.keys() else 0}',
+            page=_wx_page('/pages/workorder/workorder', order_no=order_no,
+                          notification_id=result_notice_id))
         db.commit()
-        # 审批退回推送（最佳努力，不阻断主流程）
-        try:
-            _wx_push_approve_result(cur['site_id'], order_no, '核验退回')
-        except Exception as e:
-            print('[WX] 审批退回推送异常: %s' % e)
         return jsonify({'success': True, 'status': 'in_progress'})
 
 @app.route('/api/workorders/<order_no>/used-parts', methods=['PUT'])
@@ -10860,23 +11183,31 @@ def get_notifications():
     if status not in ('all', 'unread', 'read'):
         return jsonify({'error': '消息状态参数无效'}), 400
     offset = (page - 1) * limit
+    notification_id = request.args.get('notification_id', type=int)
     with get_db() as db:
         _coalesce_pending_attachment_notifications(db)
         _retire_redundant_inspection_photo_notifications(db, user['id'])
         _retire_stale_plan_notifications(db, user['id'])
         db.commit()
         status_sql = ''
+        exact_sql = ''
+        exact_params = []
+        if notification_id is not None:
+            if notification_id <= 0:
+                return jsonify({'error': '消息编号参数无效'}), 400
+            exact_sql = ' AND id=?'
+            exact_params.append(notification_id)
         if status == 'unread':
             status_sql = ' AND is_read=0'
         elif status == 'read':
             status_sql = ' AND is_read=1'
         total = db.execute(
-            f"SELECT COUNT(*) FROM notifications WHERE user_id=?{status_sql}",
-            (user['id'],),
+            f"SELECT COUNT(*) FROM notifications WHERE user_id=?{exact_sql}{status_sql if not exact_sql else ''}",
+            (user['id'], *exact_params),
         ).fetchone()[0]
         rows = db.execute(
-            f"SELECT * FROM notifications WHERE user_id=?{status_sql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            (user['id'], limit, offset)
+            f"SELECT * FROM notifications WHERE user_id=?{exact_sql}{status_sql if not exact_sql else ''} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (user['id'], *exact_params, limit, offset)
         ).fetchall()
         notifications = []
         for row in rows:
@@ -13874,6 +14205,25 @@ def _plan_schedule_requester_name(db, schedule_id):
     return (row['real_name'] or '') if row else ''
 
 
+def _plan_schedule_requester(db, schedule_id):
+    try:
+        return db.execute("""SELECT pse.id,pse.operator_id,u.real_name,pse.created_at
+            FROM plan_schedule_events pse LEFT JOIN users u ON u.id=pse.operator_id
+            WHERE pse.schedule_id=? AND pse.event_type IN ('submitted','change_submitted')
+            ORDER BY pse.id DESC LIMIT 1""", (schedule_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _wx_plan_project(row, schedule_id):
+    value = dict(row or {})
+    frequency = _PS_FREQ_CN.get(value.get('schedule_type'), '巡检')
+    period = '~'.join(part for part in (
+        str(value.get('period_start') or '').strip(),
+        str(value.get('period_end') or '').strip()) if part)
+    return _wx_trim(f'{frequency}计划 {period}'.strip() or f'巡检计划{schedule_id}', 20)
+
+
 def _legacy_spare_part_audit_items(db, allowed_site_ids):
     """Expose pending legacy requests with the same shape as parts_requests."""
     try:
@@ -14465,6 +14815,107 @@ def audit_pending():
     # 按提交时间降序（巡检在前，工单在后）
     result.sort(key=lambda x: x.get('submit_time') or '', reverse=True)
     return jsonify(result)
+
+
+@app.route('/api/audit/target-status')
+@login_required
+def audit_target_status():
+    """Resolve an exact audit deep link without leaking a processed object to an unauthorized user."""
+    denied = require_reviewer()
+    if denied:
+        return denied
+    target_type = str(request.args.get('target_type') or '').strip()
+    target_id = str(request.args.get('target_id') or '').strip()
+    cycle_key = str(request.args.get('cycle_key') or '').strip()
+    if not target_type or not target_id:
+        return jsonify({'error': '审核目标参数不完整'}), 400
+    with get_db() as db:
+        is_admin = _has_any_role(g.current_user, 'admin')
+        row = None
+        if target_type == 'plan_schedule':
+            if not is_admin:
+                return jsonify({'error': '当前账号无权查看该审批事项'}), 403
+            reason_field = 'reject_reason' if _table_has_column(db, 'plan_schedules', 'reject_reason') else "''"
+            row = db.execute(f'SELECT status,{reason_field} AS reject_reason FROM plan_schedules WHERE id=?', (target_id,)).fetchone()
+        elif target_type == 'vehicle_application':
+            if not is_admin:
+                return jsonify({'error': '当前账号无权查看该审批事项'}), 403
+            reason_field = 'reject_reason' if _table_has_column(db, 'vehicle_applications', 'reject_reason') else "''"
+            row = db.execute(f'SELECT status,{reason_field} AS reject_reason FROM vehicle_applications WHERE id=?', (target_id,)).fetchone()
+        elif target_type == 'parts_request':
+            if not is_admin:
+                return jsonify({'error': '当前账号无权查看该审批事项'}), 403
+            reason_field = 'approve_comment' if _table_has_column(db, 'parts_requests', 'approve_comment') else "''"
+            row = db.execute(f'SELECT status,{reason_field} AS reject_reason FROM parts_requests WHERE id=?', (target_id,)).fetchone()
+        elif target_type == 'workorder_review':
+            cycle_field = 'review_cycle' if _table_has_column(db, 'work_orders', 'review_cycle') else '0'
+            row = db.execute(f'SELECT status,site_id,remark,{cycle_field} AS review_cycle FROM work_orders WHERE order_no=?', (target_id,)).fetchone()
+            if row:
+                denied = _site_access_denied(row['site_id'], '审核')
+                if denied:
+                    return denied
+        else:
+            return jsonify({'error': '不支持的审核目标类型'}), 400
+        if not row:
+            return jsonify({'error': '该审核事项不存在'}), 404
+        status = str(row['status'] or '')
+        if cycle_key:
+            business_type = {
+                'plan_schedule': 'plan_schedule',
+                'vehicle_application': 'vehicle_application',
+                'parts_request': 'parts_request',
+                'workorder_review': 'workorder',
+            }[target_type]
+            if not _table_exists(db, 'wx_subscription_outbox'):
+                return jsonify({'error': '审核周期信息不可用，请刷新后重试'}), 409
+            pending_intent = db.execute("""SELECT id FROM wx_subscription_outbox
+                WHERE purpose='approval_pending' AND business_type=? AND business_id=? AND cycle_key=?
+                ORDER BY id DESC LIMIT 1""", (business_type, target_id, cycle_key)).fetchone()
+            result_intent = db.execute("""SELECT payload_json FROM wx_subscription_outbox
+                WHERE purpose='approval_result' AND business_type=? AND business_id=? AND cycle_key=?
+                ORDER BY id DESC LIMIT 1""", (business_type, target_id, cycle_key)).fetchone()
+            if not pending_intent and not result_intent:
+                return jsonify({'error': '该审核周期不存在或当前账号无权访问'}), 404
+            if result_intent:
+                try:
+                    payload = json.loads(result_intent['payload_json'] or '{}')
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = {}
+                return jsonify({
+                    'state': 'processed', 'status': status,
+                    'result_label': (payload.get('thing5') or {}).get('value') or '已处理',
+                    'result_detail': (payload.get('thing4') or {}).get('value') or '',
+                    'cycle_key': cycle_key,
+                })
+            same_cycle_pending = True
+            if target_type == 'plan_schedule':
+                latest = db.execute("""SELECT id FROM plan_schedule_events
+                    WHERE schedule_id=? AND event_type IN ('submitted','change_submitted')
+                    ORDER BY id DESC LIMIT 1""", (target_id,)).fetchone()
+                same_cycle_pending = bool(latest and cycle_key == f'event:{latest["id"]}')
+            elif target_type == 'workorder_review':
+                same_cycle_pending = cycle_key == f'review:{int(row["review_cycle"] or 0)}'
+            elif target_type == 'vehicle_application':
+                same_cycle_pending = cycle_key == f'application:{target_id}'
+            elif target_type == 'parts_request':
+                same_cycle_pending = cycle_key == f'request:{target_id}'
+            if not same_cycle_pending:
+                return jsonify({'state': 'processed', 'status': status,
+                                'result_label': '已处理',
+                                'result_detail': '该审核周期已结束，当前对象已进入后续状态。',
+                                'cycle_key': cycle_key})
+        pending = (target_type == 'plan_schedule' and status in ('submitted', 'change_submitted')) \
+            or (target_type == 'vehicle_application' and status == 'pending') \
+            or (target_type == 'parts_request' and status == 'pending') \
+            or (target_type == 'workorder_review' and status == 'reviewing')
+        if pending:
+            return jsonify({'state': 'pending', 'status': status, 'cycle_key': cycle_key})
+        labels = {'approved': '已通过', 'closed': '已通过', 'rejected': '已退回',
+                  'in_progress': '已退回', 'cancelled': '已取消'}
+        reason = row['reject_reason'] if 'reject_reason' in row.keys() else row['remark'] if 'remark' in row.keys() else ''
+        return jsonify({'state': 'processed', 'status': status,
+                        'result_label': labels.get(status, '已处理'),
+                        'result_detail': _wx_trim(reason, 80)})
 
 
 # ---------- 操作附件审核（照片驳回/通过）----------
@@ -19260,6 +19711,13 @@ def api_parts_requests_create():
         })
         response = {'success': True, 'id': cur.lastrowid, 'request_no': request_no, 'status': 'pending'}
         _mobile_idempotency_store(db, idempotency_key, 'parts-request', response)
+        outbox_ids = _wx_queue_pending_approval(
+            db, 'parts_request', cur.lastrowid, 'pending', _ps_approver_ids(db),
+            requester_id, '备件申请', raw_part_name, request_no,
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), site_id=site_id,
+            cycle_key=f'request:{cur.lastrowid}',
+            page=_wx_page('/pages/review/view', target_type='parts_request',
+                          target_id=cur.lastrowid, cycle_key=f'request:{cur.lastrowid}'))
         db.commit()
     return jsonify(response)
 
@@ -19394,6 +19852,15 @@ def api_parts_request_approve(rid):
         db.execute("UPDATE parts_requests SET status='approved', approver_id=?, approve_comment=?, approved_at=datetime('now','localtime') WHERE id=?",
                    (g.current_user['id'], comment, rid))
         _parts_request_event(db, rid, 'approved', g.current_user, {'comment': comment, 'inventory_locked': False})
+        result_notice_id = _create_notification(
+            req['requester_id'], 'parts_request_result', rid, '备件申请已通过',
+            f'{req["request_no"] or "备件申请"} 已通过，等待领用或到货', db=db)
+        result_id = _wx_queue_approval_result(
+            db, 'parts_request', rid, 'approved', req['requester_id'], '备件申请',
+            req['requested_part_name'] or req['request_no'], '已通过',
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '等待领用或到货',
+            cycle_key=f'request:{rid}',
+            page=_wx_page('/pages/message/message', notification_id=result_notice_id))
         db.commit()
     return jsonify({'success': True, 'message': '已批准；未锁定库存，实际领用或到货时记账'})
 
@@ -19417,6 +19884,15 @@ def api_parts_request_reject(rid):
         db.execute("UPDATE parts_requests SET status='rejected', approver_id=?, approve_comment=? WHERE id=?",
                    (g.current_user['id'], comment, rid))
         _parts_request_event(db, rid, 'rejected', g.current_user, {'comment': comment})
+        result_notice_id = _create_notification(
+            req['requester_id'], 'parts_request_result', rid, '备件申请被退回',
+            f'{req["request_no"] or "备件申请"}：{comment}', db=db)
+        result_id = _wx_queue_approval_result(
+            db, 'parts_request', rid, 'rejected', req['requester_id'], '备件申请',
+            req['requested_part_name'] or req['request_no'], '已退回',
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), comment,
+            cycle_key=f'request:{rid}',
+            page=_wx_page('/pages/message/message', notification_id=result_notice_id))
         db.commit()
     return jsonify({'success': True, 'message': '已驳回'})
 
@@ -20023,14 +20499,37 @@ def mobile_bind_openid():
     openid = _wx_code2openid(code)
     if not openid:
         # 换 openid 失败（未配置密钥 / 微信接口异常）不阻断，前端照常进入首页
-        return jsonify({'success': True, 'bound': False, 'warn': 'openid 换取失败'})
+        return jsonify({'success': True, 'bound': False,
+                        'warn': '微信账号绑定未完成，请检查网络后重试'})
     try:
         with get_db() as db:
             db.execute("UPDATE users SET openid=? WHERE id=?", (openid, g.current_user['id']))
             db.commit()
         return jsonify({'success': True, 'bound': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception:
+        return jsonify({'success': False, 'bound': False,
+                        'error': '微信账号绑定暂未完成，请稍后重试'}), 503
+
+
+@app.route('/api/mobile/subscription-templates', methods=['GET'])
+@login_required
+def mobile_subscription_templates():
+    purposes = ['alert', 'approval_result']
+    with get_db() as db:
+        user, roles = _wx_user_roles(db, g.current_user['id'])
+        if not user or ('status' in user.keys() and user['status'] != 'active'):
+            return jsonify({'templates': []})
+        can_review = 'admin' in roles
+        if not can_review and 'reviewer' in roles:
+            can_review = bool(db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? LIMIT 1',
+                (g.current_user['id'],)).fetchone())
+    if can_review:
+        purposes.append('approval_pending')
+    return jsonify({'templates': [
+        {'purpose': purpose, 'template_id': WX_SUBSCRIPTION_TEMPLATES[purpose]}
+        for purpose in purposes if WX_SUBSCRIPTION_TEMPLATES.get(purpose)
+    ]})
 
 
 @app.route('/api/mobile/my-today')
@@ -24560,6 +25059,14 @@ def api_vehicle_applications_create():
         try:
             _mobile_idempotency_store(db, idempotency_key, endpoint, response)
             _notify_vehicle_application_admins(db, row)
+            outbox_ids = _wx_queue_pending_approval(
+                db, 'vehicle_application', row['id'], 'pending',
+                _vehicle_application_admin_ids(db), applicant_id, '车辆申请',
+                reason or destination or f'车辆申请{row["id"]}', f'VEH-{row["id"]}',
+                row['created_at'] if 'created_at' in row.keys() and row['created_at'] else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                site_id=site_id, cycle_key=f'application:{row["id"]}',
+                page=_wx_page('/pages/review/view', target_type='vehicle_application',
+                              target_id=row['id'], cycle_key=f'application:{row["id"]}'))
             db.commit()
         except sqlite3.DatabaseError:
             db.rollback()
@@ -24631,6 +25138,15 @@ def api_rework_plan_resource_request(plan_id):
                 'SELECT * FROM vehicle_applications WHERE id=?', (cur.lastrowid,)
             ).fetchone()
             _notify_vehicle_application_admins(db, application)
+            outbox_ids = _wx_queue_pending_approval(
+                db, 'vehicle_application', application['id'], 'pending',
+                _vehicle_application_admin_ids(db), plan['assignee_id'], '车辆申请',
+                f'整改补检#{plan_id}用车', f'VEH-{application["id"]}',
+                application['created_at'] if 'created_at' in application.keys() and application['created_at'] else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                site_id=plan['site_id'] if 'site_id' in plan.keys() else None,
+                cycle_key=f'application:{application["id"]}',
+                page=_wx_page('/pages/review/view', target_type='vehicle_application',
+                              target_id=application['id'], cycle_key=f'application:{application["id"]}'))
             db.commit()
         except sqlite3.DatabaseError:
             db.rollback()
@@ -24708,6 +25224,19 @@ def api_vehicle_application_approve(app_id):
                 ('ready' if status == 'approved' else 'arrangement_required', app_row['rework_plan_id']))
         try:
             _archive_vehicle_application_notifications(db, app_id)
+            result_notice_id = _upsert_unread_notification(
+                db, app_row['applicant_id'], 'vehicle_application_result', app_id,
+                '车辆申请已通过' if status == 'approved' else '车辆申请被退回',
+                '请按安排用车' if status == 'approved' else (reject_reason or '请修改后重新申请'),
+                dedupe_key=f'vehicle_application_result:{app_id}:{status}')
+            result_id = _wx_queue_approval_result(
+                db, 'vehicle_application', app_id, status, app_row['applicant_id'],
+                '车辆申请', app_row['reason'] or app_row['destination'] or f'车辆申请{app_id}',
+                '已通过' if status == 'approved' else '已退回', now,
+                '请按安排用车' if status == 'approved' else (reject_reason or '请修改后重新申请'),
+                cycle_key=f'application:{app_id}',
+                page=_wx_page('/pages/vehicle/vehicle', application_id=app_id,
+                              source='approval_result', notification_id=result_notice_id))
             db.commit()
         except sqlite3.DatabaseError:
             db.rollback()
@@ -26444,10 +26973,11 @@ def require_reviewer():
 
 
 def _ps_record_event(db, schedule_id, version, event_type, operator_id, payload):
-    db.execute("""INSERT INTO plan_schedule_events
+    cursor = db.execute("""INSERT INTO plan_schedule_events
         (schedule_id, version, event_type, operator_id, payload) VALUES (?,?,?,?,?)""",
         (schedule_id, version, event_type, operator_id,
          json.dumps(payload or {}, ensure_ascii=False)))
+    return cursor.lastrowid
 
 
 def _ps_reserve_parts(db, schedule):
@@ -27027,7 +27557,9 @@ def _ps_auto_flow(db, schedule):
     # 3. 只记录计划需求，不占库；现场确认拿到实物时再扣库存。
     result['parts_planned'] = _ps_reserve_parts(db, schedule)
     # 4. 通知排程人
-    _create_notification(schedule['user_id'], 'plan_schedule', schedule['id'],
+    requester = _plan_schedule_requester(db, schedule['id'])
+    result_recipient_id = requester['operator_id'] if requester else schedule['user_id']
+    result['result_notification_id'] = _create_notification(result_recipient_id, 'plan_schedule', schedule['id'],
                          f'巡检计划已通过（{_PS_FREQ_CN.get(schedule["schedule_type"], "巡检")}）',
                          f'已生成{result["plans_created"]}个巡检任务，请按计划执行。', db=db)
     return result
@@ -27975,10 +28507,17 @@ def api_plan_schedules_submit(sid):
                     'notification_target': 'review', 'review_type': 'plan_schedule',
                 }, ensure_ascii=False, separators=(',', ':')),
             )
-        _ps_record_event(db, sid, row['version'],
-                         'change_submitted' if is_change else 'submitted', u['id'],
-                         {'validation': v, 'coverage_exception_reason': row['coverage_exception_reason'],
-                          'vehicle_exception_reason': vehicle_exception_reason})
+        submission_event_id = _ps_record_event(
+            db, sid, row['version'], 'change_submitted' if is_change else 'submitted', u['id'],
+            {'validation': v, 'coverage_exception_reason': row['coverage_exception_reason'],
+             'vehicle_exception_reason': vehicle_exception_reason})
+        outbox_ids = _wx_queue_pending_approval(
+            db, 'plan_schedule', sid, new_status, approver_ids,
+            u['id'], '巡检计划变更' if is_change else '巡检计划审批',
+            f'{_PS_FREQ_CN.get(row["schedule_type"], "巡检")}计划 {row["period_start"]}~{row["period_end"]}',
+            f'PLAN-{sid}', now, cycle_key=f'event:{submission_event_id}',
+            page=_wx_page('/pages/review/view', target_type='plan_schedule',
+                          target_id=sid, cycle_key=f'event:{submission_event_id}'))
         db.commit()
         return jsonify({'success': True, 'id': sid, 'status': new_status,
                         'version': expected_version, 'validation': v})
@@ -28173,7 +28712,9 @@ def api_plan_schedules_approve(sid):
                 return jsonify({'error': str(exc),
                                 'validation': validation,
                                 'code': 'PLAN_TASK_REBUILD_FAILED'}), 409
-            _create_notification(fresh['user_id'], 'plan_schedule', sid, '计划变更已通过',
+            requester = _plan_schedule_requester(db, sid)
+            result_recipient_id = requester['operator_id'] if requester else fresh['user_id']
+            result_notice_id = _create_notification(result_recipient_id, 'plan_schedule', sid, '计划变更已通过',
                                  f'变更原因：{fresh["change_reason"] or "—"}。任务已按新计划同步'
                                  f'（保留{flow["kept"]}个、重建{flow["plans_created"]}个）。', db=db)
             # 二次审批完成后清理临时回滚快照；完整变更事实已写入审计事件。
@@ -28201,6 +28742,17 @@ def api_plan_schedules_approve(sid):
                              {'is_change': is_change,
                               'coverage_exception_reason': fresh['coverage_exception_reason'],
                               'vehicle_exception_reason': fresh['vehicle_exception_reason'] or ''})
+            requester = _plan_schedule_requester(db, sid)
+            result_id = _wx_queue_approval_result(
+                db, 'plan_schedule', sid,
+                f'{"change_approved" if is_change else "approved"}:v{fresh["version"]}',
+                requester['operator_id'] if requester else None,
+                '巡检计划变更' if is_change else '巡检计划审批',
+                f'{_PS_FREQ_CN.get(fresh["schedule_type"], "巡检")}计划 {fresh["period_start"]}~{fresh["period_end"]}',
+                '已通过', now, '请按新计划执行' if is_change else '请按计划执行',
+                cycle_key=f'event:{requester["id"] if requester else 0}',
+                page=_wx_page('/pages/plan-detail/plan-detail', id=sid,
+                              notification_id=result_notice_id if is_change else flow.get('result_notification_id')))
             db.commit()
         except (ValueError, sqlite3.Error) as exc:
             db.rollback()
@@ -28264,14 +28816,32 @@ def api_plan_schedules_reject(sid):
                        previous_vehicle_exception_reason=NULL, change_reason=NULL
                 WHERE id=?
             """, (u['id'], reason, rollback_vehicle_id, sid))
-            _create_notification(row['user_id'], 'plan_schedule', sid, '计划变更被驳回',
+            requester = _plan_schedule_requester(db, sid)
+            result_recipient_id = requester['operator_id'] if requester else row['user_id']
+            result_notice_id = _create_notification(result_recipient_id, 'plan_schedule', sid, '计划变更被驳回',
                                  f'原因：{reason}。已恢复原计划，请继续按原计划执行。', db=db)
+            result_id = _wx_queue_approval_result(
+                db, 'plan_schedule', sid, f'change_rejected:v{row["version"]}',
+                requester['operator_id'] if requester else None, '巡检计划变更',
+                _wx_plan_project(row, sid),
+                '已退回', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '原计划继续有效；' + reason,
+                cycle_key=f'event:{requester["id"] if requester else 0}',
+                page=_wx_page('/pages/plan-detail/plan-detail', id=sid, notification_id=result_notice_id))
             db.commit()
             return jsonify({'success': True, 'id': sid, 'status': 'approved', 'rolled_back': True})
         db.execute("UPDATE plan_schedules SET status='rejected', approver_id=?, reject_reason=? WHERE id=?",
                    (u['id'], reason, sid))
-        _create_notification(row['user_id'], 'plan_schedule', sid, '巡检计划被退回',
+        requester = _plan_schedule_requester(db, sid)
+        result_recipient_id = requester['operator_id'] if requester else row['user_id']
+        result_notice_id = _create_notification(result_recipient_id, 'plan_schedule', sid, '巡检计划被退回',
                              f'原因：{reason}。请修改后重新提交。', db=db)
+        result_id = _wx_queue_approval_result(
+            db, 'plan_schedule', sid, f'rejected:v{row["version"]}',
+            requester['operator_id'] if requester else None, '巡检计划审批',
+            _wx_plan_project(row, sid),
+            '已退回', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), reason,
+            cycle_key=f'event:{requester["id"] if requester else 0}',
+            page=_wx_page('/pages/plan-detail/plan-detail', id=sid, notification_id=result_notice_id))
         db.commit()
         return jsonify({'success': True, 'id': sid, 'status': 'rejected'})
 
@@ -31494,6 +32064,10 @@ if __name__ == '__main__':
     notify_overdue_vehicle_arrangements_job()
     scheduler.add_job(notify_overdue_vehicle_arrangements_job, 'interval', hours=1,
                       id='vehicle_arrangement_expiry', replace_existing=True)
+    # 持久订阅消息意图在进程重启后继续投递；网络请求不占用业务写事务。
+    _wx_flush_outbox()
+    scheduler.add_job(_wx_flush_outbox, 'interval', minutes=1,
+                      id='wx_subscription_outbox', replace_existing=True)
 
     # ===== 可选: SL651 国家水站协议接收器 =====
     # 环境变量 ENABLE_SL651=1 时启动

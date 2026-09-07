@@ -39,6 +39,13 @@ class PartsRequestIssueTest(unittest.TestCase):
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, real_name TEXT, role TEXT);
+                CREATE TABLE user_roles (user_id INTEGER, role TEXT);
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
+                    source_id TEXT, title TEXT, content TEXT, is_read INTEGER DEFAULT 0,
+                    dedupe_key TEXT DEFAULT '', payload_json TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE work_orders (order_no TEXT PRIMARY KEY, site_id INTEGER);
@@ -89,8 +96,9 @@ class PartsRequestIssueTest(unittest.TestCase):
             ''')
             db.executemany('INSERT INTO users VALUES (?,?,?,?)', [
                 (9, 'operator', '现场人员', 'operator'), (8, 'other', '其他人员', 'operator'),
-                (2, 'manager', '主管', 'manager'),
+                (2, 'manager', '主管', 'manager'), (1, 'admin', '管理员', 'admin'),
             ])
+            db.execute("INSERT INTO user_roles VALUES (1,'admin')")
             db.execute("INSERT INTO sites VALUES (1, '测试站点')")
             db.execute("INSERT INTO work_orders VALUES ('WO-RELATED-001', 1)")
             db.executemany('INSERT INTO user_sites VALUES (?,?)', [(9, 1), (8, 1)])
@@ -125,8 +133,21 @@ class PartsRequestIssueTest(unittest.TestCase):
 
     def test_approval_does_not_lock_stock_and_only_onsite_issue_deducts(self):
         request_id = self.create_request(6)
+        pending = self.read_one("""SELECT recipient_user_id,cycle_key,page FROM wx_subscription_outbox
+            WHERE purpose='approval_pending' AND business_id=?""", (str(request_id),))
+        self.assertEqual((pending[0], pending[1]), (1, f'request:{request_id}'))
+        self.assertIn('target_type=parts_request', pending[2])
         approved = self.client.put(f'/api/parts/requests/{request_id}/approve', headers=self.headers('manager-token'))
         self.assertEqual(approved.status_code, 200)
+        result = self.read_one("""SELECT recipient_user_id,cycle_key,page,status,attempts FROM wx_subscription_outbox
+            WHERE purpose='approval_result' AND business_id=?""", (str(request_id),))
+        self.assertEqual((result[0], result[1]), (9, f'request:{request_id}'))
+        self.assertIn('/pages/message/message?notification_id=', result[2])
+        self.assertNotIn('/pages/review/view', result[2])
+        self.assertEqual((result[3], result[4]), ('pending', 0))
+        result_notice = self.read_one("""SELECT user_id,title FROM notifications
+            WHERE source_type='parts_request_result' AND source_id=?""", (request_id,))
+        self.assertEqual(result_notice[0], 9)
         self.assertEqual(self.read_one('SELECT quantity FROM spare_parts_inventory WHERE id=1')[0], 10)
         self.assertIsNone(self.read_one('SELECT reserved_quantity FROM parts_request_reservations WHERE request_id=?', (request_id,)))
 

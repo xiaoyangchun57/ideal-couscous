@@ -25,6 +25,8 @@ const api = {
   // 绑定微信 openid（wx.login 的 code → 服务端换取并落库，用于订阅消息）
   bindOpenId: (code) =>
     request('/api/mobile/bind-openid', 'POST', { code }, { retry: 1, queue: false }),
+  subscriptionTemplates: () =>
+    request('/api/mobile/subscription-templates', 'GET', {}, { retry: 1, queue: false }),
 
   // 今日聚合
   myToday: () => request('/api/mobile/my-today', 'GET'),
@@ -175,14 +177,18 @@ const api = {
     request('/api/alerts/' + id + '/acknowledge', 'POST', {}),
 
   // 通知
-  notifications: (page, status) =>
-    request('/api/notifications?page=' + (page || 1) + '&limit=50&status=' + (status || 'all'), 'GET'),
+  notifications: (page, status, notificationId) =>
+    request('/api/notifications?page=' + (page || 1) + '&limit=50&status=' + (status || 'all')
+      + (notificationId ? '&notification_id=' + encodeURIComponent(notificationId) : ''), 'GET'),
   unreadCount: () => request('/api/notifications/unread-count', 'GET'),
   readNotification: (id) => request('/api/notifications/' + id + '/read', 'PUT', {}),
   readAllNotifications: () => request('/api/notifications/read-all', 'PUT', {}),
 
   // 移动端审核（管理者/审批者；复用现有审核端点，token 需 admin/manager）
   auditPending: () => request('/api/audit/pending', 'GET'),
+  auditTargetStatus: (targetType, targetId, cycleKey) => request('/api/audit/target-status?target_type='
+    + encodeURIComponent(targetType) + '&target_id=' + encodeURIComponent(targetId)
+    + (cycleKey ? '&cycle_key=' + encodeURIComponent(cycleKey) : ''), 'GET'),
   dataReviewDetail: (id) => request('/api/data-reviews/' + id, 'GET'),
   reviewDataReview: (id, action, reason) =>
     request('/api/data-reviews/' + id + '/manual-review', 'POST', {

@@ -8,6 +8,7 @@ const toasts = [];
 const modals = [];
 const navigations = [];
 const subscriptions = [];
+const logins = [];
 let definition;
 
 global.getApp = () => app;
@@ -18,6 +19,7 @@ global.wx = {
   navigateTo(options) { navigations.push(options); },
   switchTab(options) { navigations.push(options); },
   requestSubscribeMessage(options) { subscriptions.push(options); },
+  login(options) { logins.push(options); },
   stopPullDownRefresh() {},
   reLaunch() {}
 };
@@ -60,11 +62,33 @@ function message(id, sourceType, sourceId, isRead) {
 const original = {
   readNotification: api.readNotification,
   readAllNotifications: api.readAllNotifications,
-  notifications: api.notifications
+  notifications: api.notifications,
+  subscriptionTemplates: api.subscriptionTemplates,
+  bindOpenId: api.bindOpenId
 };
 
 async function main() {
   try {
+    api.notifications = () => Promise.resolve({ notifications: [] });
+    let exactNotificationId = null;
+    let focusedReadCount = 0;
+    api.readNotification = () => { focusedReadCount += 1; return Promise.resolve({ success: true }); };
+    api.notifications = (page, status, notificationId) => {
+      exactNotificationId = notificationId || null;
+      return Promise.resolve({
+        notifications: notificationId
+          ? [message(notificationId, 'parts_request_result', '8', false)] : []
+      });
+    };
+    const focusedPage = pageInstance();
+    focusedPage.onLoad({ notification_id: '77' });
+    focusedPage.onShow();
+    await flush();
+    assert.equal(exactNotificationId, 77);
+    assert.equal(focusedPage.data.view, 'current');
+    assert.equal(focusedPage.data.list[0].id, 77);
+    await flush();
+    assert.equal(focusedReadCount, 1, 'a successfully loaded result message marks only itself read');
     api.notifications = () => Promise.resolve({ notifications: [] });
     let reads = 0;
     const read = deferred();
@@ -208,24 +232,83 @@ async function main() {
     assert.equal(app.globalData.selAlertId, null, 'hidden-page navigation failure still clears its own target');
     assert.notEqual(toasts.at(-1).title, '打开消息目标失败，请重试', 'hidden-page failure does not show a stale toast');
 
+    const alertTemplate = 'alert-template';
+    const resultTemplate = 'result-template';
+    api.subscriptionTemplates = () => Promise.resolve({ templates: [
+      { purpose: 'alert', template_id: alertTemplate },
+      { purpose: 'approval_result', template_id: resultTemplate }
+    ] });
+    api.bindOpenId = () => Promise.resolve({ success: true, bound: true });
     const subscribePage = pageInstance();
     subscribePage.onSubscribe();
     subscribePage.onSubscribe();
+    await flush();
     assert.equal(subscriptions.length, 1, 'subscription requests are also gated');
     assert.equal(toasts.at(-1).title, '正在处理，请稍候');
-    const templateIds = subscriptions.pop().tmplIds;
-    subscribePage._subscribing = false;
+    const request = subscriptions.pop();
+    assert.deepEqual(request.tmplIds, [alertTemplate, resultTemplate]);
+    request.success({ [alertTemplate]: 'accept', [resultTemplate]: 'reject' });
+    logins.pop().success({ code: 'wx-code' });
+    await flush();
+    assert.match(modals.at(-1).content, /已订阅：监测告警/);
+    assert.match(modals.at(-1).content, /未订阅：审批结果/);
+
     subscribePage.onSubscribe();
-    const accepted = subscriptions.pop();
-    accepted.success({ [templateIds[0]]: 'accept', [templateIds[1]]: 'reject' });
-    assert.equal(toasts.at(-1).title, '订阅成功');
+    await flush();
+    subscriptions.pop().success({ [alertTemplate]: 'reject', [resultTemplate]: 'ban' });
+    assert.match(modals.at(-1).content, /小程序设置/);
+    assert.match(modals.at(-1).content, /监测告警、审批结果/);
+
+    api.subscriptionTemplates = () => Promise.resolve({ templates: [
+      { purpose: 'alert', template_id: alertTemplate },
+      { purpose: 'approval_pending', template_id: 'pending-template' },
+      { purpose: 'approval_result', template_id: resultTemplate }
+    ] });
+    api.bindOpenId = () => Promise.resolve({ success: true, bound: true });
     subscribePage.onSubscribe();
-    const rejected = subscriptions.pop();
-    rejected.success({ [templateIds[0]]: 'reject', [templateIds[1]]: 'ban' });
-    assert.equal(modals.at(-1).content, '可在小程序设置中重新开启消息通知');
+    await flush();
+    const allAccepted = subscriptions.pop();
+    allAccepted.success({ [alertTemplate]: 'accept', 'pending-template': 'accept', [resultTemplate]: 'accept' });
+    logins.pop().success({ code: 'wx-code-all' });
+    await flush();
+    assert.match(modals.at(-1).content, /已完成本次授权/);
+    assert.match(modals.at(-1).content, /监测告警、待审批、审批结果/);
+
     subscribePage.onSubscribe();
+    await flush();
     subscriptions.pop().fail({ errMsg: 'cancel' });
     assert.equal(toasts.at(-1).title, '暂时无法订阅消息，请稍后重试');
+
+    api.subscriptionTemplates = () => Promise.resolve({ templates: [] });
+    subscribePage.onSubscribe();
+    await flush();
+    assert.equal(toasts.at(-1).title, '订阅配置加载失败，请重试');
+
+    api.subscriptionTemplates = () => Promise.resolve({ templates: [
+      { purpose: 'alert', template_id: alertTemplate }
+    ] });
+    api.bindOpenId = () => Promise.resolve({ success: true, bound: false, warn: '绑定未完成' });
+    subscribePage.onSubscribe();
+    await flush();
+    subscriptions.pop().success({ [alertTemplate]: 'accept' });
+    logins.pop().success({ code: 'wx-code-2' });
+    await flush();
+    assert.equal(toasts.at(-1).title, '绑定未完成');
+
+    subscribePage.onSubscribe();
+    await flush();
+    subscriptions.pop().success({ [alertTemplate]: 'accept' });
+    logins.pop().fail({ errMsg: 'login fail' });
+    assert.equal(toasts.at(-1).title, '微信账号绑定失败，请重试');
+
+    const hiddenSubscribePage = pageInstance();
+    hiddenSubscribePage.onSubscribe();
+    await flush();
+    const hiddenRequest = subscriptions.pop();
+    const loginCount = logins.length;
+    hiddenSubscribePage.onHide();
+    hiddenRequest.success({ [alertTemplate]: 'accept' });
+    assert.equal(logins.length, loginCount, 'an unloaded page never starts openid binding');
     assert.doesNotMatch(JSON.stringify(toasts.concat(modals)), /message\.js|SUBSCRIBE_TMPL|公众平台|模板 ID/);
 
     console.log('messageConnection tests passed');
