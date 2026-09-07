@@ -17,6 +17,7 @@ import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
 import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
+import { finishWechatBindingUnbind } from './wechatBindingActions';
 
 const { Text } = Typography;
 
@@ -30,7 +31,7 @@ const roleMap = {
 export default function UsersPage() {
   const { message, modal } = App.useApp();
   const { tokens } = useTheme();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, logout } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [form] = Form.useForm();
 
@@ -273,6 +274,49 @@ export default function UsersPage() {
     });
   };
 
+  const handleUnbindWechat = (record) => {
+    let reason = '';
+    modal.confirm({
+      title: `解除“${record.real_name}”的微信绑定？`,
+      content: (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Text>解除后该账号的现有会话会立即失效；本人需在订阅消息时重新显式绑定微信。</Text>
+          <Input.TextArea
+            placeholder="请填写解除原因"
+            maxLength={500}
+            showCount
+            onChange={(event) => { reason = event.target.value; }}
+          />
+        </Space>
+      ),
+      okText: '确认解除绑定',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        const trimmedReason = reason.trim();
+        if (!trimmedReason) {
+          message.error('请填写解除微信绑定原因');
+          throw new Error('unbind reason required');
+        }
+        try {
+          const result = await api.deleteStrict(`/users/${record.id}/wechat-binding`, { reason: trimmedReason });
+          message.success(`“${record.real_name}”的微信绑定已解除`);
+          const isCurrentUser = Number(record.id) === Number(currentUser?.id)
+            && result?.current_session_revoked === true;
+          await finishWechatBindingUnbind({
+            isCurrentUser,
+            logout,
+            redirectToLogin: () => window.location.replace('/login'),
+            refreshUsers: fetchUsers,
+          });
+        } catch (error) {
+          message.error(error.message || '解除微信绑定失败，请重试');
+          throw error;
+        }
+      },
+    });
+  };
+
   const columns = [
     {
       title: '登录名',
@@ -350,6 +394,13 @@ export default function UsersPage() {
       },
     },
     {
+      title: '微信绑定',
+      dataIndex: 'wechat_bound',
+      key: 'wechat_bound',
+      width: 100,
+      render: (bound) => bound ? <Badge status="success" text="已绑定" /> : <Text type="secondary">未绑定</Text>,
+    },
+    {
       title: '操作',
       key: 'actions',
       width: 150,
@@ -360,6 +411,9 @@ export default function UsersPage() {
         const menuItems = [
           { key: 'set-password', icon: <LockOutlined />, label: '设置自定义密码' },
           { key: 'reset', icon: <LockOutlined />, label: '重置密码' },
+          ...(record.wechat_bound ? [
+            { key: 'unbind-wechat', icon: <SafetyOutlined />, label: '解除微信绑定', danger: true },
+          ] : []),
           {
             key: 'status',
             icon: record.status === 'active' ? <StopOutlined /> : <PlayCircleOutlined />,
@@ -372,6 +426,7 @@ export default function UsersPage() {
         const handleMenu = ({ key }) => {
           if (key === 'set-password') handleSetPassword(record);
           if (key === 'reset') handleResetPassword(record);
+          if (key === 'unbind-wechat') handleUnbindWechat(record);
           if (key === 'status') handleToggleStatus(record);
           if (key === 'delete') handleDelete(record);
         };

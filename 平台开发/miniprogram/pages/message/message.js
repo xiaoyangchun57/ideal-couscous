@@ -17,6 +17,31 @@ const SUBSCRIPTION_LABELS = {
   approval_result: '审批结果'
 };
 
+function subscribeFailureFeedback(error) {
+  const rawCode = error && (error.errCode !== undefined ? error.errCode : error.err_code);
+  const errCode = rawCode === undefined || rawCode === null ? '' : String(rawCode);
+  const errMsg = String(error && (error.errMsg || error.err_msg || error.message) || '').toLowerCase();
+  const known = {
+    10002: ['WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
+    10003: ['WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
+    10004: ['TEMPLATE_INVALID', '订阅模板无效，请联系管理员核对配置'],
+    10005: ['SUBSCRIBE_UI_UNAVAILABLE', '当前无法展示订阅界面，请返回小程序前台后重试'],
+    20001: ['TEMPLATE_DATA_MISSING', '订阅模板数据不可用，请联系管理员核对配置'],
+    20002: ['TEMPLATE_TYPE_MISMATCH', '订阅模板类型不匹配，请联系管理员核对配置'],
+    20003: ['TEMPLATE_UNAVAILABLE', '订阅配置暂不可用，请稍后重试'],
+    20004: ['MESSAGE_SWITCH_DISABLED', '微信消息通知总开关已关闭，请在微信设置中开启后重试'],
+    20005: ['TEMPLATE_UNAVAILABLE', '订阅配置暂不可用，请稍后重试'],
+    20013: ['TEMPLATE_SUBSCRIBE_NOT_ALLOWED', '当前订阅模板不支持此订阅方式，请联系管理员核对配置']
+  };
+  if (known[errCode]) {
+    return { category: known[errCode][0], errCode, message: known[errCode][1] };
+  }
+  if (/network|timeout|service/.test(errMsg)) {
+    return { category: 'WECHAT_UNAVAILABLE', errCode, message: '微信订阅服务暂不可用，请稍后重试' };
+  }
+  return { category: 'UNKNOWN', errCode, message: '订阅失败，请重试' };
+}
+
 function decorate(n) {
   return {
     id: n.id,
@@ -372,9 +397,12 @@ Page({
                         showCancel: false });
                     }
                   })
-                  .catch(() => {
+                  .catch(error => {
                     finish();
-                    if (this._isActiveView(viewEpoch)) wx.showToast({ title: '微信账号绑定失败，请重试', icon: 'none' });
+                    const message = error && (error.error || error.warn);
+                    if (this._isActiveView(viewEpoch)) wx.showToast({
+                      title: message || '微信账号绑定失败，请重试', icon: 'none'
+                    });
                   });
               },
               fail: () => {
@@ -383,9 +411,12 @@ Page({
               }
             });
           },
-          fail: () => {
+          fail: error => {
             finish();
-            if (this._isActiveView(viewEpoch)) wx.showToast({ title: '暂时无法订阅消息，请稍后重试', icon: 'none' });
+            const feedback = subscribeFailureFeedback(error);
+            this._lastSubscribeFailure = feedback;
+            console.warn('[subscription]', feedback.category, feedback.errCode || 'NO_CODE');
+            if (this._isActiveView(viewEpoch)) wx.showToast({ title: feedback.message, icon: 'none' });
           }
         });
       })

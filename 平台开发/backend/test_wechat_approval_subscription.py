@@ -43,7 +43,7 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
             db.executescript('''
                 CREATE TABLE users (
                     id INTEGER PRIMARY KEY, real_name TEXT, role TEXT,
-                    status TEXT, openid TEXT
+                    status TEXT, openid TEXT, auth_version INTEGER DEFAULT 1
                 );
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
@@ -65,15 +65,33 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
                     order_no TEXT PRIMARY KEY, status TEXT, review_cycle INTEGER DEFAULT 0,
                     site_id INTEGER, remark TEXT DEFAULT ''
                 );
+                CREATE TABLE auth_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT, user_id INTEGER,
+                    auth_version INTEGER, issued_at TEXT, expires_at TEXT,
+                    revoked_at TEXT, revoke_reason TEXT, last_seen_at TEXT
+                );
+                CREATE TABLE operation_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT, action TEXT,
+                    target_type TEXT, target_id INTEGER, operator TEXT, operator_id INTEGER,
+                    details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
                 INSERT INTO users VALUES
-                    (1,'管理员','operator','active','openid-admin'),
-                    (2,'申请人','operator','active','openid-applicant'),
-                    (3,'审核员','reviewer','active','openid-reviewer'),
-                    (4,'停用管理员','admin','inactive','openid-inactive');
+                    (1,'管理员','operator','active','openid-admin',1),
+                    (2,'申请人','operator','active','openid-applicant',1),
+                    (3,'审核员','reviewer','active','openid-reviewer',1),
+                    (4,'停用管理员','admin','inactive','openid-inactive',1);
                 INSERT INTO user_roles VALUES
                     (1,'admin'),(1,'operator'),(2,'operator'),(3,'reviewer'),(4,'admin');
                 INSERT INTO user_sites VALUES (3,10);
             ''')
+            db.executemany("""INSERT INTO auth_sessions
+                (token_hash,user_id,auth_version,issued_at,expires_at,last_seen_at)
+                VALUES (?,?,?,?,?,?)""", [
+                (app_module._hash_token('admin'), 1, 1, '2026-09-07 00:00:00', '2099-01-01 00:00:00', '2026-09-07 00:00:00'),
+                (app_module._hash_token('operator'), 2, 1, '2026-09-07 00:00:00', '2099-01-01 00:00:00', '2026-09-07 00:00:00'),
+                (app_module._hash_token('reviewer'), 3, 1, '2026-09-07 00:00:00', '2099-01-01 00:00:00', '2026-09-07 00:00:00'),
+            ])
+            db.commit()
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -355,6 +373,114 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
         self.assertFalse(response.json['bound'])
         self.assertNotIn('openid-applicant', json.dumps(response.json))
 
+    def test_openid_binding_is_first_bind_or_idempotent_never_an_overwrite(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET openid='' WHERE id=2")
+            db.commit()
+        with mock.patch.object(app_module, '_wx_code2openid', return_value='openid-new'):
+            first = self.client.post('/api/mobile/bind-openid', headers=self.headers('operator'), json={'code': 'first'})
+            repeated = self.client.post('/api/mobile/bind-openid', headers=self.headers('operator'), json={'code': 'same'})
+            with app_module.get_db() as db:
+                after_same = db.execute('SELECT openid FROM users WHERE id=2').fetchone()['openid']
+        with mock.patch.object(app_module, '_wx_code2openid', return_value='openid-other'):
+            conflict_account = self.client.post('/api/mobile/bind-openid', headers=self.headers('operator'), json={'code': 'other'})
+        self.assertEqual((first.status_code, repeated.status_code, conflict_account.status_code), (200, 200, 409))
+        self.assertTrue(first.json['bound'])
+        self.assertTrue(repeated.json['idempotent'])
+        self.assertEqual(after_same, 'openid-new')
+        self.assertEqual(conflict_account.json['code'], 'ACCOUNT_OPENID_CONFLICT')
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET openid='' WHERE id=2")
+            db.execute("UPDATE users SET openid='openid-owned' WHERE id=1")
+            db.commit()
+        with mock.patch.object(app_module, '_wx_code2openid', return_value='openid-owned'):
+            conflict_openid = self.client.post('/api/mobile/bind-openid', headers=self.headers('operator'), json={'code': 'owned'})
+        with app_module.get_db() as db:
+            current = db.execute('SELECT openid FROM users WHERE id=2').fetchone()['openid']
+        self.assertEqual(conflict_openid.status_code, 409)
+        self.assertEqual(conflict_openid.json['code'], 'OPENID_ACCOUNT_CONFLICT')
+        self.assertEqual(current, '')
+        self.assertNotIn('openid-owned', json.dumps(conflict_openid.json))
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET openid='openid-duplicate' WHERE id IN (1,2)")
+            db.commit()
+        with mock.patch.object(app_module, '_wx_code2openid', return_value='openid-duplicate'):
+            duplicate = self.client.post('/api/mobile/bind-openid', headers=self.headers('operator'), json={'code': 'duplicate'})
+        with app_module.get_db() as db:
+            owners = db.execute("SELECT id FROM users WHERE openid='openid-duplicate' ORDER BY id").fetchall()
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(duplicate.json['code'], 'OPENID_ACCOUNT_CONFLICT')
+        self.assertEqual([row['id'] for row in owners], [1, 2])
+
+    def test_admin_unbinds_wechat_with_audit_and_session_revocation(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET auth_version=7,openid='openid-target' WHERE id=2")
+            db.execute("INSERT INTO auth_sessions (token_hash,user_id) VALUES ('session-target',2)")
+            db.commit()
+        success = self.client.delete('/api/users/2/wechat-binding', headers=self.headers('admin'), json={
+            'reason': '体验账号审核完成，按流程回收绑定'
+        })
+        self.assertEqual(success.status_code, 200, success.json)
+        with app_module.get_db() as db:
+            user = db.execute('SELECT openid,auth_version FROM users WHERE id=2').fetchone()
+            session = db.execute('SELECT revoked_at,revoke_reason FROM auth_sessions WHERE user_id=2').fetchone()
+            audit = db.execute('SELECT action,target_id,operator_id,details FROM operation_logs ORDER BY id DESC LIMIT 1').fetchone()
+        self.assertEqual((user['openid'], user['auth_version']), ('', 8))
+        self.assertEqual(session['revoke_reason'], 'wechat_binding_removed')
+        self.assertIsNotNone(session['revoked_at'])
+        self.assertEqual((audit['action'], audit['target_id'], audit['operator_id']),
+                         ('wechat_binding_removed', 2, 1))
+        self.assertIn('体验账号审核完成', audit['details'])
+        self.assertNotIn('openid-target', audit['details'])
+
+        repeated = self.client.delete('/api/users/2/wechat-binding', headers=self.headers('admin'), json={'reason': '重复操作'})
+        forbidden = self.client.delete('/api/users/1/wechat-binding', headers=self.headers('reviewer'), json={'reason': '越权'})
+        missing = self.client.delete('/api/users/999/wechat-binding', headers=self.headers('admin'), json={'reason': '不存在'})
+        empty = self.client.delete('/api/users/1/wechat-binding', headers=self.headers('admin'), json={'reason': ' '})
+        long_reason = self.client.delete('/api/users/1/wechat-binding', headers=self.headers('admin'), json={'reason': 'x' * 501})
+        self.assertEqual((repeated.status_code, forbidden.status_code, missing.status_code, empty.status_code, long_reason.status_code),
+                         (409, 403, 404, 400, 400))
+
+    def test_current_admin_unbind_returns_revoked_marker_and_invalidates_its_token(self):
+        response = self.client.delete('/api/users/1/wechat-binding', headers=self.headers('admin'), json={
+            'reason': '管理员主动更换绑定微信'
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['current_session_revoked'])
+        with app_module.get_db() as db:
+            user = db.execute('SELECT openid,auth_version FROM users WHERE id=1').fetchone()
+            session = db.execute('SELECT revoked_at,revoke_reason FROM auth_sessions WHERE user_id=1').fetchone()
+        self.assertEqual((user['openid'], user['auth_version']), ('', 2))
+        self.assertEqual(session['revoke_reason'], 'wechat_binding_removed')
+        self.assertIsNotNone(session['revoked_at'])
+        current_session = self.client.get('/api/auth/me', headers=self.headers('admin'))
+        self.assertEqual(current_session.status_code, 401, current_session.json)
+
+    def test_unbind_stale_and_database_failures_leave_everything_unchanged(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET openid='openid-stale' WHERE id=2")
+            db.execute("""CREATE TRIGGER ignore_unbind BEFORE UPDATE OF openid ON users
+                WHEN OLD.id=2 AND NEW.openid='' BEGIN SELECT RAISE(IGNORE); END""")
+            db.commit()
+        stale = self.client.delete('/api/users/2/wechat-binding', headers=self.headers('admin'), json={'reason': '并发变化'})
+        self.assertEqual((stale.status_code, stale.json['code']), (409, 'WECHAT_BINDING_STALE'))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT openid FROM users WHERE id=2').fetchone()['openid'], 'openid-stale')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_logs').fetchone()[0], 0)
+
+        with app_module.get_db() as db:
+            db.execute('DROP TRIGGER ignore_unbind')
+            db.execute("""CREATE TRIGGER fail_unbind BEFORE UPDATE OF openid ON users
+                WHEN OLD.id=2 AND NEW.openid='' BEGIN SELECT RAISE(ABORT, 'forced unbind failure'); END""")
+            db.commit()
+        failed = self.client.delete('/api/users/2/wechat-binding', headers=self.headers('admin'), json={'reason': '数据库失败'})
+        self.assertEqual(failed.status_code, 503, failed.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT openid FROM users WHERE id=2').fetchone()['openid'], 'openid-stale')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_logs').fetchone()[0], 0)
+
     def test_template_roles_come_from_current_database_and_token_expiry_is_retryable(self):
         with app_module.get_db() as db:
             db.execute("DELETE FROM user_roles WHERE user_id=1 AND role='admin'")
@@ -376,6 +502,57 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
                 '/pages/review/view?target_type=vehicle_application&target_id=1')
         self.assertEqual(result['status'], 'temporary_failure')
         self.assertEqual(app_module._WX_TOKEN_CACHE, {'token': '', 'expire_at': 0})
+
+    def test_miniprogram_state_accepts_only_supported_values_and_reaches_send_payload(self):
+        self.assertEqual(app_module._resolve_miniprogram_state('developer'), 'developer')
+        self.assertEqual(app_module._resolve_miniprogram_state('trial'), 'trial')
+        self.assertEqual(app_module._resolve_miniprogram_state('formal'), 'formal')
+        self.assertIn(app_module._resolve_miniprogram_state('unsupported'), ('developer', 'formal'))
+        captured = {}
+        fake_response = mock.MagicMock()
+        fake_response.__enter__.return_value.read.return_value = b'{"errcode":0}'
+        def capture(request, timeout=10):
+            captured['payload'] = json.loads(request.data.decode('utf-8'))
+            return fake_response
+        with (mock.patch.object(app_module, 'WX_APPSECRET', 'test-secret'),
+              mock.patch.object(app_module, 'WX_MINIPROGRAM_STATE', 'trial'),
+              mock.patch.object(app_module, '_wx_get_access_token', return_value='token'),
+              mock.patch('urllib.request.urlopen', side_effect=capture)):
+            sent = app_module._wx_send_subscribe_result(
+                'openid-applicant', app_module.WX_TMPL_APPROVAL_RESULT,
+                app_module._wx_result_data('车辆申请', '测试', '已通过', '2026-09-07 10:00:00', '请按安排用车'),
+                '/pages/vehicle/vehicle?application_id=1')
+        self.assertTrue(sent['ok'])
+        self.assertEqual(captured['payload']['miniprogram_state'], 'trial')
+
+    def test_send_result_classifies_wechat_and_configuration_failures(self):
+        payload = app_module._wx_result_data('车辆申请', '测试', '已通过', '2026-09-07 10:00:00', '请按安排用车')
+        self.assertEqual(app_module._resolve_miniprogram_state('invalid'), 'developer')
+        with mock.patch.object(app_module, 'APP_RUNTIME_PROFILE', 'production'):
+            self.assertEqual(app_module._resolve_miniprogram_state('invalid'), 'formal')
+        cases = [
+            (0, 'sent', True),
+            (43101, 'no_authorization', True),
+            (40003, 'permanent_failure', True),
+            (42001, 'temporary_failure', False),
+        ]
+        for errcode, status, permanent in cases:
+            with self.subTest(errcode=errcode):
+                response = mock.MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps({'errcode': errcode}).encode()
+                with (mock.patch.object(app_module, 'WX_APPSECRET', 'test-secret'),
+                      mock.patch.object(app_module, '_wx_get_access_token', return_value='token'),
+                      mock.patch('urllib.request.urlopen', return_value=response)):
+                    result = app_module._wx_send_subscribe_result('openid-applicant', 'template', payload, '/pages/message/message')
+                self.assertEqual((result['status'], result['permanent']), (status, permanent))
+        with mock.patch.object(app_module, 'WX_APPSECRET', ''):
+            self.assertEqual(app_module._wx_send_subscribe_result('openid-applicant', 'template', payload)['status'],
+                             'config_missing')
+        with (mock.patch.object(app_module, 'WX_APPSECRET', 'test-secret'),
+              mock.patch.object(app_module, '_wx_get_access_token', return_value='token'),
+              mock.patch('urllib.request.urlopen', side_effect=OSError('offline'))):
+            self.assertEqual(app_module._wx_send_subscribe_result('openid-applicant', 'template', payload)['status'],
+                             'temporary_failure')
 
     def test_invalid_page_target_never_creates_or_sends_an_intent(self):
         with app_module.get_db() as db:

@@ -274,10 +274,32 @@ async function main() {
     assert.match(modals.at(-1).content, /已完成本次授权/);
     assert.match(modals.at(-1).content, /监测告警、待审批、审批结果/);
 
+    const failureCases = [
+      [10002, 'WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
+      [10003, 'WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
+      [10004, 'TEMPLATE_INVALID', '订阅模板无效，请联系管理员核对配置'],
+      [10005, 'SUBSCRIBE_UI_UNAVAILABLE', '当前无法展示订阅界面，请返回小程序前台后重试'],
+      [20001, 'TEMPLATE_DATA_MISSING', '订阅模板数据不可用，请联系管理员核对配置'],
+      [20002, 'TEMPLATE_TYPE_MISMATCH', '订阅模板类型不匹配，请联系管理员核对配置'],
+      [20003, 'TEMPLATE_UNAVAILABLE', '订阅配置暂不可用，请稍后重试'],
+      [20004, 'MESSAGE_SWITCH_DISABLED', '微信消息通知总开关已关闭，请在微信设置中开启后重试'],
+      [20005, 'TEMPLATE_UNAVAILABLE', '订阅配置暂不可用，请稍后重试'],
+      [20013, 'TEMPLATE_SUBSCRIBE_NOT_ALLOWED', '当前订阅模板不支持此订阅方式，请联系管理员核对配置']
+    ];
+    for (const [errCode, category, title] of failureCases) {
+      subscribePage.onSubscribe();
+      await flush();
+      subscriptions.pop().fail({ errCode, errMsg: 'wechat failure' });
+      assert.equal(toasts.at(-1).title, title);
+      assert.equal(subscribePage._lastSubscribeFailure.category, category);
+      assert.equal(subscribePage._lastSubscribeFailure.errCode, String(errCode));
+    }
+
     subscribePage.onSubscribe();
     await flush();
-    subscriptions.pop().fail({ errMsg: 'cancel' });
-    assert.equal(toasts.at(-1).title, '暂时无法订阅消息，请稍后重试');
+    subscriptions.pop().fail({ errCode: 99999, errMsg: 'unexpected' });
+    assert.equal(toasts.at(-1).title, '订阅失败，请重试');
+    assert.equal(subscribePage._lastSubscribeFailure.errCode, '99999');
 
     api.subscriptionTemplates = () => Promise.resolve({ templates: [] });
     subscribePage.onSubscribe();
@@ -294,6 +316,17 @@ async function main() {
     logins.pop().success({ code: 'wx-code-2' });
     await flush();
     assert.equal(toasts.at(-1).title, '绑定未完成');
+
+    api.bindOpenId = () => Promise.reject({
+      code: 'ACCOUNT_OPENID_CONFLICT',
+      error: '业务账号已绑定其他微信，请使用已绑定微信或联系管理员处理'
+    });
+    subscribePage.onSubscribe();
+    await flush();
+    subscriptions.pop().success({ [alertTemplate]: 'accept' });
+    logins.pop().success({ code: 'wx-code-conflict' });
+    await flush();
+    assert.equal(toasts.at(-1).title, '业务账号已绑定其他微信，请使用已绑定微信或联系管理员处理');
 
     subscribePage.onSubscribe();
     await flush();

@@ -9,6 +9,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       APP_RUNTIME_PROFILE: "production"
+      MINIPROGRAM_STATE: ${MINIPROGRAM_STATE:-formal}
       WX_APPSECRET: ${WX_APPSECRET:-}
       ENABLE_DEMO_SEED: "0"
       SKIP_BACKFILL: "1"

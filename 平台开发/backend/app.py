@@ -151,6 +151,16 @@ def _resolve_runtime_profile(raw_value):
 
 
 APP_RUNTIME_PROFILE = _resolve_runtime_profile(os.environ.get('APP_RUNTIME_PROFILE'))
+
+
+def _resolve_miniprogram_state(raw_value):
+    normalized = str(raw_value or '').strip().lower()
+    if normalized in ('developer', 'trial', 'formal'):
+        return normalized
+    return 'formal' if APP_RUNTIME_PROFILE == 'production' else 'developer'
+
+
+WX_MINIPROGRAM_STATE = _resolve_miniprogram_state(os.environ.get('MINIPROGRAM_STATE'))
 with open(__file__, 'rb') as _source_file:
     BACKEND_SOURCE_FINGERPRINT = hashlib.sha256(_source_file.read()).hexdigest()
 
@@ -4279,6 +4289,7 @@ def _wx_send_subscribe_result(openid, template_id, data, page=''):
         url = 'https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=%s' % token
         request_body = _json.dumps({
             'touser': openid, 'template_id': template_id, 'data': data, 'page': page,
+            'miniprogram_state': WX_MINIPROGRAM_STATE,
         }).encode('utf-8')
         req = urllib.request.Request(url, data=request_body,
                                     headers={'Content-Type': 'application/json'})
@@ -18311,6 +18322,7 @@ def api_users():
         if 'deleted_at' not in {row['name'] for row in db.execute('PRAGMA table_info(users)').fetchall()}:
             db.execute('ALTER TABLE users ADD COLUMN deleted_at TEXT')
         sql = '''SELECT u.id, u.username, u.login_name, u.role, u.real_name, u.phone, u.status, u.deleted_at, u.created_at,
+                        CASE WHEN TRIM(COALESCE(u.openid,''))<>'' THEN 1 ELSE 0 END AS wechat_bound,
                         GROUP_CONCAT(DISTINCT s.name) AS site_names, GROUP_CONCAT(DISTINCT s.id) AS site_ids,
                         GROUP_CONCAT(DISTINCT ur.role) AS roles
                  FROM users u LEFT JOIN user_sites us ON us.user_id=u.id LEFT JOIN sites s ON s.id=us.site_id WHERE 1=1'''
@@ -18327,6 +18339,61 @@ def api_users():
               'site_ids': [int(x) for x in (r['site_ids'] or '').split(',') if x],
               'sites': [x for x in (r['site_names'] or '').split(',') if x]} for r in rows]
     return jsonify(users)
+
+
+@app.route('/api/users/<int:uid>/wechat-binding', methods=['DELETE'])
+@login_required
+def api_unbind_user_wechat(uid):
+    """管理员显式解除一个业务账号的微信绑定，不删除任何业务或消息历史。"""
+    denied = require_admin()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '').strip()
+    if not reason:
+        return jsonify({'error': '请填写解除微信绑定原因'}), 400
+    if len(reason) > 500:
+        return jsonify({'error': '解除微信绑定原因不能超过500字'}), 400
+    try:
+        with get_db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not _table_exists(db, 'operation_logs'):
+                db.rollback()
+                return jsonify({'error': '解绑审计暂不可用，请稍后重试'}), 503
+            has_auth_version = _table_has_column(db, 'users', 'auth_version')
+            user = db.execute(
+                'SELECT id,real_name,openid,auth_version FROM users WHERE id=?' if has_auth_version
+                else 'SELECT id,real_name,openid,1 AS auth_version FROM users WHERE id=?',
+                (uid,)).fetchone()
+            if not user:
+                db.rollback()
+                return jsonify({'error': '用户不存在'}), 404
+            bound_openid = str(user['openid'] or '').strip()
+            if not bound_openid:
+                db.rollback()
+                return jsonify({'error': '该用户尚未绑定微信', 'code': 'WECHAT_NOT_BOUND'}), 409
+            changed = db.execute("""UPDATE users SET openid='' WHERE id=? AND openid=?""",
+                                 (uid, bound_openid))
+            if changed.rowcount != 1:
+                db.rollback()
+                return jsonify({'error': '微信绑定状态已变化，请刷新后重试',
+                                'code': 'WECHAT_BINDING_STALE'}), 409
+            _revoke_user_sessions(db, uid, 'wechat_binding_removed', increment_auth_version=True)
+            db.execute("""INSERT INTO operation_logs
+                (module,action,target_type,target_id,operator,operator_id,details)
+                VALUES ('user','wechat_binding_removed','user',?,?,?,?)""",
+                (uid, _current_actor_name(), g.current_user.get('id') or 0,
+                 json.dumps({'reason': reason, 'wechat_bound': False}, ensure_ascii=False)))
+            db.commit()
+        _clear_user_site_cache(uid)
+        return jsonify({
+            'success': True,
+            'id': uid,
+            'wechat_bound': False,
+            'current_session_revoked': uid == g.current_user.get('id'),
+        })
+    except sqlite3.DatabaseError:
+        return jsonify({'error': '解除微信绑定暂未完成，请稍后重试'}), 503
 
 
 @app.route('/api/users', methods=['POST'])
@@ -20503,7 +20570,43 @@ def mobile_bind_openid():
                         'warn': '微信账号绑定未完成，请检查网络后重试'})
     try:
         with get_db() as db:
-            db.execute("UPDATE users SET openid=? WHERE id=?", (openid, g.current_user['id']))
+            db.execute('BEGIN IMMEDIATE')
+            has_status = _table_has_column(db, 'users', 'status')
+            user = db.execute(
+                'SELECT id,openid,status FROM users WHERE id=?' if has_status
+                else "SELECT id,openid,'active' AS status FROM users WHERE id=?",
+                (g.current_user['id'],)).fetchone()
+            if not user or user['status'] != 'active':
+                db.rollback()
+                return jsonify({'success': False, 'bound': False,
+                                'error': '当前业务账号不可绑定微信'}), 403
+            existing = str(user['openid'] or '').strip()
+            owner_status = " AND status='active'" if has_status else ''
+            owners = db.execute("""SELECT id FROM users
+                WHERE openid=?""" + owner_status + ' ORDER BY id', (openid,)).fetchall()
+            if existing:
+                if existing == openid and [row['id'] for row in owners] == [user['id']]:
+                    db.commit()
+                    return jsonify({'success': True, 'bound': True, 'idempotent': True})
+                db.rollback()
+                if existing == openid:
+                    return jsonify({'success': False, 'bound': False,
+                                    'code': 'OPENID_ACCOUNT_CONFLICT',
+                                    'error': '当前微信已绑定其他业务账号，请切换微信后重试'}), 409
+                return jsonify({'success': False, 'bound': False,
+                                'code': 'ACCOUNT_OPENID_CONFLICT',
+                                'error': '业务账号已绑定其他微信，请使用已绑定微信或联系管理员处理'}), 409
+            if owners:
+                db.rollback()
+                return jsonify({'success': False, 'bound': False,
+                                'code': 'OPENID_ACCOUNT_CONFLICT',
+                                'error': '当前微信已绑定其他业务账号，请切换微信后重试'}), 409
+            db.execute('UPDATE users SET openid=? WHERE id=? AND COALESCE(openid,\'\')=\'\'',
+                       (openid, user['id']))
+            if db.execute('SELECT changes()').fetchone()[0] != 1:
+                db.rollback()
+                return jsonify({'success': False, 'bound': False,
+                                'error': '微信账号绑定状态已变化，请重试'}), 409
             db.commit()
         return jsonify({'success': True, 'bound': True})
     except Exception:

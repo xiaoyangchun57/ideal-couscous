@@ -1,3 +1,31 @@
+# r13 frozen candidate gate (2026-09-07)
+
+Target candidate tag: `release-20260907-cross-module-freeze-r13`
+
+r13 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r12 are immutable historical tags and remain rejected. The candidate contains the post-r12 WeChat binding recovery: explicit subscription diagnostics and deployment state, conflict-safe first binding, no launch-time binding overwrite, administrator binding status and explicit unbinding, audited reason, session revocation, and current-administrator logout after self-unbinding. All automated checks used isolated databases, temporary uploads and test configuration; no fixed service, real WeChat API or real business data was used.
+
+## r13 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 527/527 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across all current `*.test.js` files | 0 |
+| Combined syntax gate | 165 JavaScript/Python files passed | 0 |
+| React Node tests | 95/95 passed across all current `src/**/*.test.js` files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1747 modules transformed | 0 |
+| Backup archive and candidate guard unittest | 6/6 passed | 0 |
+| Direct candidate verification | r13 accepted; r1-r12 rejected by the guard suite | 0 |
+| Cached diff and boundary checks | 15 whitelisted paths only; no whitespace errors or half-staged paths | 0 |
+
+## r13 first-run correction and evidence boundary
+
+The first full miniprogram run found one stale local-only fixture: `requestLocalApi.test.js` asserted the old development endpoint `.105` while the user-authorized noncandidate local configuration is `.109`. The fixture was synchronized and intentionally remains outside the r13 staging whitelist; the full gate was then rerun from the beginning and passed.
+
+Web real UI, WeChat authorization, two-account pending/result receipt, physical-device delivery, deep-link navigation and binding-conflict UI are **NOT RUN**. Four existing approval paths still permit self-review by an otherwise authorized user; r13 does not change that product rule. No package, SSH/SCP, Docker operation, backup, deployment, push, fixed-database access, real WeChat operation, or real business-data operation was performed.
+
+---
+
 # r12 frozen candidate gate (2026-09-07)
 
 Target candidate tag: `release-20260907-cross-module-freeze-r12`
