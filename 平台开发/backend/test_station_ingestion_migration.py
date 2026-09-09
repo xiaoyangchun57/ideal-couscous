@@ -35,10 +35,52 @@ class StationIngestionMigrationTest(unittest.TestCase):
         self.assertTrue(backup.is_file())
         with closing(sqlite3.connect(self.database)) as connection:
             migration.verify_station_ingestion_schema(connection)
+            migration.verify_station_monitoring_schema(connection)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
+        self.assertEqual(self._run_check(self.database), 0)
         second_applied, second_backup = migration.apply_migration(self.database, self.backups)
         self.assertFalse(second_applied)
         self.assertIsNone(second_backup)
+
+    def _run_check(self, database: Path) -> int:
+        with mock.patch.object(sys, "argv", [
+            "migrate_station_ingestion.py", "--database", str(database), "--backup-dir", str(self.backups), "--check",
+        ]):
+            return migration.main()
+
+    def test_check_rejects_database_with_only_first_stage_migration(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            migration._execute_migration_sql(connection, migration.MIGRATIONS[0][1].read_text(encoding="utf-8"))
+            connection.execute(
+                "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                (migration.MIGRATION_VERSION, migration.migration_checksum(), "2026-09-09T00:00:00+00:00", "isolated"),
+            )
+            connection.commit()
+        with self.assertRaisesRegex(migration.MigrationError, "missing monitoring tables"):
+            self._run_check(self.database)
+
+    def test_monitoring_schema_rejects_missing_overlap_trigger(self):
+        for trigger in (
+            "reject_overlapping_monitoring_factor_mapping_insert",
+            "reject_overlapping_monitoring_factor_mapping_update",
+        ):
+            with self.subTest(trigger=trigger):
+                database = self.root / f"{trigger}.db"
+                self.create_business_database(database)
+                migration.apply_migration(database, self.root / f"{trigger}-backups")
+                with closing(sqlite3.connect(database)) as connection:
+                    connection.execute(f"DROP TRIGGER {trigger}")
+                    connection.commit()
+                    with self.assertRaisesRegex(migration.MigrationError, trigger):
+                        migration.verify_station_monitoring_schema(connection)
+
+    def test_monitoring_schema_rejects_missing_current_batch_unique_constraint(self):
+        migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP INDEX uq_observation_current_raw")
+            connection.commit()
+            with self.assertRaisesRegex(migration.MigrationError, "current raw frame"):
+                migration.verify_station_monitoring_schema(connection)
 
     def test_missing_target_path_is_rejected_without_creating_sqlite_file(self):
         missing = self.root / "not-created" / "water.db"

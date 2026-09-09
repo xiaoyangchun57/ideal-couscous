@@ -15,6 +15,7 @@ from sl651_parser import (
     encode_station_code,
     extract_frames,
     parse_frame,
+    parse_water_quality_report,
 )
 
 
@@ -38,6 +39,12 @@ class SL651ParserTest(unittest.TestCase):
         self.assertEqual(frame.function_code, 0x32)
         self.assertEqual(frame.serial_number, 3)
         self.assertEqual(frame.sent_at, datetime(2020, 6, 12, 2, 0, 0))
+        report = parse_water_quality_report(frame.payload)
+        self.assertEqual(report.station_code, frame.station_code)
+        self.assertEqual(report.station_type, 0x51)
+        self.assertEqual(report.observed_at, datetime(2014, 6, 12, 2, 0))
+        self.assertEqual(report.factors[0].protocol_code, '0311')
+        self.assertEqual(report.factors[0].raw_value, 30.4)
         ack = build_ack(frame, now=datetime(2020, 6, 12, 2, 1, 0))
         acknowledgement = parse_frame(ack)
         self.assertEqual(acknowledgement.direction, 'down')
@@ -52,6 +59,12 @@ class SL651ParserTest(unittest.TestCase):
             '4818000125491001004C1A0033654D1B01022245200000000338121290FF01082603'
         )
         self.assertEqual(crc16_modbus(data), 0xEF48)
+
+    def test_water_quality_body_requires_ordered_station_and_observation_sections(self):
+        with self.assertRaisesRegex(FrameError, 'F1 F1'):
+            parse_water_quality_report(b'\x00' * 15)
+        with self.assertRaisesRegex(FrameError, 'F0 F0'):
+            parse_water_quality_report(bytes.fromhex('F1F100123456785100000000000000'))
 
     def test_half_frames_noise_and_multiple_frames(self):
         first = make_uplink(serial=1)

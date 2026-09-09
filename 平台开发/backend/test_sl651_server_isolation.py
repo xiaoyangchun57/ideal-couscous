@@ -17,17 +17,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import app as web_app
+import migrate_station_ingestion as migration
 from migrate_station_ingestion import apply_migration
-from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code, parse_frame
-from sl651_server import IngestionStorage, StationIngestServer, _listener_healthcheck, credential_hmac
+from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_observation_time, encode_bcd_time, encode_station_code, parse_frame
+import sl651_server as ingest_server
+from sl651_server import IngestionStorage, StationIngestServer, StorageError, _listener_healthcheck, credential_hmac
 
 
 ACK_BYTES = 25
 
 
-def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=None, function_code=0x32):
+def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=None, function_code=0x32, payload=b""):
     sent_at = sent_at or datetime(2020, 6, 12, 2, 0, 0)
-    content = serial.to_bytes(2, "big") + encode_bcd_time(sent_at)
+    content = serial.to_bytes(2, "big") + encode_bcd_time(sent_at) + payload
     prefix = (
         b"\x7e\x7e\x10" + encode_station_code(station) + password + bytes((function_code,))
         + len(content).to_bytes(2, "big") + b"\x02" + content + bytes((UP_FLOW_CONTROL,))
@@ -141,7 +143,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         await writer.wait_closed()
         with closing(sqlite3.connect(self.database)) as connection:
             rows = connection.execute("SELECT disposition, duplicate_of_raw_frame_id FROM ingest_raw_frames ORDER BY id").fetchall()
-        self.assertEqual(rows[0][0], "pending_parse")
+        self.assertNotEqual(rows[0][0], "duplicate")
         self.assertEqual(rows[1][0], "duplicate")
         self.assertEqual(rows[1][1], 1)
 
@@ -182,6 +184,50 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='queue_full'").fetchone()[0], 1)
+
+    async def test_small_normalization_queue_continuously_drains_durable_backlog_without_restart(self):
+        await self.server.close()
+        self.server = StationIngestServer(
+            self.storage, host="127.0.0.1", port=0, max_connections=32, max_connections_per_source=32,
+            source_connection_burst=64, queue_max_frames=2, queue_max_bytes=1024 * 1024, error_queue_max=8,
+        )
+        self.add_endpoint("bound")
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute("INSERT INTO sites(code,name,type) VALUES ('NORM-Q','queue test','water')").lastrowid
+            endpoint_id = connection.execute("SELECT id FROM trusted_endpoints WHERE station_code='0012345678'").fetchone()[0]
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(endpoint_id,business_site_id,expected_granularity,timezone,effective_from)
+                   VALUES (?,?,'realtime','Asia/Shanghai','2019-01-01T00:00:00+00:00')""", (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                   expected_interval_seconds,tolerance_seconds,effective_from)
+                   VALUES (?, '0311', 'water_temp', 'Q-INST', 60, 15, '2019-01-01T00:00:00+00:00')""", (endpoint_id,),
+            )
+            connection.commit()
+        original = ingest_server.normalize_raw_frame
+
+        def slow_normalize(database, raw_id):
+            time.sleep(0.04)
+            return original(database, raw_id)
+
+        payload = b'\xf1\xf1' + encode_station_code('0012345678') + b'\x51\xf0\xf0' + encode_bcd_observation_time(datetime(2020, 6, 12, 2, 0)) + bytes.fromhex('03110304')
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=slow_normalize):
+            await self.server.start()
+            for serial in range(1, 8):
+                await self.send_one(make_uplink(serial=700 + serial, payload=payload))
+            for _ in range(100):
+                with closing(sqlite3.connect(self.database)) as connection:
+                    pending = connection.execute(
+                        "SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')"
+                    ).fetchone()[0]
+                    batches = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
+                if pending == 0 and batches == 7:
+                    break
+                await asyncio.sleep(0.05)
+        self.assertEqual(pending, 0)
+        self.assertEqual(batches, 7)
+        self.assertFalse(self.server._normalization_scanner.done())
 
     def _create_l1_web_credentials(self) -> tuple[int, str]:
         with closing(sqlite3.connect(self.database)) as connection:
@@ -355,6 +401,26 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.storage.healthcheck()
         await _listener_healthcheck("127.0.0.1", self.server.bound_port)
         self.assertNotIn("integrity_check", inspect.getsource(IngestionStorage.healthcheck))
+
+    async def test_first_stage_only_database_refuses_healthcheck_and_start_before_listener_binding(self):
+        await self.server.close()
+        first_stage_database = self.root / "first-stage-only.db"
+        with closing(sqlite3.connect(first_stage_database)) as connection:
+            connection.execute("CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            migration._execute_migration_sql(connection, migration.MIGRATIONS[0][1].read_text(encoding="utf-8"))
+            connection.commit()
+            connection.execute("PRAGMA journal_mode=WAL")
+        first_stage_storage = IngestionStorage(first_stage_database, self.pepper)
+        first_stage_server = StationIngestServer(first_stage_storage, host="127.0.0.1", port=0)
+        with self.assertRaisesRegex(StorageError, "missing monitoring tables"):
+            first_stage_storage.healthcheck()
+        with self.assertRaisesRegex(StorageError, "missing monitoring tables"):
+            await first_stage_server.start()
+        self.assertIsNone(first_stage_server._server)
+        self.assertIsNone(first_stage_server._worker)
+        self.assertIsNone(first_stage_server._normalizer)
+        self.assertIsNone(first_stage_server._normalization_scanner)
+        self.server = first_stage_server
 
     def test_station_ingest_container_has_shared_group_and_executable_permission_probe(self):
         project = Path(__file__).resolve().parents[1]

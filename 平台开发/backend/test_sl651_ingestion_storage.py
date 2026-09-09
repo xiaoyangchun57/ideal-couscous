@@ -111,7 +111,7 @@ class IngestionStorageTest(unittest.TestCase):
             server = StationIngestServer(self.storage)
             self.assertIsNotNone(server._process_raw(make_uplink(serial=77), "2026-09-08T00:00:00+00:00"))
             restarted_storage = IngestionStorage(self.database, self.pepper)
-            self.assertEqual(len(restarted_storage.pending_raw_ids()), 1)
+            self.assertEqual(len(restarted_storage.pending_normalization_page(0, 10)), 1)
         finally:
             release.set()
             holder.join(timeout=2)

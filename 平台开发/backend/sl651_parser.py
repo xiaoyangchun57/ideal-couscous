@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
+from pathlib import Path
+import re
 from typing import Iterable
 
 FRAME_HEAD = b"\x7e\x7e"
@@ -16,6 +19,8 @@ DOWN_FLOW_CONTROL = 0x04
 MAX_BODY_LENGTH = 4095
 MAX_FRAME_BYTES = 8192
 PARSER_VERSION = "jx-hydro-hex-bcd-v1"
+DEFAULT_MAPPING_PATH = Path(__file__).with_name("sl651_mapping.json")
+_NUMERIC_FORMAT = re.compile(r"^N\((\d+)(?:,(\d+))?\)$")
 
 
 class FrameError(ValueError):
@@ -54,6 +59,24 @@ class ParsedFrame:
                 self.payload.hex(),
             )
         )
+
+
+@dataclass(frozen=True)
+class ParsedFactor:
+    protocol_code: str
+    factor: str | None
+    raw_value: float | str | None
+    unit: str | None
+    parse_format: str | None
+    quality: str = "valid"
+
+
+@dataclass(frozen=True)
+class ParsedWaterQualityReport:
+    station_code: str
+    station_type: int
+    observed_at: datetime
+    factors: list[ParsedFactor]
 
 
 def crc16_modbus(data: bytes) -> int:
@@ -106,6 +129,23 @@ def decode_bcd_time(raw: bytes) -> datetime:
 
 def encode_bcd_time(value: datetime) -> bytes:
     fields = (value.year % 100, value.month, value.day, value.hour, value.minute, value.second)
+    return bytes(((field // 10) << 4) | (field % 10) for field in fields)
+
+
+def decode_bcd_observation_time(raw: bytes) -> datetime:
+    """Decode the five-byte `F0 F0` observation time as YYMMDDhhmm."""
+    if len(raw) != 5:
+        raise FrameError("invalid_observation_time_length", "observation time must be five BCD bytes")
+    pairs = [_decode_bcd_byte(value) for value in raw]
+    year, month, day, hour, minute = [high * 10 + low for high, low in pairs]
+    try:
+        return datetime(2000 + year, month, day, hour, minute)
+    except ValueError as exc:
+        raise FrameError("invalid_observation_time", "observation timestamp is not a valid calendar time") from exc
+
+
+def encode_bcd_observation_time(value: datetime) -> bytes:
+    fields = (value.year % 100, value.month, value.day, value.hour, value.minute)
     return bytes(((field // 10) << 4) | (field % 10) for field in fields)
 
 
@@ -246,3 +286,86 @@ def build_ack(frame: ParsedFrame, *, now: datetime | None = None) -> bytes:
 
 def parse_many(frames: Iterable[bytes]) -> list[ParsedFrame]:
     return [parse_frame(frame) for frame in frames]
+
+
+def parse_water_quality_payload(payload: bytes, mapping_path: Path = DEFAULT_MAPPING_PATH) -> list[ParsedFactor]:
+    """Decode first-phase 32H factor records without assigning a business site.
+
+    Each known factor is its two/three-byte protocol code followed by the fixed-width
+    BCD or opaque value declared in the versioned mapping. An unknown trailing code is
+    preserved as an unmapped factor so prior valid factors can still be normalized.
+    """
+    try:
+        definitions = json.loads(Path(mapping_path).read_text(encoding="utf-8"))["water_quality_factor_definitions"]
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise FrameError("factor_mapping_unavailable", "factor mapping is unavailable") from exc
+    indexed = [(bytes.fromhex(code), code, value) for code, value in definitions.items()]
+    indexed.sort(key=lambda item: len(item[0]), reverse=True)
+    values: list[ParsedFactor] = []
+    offset = 0
+    while offset < len(payload):
+        matched = next((item for item in indexed if payload.startswith(item[0], offset)), None)
+        if matched is None:
+            code = payload[offset:offset + 2].hex().upper()
+            values.append(ParsedFactor(code, None, None, None, None, "unmapped"))
+            break
+        raw_code, code, definition = matched
+        offset += len(raw_code)
+        parse_format = str(definition["format"])
+        numeric = _NUMERIC_FORMAT.match(parse_format)
+        if numeric:
+            digits = int(numeric.group(1))
+            precision = int(numeric.group(2) or 0)
+            byte_count = (digits + 1) // 2
+            encoded = payload[offset:offset + byte_count]
+            if len(encoded) != byte_count:
+                raise FrameError("truncated_factor_value", "factor value is truncated")
+            decoded_digits: list[str] = []
+            try:
+                for value in encoded:
+                    high, low = _decode_bcd_byte(value)
+                    decoded_digits.extend((str(high), str(low)))
+            except FrameError:
+                # The record boundary is known even when a factor value is corrupt.
+                # Keep scanning following factors instead of discarding the batch.
+                offset += byte_count
+                values.append(ParsedFactor(code, str(definition["code"]), None, definition.get("unit"), parse_format, "invalid"))
+                continue
+            number = int("".join(decoded_digits)[-digits:]) / (10 ** precision)
+            offset += byte_count
+            values.append(ParsedFactor(code, str(definition["code"]), number, definition.get("unit"), parse_format))
+            continue
+        if parse_format.startswith("X(") and parse_format.endswith(")"):
+            length = int(parse_format[2:-1])
+            encoded = payload[offset:offset + length]
+            if len(encoded) != length:
+                raise FrameError("truncated_factor_value", "factor value is truncated")
+            offset += length
+            values.append(ParsedFactor(code, str(definition["code"]), encoded.hex().upper(), definition.get("unit"), parse_format))
+            continue
+        raise FrameError("unsupported_factor_format", "factor format is unsupported")
+    return values
+
+
+def parse_water_quality_report(payload: bytes, mapping_path: Path = DEFAULT_MAPPING_PATH) -> ParsedWaterQualityReport:
+    """Decode the documented 32H body in order, without prefix searching.
+
+    The water-quality report begins with `F1 F1`, five BCD station-address bytes and
+    one station-type byte, followed by `F0 F0` and a five-byte observation time.
+    """
+    minimum_size = 2 + 5 + 1 + 2 + 5
+    if len(payload) < minimum_size:
+        raise FrameError("water_quality_body_too_short", "32H water-quality body is incomplete")
+    if payload[:2] != b"\xf1\xf1":
+        raise FrameError("missing_station_identifier", "32H body must start with F1 F1 station identifier")
+    station_code = decode_station_code(payload[2:7])
+    station_type = payload[7]
+    if payload[8:10] != b"\xf0\xf0":
+        raise FrameError("missing_observation_time", "station identifier must be followed by F0 F0 observation time")
+    observed_at = decode_bcd_observation_time(payload[10:15])
+    return ParsedWaterQualityReport(
+        station_code=station_code,
+        station_type=station_type,
+        observed_at=observed_at,
+        factors=parse_water_quality_payload(payload[15:], mapping_path),
+    )

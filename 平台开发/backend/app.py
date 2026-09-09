@@ -114,13 +114,15 @@ import tempfile
 import calendar
 from io import BytesIO
 from difflib import SequenceMatcher
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
 from flask import Flask, jsonify, request, g, send_from_directory, send_file, has_request_context
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos
+from station_monitoring import (current_factor_configurations as monitoring_factor_configurations,
+                                latest_values as monitoring_latest_values, trend as monitoring_trend)
 import os, uuid, urllib.request, urllib.error, urllib.parse, json as _json
 try:
     from openpyxl import Workbook, load_workbook
@@ -32051,6 +32053,257 @@ def notify_overdue_vehicle_arrangements_job():
             db.commit()
     except Exception as e:
         print(f'[VehicleExpiry] 延期提醒扫描失败（非致命）: {e}')
+
+
+def _monitoring_site_context(db, site_id):
+    denied = _site_access_denied(site_id, '读取站点监测')
+    if denied:
+        return None, denied
+    if not db.execute('SELECT 1 FROM sites WHERE id=?', (site_id,)).fetchone():
+        return None, (jsonify({'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND'}), 404)
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    profile = db.execute(
+        """SELECT * FROM monitoring_endpoint_profiles
+           WHERE business_site_id=? AND enabled=1 AND effective_from<=?
+             AND (effective_to IS NULL OR effective_to>?)
+           ORDER BY effective_from DESC LIMIT 1""", (site_id, now, now)
+    ).fetchone()
+    if not profile:
+        return None, (jsonify({'error': '站点尚未接入监测端点', 'code': 'MONITORING_NOT_CONNECTED'}), 409)
+    return profile, None
+
+
+def _monitoring_freshness(last_time, interval, tolerance=0):
+    if not interval:
+        return {'state': 'unknown', 'reason_code': 'unconfigured'}
+    if not last_time:
+        return {'state': 'unknown', 'reason_code': 'no_observation'}
+    try:
+        value = datetime.fromisoformat(str(last_time))
+        now = datetime.now(value.tzinfo) if value.tzinfo else datetime.now()
+        allowance = int(interval) + int(tolerance or 0)
+        return {'state': 'fresh' if (now - value).total_seconds() <= allowance else 'stale', 'reason_code': None}
+    except ValueError:
+        return {'state': 'unknown', 'reason_code': 'invalid_time'}
+
+
+def _monitoring_query_time(value, field):
+    if not value:
+        return None, None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None, (jsonify({'error': f'{field}必须是ISO时间', 'code': 'MONITORING_INVALID_TIME'}), 400)
+    if parsed.tzinfo is None:
+        return None, (jsonify({'error': f'{field}必须包含时区', 'code': 'MONITORING_INVALID_TIME'}), 400)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat(), None
+
+
+@app.route('/api/station-monitoring/sites/<int:site_id>/summary')
+@login_required
+def station_monitoring_summary(site_id):
+    with get_db() as db:
+        profile, error = _monitoring_site_context(db, site_id)
+        if error:
+            return error
+        last_communication = db.execute(
+            """SELECT event.occurred_at, event.received_at FROM monitoring_status_events event
+               JOIN observation_batches batch ON batch.id=event.observation_batch_id AND batch.is_current=1
+               WHERE event.business_site_id=? AND event.endpoint_id=? AND event.event_axis='communication'
+               ORDER BY event.received_at DESC, event.id DESC LIMIT 1""",
+            (site_id, profile['endpoint_id']),
+        ).fetchone()
+        configurations = monitoring_factor_configurations(db, site_id)
+        values = monitoring_latest_values(db, site_id)
+        value_by_configuration = {
+            (item['endpoint_id'], item['protocol_code'], item['instrument_asset_code']): item for item in values
+        }
+        communication = _monitoring_freshness(last_communication['received_at'] if last_communication else None,
+                                              profile['expected_interval_seconds'])
+        factor_states = []
+        for configuration in configurations:
+            key = (configuration['endpoint_id'], configuration['protocol_code'], configuration['instrument_asset_code'])
+            value = value_by_configuration.get(key)
+            state = _monitoring_freshness(
+                value['observed_at'] if value else None,
+                configuration['expected_interval_seconds'], configuration['tolerance_seconds'],
+            )
+            factor_states.append(dict(configuration, last_valid=value, freshness=state))
+        configured_data = [item for item in factor_states if item['expected_interval_seconds']]
+        data_state = (
+            {'state': 'unknown', 'reason_code': 'unconfigured'} if not configured_data else
+            {'state': 'fresh', 'reason_code': None} if all(item['freshness']['state'] == 'fresh' for item in configured_data) else
+            {'state': 'no_observation', 'reason_code': 'missing_observation'}
+            if any(item['freshness']['reason_code'] == 'no_observation' for item in configured_data) else
+            {'state': 'stale', 'reason_code': 'stale_observation'}
+        )
+        confirmed_rtu = db.execute(
+            """SELECT event.event_value, event.received_at FROM monitoring_status_events event
+               JOIN observation_batches batch ON batch.id=event.observation_batch_id AND batch.is_current=1
+               WHERE event.business_site_id=? AND event.endpoint_id=? AND event.event_axis='rtu'
+                 AND event.source='confirmed_protocol' ORDER BY event.received_at DESC, event.id DESC LIMIT 1""",
+            (site_id, profile['endpoint_id']),
+        ).fetchone()
+        axes = {
+            'communication': communication,
+            'data': dict(data_state, factors=factor_states),
+            'rtu': {'state': 'reported' if confirmed_rtu else 'unknown',
+                    'reason_code': None if confirmed_rtu else 'unconfirmed_protocol',
+                    'last_confirmed_at': confirmed_rtu['received_at'] if confirmed_rtu else None},
+            'instrument': {'state': 'unknown', 'reason_code': 'unconfirmed'},
+        }
+        attention = 'normal' if communication['state'] == 'fresh' and data_state['state'] == 'fresh' else 'attention'
+        reason = communication['reason_code'] or data_state['reason_code']
+        return jsonify({
+            'site_id': site_id, 'attention_level': attention, 'reason_code': reason,
+            'last_communication_at': last_communication['received_at'] if last_communication else None,
+            'last_valid_observation_at': max((item['observed_at'] for item in values), default=None),
+            'updated_at': datetime.now().astimezone().replace(microsecond=0).isoformat(), 'axes': axes,
+        })
+
+
+@app.route('/api/station-monitoring/sites/<int:site_id>/latest')
+@login_required
+def station_monitoring_latest(site_id):
+    with get_db() as db:
+        _, error = _monitoring_site_context(db, site_id)
+        if error:
+            return error
+        items = monitoring_latest_values(db, site_id)
+        return jsonify({'site_id': site_id, 'status': 'ok' if items else 'no_observations', 'items': items})
+
+
+@app.route('/api/station-monitoring/sites/<int:site_id>/trend')
+@login_required
+def station_monitoring_trend(site_id):
+    metric = str(request.args.get('metric') or '').strip()
+    if not metric:
+        return jsonify({'error': '必须指定业务因子', 'code': 'MONITORING_METRIC_REQUIRED'}), 400
+    start, start_error = _monitoring_query_time(request.args.get('start'), 'start')
+    if start_error:
+        return start_error
+    end, end_error = _monitoring_query_time(request.args.get('end'), 'end')
+    if end_error:
+        return end_error
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    end = end or now.isoformat()
+    start = start or (now - timedelta(hours=24)).isoformat()
+    try:
+        start_time, end_time = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    except ValueError:  # Defensive: both values were normalized above.
+        return jsonify({'error': '趋势时间无效', 'code': 'MONITORING_INVALID_TIME'}), 400
+    if end_time < start_time:
+        return jsonify({'error': '结束时间早于开始时间', 'code': 'MONITORING_INVALID_WINDOW'}), 400
+    if end_time - start_time > timedelta(hours=24):
+        return jsonify({'error': '首期趋势仅支持24小时', 'code': 'MONITORING_TREND_WINDOW_UNSUPPORTED'}), 422
+    with get_db() as db:
+        profile, error = _monitoring_site_context(db, site_id)
+        if error:
+            return error
+        configurations = [item for item in monitoring_factor_configurations(db, site_id) if item['business_metric'] == metric]
+        if not configurations:
+            return jsonify({'error': '业务因子未发布或不存在', 'code': 'MONITORING_METRIC_NOT_PUBLISHED'}), 404
+        point_limit = 1000
+        points = monitoring_trend(db, site_id, metric, start, end, point_limit + 1)
+        if len(points) > point_limit:
+            return jsonify({'error': '趋势点数超过上限', 'code': 'MONITORING_TREND_POINT_LIMIT'}), 422
+        interval = configurations[0]['expected_interval_seconds'] if len(configurations) == 1 else None
+        tolerance = configurations[0]['tolerance_seconds'] if len(configurations) == 1 else None
+        gaps = []
+        expected_points = None
+        valid_points = 0
+        displayed_points = 0
+        missing_points = 0
+        if interval:
+            interval = int(interval)
+            tolerance = int(tolerance or 0)
+            expected_points = int((end_time - start_time).total_seconds() // interval) + 1
+            displayed_slots = set()
+            valid_slots = set()
+            for point in points:
+                offset = (datetime.fromisoformat(point['observed_at']) - start_time).total_seconds()
+                slot = int(offset // interval + 0.5)
+                if not 0 <= slot < expected_points or abs(offset - slot * interval) > tolerance:
+                    continue
+                displayed_slots.add(slot)
+                if point['quality'] == 'valid':
+                    valid_slots.add(slot)
+            valid_points = len(valid_slots)
+            displayed_points = len(displayed_slots)
+            missing_slots = [slot for slot in range(expected_points) if slot not in displayed_slots]
+            missing_points = len(missing_slots)
+            gap_start = None
+            previous_slot = None
+            for slot in missing_slots:
+                if gap_start is None:
+                    gap_start = slot
+                elif slot != previous_slot + 1:
+                    gap_end = previous_slot
+                    gap_from = start_time + timedelta(seconds=gap_start * interval)
+                    gap_to = start_time + timedelta(seconds=gap_end * interval)
+                    gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
+                                 'seconds': (gap_to - gap_from).total_seconds(),
+                                 'missing_points': gap_end - gap_start + 1})
+                    gap_start = slot
+                previous_slot = slot
+            if gap_start is not None:
+                gap_end = previous_slot
+                gap_from = start_time + timedelta(seconds=gap_start * interval)
+                gap_to = start_time + timedelta(seconds=gap_end * interval)
+                gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
+                             'seconds': (gap_to - gap_from).total_seconds(),
+                             'missing_points': gap_end - gap_start + 1})
+        return jsonify({
+            'site_id': site_id, 'metric': metric, 'points': points, 'coverage': {
+                'state': 'configured' if interval else 'unconfigured', 'expected_interval_seconds': interval,
+                'valid_points': valid_points, 'displayed_points': displayed_points, 'expected_points': expected_points,
+                'coverage_rate': displayed_points / expected_points if expected_points else None,
+                'gap_count': len(gaps), 'missing_points': missing_points,
+                'window_start': start, 'window_end': end, 'point_limit': point_limit,
+            }, 'gaps': gaps, 'normalization_version': points[-1]['normalization_version'] if points else None,
+        })
+
+
+@app.route('/api/station-monitoring/sites/<int:site_id>/instruments')
+@login_required
+def station_monitoring_instruments(site_id):
+    with get_db() as db:
+        profile, error = _monitoring_site_context(db, site_id)
+        if error:
+            return error
+        rows = [item for item in monitoring_factor_configurations(db, site_id) if item['endpoint_id'] == profile['endpoint_id']]
+        latest = {(item['instrument_asset_code'], item['business_metric']): item for item in monitoring_latest_values(db, site_id)}
+        items = []
+        for row in rows:
+            item = dict(row)
+            item['last_valid'] = latest.get((row['instrument_asset_code'], row['business_metric']))
+            item['status'] = 'available' if item['last_valid'] else 'unknown'
+            item['reason_code'] = None if item['last_valid'] else 'no_valid_observation'
+            items.append(item)
+        return jsonify({'site_id': site_id, 'status': 'ok' if items else 'no_instruments', 'items': items})
+
+
+@app.route('/api/station-monitoring/quality-issues')
+@login_required
+def station_monitoring_quality_issues():
+    if not _has_any_role(g.current_user, 'admin'):
+        return jsonify({'error': '数据质量事项仅管理员可读', 'code': 'MONITORING_QUALITY_FORBIDDEN'}), 403
+    site_id = request.args.get('site_id', type=int)
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 50, type=int)
+    if page is None or page < 1 or page_size is None or not 1 <= page_size <= 100:
+        return jsonify({'error': '分页参数无效', 'code': 'MONITORING_INVALID_PAGINATION'}), 400
+    with get_db() as db:
+        if site_id is not None and not db.execute('SELECT 1 FROM sites WHERE id=?', (site_id,)).fetchone():
+            return jsonify({'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND'}), 404
+        where, params = ('', []) if site_id is None else (' WHERE business_site_id=?', [site_id])
+        total = db.execute('SELECT COUNT(*) FROM monitoring_quality_issues' + where, params).fetchone()[0]
+        rows = db.execute(
+            'SELECT * FROM monitoring_quality_issues' + where + ' ORDER BY last_seen_at DESC, id DESC LIMIT ? OFFSET ?',
+            params + [page_size, (page - 1) * page_size],
+        ).fetchall()
+        return jsonify({'site_id': site_id, 'items': [dict(row) for row in rows],
+                        'page': page, 'page_size': page_size, 'total': total})
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ import asyncio
 from collections import deque
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -28,6 +28,14 @@ except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry 
     from sl651_parser import (
         MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, extract_frames, parse_frame,
     )
+try:
+    from .station_monitoring import normalize_raw_frame
+except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
+    from station_monitoring import normalize_raw_frame
+try:
+    from .migrate_station_ingestion import MigrationError, verify_station_monitoring_contract
+except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
+    from migrate_station_ingestion import MigrationError, verify_station_monitoring_contract
 
 LOGGER = logging.getLogger("station_ingest")
 DEFAULT_HOST = "127.0.0.1"
@@ -42,6 +50,8 @@ DEFAULT_SOURCE_STATE_CAPACITY = 1024
 DEFAULT_QUEUE_MAX_FRAMES = 10_000
 DEFAULT_QUEUE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_ERROR_QUEUE_MAX = 256
+DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE = 64
+DEFAULT_NORMALIZATION_SCAN_SECONDS = 0.1
 DEFAULT_MAPPING_PATH = Path(__file__).with_name("sl651_mapping.json")
 
 
@@ -122,11 +132,10 @@ class IngestionStorage:
     def healthcheck(self) -> None:
         """Lightweight schema/readability probe suitable for a frequent container check."""
         with closing(self._connect()) as connection:
-            required = {"schema_migrations", "trusted_endpoints", "ingest_raw_frames", "ingest_parse_attempts", "ingest_errors"}
-            found = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            missing = required - found
-            if missing:
-                raise StorageError(f"ingestion schema unavailable: {', '.join(sorted(missing))}")
+            try:
+                verify_station_monitoring_contract(connection)
+            except MigrationError as exc:
+                raise StorageError(f"station monitoring schema unavailable: {exc}") from exc
             if connection.execute("SELECT 1").fetchone()[0] != 1:
                 raise StorageError("database readability probe failed")
             journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
@@ -247,14 +256,66 @@ class IngestionStorage:
             connection.commit()
             return raw_id, duplicate_of is not None
 
-    def pending_raw_ids(self) -> list[int]:
+    def pending_normalization_page(self, after_id: int, limit: int) -> list[int]:
+        """Read a bounded due-work page; callers must not materialize the full backlog."""
         with closing(self._connect()) as connection:
             return [
                 int(row[0])
                 for row in connection.execute(
-                    "SELECT id FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse', 'pending_reparse') ORDER BY id"
+                    """SELECT raw.id FROM ingest_raw_frames raw
+                       LEFT JOIN monitoring_normalization_retries retry
+                         ON retry.raw_frame_id=raw.id AND retry.normalization_version=?
+                       WHERE raw.id>? AND raw.persistence_state IN ('pending_parse', 'pending_reparse')
+                         AND (retry.raw_frame_id IS NULL OR (retry.state!='exhausted'
+                              AND (retry.next_attempt_at IS NULL OR retry.next_attempt_at<=?)))
+                       ORDER BY raw.id LIMIT ?""",
+                    ("station-monitoring-normalizer-v1", after_id, _utc_now(), limit),
                 )
             ]
+
+    def record_normalization_retry(self, raw_id: int, error_type: str, *, max_attempts: int = 3) -> None:
+        """Persist bounded retry state; exhausted work becomes a stable diagnostic."""
+        version = "station-monitoring-normalizer-v1"
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT attempt_count FROM monitoring_normalization_retries WHERE raw_frame_id=? AND normalization_version=?",
+                (raw_id, version),
+            ).fetchone()
+            attempt = int(row[0]) + 1 if row else 1
+            now = datetime.now(timezone.utc)
+            if attempt >= max_attempts:
+                connection.execute(
+                    """INSERT INTO monitoring_normalization_retries(raw_frame_id, normalization_version, attempt_count, last_error, state)
+                       VALUES (?, ?, ?, ?, 'exhausted')
+                       ON CONFLICT(raw_frame_id, normalization_version) DO UPDATE SET
+                         attempt_count=excluded.attempt_count, last_error=excluded.last_error, state='exhausted', next_attempt_at=NULL""",
+                    (raw_id, version, max_attempts, error_type),
+                )
+                connection.execute("UPDATE ingest_raw_frames SET persistence_state='persisted' WHERE id=?", (raw_id,))
+                issue = connection.execute(
+                    "SELECT id FROM monitoring_quality_issues WHERE raw_frame_id=? AND issue_type='normalization_retry_exhausted' AND status='open'",
+                    (raw_id,),
+                ).fetchone()
+                if issue:
+                    connection.execute("UPDATE monitoring_quality_issues SET last_seen_at=? WHERE id=?", (_utc_now(), issue[0]))
+                else:
+                    connection.execute(
+                        """INSERT INTO monitoring_quality_issues(raw_frame_id, issue_type, object_summary, first_seen_at, last_seen_at, reparse_allowed)
+                           VALUES (?, 'normalization_retry_exhausted', ?, ?, ?, 1)""",
+                        (raw_id, error_type[:160], _utc_now(), _utc_now()),
+                    )
+            else:
+                next_attempt = (now + timedelta(seconds=2 ** (attempt - 1))).replace(microsecond=0).isoformat()
+                connection.execute(
+                    """INSERT INTO monitoring_normalization_retries(raw_frame_id, normalization_version, attempt_count, next_attempt_at, last_error, state)
+                       VALUES (?, ?, ?, ?, ?, 'retrying')
+                       ON CONFLICT(raw_frame_id, normalization_version) DO UPDATE SET
+                         attempt_count=excluded.attempt_count, next_attempt_at=excluded.next_attempt_at,
+                         last_error=excluded.last_error, state='retrying'""",
+                    (raw_id, version, attempt, next_attempt, error_type),
+                )
+            connection.commit()
 
 
 class StationIngestServer:
@@ -306,6 +367,13 @@ class StationIngestServer:
         self._sources: dict[str, _SourceState] = {}
         self._server: asyncio.AbstractServer | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._normalization_queue: asyncio.Queue[int] = asyncio.Queue(maxsize=queue_max_frames)
+        self._normalizer: asyncio.Task[None] | None = None
+        self._normalization_scanner: asyncio.Task[None] | None = None
+        self._normalization_wakeup = asyncio.Event()
+        self._scheduled_normalizations: set[int] = set()
+        self._normalization_stopping = False
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def bound_port(self) -> int:
@@ -323,7 +391,11 @@ class StationIngestServer:
 
     async def start(self) -> None:
         self.storage.healthcheck()
+        self._event_loop = asyncio.get_running_loop()
         self._worker = asyncio.create_task(self._persistence_worker(), name="station-ingest-persistence")
+        self._normalizer = asyncio.create_task(self._normalization_worker(), name="station-monitoring-normalization")
+        self._normalization_scanner = asyncio.create_task(self._normalization_scan_loop(), name="station-monitoring-scan")
+        self._normalization_wakeup.set()
         self._server = await asyncio.start_server(self._handle_connection, self.host, self.port, limit=MAX_FRAME_BYTES)
 
     async def close(self) -> None:
@@ -334,6 +406,19 @@ class StationIngestServer:
             await self._queue.join()
             await self._queue.put(_QueuedWork("stop"))
             await self._worker
+        if self._normalization_scanner:
+            self._normalization_stopping = True
+            self._normalization_wakeup.set()
+            await self._normalization_scanner
+        if self._normalizer:
+            # Let in-flight SQLite work close its connection before cancelling the idle
+            # task.  Cancelling asyncio.to_thread() alone leaves its worker thread alive.
+            await self._normalization_queue.join()
+            self._normalizer.cancel()
+            try:
+                await self._normalizer
+            except asyncio.CancelledError:
+                pass
 
     def _source_key(self, writer: asyncio.StreamWriter) -> str:
         peer = writer.get_extra_info("peername")
@@ -405,6 +490,57 @@ class StationIngestServer:
         except asyncio.QueueFull:
             self.dropped_error_events += 1
 
+    def _schedule_normalization(self, raw_id: int) -> None:
+        if self._event_loop and self._normalizer:
+            self._event_loop.call_soon_threadsafe(self._normalization_wakeup.set)
+
+    async def _normalization_scan_loop(self) -> None:
+        """Continuously page durable work into the bounded queue without restart reliance."""
+        cursor = 0
+        while not self._normalization_stopping:
+            available = self._normalization_queue.maxsize - self._normalization_queue.qsize()
+            if available <= 0:
+                await self._normalization_wakeup.wait()
+                self._normalization_wakeup.clear()
+                continue
+            raw_ids = await asyncio.to_thread(
+                self.storage.pending_normalization_page, cursor, min(available, DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE)
+            )
+            if self._normalization_stopping:
+                return
+            if not raw_ids:
+                cursor = 0
+                try:
+                    await asyncio.wait_for(self._normalization_wakeup.wait(), timeout=DEFAULT_NORMALIZATION_SCAN_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                self._normalization_wakeup.clear()
+                continue
+            for raw_id in raw_ids:
+                if self._normalization_stopping:
+                    return
+                cursor = raw_id
+                if raw_id in self._scheduled_normalizations:
+                    continue
+                self._scheduled_normalizations.add(raw_id)
+                await self._normalization_queue.put(raw_id)
+
+    async def _normalization_worker(self) -> None:
+        while True:
+            raw_id = await self._normalization_queue.get()
+            try:
+                await asyncio.to_thread(normalize_raw_frame, self.storage.database, raw_id)
+            except Exception as exc:
+                LOGGER.warning("station monitoring normalization deferred: %s", type(exc).__name__)
+                try:
+                    await asyncio.to_thread(self.storage.record_normalization_retry, raw_id, type(exc).__name__)
+                except Exception as retry_exc:
+                    LOGGER.warning("station monitoring retry evidence failed: %s", type(retry_exc).__name__)
+            finally:
+                self._scheduled_normalizations.discard(raw_id)
+                self._normalization_queue.task_done()
+                self._normalization_wakeup.set()
+
     async def _persistence_worker(self) -> None:
         """Keep the sole persistence worker alive across individual SQLite failures.
 
@@ -460,7 +596,11 @@ class StationIngestServer:
         if frame.function_code not in self.supported_uplink_function_codes:
             self.storage.persist_parsed(frame, auth, received_at, quarantine_error="unsupported_function_code")
             return None
-        self.storage.persist_parsed(frame, auth, received_at)
+        raw_id, duplicate = self.storage.persist_parsed(frame, auth, received_at)
+        # Normalization is deliberately after the durable raw receipt and ACK path.
+        # A mapping or parser defect remains retryable evidence on restart.
+        if auth.status == "authenticated" and not duplicate:
+            self._schedule_normalization(raw_id)
         if not auth.may_acknowledge:
             return None
         return build_ack(frame)

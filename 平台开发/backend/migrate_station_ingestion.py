@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MIGRATION_VERSION = "20260908_001_station_ingestion"
-MIGRATION_PATH = Path(__file__).with_name("migrations") / "20260908_001_station_ingestion.sql"
+MIGRATIONS = (
+    (MIGRATION_VERSION, Path(__file__).with_name("migrations") / "20260908_001_station_ingestion.sql"),
+    ("20260909_002_station_monitoring_normalization", Path(__file__).with_name("migrations") / "20260909_002_station_monitoring_normalization.sql"),
+)
+MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
 
 
@@ -23,8 +27,11 @@ class MigrationError(RuntimeError):
     pass
 
 
-def migration_checksum() -> str:
-    return hashlib.sha256(MIGRATION_PATH.read_bytes()).hexdigest()
+def migration_checksum(version: str = MIGRATION_VERSION) -> str:
+    for candidate, path in MIGRATIONS:
+        if candidate == version:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+    raise MigrationError(f"unknown migration version: {version}")
 
 
 def _utc_now() -> str:
@@ -80,7 +87,8 @@ def _require_existing_business_database(database: Path, *, isolated_test: bool) 
         )
 
 
-def verify_station_ingestion_schema(connection: sqlite3.Connection) -> None:
+def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
+    """Verify the lightweight first-stage objects required before ingestion can start."""
     required_tables = {"schema_migrations", "trusted_endpoints", "ingest_raw_frames", "ingest_parse_attempts", "ingest_errors"}
     existing = {
         row[0]
@@ -105,12 +113,77 @@ def verify_station_ingestion_schema(connection: sqlite3.Connection) -> None:
     missing_indexes = required_indexes - indexes
     if missing_indexes:
         raise MigrationError(f"missing required indexes: {', '.join(sorted(missing_indexes))}")
+
+
+def verify_station_ingestion_schema(connection: sqlite3.Connection) -> None:
+    verify_station_ingestion_contract(connection)
     integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
     if integrity != "ok":
         raise MigrationError("database integrity check failed")
     foreign_rows = connection.execute("PRAGMA foreign_key_check").fetchall()
     if foreign_rows:
         raise MigrationError("foreign key check failed")
+
+
+def _require_unique_columns(connection: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> None:
+    for index in connection.execute(f"PRAGMA index_list({table})"):
+        if not index[2]:
+            continue
+        index_columns = tuple(row[2] for row in connection.execute(f"PRAGMA index_info({index[1]})"))
+        if index_columns == columns:
+            return
+    raise MigrationError(f"missing required unique constraint: {table}({', '.join(columns)})")
+
+
+def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
+    required = {
+        "monitoring_endpoint_profiles", "monitoring_factor_definitions", "monitoring_factor_mappings",
+        "observation_batches", "observation_values", "monitoring_status_events", "monitoring_quality_issues",
+        "monitoring_normalization_retries",
+    }
+    existing = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    missing = required - existing
+    if missing:
+        raise MigrationError(f"missing monitoring tables: {', '.join(sorted(missing))}")
+    applied = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (MONITORING_MIGRATION_VERSION,)
+    ).fetchone()
+    if not applied or applied[0] != migration_checksum(MONITORING_MIGRATION_VERSION):
+        raise MigrationError("station monitoring migration is missing or incompatible")
+    _require_unique_columns(connection, "observation_batches", ("raw_frame_id", "normalization_version"))
+    _require_unique_columns(connection, "observation_batches", ("endpoint_id", "idempotency_key", "normalization_version"))
+    _require_unique_columns(connection, "monitoring_normalization_retries", ("raw_frame_id", "normalization_version"))
+    current_index = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_observation_current_raw'"
+    ).fetchone()
+    normalized_sql = "".join(str(current_index[0]).upper().split()) if current_index else ""
+    if "CREATEUNIQUEINDEX" not in normalized_sql or "ONOBSERVATION_BATCHES(RAW_FRAME_ID)" not in normalized_sql or "WHEREIS_CURRENT=1" not in normalized_sql:
+        raise MigrationError("missing required unique constraint: observation_batches current raw frame")
+    required_triggers = {
+        "reject_overlapping_monitoring_factor_mapping_insert": "BEFOREINSERTONMONITORING_FACTOR_MAPPINGS",
+        "reject_overlapping_monitoring_factor_mapping_update": "BEFOREUPDATEOFENDPOINT_ID,PROTOCOL_CODE,EFFECTIVE_FROM,EFFECTIVE_TO,ENABLEDONMONITORING_FACTOR_MAPPINGS",
+    }
+    triggers = {
+        row[0]: "".join(str(row[1]).upper().split())
+        for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'")
+    }
+    missing_triggers = set(required_triggers) - set(triggers)
+    if missing_triggers:
+        raise MigrationError(f"missing required monitoring triggers: {', '.join(sorted(missing_triggers))}")
+    for trigger, operation in required_triggers.items():
+        if operation not in triggers[trigger] or "RAISE(ABORT,'OVERLAPPINGFACTORMAPPING')" not in triggers[trigger]:
+            raise MigrationError(f"invalid required monitoring trigger: {trigger}")
+
+
+def verify_station_monitoring_contract(connection: sqlite3.Connection) -> None:
+    """Verify all startup-critical ingestion and normalization objects without a table scan."""
+    verify_station_ingestion_contract(connection)
+    _verify_monitoring_contract(connection)
+
+
+def verify_station_monitoring_schema(connection: sqlite3.Connection) -> None:
+    verify_station_ingestion_schema(connection)
+    _verify_monitoring_contract(connection)
 
 
 def _execute_migration_sql(connection: sqlite3.Connection, script: str) -> None:
@@ -136,40 +209,34 @@ def apply_migration(
     database = Path(database)
     backup_dir = Path(backup_dir)
     _require_existing_business_database(database, isolated_test=isolated_test)
-    checksum = migration_checksum()
-
     with closing(sqlite3.connect(str(database))) as connection:
+        existing_versions = {}
         if _table_exists(connection, "schema_migrations"):
-            existing = connection.execute(
-                "SELECT checksum FROM schema_migrations WHERE version=?", (MIGRATION_VERSION,)
-            ).fetchone()
-            if existing:
-                if existing[0] != checksum:
-                    raise MigrationError("migration checksum conflict")
-                verify_station_ingestion_schema(connection)
-                return False, None
+            existing_versions = dict(connection.execute("SELECT version, checksum FROM schema_migrations").fetchall())
+        for version, _ in MIGRATIONS:
+            existing = existing_versions.get(version)
+            if existing is not None and existing != migration_checksum(version):
+                raise MigrationError("migration checksum conflict")
+        pending = [(version, path) for version, path in MIGRATIONS if version not in existing_versions]
+        if not pending:
+            verify_station_monitoring_schema(connection)
+            return False, None
         before_schema = _schema_snapshot(connection)
 
     backup_path = backup_database(database, backup_dir)
-    script = MIGRATION_PATH.read_text(encoding="utf-8")
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(str(database), isolation_level=None)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
-        _execute_migration_sql(connection, script)
-        existing = connection.execute(
-            "SELECT checksum FROM schema_migrations WHERE version=?", (MIGRATION_VERSION,)
-        ).fetchone()
-        if existing and existing[0] != checksum:
-            raise MigrationError("migration checksum conflict")
-        if not existing:
+        for version, path in pending:
+            _execute_migration_sql(connection, path.read_text(encoding="utf-8"))
             connection.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at, app_version) VALUES (?, ?, ?, ?)",
-                (MIGRATION_VERSION, checksum, _utc_now(), app_version),
+                (version, migration_checksum(version), _utc_now(), app_version),
             )
-        verify_station_ingestion_schema(connection)
+        verify_station_monitoring_schema(connection)
         after_schema = _schema_snapshot(connection)
         changed_existing = {
             name
@@ -234,7 +301,7 @@ def main() -> int:
     if arguments.check:
         _require_existing_business_database(arguments.database, isolated_test=arguments.isolated_test)
         with closing(sqlite3.connect(str(arguments.database))) as connection:
-            verify_station_ingestion_schema(connection)
+            verify_station_monitoring_schema(connection)
         return 0
     applied, backup = apply_migration(
         arguments.database,
