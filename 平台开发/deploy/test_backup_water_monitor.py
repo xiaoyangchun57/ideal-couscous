@@ -117,23 +117,22 @@ class BackupWaterMonitorScriptTest(unittest.TestCase):
         self.assertIn('Cannot discover APP_DIR from running container', result.stderr)
         self.assertFalse((self.root / 'backups').exists())
 
+    def test_backup_script_includes_sensitive_ingest_archives_when_present(self):
+        script = SCRIPT_PATH.read_text(encoding='utf-8')
+        self.assertIn('INGEST_ARCHIVE_DIR=', script)
+        self.assertIn('ingest-archives-${STAMP}.tar.gz', script)
+        self.assertIn('backup_files=("$DATABASE_BACKUP" "$UPLOADS_BACKUP")', script)
+        self.assertIn('sha256sum "${backup_files[@]}"', script)
+
     def test_candidate_archive_preserves_lf_shebang(self):
-        tree = subprocess.run(
-            ['git', 'write-tree'], cwd=REPOSITORY_ROOT,
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-        )
-        self.assertEqual(tree.returncode, 0, tree.stderr)
-        archive = subprocess.run(
-            ['git', 'archive', f'{tree.stdout.strip()}:{PROJECT_ROOT.name}'],
-            cwd=REPOSITORY_ROOT, capture_output=True,
-        )
-        self.assertEqual(archive.returncode, 0, archive.stderr.decode('utf-8', errors='replace'))
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode='r:') as bundle:
-            member = bundle.extractfile('deploy/backup-water-monitor.sh')
-            self.assertIsNotNone(member)
-            script = member.read()
+        # The candidate archive is built from this tracked source under .gitattributes;
+        # inspect it directly so the test never creates an index.lock in another worktree.
+        script = SCRIPT_PATH.read_bytes()
         self.assertEqual(script.splitlines(keepends=True)[0], b'#!/usr/bin/env bash\n')
         self.assertNotIn(b'\r', script)
+        attributes = (PROJECT_ROOT / '.gitattributes').read_text(encoding='utf-8')
+        self.assertIn('*.sh text eol=lf', attributes)
+
 
 
 if __name__ == '__main__':

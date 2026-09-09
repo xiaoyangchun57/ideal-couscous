@@ -1,33 +1,23 @@
 {
-  "_comment": "SL651-2014 国家水站协议 — 测点/指标映射配置",
-
-  "debug_mode": true,
-
-  "metric_mapping": {
-    "W":   "water_level",
-    "R":   "rainfall",
-    "Q":   "flow",
-    "T":   "temperature",
-    "H":   "humidity",
-    "V":   "wind_speed",
-    "P":   "pressure",
-    "E":   "evaporation",
-    "X":   "turbidity"
-  },
-
-  "per_station": {
-    "62644100": {
-      "name": "横塘",
-      "override_metrics": {}
-    }
-  },
-
-  "unknown_metric_action": "log_and_store",
-
-  "value_transform": {
-    "temperature": { "unit": "celsius", "factor": 1, "offset": 0 },
-    "water_level": { "unit": "m",       "factor": 1, "offset": 0 },
-    "rainfall":    { "unit": "mm",      "factor": 1, "offset": 0 },
-    "flow":        { "unit": "m3h",     "factor": 1, "offset": 0 }
+  "schema_version": 1,
+  "protocol": "jiangxi-hydrology-hex-bcd",
+  "parser_version": "jx-hydro-hex-bcd-v1",
+  "security_notice": "Do not place station addresses, credentials, public addresses, ports, or production connection data in this file. Trusted endpoints are provisioned through a private runtime configuration and the migration-managed database.",
+  "supported_uplink_function_codes": ["32"],
+  "water_quality_factor_definitions": {
+    "0311": {"code": "water_temperature", "unit": "degC", "format": "N(3,1)"},
+    "4612": {"code": "ph", "unit": "pH", "format": "N(4,2)"},
+    "4711": {"code": "dissolved_oxygen", "unit": "mg/L", "format": "N(4,1)"},
+    "4818": {"code": "conductivity", "unit": "uS/cm", "format": "N(5)"},
+    "4910": {"code": "turbidity", "unit": "NTU", "format": "N(3)"},
+    "4A11": {"code": "permanganate_index", "unit": "mg/L", "format": "N(4,1)"},
+    "4B19": {"code": "oxidation_reduction_potential", "unit": "mV", "format": "N(5,1)"},
+    "4C1A": {"code": "ammonia_nitrogen", "unit": "mg/L", "format": "N(6,2)"},
+    "4D1B": {"code": "total_phosphorus", "unit": "mg/L", "format": "N(5,3)"},
+    "4E1A": {"code": "total_nitrogen", "unit": "mg/L", "format": "N(5,2)"},
+    "4F12": {"code": "total_organic_carbon", "unit": "mg/L", "format": "N(4,2)"},
+    "4520": {"code": "rtu_status", "unit": null, "format": "X(4)"},
+    "3812": {"code": "power_voltage", "unit": "V", "format": "N(4,2)"},
+    "FF0108": {"code": "signal_strength", "unit": null, "format": "N(2)"}
   }
 }

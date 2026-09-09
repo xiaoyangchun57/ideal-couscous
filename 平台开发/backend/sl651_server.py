@@ -1,464 +1,601 @@
+"""Independent, loopback-by-default TCP receiver for the station-ingestion evidence base.
+
+The receiver persists raw frames before acknowledging them. It deliberately does not
+project values, update station status, or invoke alert/work-order logic.
 """
-SL651-2014 TCP Server
+from __future__ import annotations
 
-接收科蓝平台通过"国家水站协议"转发的实时水文数据，
-解析帧 → 写入 sensor_data_raw → 触发告警判断。
-
-启动方式：
-  python sl651_server.py [port]      # 独立启动
-  或集成到 app.py 一起启动（推荐）
-"""
-
+import argparse
 import asyncio
+from collections import deque
+from contextlib import closing
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
+import hmac
+import json
 import logging
-import sqlite3
 import os
-import signal
-import sys
-from datetime import datetime
+from pathlib import Path
+import sqlite3
+from typing import Literal
 
-from sl651_parser import find_frame, parse_frame
+try:  # Support both package tests and direct container execution.
+    from .sl651_parser import (
+        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, extract_frames, parse_frame,
+    )
+except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
+    from sl651_parser import (
+        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, extract_frames, parse_frame,
+    )
 
-logger = logging.getLogger('sl651-server')
+LOGGER = logging.getLogger("station_ingest")
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 0
+DEFAULT_MAX_CONNECTIONS = 32
+DEFAULT_MAX_CONNECTIONS_PER_SOURCE = 4
+DEFAULT_SOURCE_ERROR_BUDGET = 8
+DEFAULT_SOURCE_COOLDOWN_SECONDS = 5.0
+DEFAULT_SOURCE_CONNECTION_BURST = 8
+DEFAULT_SOURCE_CONNECTION_WINDOW_SECONDS = 1.0
+DEFAULT_SOURCE_STATE_CAPACITY = 1024
+DEFAULT_QUEUE_MAX_FRAMES = 10_000
+DEFAULT_QUEUE_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_ERROR_QUEUE_MAX = 256
+DEFAULT_MAPPING_PATH = Path(__file__).with_name("sl651_mapping.json")
 
-# 默认监听端口
-DEFAULT_PORT = 5005
 
-# 数据库路径（与app.py保持一致）
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'water.db')
+class StorageError(RuntimeError):
+    pass
 
-# 映射配置路径
-MAPPING_PATH = os.path.join(os.path.dirname(__file__), 'sl651_mapping.json')
 
-# 连接状态
-_connections = set()
+@dataclass(frozen=True)
+class AuthenticationResult:
+    status: Literal["authenticated", "unbound_authenticated", "unknown_endpoint", "credential_failed"]
+    endpoint_id: int | None
 
-# ============================================================
-# 映射配置加载
-# ============================================================
+    @property
+    def may_acknowledge(self) -> bool:
+        return self.status in {"authenticated", "unbound_authenticated"}
 
-def load_mapping():
-    """加载测点/指标映射配置"""
-    default = {
-        'debug_mode': True,
-        'metric_mapping': {
-            'W': 'water_level', 'R': 'rainfall', 'Q': 'flow',
-            'T': 'temperature', 'H': 'humidity', 'V': 'wind_speed',
-            'P': 'pressure', 'E': 'evaporation',
-        },
-        'per_station': {},
-        'unknown_metric_action': 'log_and_store',
-        'value_transform': {},
-    }
-    if not os.path.exists(MAPPING_PATH):
-        return default
+
+@dataclass
+class _QueuedWork:
+    kind: Literal["frame", "error", "stop"]
+    raw: bytes = b""
+    received_at: str = ""
+    reply: asyncio.Future[bytes | None] | None = None
+    error_code: str | None = None
+
+
+@dataclass
+class _SourceState:
+    active_connections: int = 0
+    error_count: int = 0
+    cooldown_until: float = 0.0
+    attempts: deque[float] = field(default_factory=deque)
+    last_seen: float = 0.0
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def credential_hmac(password: bytes, pepper: str) -> str:
+    if not pepper:
+        raise StorageError("credential pepper is not configured")
+    return hmac.new(pepper.encode("utf-8"), password, hashlib.sha256).hexdigest()
+
+
+def load_supported_uplink_function_codes(mapping_path: Path = DEFAULT_MAPPING_PATH) -> frozenset[int]:
+    """Load the explicitly approved first-phase uplink function codes.
+
+    The bootstrap limits this receiver to water-quality timing reports (32H). A mapping
+    file that attempts to silently expand that boundary is rejected at startup.
+    """
     try:
-        import json
-        with open(MAPPING_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            # 合并默认值（保留未配置的字段）
-            for k in default:
-                if k not in data:
-                    data[k] = default[k]
-            return data
-    except Exception as e:
-        logger.warning(f"[Mapping] 配置加载失败: {e}，使用默认映射")
-        return default
+        document = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
+        values = document["supported_uplink_function_codes"]
+        codes = frozenset(int(str(value), 16) for value in values)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise StorageError("supported uplink function-code mapping is unavailable") from exc
+    if codes != frozenset({0x32}):
+        raise StorageError("first-phase station ingestion supports only uplink function code 32H")
+    return codes
 
 
-_MAPPING_CACHE = None
+class IngestionStorage:
+    def __init__(self, database: Path, credential_pepper: str):
+        self.database = Path(database)
+        self.credential_pepper = credential_pepper
 
-def get_mapping():
-    global _MAPPING_CACHE
-    if _MAPPING_CACHE is None:
-        _MAPPING_CACHE = load_mapping()
-    return _MAPPING_CACHE
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(str(self.database), timeout=5, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        # WAL is established by the versioned migration. Do not change journal mode per
+        # receiver connection: that operation itself competes with a concurrent Web writer.
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
 
+    def healthcheck(self) -> None:
+        """Lightweight schema/readability probe suitable for a frequent container check."""
+        with closing(self._connect()) as connection:
+            required = {"schema_migrations", "trusted_endpoints", "ingest_raw_frames", "ingest_parse_attempts", "ingest_errors"}
+            found = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = required - found
+            if missing:
+                raise StorageError(f"ingestion schema unavailable: {', '.join(sorted(missing))}")
+            if connection.execute("SELECT 1").fetchone()[0] != 1:
+                raise StorageError("database readability probe failed")
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
+            if journal_mode != "wal":
+                raise StorageError("station ingestion requires WAL mode")
 
-def reload_mapping():
-    """热重载映射配置（不改代码，改完JSON即生效）"""
-    global _MAPPING_CACHE
-    _MAPPING_CACHE = load_mapping()
-    logger.info("[Mapping] 配置已热重载")
+    def full_integrity_check(self) -> None:
+        """Low-frequency maintenance/recovery validation; never used by container healthchecks."""
+        with closing(self._connect()) as connection:
+            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise StorageError("database integrity check failed")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise StorageError("foreign key check failed")
 
+    def authenticate(self, frame: ParsedFrame) -> AuthenticationResult:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT id, credential_hmac, enabled, endpoint_state FROM trusted_endpoints WHERE station_code=?",
+                (frame.station_code,),
+            ).fetchone()
+        if not row or not row["enabled"] or row["endpoint_state"] == "disabled":
+            return AuthenticationResult("unknown_endpoint", None)
+        supplied = credential_hmac(frame.password, self.credential_pepper)
+        if not hmac.compare_digest(supplied, row["credential_hmac"]):
+            return AuthenticationResult("credential_failed", None)
+        if row["endpoint_state"] == "unbound":
+            return AuthenticationResult("unbound_authenticated", row["id"])
+        return AuthenticationResult("authenticated", row["id"])
 
-def apply_mapping(station: str, table_id: str, raw_value: float, data_time) -> list:
-    """
-    将SL651表标识 + 原始值 → 映射后的metric列表。
-    返回 [{'metric': str, 'value': float, 'unit': str}, ...]
-    """
-    if isinstance(table_id, bytes):
-        table_id = table_id.decode('ascii', errors='replace')
-
-    mapping = get_mapping()
-    result = []
-
-    # 1. 先查站专属映射
-    station_cfg = mapping.get('per_station', {}).get(station, {})
-    override = station_cfg.get('override_metrics', {})
-
-    if table_id in override:
-        target_metric = override[table_id]
-    elif table_id in mapping.get('metric_mapping', {}):
-        target_metric = mapping['metric_mapping'][table_id]
-    else:
-        # 未知表标识
-        action = mapping.get('unknown_metric_action', 'log_and_store')
-        if action == 'ignore':
-            logger.warning(f"[Mapping] 忽略未知指标: station={station} table={table_id}")
-            return []
-        # log_and_store: 以原始名称存储
-        target_metric = f"raw_{table_id}"
-        logger.info(f"[Mapping] 未知指标 {table_id} → 以 {target_metric} 存储")
-
-    # 2. 值变换（单位换算等）
-    val = raw_value
-    transform = mapping.get('value_transform', {}).get(target_metric, {})
-    if transform:
-        val = val * transform.get('factor', 1) + transform.get('offset', 0)
-
-    result.append({
-        'metric': target_metric,
-        'value': round(val, 2),
-        'unit': transform.get('unit', '') if transform else '',
-    })
-
-    return result
-
-
-def log_debug_frame(frame_hex: str, station: str, info: str = ''):
-    """调试模式：记录原始帧到日志"""
-    mapping = get_mapping()
-    if mapping.get('debug_mode'):
-        logger.debug(f"[Raw] {station} {info} {frame_hex[:120]}")
-
-# ============================================================
-# 数据入库 + 告警判断
-# ============================================================
-
-def get_db():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def lookup_site_by_code(station_code: str):
-    """
-    通过站址编码查找本地站点。
-
-    SL651站址是11位BCD编码，本地sites.code可能是纯数字或带前缀。
-    尝试多种匹配方式：
-    - 精确匹配
-    - 尾部匹配（取后8/9/10位）
-    - 去尾零匹配
-    """
-    if not station_code or station_code == 'unknown':
-        return None
-
-    candidates = set()
-    candidates.add(station_code)
-    candidates.add(station_code.lstrip('0'))
-    # 去掉可能的末尾填充（BCD填充可能导致多余末尾数字）
-    for trim in range(1, 5):
-        if len(station_code) > trim:
-            candidates.add(station_code[:-trim])
-            candidates.add(station_code[:-trim].lstrip('0'))
-
-    conn = get_db()
-    try:
-        for code in candidates:
-            row = conn.execute("SELECT id, name, code FROM sites WHERE code=?", (code,)).fetchone()
-            if row:
-                logger.info(f"[Site] 精确匹配: {station_code} → {row['code']}({row['name']})")
-                return dict(row)
-
-        # 尾部模糊匹配（取最后8位）
-        for code in candidates:
-            tail = code[-8:] if len(code) >= 8 else code
-            rows = conn.execute(
-                "SELECT id, name, code FROM sites WHERE code=? OR code LIKE ?",
-                (tail, f'%{tail}')
-            ).fetchall()
-            if len(rows) == 1:
-                logger.info(f"[Site] 尾部匹配: {station_code} → {rows[0]['code']}({rows[0]['name']})")
-                return dict(rows[0])
-            elif len(rows) > 1:
-                # 多个匹配取最短code的（最可能的那个）
-                rows = sorted(rows, key=lambda r: len(r['code']))
-                logger.info(f"[Site] 尾部匹配(多结果取最短): {station_code} → {rows[0]['code']}({rows[0]['name']})")
-                return dict(rows[0])
-    except Exception as e:
-        logger.error(f"[Site] 站址查询失败: {e}")
-    finally:
-        conn.close()
-
-    logger.warning(f"[Site] 未找到站址 {station_code} 对应的站点")
-    return None
-
-
-def ingest_data(station: str, values: list, data_time: datetime):
-    """
-    将解析出的测值写入数据库。
-    先经过映射配置转换，再入库。
-    """
-    if not values:
-        return
-
-    site = lookup_site_by_code(station)
-    if not site:
-        return
-
-    site_id = site['id']
-    ts = data_time.strftime('%Y-%m-%d %H:%M:%S')
-
-    conn = get_db()
-    try:
-        for v in values:
-            if v['value'] is None:
-                continue
-
-            raw_metric = v['metric']
-            raw_val = v['value']
-
-            # ----- 应用映射配置 -----
-            # 如果值里带了 table_id，按 table_id 映射
-            table_id = v.get('table_id', '')
-            if table_id:
-                mapped = apply_mapping(station, table_id, raw_val, data_time)
-            else:
-                # 直接用 metric 名称查 value_transform
-                transform = get_mapping().get('value_transform', {}).get(raw_metric, {})
-                mapped_val = raw_val * transform.get('factor', 1) + transform.get('offset', 0)
-                mapped = [{'metric': raw_metric, 'value': round(mapped_val, 2), 'unit': transform.get('unit', '')}]
-
-            for item in mapped:
-                metric, val = item['metric'], item['value']
-
-                # 写入 sensor_data_raw
-                conn.execute(
-                    "INSERT INTO sensor_data_raw (site_id, metric, value, recorded_at) VALUES (?, ?, ?, ?)",
-                    (site_id, metric, val, ts)
-                )
-                logger.info(f"[Data] {site['name']}({station}) | {metric}={val} | {ts}")
-
-                # 更新站点的最后心跳
-                conn.execute(
-                    "UPDATE sites SET last_heartbeat=?, status='online' WHERE id=?",
-                    (ts, site_id)
-                )
-
-                # 简单告警判断
-                _check_threshold(conn, site_id, site['name'], metric, val, ts)
-
-        conn.commit()
-
-        # 更新到报率（标记该站点本小时有数据到达）
-        hour = ts[:13] + ':00:00'
-        conn.execute(
-            "INSERT OR IGNORE INTO sensor_data_hourly (site_id, metric, hour, avg_value, min_value, max_value, sample_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, 1)",
-            (site_id, 'arrival_rate', hour, 100, 100, 100)
+    def _write_attempt(self, connection: sqlite3.Connection, raw_id: int, status: str, error_code: str | None = None) -> None:
+        connection.execute(
+            "INSERT INTO ingest_parse_attempts(raw_frame_id, parser_version, parse_status, error_code) VALUES (?, ?, ?, ?)",
+            (raw_id, PARSER_VERSION, status, error_code),
         )
 
-    except Exception as e:
-        logger.error(f"[Data] 写入失败: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+    def _write_error(self, connection: sqlite3.Connection, raw_id: int | None, error_type: str) -> None:
+        connection.execute(
+            "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
+            (raw_id, error_type),
+        )
 
-
-def _check_threshold(conn, site_id, site_name, metric, value, ts):
-    """
-    简单阈值告警判断。
-    真实场景中应使用更复杂的规则引擎（历史比对、趋势分析等）。
-    """
-    # 水位告警阈值（可配置化）
-    THRESHOLDS = {
-        'water_level': {'orange': 15.0, 'red': 20.0},
-        'rainfall':    {'yellow': 30, 'orange': 50, 'red': 80},  # mm/小时
-        'flow':        {'orange': 500, 'red': 1000},
-    }
-
-    if metric not in THRESHOLDS:
-        return
-
-    limits = THRESHOLDS[metric]
-    for level, limit in sorted(limits.items(), key=lambda x: ['yellow','orange','red'].index(x[0])):
-        if value >= limit:
-            # 检查是否已有未办结的同类告警
-            existing = conn.execute(
-                "SELECT id FROM alerts WHERE site_id=? AND metric=? AND level=? AND status IN ('pending','acknowledged')",
-                (site_id, metric, level)
-            ).fetchone()
-
-            if not existing:
-                level_cn = {'yellow': '黄色', 'orange': '橙色', 'red': '红色'}
-                message = f"{site_name}{level_cn[level]}告警: {metric}={value}（超阈值{limit}）"
-                conn.execute(
-                    "INSERT INTO alerts (site_id, metric, value, level, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-                    (site_id, metric, value, level, message, 'pending', ts)
-                )
-                logger.warning(f"[Alert] {message}")
-            else:
-                # 更新值
-                conn.execute(
-                    "UPDATE alerts SET value=?, created_at=? WHERE id=?",
-                    (value, ts, existing['id'])
-                )
-            break  # 只触发最高级别告警
-
-
-# ============================================================
-# TCP Server (asyncio)
-# ============================================================
-
-class SL651Protocol(asyncio.Protocol):
-    """处理单个TCP连接的协议"""
-
-    def __init__(self):
-        self.buffer = b''
-        self.addr = None
-        self.connected_at = None
-
-    def connection_made(self, transport):
-        peername = transport.get_extra_info('peername')
-        self.addr = f"{peername[0]}:{peername[1]}" if peername else "unknown"
-        self.connected_at = datetime.now()
-        _connections.add(self.addr)
-        logger.info(f"[Connect] {self.addr} 已连接 (当前连接数: {len(_connections)})")
-
-        # 回应登录确认（SL651标准要求）
-        # 简单确认帧：68H 06 06 68H 01 00 00 00 00 00 00 01 16H
-        transport.write(bytes.fromhex('68 06 06 68 01 00 00 00 00 00 00 01 16'))
-
-    def data_received(self, data):
-        self.buffer += data
-
-        while True:
-            frame, self.buffer = find_frame(self.buffer)
-            if frame is None:
-                break
-
-            self._process_frame(frame)
-
-    def _process_frame(self, frame):
-        """处理单个帧"""
-        result = parse_frame(frame)
-
-        if not result['valid']:
-            logger.warning(f"[Frame] 无效帧: {result['raw_hex'][:40]}...")
-            return
-
-        logger.debug(f"[Frame] {result['station']} | {result['frame_type']} | {len(result['values'])}个测值")
-
-        # 只处理包含测量值的帧
-        if result['values']:
-            ingest_data(
-                station=result['station'],
-                values=result['values'],
-                data_time=result['data_time'] or datetime.now(),
+    def persist_unparseable(self, raw: bytes, error_code: str, received_at: str) -> int:
+        """Persist a complete frame that failed structural/CRC validation; never acknowledge it."""
+        frame_hash = hashlib.sha256(raw).hexdigest()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """INSERT INTO ingest_raw_frames(
+                    endpoint_id, station_code, received_at, frame_sha256, logical_key_sha256,
+                    raw_frame, body_length, crc_status, authentication_status, disposition, persistence_state
+                ) VALUES (NULL, NULL, ?, ?, NULL, ?, NULL, ?, 'not_checked', 'quarantined', 'persisted')""",
+                (received_at, frame_hash, raw, "invalid" if error_code == "crc_mismatch" else "not_checked"),
             )
+            raw_id = int(cursor.lastrowid)
+            self._write_attempt(connection, raw_id, "failed_header", error_code)
+            self._write_error(connection, raw_id, error_code)
+            connection.commit()
+            return raw_id
 
-        # 记录未知数据体
-        if result['unknown_data']:
-            logger.debug(f"[Raw] 未解析数据: {result['unknown_data'][:80]}")
+    def record_connection_error(self, error_code: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._write_error(connection, None, error_code)
+            connection.commit()
 
-    def connection_lost(self, exc):
-        _connections.discard(self.addr)
-        duration = datetime.now() - self.connected_at if self.connected_at else 0
-        logger.info(f"[Disconnect] {self.addr} 断开 (连接时长: {duration}, 当前连接数: {len(_connections)})")
+    def persist_parsed(
+        self,
+        frame: ParsedFrame,
+        auth: AuthenticationResult,
+        received_at: str,
+        *,
+        quarantine_error: str | None = None,
+    ) -> tuple[int, bool]:
+        """Persist one parsed frame and its attempt. Returns raw id and duplicate status."""
+        frame_hash = hashlib.sha256(frame.raw).hexdigest()
+        logical_hash = hashlib.sha256(frame.logical_key.encode("ascii")).hexdigest()
+        disposition = "pending_parse" if auth.status == "authenticated" and not quarantine_error else "quarantined"
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            duplicate_of = None
+            if auth.endpoint_id is not None:
+                existing = connection.execute(
+                    """SELECT id FROM ingest_raw_frames
+                       WHERE endpoint_id=? AND logical_key_sha256=? AND duplicate_of_raw_frame_id IS NULL
+                       ORDER BY id ASC LIMIT 1""",
+                    (auth.endpoint_id, logical_hash),
+                ).fetchone()
+                duplicate_of = int(existing["id"]) if existing else None
+            if duplicate_of is not None:
+                disposition = "duplicate"
+            cursor = connection.execute(
+                """INSERT INTO ingest_raw_frames(
+                    endpoint_id, station_code, received_at, frame_sha256, logical_key_sha256, raw_frame,
+                    body_length, crc_status, authentication_status, disposition, duplicate_of_raw_frame_id, persistence_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?, ?, ?)""",
+                (
+                    auth.endpoint_id,
+                    frame.station_code,
+                    received_at,
+                    frame_hash,
+                    logical_hash,
+                    frame.raw,
+                    frame.body_length,
+                    auth.status,
+                    disposition,
+                    duplicate_of,
+                    "persisted" if disposition in {"duplicate", "quarantined"} else "pending_parse",
+                ),
+            )
+            raw_id = int(cursor.lastrowid)
+            self._write_attempt(connection, raw_id, "parsed_header", quarantine_error)
+            if quarantine_error:
+                self._write_error(connection, raw_id, quarantine_error)
+            elif auth.status in {"unknown_endpoint", "credential_failed"}:
+                self._write_error(connection, raw_id, auth.status)
+            elif auth.status == "unbound_authenticated":
+                self._write_error(connection, raw_id, "unbound_authenticated_endpoint")
+            connection.commit()
+            return raw_id, duplicate_of is not None
+
+    def pending_raw_ids(self) -> list[int]:
+        with closing(self._connect()) as connection:
+            return [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT id FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse', 'pending_reparse') ORDER BY id"
+                )
+            ]
 
 
-class SL651Server:
-    """SL651 TCP Server 封装"""
-
-    def __init__(self, host='0.0.0.0', port=DEFAULT_PORT):
+class StationIngestServer:
+    def __init__(
+        self,
+        storage: IngestionStorage,
+        *,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_connections_per_source: int = DEFAULT_MAX_CONNECTIONS_PER_SOURCE,
+        source_error_budget: int = DEFAULT_SOURCE_ERROR_BUDGET,
+        source_cooldown_seconds: float = DEFAULT_SOURCE_COOLDOWN_SECONDS,
+        source_connection_burst: int = DEFAULT_SOURCE_CONNECTION_BURST,
+        source_connection_window_seconds: float = DEFAULT_SOURCE_CONNECTION_WINDOW_SECONDS,
+        source_state_capacity: int = DEFAULT_SOURCE_STATE_CAPACITY,
+        queue_max_frames: int = DEFAULT_QUEUE_MAX_FRAMES,
+        queue_max_bytes: int = DEFAULT_QUEUE_MAX_BYTES,
+        error_queue_max: int = DEFAULT_ERROR_QUEUE_MAX,
+        read_timeout_seconds: float = 10.0,
+        mapping_path: Path = DEFAULT_MAPPING_PATH,
+    ):
+        self.storage = storage
         self.host = host
         self.port = port
-        self._server = None
+        self.max_connections = max_connections
+        self.max_connections_per_source = max_connections_per_source
+        self.source_error_budget = source_error_budget
+        self.source_cooldown_seconds = source_cooldown_seconds
+        self.source_connection_burst = source_connection_burst
+        self.source_connection_window_seconds = source_connection_window_seconds
+        self.source_state_capacity = source_state_capacity
+        self.queue_max_bytes = queue_max_bytes
+        self.error_queue_max = error_queue_max
+        self.read_timeout_seconds = read_timeout_seconds
+        self.supported_uplink_function_codes = load_supported_uplink_function_codes(mapping_path)
+        self._queue: asyncio.Queue[_QueuedWork] = asyncio.Queue(maxsize=queue_max_frames + error_queue_max)
+        self._queue_max_frames = queue_max_frames
+        self._queued_frames = 0
+        self._queued_errors = 0
+        self._queued_bytes = 0
+        self.queue_peak_frames = 0
+        self.queue_peak_bytes = 0
+        self.dropped_error_events = 0
+        self.failed_error_persistence = 0
+        self._queued_bytes_lock = asyncio.Lock()
+        self._active_connections = 0
+        self._connection_lock = asyncio.Lock()
+        self._sources: dict[str, _SourceState] = {}
+        self._server: asyncio.AbstractServer | None = None
+        self._worker: asyncio.Task[None] | None = None
 
-    async def start(self):
-        """启动服务器"""
-        loop = asyncio.get_event_loop()
-        self._server = await loop.create_server(
-            lambda: SL651Protocol(),
-            host=self.host,
-            port=self.port,
-        )
-        logger.info(f"[SL651] TCP Server 已启动: {self.host}:{self.port}")
-        return self
+    @property
+    def bound_port(self) -> int:
+        if not self._server or not self._server.sockets:
+            return 0
+        return int(self._server.sockets[0].getsockname()[1])
 
-    async def serve_forever(self):
-        """持续运行"""
-        async with self._server:
-            await self._server.serve_forever()
+    @property
+    def queued_frames(self) -> int:
+        return self._queued_frames
 
-    async def stop(self):
-        """停止服务器"""
+    @property
+    def queued_bytes(self) -> int:
+        return self._queued_bytes
+
+    async def start(self) -> None:
+        self.storage.healthcheck()
+        self._worker = asyncio.create_task(self._persistence_worker(), name="station-ingest-persistence")
+        self._server = await asyncio.start_server(self._handle_connection, self.host, self.port, limit=MAX_FRAME_BYTES)
+
+    async def close(self) -> None:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
-            logger.info("[SL651] TCP Server 已停止")
+        if self._worker:
+            await self._queue.join()
+            await self._queue.put(_QueuedWork("stop"))
+            await self._worker
 
+    def _source_key(self, writer: asyncio.StreamWriter) -> str:
+        peer = writer.get_extra_info("peername")
+        return str(peer[0]) if isinstance(peer, tuple) and peer else "unknown"
 
-# ============================================================
-# 独立启动入口
-# ============================================================
+    def _prune_sources(self, now: float) -> None:
+        stale = [
+            key for key, state in self._sources.items()
+            if not state.active_connections and state.cooldown_until <= now and now - state.last_seen > self.source_connection_window_seconds
+        ]
+        for key in stale:
+            del self._sources[key]
 
-def run_server(port=DEFAULT_PORT):
-    """同步方式运行（供Flask子线程调用）"""
+    async def _admit_connection(self, source: str) -> str | None:
+        now = asyncio.get_running_loop().time()
+        async with self._connection_lock:
+            self._prune_sources(now)
+            if self._active_connections >= self.max_connections:
+                return "global_connection_limit"
+            state = self._sources.get(source)
+            if state is None:
+                if len(self._sources) >= self.source_state_capacity:
+                    return "source_tracking_capacity"
+                state = self._sources[source] = _SourceState(last_seen=now)
+            while state.attempts and now - state.attempts[0] > self.source_connection_window_seconds:
+                state.attempts.popleft()
+            state.last_seen = now
+            if state.cooldown_until > now:
+                return "source_cooling"
+            if len(state.attempts) >= self.source_connection_burst:
+                state.cooldown_until = now + self.source_cooldown_seconds
+                return "source_connection_burst"
+            if state.active_connections >= self.max_connections_per_source:
+                return "source_connection_limit"
+            state.attempts.append(now)
+            state.active_connections += 1
+            self._active_connections += 1
+            return None
 
-    async def _run():
-        server = SL651Server(port=port)
-        await server.start()
-        print(f"[SL651] 国家水站协议接收器已启动，监听端口 {port}")
-        print(f"[SL651] 请在科蓝平台配置转发: TCP → {get_local_ip()}:{port}")
-        await server.serve_forever()
+    async def _release_connection(self, source: str) -> None:
+        async with self._connection_lock:
+            self._active_connections = max(0, self._active_connections - 1)
+            state = self._sources.get(source)
+            if state:
+                state.active_connections = max(0, state.active_connections - 1)
+                state.last_seen = asyncio.get_running_loop().time()
 
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        logger.info("[SL651] Server stopped by user")
+    def _note_source_error(self, source: str, *, count_toward_budget: bool) -> None:
+        if not count_toward_budget:
+            return
+        state = self._sources.get(source)
+        if not state:
+            return
+        state.error_count += 1
+        state.last_seen = asyncio.get_running_loop().time()
+        if state.error_count >= self.source_error_budget:
+            state.cooldown_until = max(state.cooldown_until, state.last_seen + self.source_cooldown_seconds)
 
-
-def get_local_ip():
-    """获取本机内网IP"""
-    import socket
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except:
-        return '127.0.0.1'
-
-
-if __name__ == '__main__':
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-    )
-
-    port = DEFAULT_PORT
-    if len(sys.argv) > 1:
+    def _enqueue_error(self, error_code: str, source: str | None = None, *, count_toward_budget: bool = True) -> None:
+        """Schedule bounded error persistence without opening SQLite on the event loop."""
+        if source:
+            self._note_source_error(source, count_toward_budget=count_toward_budget)
+        if self._queued_errors >= self.error_queue_max:
+            self.dropped_error_events += 1
+            return
         try:
-            port = int(sys.argv[1])
-        except:
-            print(f"Usage: python {sys.argv[0]} [port]")
-            sys.exit(1)
+            self._queue.put_nowait(_QueuedWork("error", error_code=error_code))
+            self._queued_errors += 1
+        except asyncio.QueueFull:
+            self.dropped_error_events += 1
 
-    print("=" * 60)
-    print("  SL651-2014 国家水站协议接收器")
-    print(f"  监听端口: {port}")
-    print(f"  数据库: {DB_PATH}")
-    print("=" * 60)
+    async def _persistence_worker(self) -> None:
+        """Keep the sole persistence worker alive across individual SQLite failures.
 
-    # 预检查数据库
-    if not os.path.exists(DB_PATH):
-        logger.error(f"数据库文件不存在: {DB_PATH}")
-        sys.exit(1)
+        Raw-frame persistence failures suppress their matching acknowledgement. Error-event
+        persistence is best-effort and bounded: it must not take the receiver down or
+        prevent later raw frames from reaching the same worker.
+        """
+        while True:
+            item = await self._queue.get()
+            try:
+                if item.kind == "stop":
+                    return
+                if item.kind == "error":
+                    try:
+                        await asyncio.to_thread(
+                            self.storage.record_connection_error,
+                            item.error_code or "unknown_connection_error",
+                        )
+                    except Exception as exc:
+                        self.failed_error_persistence += 1
+                        LOGGER.warning("station ingest error evidence persistence failed: %s", type(exc).__name__)
+                    continue
+                try:
+                    ack = await asyncio.to_thread(self._process_raw, item.raw, item.received_at)
+                except Exception as exc:  # raw persistence failure must never generate an acknowledgement
+                    LOGGER.warning("station ingest raw persistence failed: %s", type(exc).__name__)
+                    ack = None
+                if item.reply is not None and not item.reply.done():
+                    item.reply.set_result(ack)
+            except Exception as exc:  # defensive last line: only an explicit stop may end this worker
+                LOGGER.warning("station ingest persistence worker item failed: %s", type(exc).__name__)
+                if item.reply is not None and not item.reply.done():
+                    item.reply.set_result(None)
+            finally:
+                if item.kind == "frame":
+                    async with self._queued_bytes_lock:
+                        self._queued_frames = max(0, self._queued_frames - 1)
+                        self._queued_bytes = max(0, self._queued_bytes - len(item.raw))
+                elif item.kind == "error":
+                    self._queued_errors = max(0, self._queued_errors - 1)
+                self._queue.task_done()
 
-    run_server(port)
+    def _process_raw(self, raw: bytes, received_at: str) -> bytes | None:
+        try:
+            frame = parse_frame(raw)
+        except FrameError as exc:
+            self.storage.persist_unparseable(raw, exc.code, received_at)
+            return None
+        if frame.direction != "up":
+            self.storage.persist_unparseable(raw, "unexpected_downlink", received_at)
+            return None
+        auth = self.storage.authenticate(frame)
+        if frame.function_code not in self.supported_uplink_function_codes:
+            self.storage.persist_parsed(frame, auth, received_at, quarantine_error="unsupported_function_code")
+            return None
+        self.storage.persist_parsed(frame, auth, received_at)
+        if not auth.may_acknowledge:
+            return None
+        return build_ack(frame)
+
+    async def _enqueue(self, raw: bytes, source: str) -> bytes | None:
+        if len(raw) > MAX_FRAME_BYTES:
+            self._enqueue_error("frame_too_large", source)
+            return None
+        async with self._queued_bytes_lock:
+            if self._queued_frames >= self._queue_max_frames or self._queued_bytes + len(raw) > self.queue_max_bytes:
+                self._enqueue_error("queue_full", source)
+                return None
+            self._queued_frames += 1
+            self._queued_bytes += len(raw)
+            self.queue_peak_frames = max(self.queue_peak_frames, self._queued_frames)
+            self.queue_peak_bytes = max(self.queue_peak_bytes, self._queued_bytes)
+            reply: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+            try:
+                self._queue.put_nowait(_QueuedWork("frame", raw, _utc_now(), reply))
+            except asyncio.QueueFull:  # reserved error capacity should make this unreachable.
+                self._queued_frames -= 1
+                self._queued_bytes -= len(raw)
+                self._enqueue_error("queue_full", source)
+                return None
+        try:
+            return await asyncio.wait_for(reply, timeout=self.read_timeout_seconds)
+        except asyncio.TimeoutError:
+            self._enqueue_error("persistence_timeout", source)
+            return None
+
+    async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        source = self._source_key(writer)
+        rejection = await self._admit_connection(source)
+        if rejection:
+            self._enqueue_error(rejection, source, count_toward_budget=False)
+            writer.close()
+            await writer.wait_closed()
+            return
+        buffer = b""
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=self.read_timeout_seconds)
+                except asyncio.TimeoutError:
+                    self._enqueue_error("read_timeout", source)
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                frames, buffer, errors = extract_frames(buffer)
+                for error_code in errors:
+                    self._enqueue_error(error_code, source)
+                for raw in frames:
+                    ack = await self._enqueue(raw, source)
+                    if ack is None:
+                        writer.close()
+                        await writer.wait_closed()
+                        return
+                    writer.write(ack)
+                    await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+            await self._release_connection(source)
+
+
+async def run_server(
+    database: Path,
+    *,
+    credential_pepper: str,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    max_connections: int = DEFAULT_MAX_CONNECTIONS,
+    mapping_path: Path = DEFAULT_MAPPING_PATH,
+) -> StationIngestServer:
+    server = StationIngestServer(
+        IngestionStorage(database, credential_pepper),
+        host=host,
+        port=port,
+        max_connections=max_connections,
+        mapping_path=mapping_path,
+    )
+    await server.start()
+    return server
+
+
+async def _listener_healthcheck(host: str, port: int) -> None:
+    if port <= 0:
+        raise StorageError("healthcheck requires the receiver listener port")
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=3)
+    del reader
+    writer.close()
+    await writer.wait_closed()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--database", required=True, type=Path)
+    parser.add_argument("--host", default=os.environ.get("SL651_BIND_HOST", DEFAULT_HOST))
+    parser.add_argument("--port", default=int(os.environ.get("SL651_PORT", DEFAULT_PORT)), type=int)
+    parser.add_argument("--max-connections", default=DEFAULT_MAX_CONNECTIONS, type=int)
+    parser.add_argument("--mapping", default=DEFAULT_MAPPING_PATH, type=Path)
+    parser.add_argument("--healthcheck", action="store_true")
+    arguments = parser.parse_args()
+    pepper = os.environ.get("SL651_CREDENTIAL_PEPPER", "")
+    storage = IngestionStorage(arguments.database, pepper)
+    if arguments.healthcheck:
+        storage.healthcheck()
+        asyncio.run(_listener_healthcheck(arguments.host, arguments.port))
+        return 0
+    if not pepper:
+        raise SystemExit("SL651_CREDENTIAL_PEPPER must be injected through private runtime configuration")
+
+    async def serve() -> None:
+        server = await run_server(
+            arguments.database,
+            credential_pepper=pepper,
+            host=arguments.host,
+            port=arguments.port,
+            max_connections=arguments.max_connections,
+            mapping_path=arguments.mapping,
+        )
+        LOGGER.info("station ingestion receiver started on loopback-or-explicit host")
+        try:
+            await asyncio.Future()
+        finally:
+            await server.close()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    asyncio.run(serve())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

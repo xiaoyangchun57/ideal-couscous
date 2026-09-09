@@ -5255,36 +5255,8 @@ def health():
         'source_fingerprint': BACKEND_SOURCE_FINGERPRINT,
     })
 
-# --- SL651状态查询 ---
-@app.route('/api/sl651/status')
-def sl651_status():
-    """查看SL651接收器状态（运行中/连接数/映射配置）"""
-    try:
-        from sl651_server import get_mapping, _connections
-        mapping = get_mapping()
-        return jsonify({
-            'enabled': True,
-            'port': 5005,
-            'connections': len(_connections),
-            'connections_list': list(_connections),
-            'debug_mode': mapping.get('debug_mode', False),
-            'mapped_metrics': list(mapping.get('metric_mapping', {}).keys()),
-            'station_overrides': list(mapping.get('per_station', {}).keys()),
-        })
-    except ImportError:
-        return jsonify({'enabled': False, 'port': 5005})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/sl651/reload', methods=['POST'])
-def sl651_reload():
-    """热重载映射配置"""
-    try:
-        from sl651_server import reload_mapping
-        reload_mapping()
-        return jsonify({'success': True, 'message': '映射配置已热重载'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# Station-ingestion TCP receiver runs as an independent container.
+# It intentionally has no Flask status or mapping-reload control surface.
 
 # --- Sites ---
 @app.route('/api/sites')
@@ -32172,18 +32144,9 @@ if __name__ == '__main__':
     scheduler.add_job(_wx_flush_outbox, 'interval', minutes=1,
                       id='wx_subscription_outbox', replace_existing=True)
 
-    # ===== 可选: SL651 国家水站协议接收器 =====
-    # 环境变量 ENABLE_SL651=1 时启动
-    if os.environ.get('ENABLE_SL651') == '1':
-        import threading
-        from sl651_server import run_server as sl651_run, get_local_ip, DEFAULT_PORT as SL651_PORT
-        _t = threading.Thread(target=sl651_run, args=(SL651_PORT,), daemon=True)
-        _t.start()
-        local_ip = get_local_ip()
-        print(f"[SL651] 国家水站协议接收器已启动（ENABLE_SL651=1）")
-        print(f"[SL651] 请在科蓝平台配置转发: TCP → {local_ip}:{SL651_PORT}")
-    else:
-        print("[SL651] 跳过（ENABLE_SL651=1 可启用国家水站协议接收器）")
+    # Station ingestion is intentionally not embedded in the Flask process.
+    # The independent receiver validates its own schema and health before binding a TCP listener.
+    print("[SL651] embedded receiver permanently disabled; use the isolated station-ingest container")
 
     print("[Server] 水利运维智慧运营平台 启动成功!")
     print("[Server] API: http://localhost:5000/api/health")

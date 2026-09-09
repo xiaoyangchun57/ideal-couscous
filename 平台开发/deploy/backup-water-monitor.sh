@@ -27,6 +27,7 @@ if [[ -z "$APP_DIR" ]]; then
 fi
 
 SNAPSHOT_ON_HOST="${APP_DIR}/backend/data/${SNAPSHOT_NAME}"
+INGEST_ARCHIVE_DIR="${APP_DIR}/backend/data/ingest-archives"
 
 require_directory() {
   [[ -d "$1" ]] || { echo "Missing directory: $1" >&2; exit 1; }
@@ -51,10 +52,20 @@ source.close()
 '
 
 trap 'rm -f "$SNAPSHOT_ON_HOST"' EXIT
-mv "$SNAPSHOT_ON_HOST" "$BACKUP_DIR/water.db-${STAMP}"
-tar -C "$APP_DIR/frontend" -czf "$BACKUP_DIR/uploads-${STAMP}.tar.gz" uploads
-sha256sum "$BACKUP_DIR/water.db-${STAMP}" "$BACKUP_DIR/uploads-${STAMP}.tar.gz" \
-  > "$BACKUP_DIR/SHA256SUMS-${STAMP}.txt"
+DATABASE_BACKUP="$BACKUP_DIR/water.db-${STAMP}"
+UPLOADS_BACKUP="$BACKUP_DIR/uploads-${STAMP}.tar.gz"
+mv "$SNAPSHOT_ON_HOST" "$DATABASE_BACKUP"
+tar -C "$APP_DIR/frontend" -czf "$UPLOADS_BACKUP" uploads
+
+backup_files=("$DATABASE_BACKUP" "$UPLOADS_BACKUP")
+# Raw-frame archives are sensitive evidence. If present, package them together with
+# the database snapshot without printing names or contents to ordinary logs.
+if [[ -d "$INGEST_ARCHIVE_DIR" ]]; then
+  INGEST_ARCHIVE_BACKUP="$BACKUP_DIR/ingest-archives-${STAMP}.tar.gz"
+  tar -C "$APP_DIR/backend/data" -czf "$INGEST_ARCHIVE_BACKUP" ingest-archives
+  backup_files+=("$INGEST_ARCHIVE_BACKUP")
+fi
+sha256sum "${backup_files[@]}" > "$BACKUP_DIR/SHA256SUMS-${STAMP}.txt"
 
 find "$BACKUP_DIR" -maxdepth 1 -type f -mtime +"$RETENTION_DAYS" -delete
 echo "Backup complete: $BACKUP_DIR ($STAMP)"

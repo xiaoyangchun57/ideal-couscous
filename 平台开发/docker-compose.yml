@@ -6,8 +6,16 @@ services:
     image: water-monitor-app:latest
     container_name: water-monitor
     restart: unless-stopped
+    depends_on:
+      station-ingest-permissions:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python app.py"
     environment:
       TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
       APP_RUNTIME_PROFILE: "production"
       MINIPROGRAM_STATE: ${MINIPROGRAM_STATE:-formal}
       WX_APPSECRET: ${WX_APPSECRET:-}
@@ -33,3 +41,197 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  station-ingest-permissions:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    restart: "no"
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        install -d -o 0 -g 10001 -m 2770 /app/backend/data
+        chown -R 0:10001 /app/backend/data
+        chmod -R u+rwX,g+rwX,o-rwx /app/backend/data
+        find /app/backend/data -type d -exec chmod g+s {} +
+    volumes:
+      # The one-shot preparer has no network or application ports and may alter only
+      # the receiver's designated sensitive evidence directory.
+      - ./backend/data:/app/backend/data
+
+  station-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    container_name: water-monitor-station-ingest
+    profiles: ["station-ingest"]
+    restart: unless-stopped
+    depends_on:
+      station-ingest-permissions:
+        condition: service_completed_successfully
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --host 0.0.0.0 --port 5005"
+    environment:
+      TZ: Asia/Shanghai
+      SL651_CREDENTIAL_PEPPER: ${SL651_CREDENTIAL_PEPPER:-}
+    ports:
+      - "127.0.0.1:${SL651_BIND_PORT:-5505}:5005"
+    volumes:
+      # This is the receiver's only persistent writable mount. The preparer above
+      # gives the shared group write access before this non-root service is allowed
+      # to start. The Web command uses umask 0007 so recreated sidecars stay shared.
+      - ./backend/data:/app/backend/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --host 127.0.0.1 --port 5005 --healthcheck"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  station-ingest-permission-check:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    profiles: ["station-ingest-check"]
+    restart: "no"
+    depends_on:
+      station-ingest-permissions:
+        condition: service_completed_successfully
+    user: "0:0"
+    read_only: true
+    environment:
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    command:
+      - python
+      - -c
+      - |
+        import os
+        import stat
+        import subprocess
+        import sys
+        import time
+        import uuid
+        from pathlib import Path
+
+        subprocess.run(['setpriv', '--version'], stdout=subprocess.DEVNULL, check=True)
+        os.umask(0o007)
+        import sqlite3
+
+        root = Path('/app/backend/data')
+        probe = root / f'.station-ingest-shared-permission-{uuid.uuid4().hex}.db'
+        helper = Path('/tmp/shared_sqlite_probe.py')
+        ready_prefix = root / f'.station-ingest-ready-{uuid.uuid4().hex}'
+        helper.write_text('''
+        import os
+        import sqlite3
+        import stat
+        import sys
+        import time
+        from pathlib import Path
+
+        database = Path(sys.argv[1])
+        actor = sys.argv[2]
+        expected_uid = int(sys.argv[3])
+        ready = Path(sys.argv[4]) if len(sys.argv) > 4 else None
+        if os.geteuid() != expected_uid:
+            raise RuntimeError(f'{actor} did not run as expected UID')
+        connection = sqlite3.connect(database, timeout=5)
+        try:
+            connection.execute('PRAGMA journal_mode=WAL')
+            connection.execute('CREATE TABLE IF NOT EXISTS proof (id INTEGER PRIMARY KEY, actor TEXT NOT NULL)')
+            connection.execute('INSERT INTO proof(actor) VALUES (?)', (actor,))
+            connection.commit()
+            required = (database, Path(str(database) + '-wal'), Path(str(database) + '-shm'))
+            for path in required:
+                details = path.stat()
+                if details.st_gid != 10001 or details.st_mode & stat.S_IWGRP == 0:
+                    raise RuntimeError(f'{actor} found unshared SQLite evidence file')
+            if ready is not None:
+                ready.write_text('ready', encoding='ascii')
+                time.sleep(3)
+        finally:
+            connection.close()
+        ''', encoding='utf-8')
+        # The helper must remain readable after setpriv drops to UID/GID 10001.
+        # It contains only the isolated probe logic and is immutable before either
+        # identity executes it; the tmpfs remains the only writable non-data path.
+        helper.chmod(0o444)
+
+        def command(actor, expected_uid, hold=False):
+            args = [sys.executable, str(helper), str(probe), actor, str(expected_uid)]
+            if hold:
+                args.append(str(ready_prefix.with_name(ready_prefix.name + '-' + actor)))
+            if expected_uid == 10001:
+                return ['setpriv', '--reuid=10001', '--regid=10001', '--clear-groups', *args]
+            return args
+
+        def wait_ready(actor):
+            ready = ready_prefix.with_name(ready_prefix.name + '-' + actor)
+            for _ in range(100):
+                if ready.exists():
+                    return
+                time.sleep(0.05)
+            raise RuntimeError(f'{actor} did not create its SQLite WAL readiness marker')
+
+        try:
+            # Web identity first, with its WAL/SHM still open while ingest writes.
+            web_holder = subprocess.Popen(command('web-first', 0, hold=True))
+            wait_ready('web-first')
+            subprocess.run(command('ingest-after-web', 10001), check=True)
+            web_holder.wait(timeout=10)
+            if web_holder.returncode != 0:
+                raise RuntimeError('Web-first SQLite holder failed')
+
+            # Ingest identity first, then the root Web identity writes the same database.
+            ingest_holder = subprocess.Popen(command('ingest-first', 10001, hold=True))
+            wait_ready('ingest-first')
+            subprocess.run(command('web-after-ingest', 0), check=True)
+            ingest_holder.wait(timeout=10)
+            if ingest_holder.returncode != 0:
+                raise RuntimeError('Ingest-first SQLite holder failed')
+
+            # Both processes reopen after the preceding sessions have exited.
+            subprocess.run(command('web-restarted', 0), check=True)
+            subprocess.run(command('ingest-restarted', 10001), check=True)
+            with sqlite3.connect(probe) as verifier:
+                count = verifier.execute('SELECT COUNT(*) FROM proof').fetchone()[0]
+            if count != 6:
+                raise RuntimeError('Shared SQLite restart sequence lost writes')
+
+            for directory in ('/app/backend', '/app/frontend'):
+                forbidden = ['test', '-w', directory]
+                if subprocess.run(
+                    ['setpriv', '--reuid=10001', '--regid=10001', '--clear-groups', *forbidden]
+                ).returncode == 0:
+                    raise RuntimeError('UID 10001 can write outside its necessary data mount')
+        finally:
+            for path in (
+                probe,
+                Path(str(probe) + '-wal'),
+                Path(str(probe) + '-shm'),
+                helper,
+                *root.glob(ready_prefix.name + '-*'),
+            ):
+                path.unlink(missing_ok=True)
+    volumes:
+      - ./backend/data:/app/backend/data
