@@ -1,3 +1,35 @@
+# r14 station ingestion frozen candidate gate (2026-09-10)
+
+Target candidate tag: `release-20260910-cross-module-freeze-r14`
+
+r14 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r13 are immutable historical tags and remain rejected. It contains the isolated SL651 32H station-receipt base, raw-frame evidence retention, SQLite migration and backup boundaries, monitoring normalization and read-only projections, receiver startup schema gate, and the offline single-site configuration command. All automated checks use isolated databases, temporary uploads, loopback-only test listeners, virtual station codes and test configuration.
+
+## r14 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 592/592 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across all 40 current `*.test.js` files | 0 |
+| Combined syntax gate | 174 JavaScript/Python files passed | 0 |
+| React Node tests | 95/95 passed across all 17 current `src/**/*.test.js` files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1747 modules transformed | 0 |
+| Backup archive and candidate guard unittest | 7/7 passed; r1-r13 rejected by guard | 0 |
+| Station ingestion direct contracts | 65/65 passed; L1 2,980 frames, 160 isolated Web writes, p95=0.874s, p99=2.838s | 0 |
+| Docker Compose station-ingest configuration validation | PASS with non-production project name only; no container started | 0 |
+| Candidate verification | r14 accepted | 0 |
+| Cached diff and release-boundary checks | PASS: three whitelisted candidate paths only; no whitespace errors or half-staged paths | 0 |
+
+## r14 first-run correction
+
+The initial backup-script test run selected the Windows WSL relay `bash`, which cannot execute a POSIX shell in this host session, and therefore failed its seven isolated probes. Re-running the unchanged test with the repository Git Bash first in `PATH` passed 7/7. The initial Compose validation also lacked a local project name and was rejected before parsing; setting the non-production `COMPOSE_PROJECT_NAME=water-monitor-freeze-r14` made `docker compose --profile station-ingest config` pass without building, starting, or exposing any container. No candidate source, fixture, protocol behavior, or production configuration was changed for either correction.
+
+## r14 evidence boundary
+
+No real station code, MN, password, HMAC, pepper, IP address, port, connection string, private configuration, fixed database or raw production frame belongs in the candidate. Real station receipt, ACK exchange, hourly reporting, disconnect recovery, manual retransmission and cross-platform numeric comparison are **NOT RUN**. The server ingress is **PREPARED** only: no production configuration, listener, public exposure, service start or deployment is authorized by this candidate.
+
+---
+
 # r13 frozen candidate gate (2026-09-07)
 
 Target candidate tag: `release-20260907-cross-module-freeze-r13`
