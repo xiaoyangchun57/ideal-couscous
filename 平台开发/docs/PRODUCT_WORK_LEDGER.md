@@ -3,6 +3,6 @@
 > 本文件不是产品台账副本，不记录历史、状态矩阵或产品结论。
 
 - 唯一权威产品台账：`E:\杂七杂八\水质运维\平台开发\docs\PRODUCT_WORK_LEDGER.md`
-- 当前开发树执行交接：`E:\杂七杂八\水质运维-开发线\平台开发\docs\STATION_DATA_INGESTION_DATABASE_STEWARD_BOOTSTRAP_20260908.md`
+- 当前开发树执行交接：`E:\杂七杂八\水质运维-开发线\平台开发\docs\STATION_INGESTION_LEGACY_FK_BASELINE_DEVELOPMENT_HANDOFF_20260911.md`
 - 当前执行状态和写入权只以产品树台账及上述开发交接为准；本指针本身不授予代码、生产、端口或发布权限。
 - 本文件只由产品主任务随开发交接切换更新；开发任务不得在此维护第二份台账。
