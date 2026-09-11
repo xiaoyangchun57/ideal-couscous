@@ -1,3 +1,37 @@
+# r15 station ingestion migration compatibility candidate gate (2026-09-11)
+
+Target candidate tag: `release-20260911-cross-module-freeze-r15`
+
+r15 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r14 are immutable historical tags and remain rejected. Relative to r14, this candidate adds the reviewed station-ingestion migration compatibility change, its self-contained collaboration handoff, and the previously omitted read-only UI-validation context script already required by the frozen backend tests. A pre-existing unrelated foreign-key violation may remain as an unchanged migration baseline, while any migration-caused change and every station-owned foreign-key violation still fail. No migration SQL, public contract, frontend, Compose, protocol, factor mapping or production configuration changes.
+
+## r15 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 597/597 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across all 40 current `*.test.js` files | 0 |
+| Combined syntax gate | 174 JavaScript/Python files passed | 0 |
+| React Node tests | 95/95 passed across all 17 current `src/**/*.test.js` files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1747 modules transformed | 0 |
+| Backup archive and candidate guard unittest | 7/7 passed; r1-r14 rejected by guard | 0 |
+| Station ingestion direct contracts | 70/70 passed; L1 2,980 frames, queue peak 82, 160 isolated Web writes, p95=0.889s, p99=2.609s | 0 |
+| Docker Compose station-ingest configuration validation | PASS with non-production project name and placeholder-only configuration; no container started | 0 |
+| Candidate verification | r15 accepted | 0 |
+| Cached candidate-tree and release-boundary checks | PASS: four whitelisted freeze paths only; unrelated working-tree changes excluded | 0 |
+
+## r15 first-run correction
+
+The first full backend run was executed from the staged candidate tree rather than the dirty development worktree. It ran 597 tests and exposed four failures because `backend/test_health_runtime_fingerprint.py`, tracked since r11, invokes `dev_scripts/capture-ui-validation-context.ps1`, while that script had remained an untracked local file and was absent from every frozen candidate. The migration tests themselves passed. The candidate was not frozen or tagged. The existing read-only script was reviewed for repository, health and secret boundaries, then added without changing the test or relaxing any assertion. The first retry exported the candidate files without isolated `.git` metadata and was stopped when the same four context tests correctly rejected that incomplete verification environment; no candidate source changed. The complete r15 gate was then restarted from a newly exported candidate tree with an isolated, non-production Git identity. The first backup-script check selected the Windows WSL relay and failed before executing the script; explicitly selecting the repository Git Bash reran the unchanged seven-test set successfully.
+
+## r15 evidence boundary
+
+The reviewed code commit is `6d33ead17d0ee754fa7237a64777974dee487c35`, based on the r14 candidate through the documentation-only collaboration handoff `c67ed5f9dfd4c6d215a044df8fa170666c18a472`. The candidate must not include the collaborator's later delivery-note commit. The added context script is a local verification utility only and performs no writes. No real station code, MN, password, HMAC, pepper, IP address, port, connection string, private configuration, fixed database or production frame belongs in the candidate.
+
+Production migration, container start, public ingress activation and real RTU receipt remain **NOT RUN** until the immutable r15 tag is handed to the independent release task. Real ACK exchange, hourly continuity, disconnect recovery, manual retransmission and cross-platform numeric comparison remain **NOT RUN** after deployment until actual vendor coordination.
+
+---
+
 # r14 station ingestion frozen candidate gate (2026-09-10)
 
 Target candidate tag: `release-20260910-cross-module-freeze-r14`
