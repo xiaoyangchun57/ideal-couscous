@@ -33,9 +33,13 @@ try:
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
     from station_monitoring import normalize_raw_frame
 try:
-    from .migrate_station_ingestion import MigrationError, verify_station_monitoring_contract
+    from .migrate_station_ingestion import (
+        MigrationError, station_ingestion_foreign_key_violations, verify_station_monitoring_contract,
+    )
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
-    from migrate_station_ingestion import MigrationError, verify_station_monitoring_contract
+    from migrate_station_ingestion import (
+        MigrationError, station_ingestion_foreign_key_violations, verify_station_monitoring_contract,
+    )
 
 LOGGER = logging.getLogger("station_ingest")
 DEFAULT_HOST = "127.0.0.1"
@@ -147,8 +151,8 @@ class IngestionStorage:
         with closing(self._connect()) as connection:
             if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise StorageError("database integrity check failed")
-            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise StorageError("foreign key check failed")
+            if station_ingestion_foreign_key_violations(connection):
+                raise StorageError("station ingestion foreign key check failed")
 
     def authenticate(self, frame: ParsedFrame) -> AuthenticationResult:
         with closing(self._connect()) as connection:

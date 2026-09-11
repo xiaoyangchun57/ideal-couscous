@@ -402,6 +402,33 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         await _listener_healthcheck("127.0.0.1", self.server.bound_port)
         self.assertNotIn("integrity_check", inspect.getsource(IngestionStorage.healthcheck))
 
+    async def test_full_integrity_check_allows_unrelated_legacy_foreign_key_violation(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("CREATE TABLE legacy_parents (id INTEGER PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE legacy_children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES legacy_parents(id))"
+            )
+            connection.execute("INSERT INTO legacy_children(parent_id) VALUES (17)")
+            connection.commit()
+            before = frozenset(tuple(row) for row in connection.execute("PRAGMA foreign_key_check"))
+        self.assertEqual(len(before), 1)
+
+        self.storage.full_integrity_check()
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            after = frozenset(tuple(row) for row in connection.execute("PRAGMA foreign_key_check"))
+            self.assertEqual(after, before)
+            self.assertEqual(connection.execute("SELECT parent_id FROM legacy_children").fetchone()[0], 17)
+
+    async def test_full_integrity_check_rejects_station_owned_foreign_key_violation(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO monitoring_normalization_retries(raw_frame_id, normalization_version) VALUES (999, 'test')"
+            )
+            connection.commit()
+        with self.assertRaisesRegex(StorageError, "station ingestion foreign key"):
+            self.storage.full_integrity_check()
+
     async def test_first_stage_only_database_refuses_healthcheck_and_start_before_listener_binding(self):
         await self.server.close()
         first_stage_database = self.root / "first-stage-only.db"

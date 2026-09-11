@@ -112,6 +112,67 @@ class StationIngestionMigrationTest(unittest.TestCase):
             self.assertEqual(before, after)
             self.assertEqual(connection.execute("SELECT value FROM sensor_data").fetchone()[0], 7.2)
 
+    def test_unrelated_legacy_foreign_key_violation_is_preserved_and_does_not_block_migration(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("CREATE TABLE legacy_parents (id INTEGER PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE legacy_children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES legacy_parents(id))"
+            )
+            connection.execute("INSERT INTO legacy_children(parent_id) VALUES (17)")
+            connection.commit()
+            before = frozenset(tuple(row) for row in connection.execute("PRAGMA foreign_key_check"))
+        self.assertEqual(len(before), 1)
+
+        applied, _ = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        with closing(sqlite3.connect(self.database)) as connection:
+            after = frozenset(tuple(row) for row in connection.execute("PRAGMA foreign_key_check"))
+            self.assertEqual(after, before)
+            self.assertEqual(connection.execute("SELECT parent_id FROM legacy_children").fetchone()[0], 17)
+            migration.verify_station_ingestion_schema(connection)
+            migration.verify_station_monitoring_schema(connection)
+        second_applied, second_backup = migration.apply_migration(self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_station_owned_foreign_key_violation_is_rejected_by_schema_verification(self):
+        migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO monitoring_normalization_retries(raw_frame_id, normalization_version) VALUES (999, 'test')"
+            )
+            connection.commit()
+            with self.assertRaisesRegex(migration.MigrationError, "station ingestion foreign key"):
+                migration.verify_station_ingestion_schema(connection)
+
+    def test_migration_added_foreign_key_violation_restores_original_database(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("CREATE TABLE legacy_parents (id INTEGER PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE legacy_children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES legacy_parents(id))"
+            )
+            connection.commit()
+        original_execute = migration._execute_migration_sql
+        injected = False
+
+        def execute_with_orphan(connection, script):
+            nonlocal injected
+            original_execute(connection, script)
+            if not injected:
+                connection.execute("PRAGMA defer_foreign_keys=ON")
+                connection.execute("INSERT INTO legacy_children(parent_id) VALUES (999)")
+                injected = True
+
+        with mock.patch.object(migration, "_execute_migration_sql", side_effect=execute_with_orphan):
+            with self.assertRaisesRegex(migration.MigrationError, "migration changed foreign key violations"):
+                migration.apply_migration(self.database, self.backups)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM legacy_children").fetchone()[0], 0)
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertFalse(migration._table_exists(connection, "ingest_raw_frames"))
+
     def test_checksum_conflict_is_rejected(self):
         migration.apply_migration(self.database, self.backups)
         with closing(sqlite3.connect(self.database)) as connection:

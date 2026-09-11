@@ -21,6 +21,21 @@ MIGRATIONS = (
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
+STATION_INGESTION_TABLES = frozenset({
+    "schema_migrations",
+    "trusted_endpoints",
+    "ingest_raw_frames",
+    "ingest_parse_attempts",
+    "ingest_errors",
+    "monitoring_endpoint_profiles",
+    "monitoring_factor_definitions",
+    "monitoring_factor_mappings",
+    "observation_batches",
+    "observation_values",
+    "monitoring_status_events",
+    "monitoring_quality_issues",
+    "monitoring_normalization_retries",
+})
 
 
 class MigrationError(RuntimeError):
@@ -61,6 +76,32 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone() is not None
+
+
+def _foreign_key_violations(
+    connection: sqlite3.Connection,
+    tables: frozenset[str] | None = None,
+) -> frozenset[tuple[object, ...]]:
+    if tables is None:
+        return frozenset(tuple(row) for row in connection.execute("PRAGMA foreign_key_check"))
+    existing = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    violations: set[tuple[object, ...]] = set()
+    for table in sorted(tables & existing):
+        quoted_table = '"' + table.replace('"', '""') + '"'
+        violations.update(
+            tuple(row)
+            for row in connection.execute(f"PRAGMA foreign_key_check({quoted_table})")
+        )
+    return frozenset(violations)
+
+
+def station_ingestion_foreign_key_violations(
+    connection: sqlite3.Connection,
+) -> frozenset[tuple[object, ...]]:
+    return _foreign_key_violations(connection, STATION_INGESTION_TABLES)
 
 
 def _schema_snapshot(connection: sqlite3.Connection) -> dict[str, str]:
@@ -120,9 +161,9 @@ def verify_station_ingestion_schema(connection: sqlite3.Connection) -> None:
     integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
     if integrity != "ok":
         raise MigrationError("database integrity check failed")
-    foreign_rows = connection.execute("PRAGMA foreign_key_check").fetchall()
+    foreign_rows = station_ingestion_foreign_key_violations(connection)
     if foreign_rows:
-        raise MigrationError("foreign key check failed")
+        raise MigrationError("station ingestion foreign key check failed")
 
 
 def _require_unique_columns(connection: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> None:
@@ -225,11 +266,13 @@ def apply_migration(
 
     backup_path = backup_database(database, backup_dir)
     connection: sqlite3.Connection | None = None
+    before_foreign_rows: frozenset[tuple[object, ...]] | None = None
     try:
         connection = sqlite3.connect(str(database), isolation_level=None)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
+        before_foreign_rows = _foreign_key_violations(connection)
         for version, path in pending:
             _execute_migration_sql(connection, path.read_text(encoding="utf-8"))
             connection.execute(
@@ -245,6 +288,9 @@ def apply_migration(
         }
         if changed_existing:
             raise MigrationError("migration modified pre-existing schema objects")
+        after_foreign_rows = _foreign_key_violations(connection)
+        if after_foreign_rows != before_foreign_rows:
+            raise MigrationError("migration changed foreign key violations")
         connection.commit()
     except Exception:
         if connection is not None:
@@ -259,6 +305,8 @@ def apply_migration(
         restore_backup(database, backup_path)
         with closing(sqlite3.connect(str(database))) as restored:
             if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise MigrationError("migration failed and automatic restore verification failed")
+            if before_foreign_rows is not None and _foreign_key_violations(restored) != before_foreign_rows:
                 raise MigrationError("migration failed and automatic restore verification failed")
         raise
     finally:
