@@ -18,8 +18,14 @@ MIGRATION_VERSION = "20260908_001_station_ingestion"
 MIGRATIONS = (
     (MIGRATION_VERSION, Path(__file__).with_name("migrations") / "20260908_001_station_ingestion.sql"),
     ("20260909_002_station_monitoring_normalization", Path(__file__).with_name("migrations") / "20260909_002_station_monitoring_normalization.sql"),
+    ("20260911_003_hj212_protocol", Path(__file__).with_name("migrations") / "20260911_003_hj212_protocol.sql"),
+    ("20260912_004_monitoring_retention", Path(__file__).with_name("migrations") / "20260912_004_monitoring_retention.sql"),
+    ("20260912_005_retention_recovery", Path(__file__).with_name("migrations") / "20260912_005_retention_recovery.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
+HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
+RETENTION_MIGRATION_VERSION = "20260912_004_monitoring_retention"
+RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
 STATION_INGESTION_TABLES = frozenset({
     "schema_migrations",
@@ -27,6 +33,7 @@ STATION_INGESTION_TABLES = frozenset({
     "ingest_raw_frames",
     "ingest_parse_attempts",
     "ingest_errors",
+    "ingest_frame_protocols",
     "monitoring_endpoint_profiles",
     "monitoring_factor_definitions",
     "monitoring_factor_mappings",
@@ -35,6 +42,13 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_status_events",
     "monitoring_quality_issues",
     "monitoring_normalization_retries",
+    "monitoring_raw_archives",
+    "monitoring_raw_archive_frames",
+    "monitoring_hourly_values",
+    "monitoring_raw_archive_parts",
+    "monitoring_raw_archive_part_frames",
+    "monitoring_hourly_value_series",
+    "monitoring_storage_health",
 })
 
 
@@ -130,7 +144,10 @@ def _require_existing_business_database(database: Path, *, isolated_test: bool) 
 
 def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
     """Verify the lightweight first-stage objects required before ingestion can start."""
-    required_tables = {"schema_migrations", "trusted_endpoints", "ingest_raw_frames", "ingest_parse_attempts", "ingest_errors"}
+    required_tables = {
+        "schema_migrations", "trusted_endpoints", "ingest_raw_frames", "ingest_parse_attempts", "ingest_errors",
+        "ingest_frame_protocols",
+    }
     existing = {
         row[0]
         for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -146,6 +163,7 @@ def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
         "idx_ingest_raw_logical_key",
         "idx_ingest_parse_pending",
         "idx_ingest_errors_open",
+        "idx_ingest_protocol_family_raw",
     }
     indexes = {
         row[0]
@@ -191,6 +209,21 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not applied or applied[0] != migration_checksum(MONITORING_MIGRATION_VERSION):
         raise MigrationError("station monitoring migration is missing or incompatible")
+    hj212 = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (HJ212_MIGRATION_VERSION,)
+    ).fetchone()
+    if not hj212 or hj212[0] != migration_checksum(HJ212_MIGRATION_VERSION):
+        raise MigrationError("HJ212 protocol migration is missing or incompatible")
+    retention = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (RETENTION_MIGRATION_VERSION,)
+    ).fetchone()
+    if not retention or retention[0] != migration_checksum(RETENTION_MIGRATION_VERSION):
+        raise MigrationError("monitoring retention migration is missing or incompatible")
+    recovery = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (RETENTION_RECOVERY_MIGRATION_VERSION,)
+    ).fetchone()
+    if not recovery or recovery[0] != migration_checksum(RETENTION_RECOVERY_MIGRATION_VERSION):
+        raise MigrationError("monitoring retention recovery migration is missing or incompatible")
     _require_unique_columns(connection, "observation_batches", ("raw_frame_id", "normalization_version"))
     _require_unique_columns(connection, "observation_batches", ("endpoint_id", "idempotency_key", "normalization_version"))
     _require_unique_columns(connection, "monitoring_normalization_retries", ("raw_frame_id", "normalization_version"))

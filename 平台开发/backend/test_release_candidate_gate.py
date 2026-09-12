@@ -22,8 +22,9 @@ HISTORICAL_TAGS = (
     'release-20260907-cross-module-freeze-r12',
     'release-20260907-cross-module-freeze-r13',
     'release-20260910-cross-module-freeze-r14',
+    'release-20260911-cross-module-freeze-r15',
 )
-CURRENT_CANDIDATE = 'release-20260911-cross-module-freeze-r15'
+CURRENT_CANDIDATE = 'release-20260912-cross-module-freeze-r16'
 
 
 class ReleaseCandidateGateTest(unittest.TestCase):

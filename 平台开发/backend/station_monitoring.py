@@ -9,8 +9,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from .sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
+    from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
 except ImportError:  # pragma: no cover
     from sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
+    from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
 
 NORMALIZATION_VERSION = "station-monitoring-normalizer-v1"
 
@@ -112,15 +114,36 @@ def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: s
             connection.rollback()
             return "not_projectable"
         try:
-            frame = parse_frame(raw["raw_frame"])
+            protocol = connection.execute(
+                "SELECT protocol_family FROM ingest_frame_protocols WHERE raw_frame_id=?", (raw_id,)
+            ).fetchone()
+            family = protocol[0] if protocol else "sl651"
             endpoint_timezone = _endpoint_timezone(connection, raw["endpoint_id"])
-            report = parse_water_quality_report(frame.payload)
-            if report.station_code != frame.station_code:
-                return _mark_waiting(connection, raw_id, None, "payload_station_mismatch", "32H body station does not match frame header")
-            reported_at = _as_utc(frame.sent_at, endpoint_timezone)
-            observed_at = _as_utc(report.observed_at, endpoint_timezone)
+            if family == "hj212":
+                frame = parse_hj212_frame(raw["raw_frame"])
+                if frame.command != "2011" or frame.data_time is None:
+                    return _mark_waiting(connection, raw_id, None, "hj212_not_projectable", "HJ212 command has no projectable observation")
+                report_factors = frame.factors
+                reported_at = _as_utc(frame.data_time, endpoint_timezone)
+                observed_at = _as_utc(frame.data_time, endpoint_timezone)
+                function_code = 2011
+                serial_number = 0
+                parser_version = HJ212_PARSER_VERSION
+            elif family == "sl651":
+                frame = parse_frame(raw["raw_frame"])
+                report = parse_water_quality_report(frame.payload)
+                if report.station_code != frame.station_code:
+                    return _mark_waiting(connection, raw_id, None, "payload_station_mismatch", "32H body station does not match frame header")
+                report_factors = report.factors
+                reported_at = _as_utc(frame.sent_at, endpoint_timezone)
+                observed_at = _as_utc(report.observed_at, endpoint_timezone)
+                function_code = frame.function_code
+                serial_number = frame.serial_number
+                parser_version = PARSER_VERSION
+            else:
+                return _mark_waiting(connection, raw_id, None, "unsupported_protocol_family", "raw receipt protocol family is unsupported")
         except FrameError as exc:
-            return _mark_waiting(connection, raw_id, None, exc.code, "32H body cannot be normalized by this parser")
+            return _mark_waiting(connection, raw_id, None, exc.code, "station body cannot be normalized by its protocol parser")
         profile = _profile_for(connection, raw["endpoint_id"], observed_at)
         if not profile:
             return _mark_waiting(connection, raw_id, None, "unmapped_endpoint", "endpoint profile is missing at observation time")
@@ -135,7 +158,7 @@ def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: s
                idempotency_key, normalization_version, batch_status, projection_state, error_code,
                replaces_batch_id, normalized_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'device_reported', ?, ?, 'accepted', 'completed', NULL, ?, ?)""",
-            (raw_id, raw["endpoint_id"], site_id, frame.function_code, frame.serial_number, reported_at, observed_at,
+            (raw_id, raw["endpoint_id"], site_id, function_code, serial_number, reported_at, observed_at,
              raw["received_at"], profile["expected_granularity"] or "realtime", frame.logical_key,
              normalization_version, previous[0] if previous else None, _utc_now()),
         )
@@ -147,7 +170,14 @@ def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: s
             (batch_id, raw["endpoint_id"], site_id, raw["received_at"], raw["received_at"]),
         )
         batch_status = "accepted"
-        for factor in report.factors:
+        for factor in report_factors:
+            if factor.quality == "fault":
+                batch_status = "partial"
+                _record_issue(
+                    connection, raw_id, batch_id, site_id,
+                    getattr(factor, "issue_code", None) or "invalid_factor_value", factor.protocol_code,
+                )
+                continue
             definition = connection.execute("SELECT * FROM monitoring_factor_definitions WHERE protocol_code=?", (factor.protocol_code,)).fetchone()
             if not definition:
                 batch_status = "partial"
@@ -174,21 +204,24 @@ def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: s
                 _record_issue(connection, raw_id, batch_id, site_id, "unmapped_factor", factor.protocol_code)
                 connection.execute(
                     """INSERT INTO observation_values(observation_batch_id, protocol_code, quality, parser_version, is_published)
-                       VALUES (?, ?, 'unmapped', ?, 0)""", (batch_id, factor.protocol_code, PARSER_VERSION),
+                       VALUES (?, ?, 'unmapped', ?, 0)""", (batch_id, factor.protocol_code, parser_version),
                 )
                 continue
             metric = mapping["business_metric"] or definition["business_metric"]
             published = bool(definition["is_published"] and metric)
             if factor.quality != "valid":
                 batch_status = "partial"
-                _record_issue(connection, raw_id, batch_id, site_id, "invalid_factor_value", factor.protocol_code)
+                _record_issue(
+                    connection, raw_id, batch_id, site_id,
+                    getattr(factor, "issue_code", None) or "invalid_factor_value", factor.protocol_code,
+                )
             connection.execute(
                 """INSERT INTO observation_values(observation_batch_id, protocol_code, business_metric, raw_value,
                    raw_unit, standard_value, standard_unit, quality, instrument_asset_code, parser_version, is_published)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (batch_id, factor.protocol_code, metric, factor.raw_value, definition["raw_unit"], factor.raw_value,
                  definition["standard_unit"], factor.quality, mapping["instrument_asset_code"] or profile["instrument_asset_code"],
-                 PARSER_VERSION, int(published)),
+                 parser_version, int(published and factor.quality in {"valid", "suspect"})),
             )
         connection.execute("UPDATE observation_batches SET batch_status=? WHERE id=?", (batch_status, batch_id))
         connection.execute("UPDATE ingest_raw_frames SET disposition='accepted', persistence_state='persisted' WHERE id=?", (raw_id,))

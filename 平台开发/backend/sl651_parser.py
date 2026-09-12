@@ -47,6 +47,9 @@ class ParsedFrame:
     flow_control: int
     crc: int
 
+    protocol_family: str = "sl651"
+    parser_version: str = PARSER_VERSION
+
     @property
     def logical_key(self) -> str:
         # The caller hashes this value before storage; it never belongs in ordinary logs.

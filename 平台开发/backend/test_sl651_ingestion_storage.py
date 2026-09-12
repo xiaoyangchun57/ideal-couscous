@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code
-from sl651_server import IngestionStorage, StationIngestServer, credential_hmac
+from sl651_server import IngestionStorage, StationIngestServer, StorageError, credential_hmac
+import station_ingest_retention as retention
+from station_ingest_retention import StoragePolicy, storage_policy_for_mode
 
 
 def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=None):
@@ -86,6 +88,59 @@ class IngestionStorageTest(unittest.TestCase):
         with mock.patch.object(self.storage, "persist_parsed", side_effect=sqlite3.OperationalError("locked")):
             with self.assertRaises(sqlite3.OperationalError):
                 server._process_raw(make_uplink(), "2026-09-08T00:00:00+00:00")
+
+    def test_unavailable_archive_storage_blocks_persistence_before_ack(self):
+        self.add_endpoint()
+        storage = IngestionStorage(
+            self.database, self.pepper,
+            storage_policy=StoragePolicy(self.root, minimum_total_bytes=10**18, minimum_free_bytes=10 * 1024 ** 3),
+        )
+        server = StationIngestServer(storage)
+        with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+            server._process_raw(make_uplink(), "2026-09-08T00:00:00+00:00")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], "degraded")
+
+    def test_unparseable_frame_is_also_blocked_when_archive_storage_is_unavailable(self):
+        storage = IngestionStorage(
+            self.database, self.pepper,
+            storage_policy=StoragePolicy(self.root, minimum_total_bytes=10**18, minimum_free_bytes=10 * 1024 ** 3),
+        )
+        server = StationIngestServer(storage)
+        broken = bytearray(make_uplink())
+        broken[-1] ^= 1
+        with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+            server._process_raw(bytes(broken), "2026-09-08T00:00:00+00:00")
+        self.assertEqual(self.rows("ingest_raw_frames"), [])
+
+    def test_framing_error_evidence_uses_the_same_storage_capacity_guard(self):
+        storage = IngestionStorage(
+            self.database, self.pepper,
+            storage_policy=StoragePolicy(self.root, minimum_total_bytes=10**18, minimum_free_bytes=10 * 1024 ** 3),
+        )
+        with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+            storage.record_connection_error("hj212_invalid_length")
+        self.assertEqual(self.rows("ingest_errors"), [])
+
+    def test_validation_mode_rejects_low_space_on_sqlite_hot_storage_even_when_archive_is_healthy(self):
+        archive_root = self.root / "archive"
+        archive_root.mkdir()
+        policy = storage_policy_for_mode(archive_root, "validation")
+
+        class Usage:
+            total = 29 * 1024 ** 3
+            free = 6 * 1024 ** 3
+
+        class LowHotUsage:
+            total = 29 * 1024 ** 3
+            free = 4 * 1024 ** 3
+
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=lambda path: Usage() if Path(path) == archive_root else LowHotUsage()):
+            with self.assertRaisesRegex(Exception, "SQLite hot storage is below"):
+                retention.check_storage_policy(self.database, policy)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], "degraded")
 
     def test_wal_lock_wait_and_restart_recovery_keep_raw_evidence(self):
         self.add_endpoint()

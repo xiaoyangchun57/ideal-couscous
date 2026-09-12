@@ -56,7 +56,7 @@ class StationIngestionMigrationTest(unittest.TestCase):
                 (migration.MIGRATION_VERSION, migration.migration_checksum(), "2026-09-09T00:00:00+00:00", "isolated"),
             )
             connection.commit()
-        with self.assertRaisesRegex(migration.MigrationError, "missing monitoring tables"):
+        with self.assertRaisesRegex(migration.MigrationError, "missing required tables: ingest_frame_protocols"):
             self._run_check(self.database)
 
     def test_monitoring_schema_rejects_missing_overlap_trigger(self):

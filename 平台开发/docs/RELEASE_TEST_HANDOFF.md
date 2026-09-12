@@ -1,3 +1,37 @@
+# r16 HJ212 real-traffic adaptation and retention candidate gate (2026-09-12)
+
+Target candidate tag: `release-20260912-cross-module-freeze-r16`
+
+r16 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r15 are immutable historical tags and remain rejected. Relative to r15, this candidate adds the reviewed HJ212 passive-receipt path, dual-protocol framing, authenticated endpoint provisioning, versioned protocol and retention migrations, normalized observation projection, capacity-protected raw evidence retention, and the isolated Compose receiver storage boundary. Real MN/PW values and production configuration remain outside Git.
+
+## r16 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 624/624 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across all 40 current `*.test.js` files | 0 |
+| Combined syntax gate | 179 JavaScript/Python files passed | 0 |
+| React Node tests | 95/95 passed across all 17 current `src/**/*.test.js` files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1747 modules transformed | 0 |
+| Backup archive and candidate guard unittest | 7/7 passed; r1-r15 rejected by guard | 0 |
+| Station ingestion direct contracts | 87/87 passed; L1 2,980 frames, queue peak 83, 160 isolated Web writes, p95=0.652s, p99=1.792s | 0 |
+| Docker Compose station-ingest configuration validation | PASS with placeholder-only configuration; both storage paths and four escaped shell references retained; no container started | 0 |
+| Candidate verification | r16 accepted | 0 |
+| Cached candidate-tree and release-boundary checks | PASS: 21 whitelisted paths only; unrelated working-tree changes excluded | 0 |
+
+## r16 first-run correction
+
+The first backend run used a detached temporary worktree. Four existing UI-context tests failed before their health assertions because the context script requires a non-empty Git branch name. No candidate source failed and the remaining 620 tests passed. The same immutable staged snapshot was attached to a temporary non-production validation branch; with that verification-environment correction and no candidate content change, backend discovery passed 624/624. Intentional fault-injection 500 traces remained visible while their rollback assertions passed.
+
+## r16 evidence boundary
+
+The Compose review independently confirmed that the permission preparer preserves both `/app/backend/data` and `/var/lib/station-ingest/raw`, emits no unset-variable warning or empty path, and retains four escaped container-shell references. The final gate was rerun from the beginning after writing this evidence into the candidate.
+
+Production deployment, real 43-station private provisioning, independent data-disk mounting, real traffic replay and dual-client monitoring UI remain **NOT RUN**. This freeze does not authorize packaging, pushing, deployment, server operations, Phase B, or disclosure of real endpoint identity or credentials.
+
+---
+
 # r15 station ingestion migration compatibility candidate gate (2026-09-11)
 
 Target candidate tag: `release-20260911-cross-module-freeze-r15`

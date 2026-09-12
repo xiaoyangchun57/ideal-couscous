@@ -1,10 +1,13 @@
 import ast
 import asyncio
 import inspect
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 import tempfile
+import os
+import subprocess
 import threading
 import time
 import unittest
@@ -20,6 +23,7 @@ import app as web_app
 import migrate_station_ingestion as migration
 from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_observation_time, encode_bcd_time, encode_station_code, parse_frame
+from hj212_parser import build_hj212_9011_response, parse_hj212_frame
 import sl651_server as ingest_server
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, _listener_healthcheck, credential_hmac
 
@@ -35,6 +39,12 @@ def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=No
         + len(content).to_bytes(2, "big") + b"\x02" + content + bytes((UP_FLOW_CONTROL,))
     )
     return prefix + crc16_modbus(prefix).to_bytes(2, "big")
+
+
+def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001"):
+    cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
+    body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
 
 
 class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
@@ -85,7 +95,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self.connect()
         writer.write(raw)
         await writer.drain()
-        acknowledgement = await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=4)
+        acknowledgement = await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=self.server.read_timeout_seconds)
         self.assertEqual(parse_frame(acknowledgement).direction, "down")
         writer.close()
         await writer.wait_closed()
@@ -146,6 +156,74 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(rows[0][0], "duplicate")
         self.assertEqual(rows[1][0], "duplicate")
         self.assertEqual(rows[1][1], 1)
+
+    async def test_hj212_silent_receipts_keep_sticky_connection_for_later_3020(self):
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO trusted_endpoints(station_code,credential_hmac,endpoint_state) VALUES (?,?, 'bound')",
+                ("TESTHJ01", credential_hmac(password.encode("ascii"), self.pepper)),
+            )
+            connection.commit()
+        first = make_hj212(qn="20260911164900001")
+        second = make_hj212(qn="20260911164900002")
+        inquiry = make_hj212(command="3020", qn="20260911164900003")
+        reader, writer = await self.connect()
+        writer.write(first + second + inquiry)
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=3)
+        self.assertEqual(reply, build_hj212_9011_response(parse_hj212_frame(inquiry)))
+        writer.close()
+        await writer.wait_closed()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'").fetchone()[0], 3)
+
+    async def test_hj212_persistence_failure_closes_without_a_silent_success(self):
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO trusted_endpoints(station_code,credential_hmac,endpoint_state) VALUES (?,?, 'bound')",
+                ("TESTHJ01", credential_hmac(password.encode("ascii"), self.pepper)),
+            )
+            connection.commit()
+        reader, writer = await self.connect()
+        with mock.patch.object(self.storage, "persist_parsed", side_effect=sqlite3.OperationalError("isolated lock")):
+            writer.write(make_hj212())
+            await writer.drain()
+            self.assertEqual(await asyncio.wait_for(reader.read(), timeout=3), b"")
+        writer.close()
+        await writer.wait_closed()
+
+    async def test_bad_frame_does_not_discard_later_complete_frame_from_same_read(self):
+        self.add_endpoint("bound")
+        bad = bytearray(make_uplink(serial=401))
+        bad[-1] ^= 1
+        good = make_uplink(serial=402)
+        reader, writer = await self.connect()
+        writer.write(bytes(bad) + good)
+        await writer.drain()
+        acknowledgement = await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=3)
+        self.assertEqual(parse_frame(acknowledgement).serial_number, 402)
+        self.assertEqual(await asyncio.wait_for(reader.read(), timeout=3), b"")
+        writer.close()
+        await writer.wait_closed()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 2)
+            self.assertIn("crc_mismatch", {row[0] for row in connection.execute("SELECT error_type FROM ingest_errors")})
+
+    async def test_framing_error_and_following_complete_frame_both_reach_receiver_chain(self):
+        self.add_endpoint("bound")
+        reader, writer = await self.connect()
+        writer.write(b"##ABCD" + make_uplink(serial=403))
+        await writer.drain()
+        acknowledgement = await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=3)
+        self.assertEqual(parse_frame(acknowledgement).serial_number, 403)
+        await asyncio.wait_for(self.server._queue.join(), timeout=3)
+        writer.close()
+        await writer.wait_closed()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 1)
+            self.assertIn("hj212_invalid_length", {row[0] for row in connection.execute("SELECT error_type FROM ingest_errors")})
 
     async def test_error_evidence_write_failure_does_not_kill_persistence_worker(self):
         self.add_endpoint("bound")
@@ -250,6 +328,9 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_l1_tcp_equivalent_day_and_tenfold_burst_with_actual_web_writes(self):
         """Exercise TCP ingestion beside the real authenticated Flask site-write route."""
+        # Let every isolated sample finish so the existing p95/p99 <= 4s assertion,
+        # rather than an earlier client cancellation, is the latency authority.
+        self.server.read_timeout_seconds = 8
         self.add_endpoint("bound")
         operator_id, token = self._create_l1_web_credentials()
         stop_web_writer = threading.Event()
@@ -439,9 +520,9 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             connection.execute("PRAGMA journal_mode=WAL")
         first_stage_storage = IngestionStorage(first_stage_database, self.pepper)
         first_stage_server = StationIngestServer(first_stage_storage, host="127.0.0.1", port=0)
-        with self.assertRaisesRegex(StorageError, "missing monitoring tables"):
+        with self.assertRaisesRegex(StorageError, "missing required tables: ingest_frame_protocols"):
             first_stage_storage.healthcheck()
-        with self.assertRaisesRegex(StorageError, "missing monitoring tables"):
+        with self.assertRaisesRegex(StorageError, "missing required tables: ingest_frame_protocols"):
             await first_stage_server.start()
         self.assertIsNone(first_stage_server._server)
         self.assertIsNone(first_stage_server._worker)
@@ -495,9 +576,38 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         preparer = compose["station-ingest-permissions"]
         self.assertEqual(preparer["user"], "0:0")
         self.assertEqual(preparer["restart"], "no")
-        self.assertIn("chown -R 0:10001 /app/backend/data", preparer["command"][2])
-        self.assertIn("chmod -R u+rwX,g+rwX,o-rwx /app/backend/data", preparer["command"][2])
+        self.assertIn("/app/backend/data /var/lib/station-ingest/raw", preparer["command"][2])
+        self.assertIn('chown -R 0:10001 "$$directory"', preparer["command"][2])
+        self.assertIn('chmod -R u+rwX,g+rwX,o-rwx "$$directory"', preparer["command"][2])
         self.assertIn("chmod g+s", preparer["command"][2])
+
+        # Raw YAML parsing cannot detect Compose's host-side interpolation. Render
+        # with non-production placeholders and assert the command seen by a
+        # container still contains a live shell variable and no empty path.
+        environment = os.environ.copy()
+        environment.update({
+            "SL651_RAW_STORAGE_HOST_PATH": "/tmp/codex-station-raw-placeholder",
+            "SL651_BIND_PORT": "15505",
+            "SL651_STORAGE_MODE": "validation",
+            "SL651_CREDENTIAL_PEPPER": "test-only-placeholder",
+            "MINIPROGRAM_STATE": "formal",
+            "WX_APPSECRET": "test-only-placeholder",
+            "COMPOSE_PROJECT_NAME": "station-ingest-contract-test",
+        })
+        rendered = subprocess.run(
+            ["docker", "compose", "--profile", "station-ingest", "config", "--format", "json"],
+            cwd=project, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        self.assertNotIn("directory is not set", rendered.stderr.lower())
+        rendered_services = json.loads(rendered.stdout)["services"]
+        rendered_command = rendered_services["station-ingest-permissions"]["command"][2]
+        self.assertEqual(rendered_command.count('"$$directory"'), 4)
+        # Compose's config output preserves the escape; the command delivered to
+        # the container is the corresponding single-dollar shell variable.
+        self.assertEqual(rendered_command.replace("$$directory", "$directory").count('"$directory"'), 4)
+        self.assertNotIn('""', rendered_command)
+        self.assertIn("/app/backend/data /var/lib/station-ingest/raw", rendered_command)
 
         web = compose["water-monitor"]
         self.assertIn("umask 0007", web["command"][2])
@@ -511,6 +621,11 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receiver["user"], "10001:10001")
         self.assertTrue(receiver["read_only"])
         self.assertIn("umask 0007", receiver["command"][2])
+        self.assertIn("--raw-storage-dir /var/lib/station-ingest/raw", receiver["command"][2])
+        self.assertIn("--storage-mode ${SL651_STORAGE_MODE:-long_term}", receiver["command"][2])
+        self.assertEqual(receiver["environment"]["SL651_RAW_STORAGE_DIR"], "/var/lib/station-ingest/raw")
+        self.assertEqual(receiver["environment"]["SL651_STORAGE_MODE"], "${SL651_STORAGE_MODE:-long_term}")
+        self.assertIn("${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw", receiver["volumes"])
         self.assertIn("umask 0007", receiver["healthcheck"]["test"][1])
         self.assertEqual(
             receiver["depends_on"]["station-ingest-permissions"]["condition"],

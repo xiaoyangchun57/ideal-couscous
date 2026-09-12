@@ -53,14 +53,17 @@ services:
       - /bin/sh
       - -ec
       - |
-        install -d -o 0 -g 10001 -m 2770 /app/backend/data
-        chown -R 0:10001 /app/backend/data
-        chmod -R u+rwX,g+rwX,o-rwx /app/backend/data
-        find /app/backend/data -type d -exec chmod g+s {} +
+        for directory in /app/backend/data /var/lib/station-ingest/raw; do
+          install -d -o 0 -g 10001 -m 2770 "$$directory"
+          chown -R 0:10001 "$$directory"
+          chmod -R u+rwX,g+rwX,o-rwx "$$directory"
+          find "$$directory" -type d -exec chmod g+s {} +
+        done
     volumes:
       # The one-shot preparer has no network or application ports and may alter only
       # the receiver's designated sensitive evidence directory.
       - ./backend/data:/app/backend/data
+      - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
 
   station-ingest:
     build:
@@ -80,10 +83,12 @@ services:
     command:
       - /bin/sh
       - -ec
-      - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --host 0.0.0.0 --port 5005"
+      - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --storage-mode ${SL651_STORAGE_MODE:-long_term} --host 0.0.0.0 --port 5005"
     environment:
       TZ: Asia/Shanghai
       SL651_CREDENTIAL_PEPPER: ${SL651_CREDENTIAL_PEPPER:-}
+      SL651_RAW_STORAGE_DIR: /var/lib/station-ingest/raw
+      SL651_STORAGE_MODE: ${SL651_STORAGE_MODE:-long_term}
     ports:
       - "127.0.0.1:${SL651_BIND_PORT:-5505}:5005"
     volumes:
@@ -91,10 +96,11 @@ services:
       # gives the shared group write access before this non-root service is allowed
       # to start. The Web command uses umask 0007 so recreated sidecars stay shared.
       - ./backend/data:/app/backend/data
+      - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
     healthcheck:
       test:
         - CMD-SHELL
-        - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --host 127.0.0.1 --port 5005 --healthcheck"
+        - "umask 0007; exec python sl651_server.py --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --storage-mode ${SL651_STORAGE_MODE:-long_term} --host 127.0.0.1 --port 5005 --healthcheck"
       interval: 30s
       timeout: 8s
       retries: 3

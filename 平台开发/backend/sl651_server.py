@@ -18,16 +18,22 @@ import logging
 import os
 from pathlib import Path
 import sqlite3
-from typing import Literal
+from typing import Literal, Protocol
 
 try:  # Support both package tests and direct container execution.
     from .sl651_parser import (
-        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, extract_frames, parse_frame,
+        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, parse_frame,
     )
+    from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
+    from .ingestion_framing import extract_ingestion_frames
+    from .station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
     from sl651_parser import (
-        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, extract_frames, parse_frame,
+        MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, parse_frame,
     )
+    from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
+    from ingestion_framing import extract_ingestion_frames
+    from station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
 try:
     from .station_monitoring import normalize_raw_frame
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
@@ -64,6 +70,25 @@ class StorageError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ProcessingResult:
+    """Persistence outcome kept separate from the optional protocol reply."""
+    reply: bytes | None
+    keep_connection: bool
+
+
+class IngestFrame(Protocol):
+    raw: bytes
+    station_code: str
+    password: bytes
+    body_length: int
+    protocol_family: str
+    parser_version: str
+
+    @property
+    def logical_key(self) -> str: ...
+
+
+@dataclass(frozen=True)
 class AuthenticationResult:
     status: Literal["authenticated", "unbound_authenticated", "unknown_endpoint", "credential_failed"]
     endpoint_id: int | None
@@ -78,7 +103,7 @@ class _QueuedWork:
     kind: Literal["frame", "error", "stop"]
     raw: bytes = b""
     received_at: str = ""
-    reply: asyncio.Future[bytes | None] | None = None
+    reply: asyncio.Future[ProcessingResult] | None = None
     error_code: str | None = None
 
 
@@ -119,9 +144,18 @@ def load_supported_uplink_function_codes(mapping_path: Path = DEFAULT_MAPPING_PA
 
 
 class IngestionStorage:
-    def __init__(self, database: Path, credential_pepper: str):
+    def __init__(self, database: Path, credential_pepper: str, *, storage_policy: StoragePolicy | None = None):
         self.database = Path(database)
         self.credential_pepper = credential_pepper
+        self.storage_policy = storage_policy
+
+    def _require_raw_storage_capacity(self) -> None:
+        if self.storage_policy is None:
+            return
+        try:
+            check_storage_policy(self.database, self.storage_policy)
+        except RetentionError as exc:
+            raise StorageError("raw archive storage is unavailable") from exc
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.database), timeout=5, isolation_level=None)
@@ -135,6 +169,7 @@ class IngestionStorage:
 
     def healthcheck(self) -> None:
         """Lightweight schema/readability probe suitable for a frequent container check."""
+        self._require_raw_storage_capacity()
         with closing(self._connect()) as connection:
             try:
                 verify_station_monitoring_contract(connection)
@@ -154,7 +189,7 @@ class IngestionStorage:
             if station_ingestion_foreign_key_violations(connection):
                 raise StorageError("station ingestion foreign key check failed")
 
-    def authenticate(self, frame: ParsedFrame) -> AuthenticationResult:
+    def authenticate(self, frame: IngestFrame) -> AuthenticationResult:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT id, credential_hmac, enabled, endpoint_state FROM trusted_endpoints WHERE station_code=?",
@@ -169,10 +204,13 @@ class IngestionStorage:
             return AuthenticationResult("unbound_authenticated", row["id"])
         return AuthenticationResult("authenticated", row["id"])
 
-    def _write_attempt(self, connection: sqlite3.Connection, raw_id: int, status: str, error_code: str | None = None) -> None:
+    def _write_attempt(
+        self, connection: sqlite3.Connection, raw_id: int, status: str, error_code: str | None = None,
+        *, parser_version: str = PARSER_VERSION,
+    ) -> None:
         connection.execute(
             "INSERT INTO ingest_parse_attempts(raw_frame_id, parser_version, parse_status, error_code) VALUES (?, ?, ?, ?)",
-            (raw_id, PARSER_VERSION, status, error_code),
+            (raw_id, parser_version, status, error_code),
         )
 
     def _write_error(self, connection: sqlite3.Connection, raw_id: int | None, error_type: str) -> None:
@@ -181,8 +219,12 @@ class IngestionStorage:
             (raw_id, error_type),
         )
 
-    def persist_unparseable(self, raw: bytes, error_code: str, received_at: str) -> int:
+    def persist_unparseable(
+        self, raw: bytes, error_code: str, received_at: str, *, protocol_family: str = "unknown",
+        parser_version: str = "unknown",
+    ) -> int:
         """Persist a complete frame that failed structural/CRC validation; never acknowledge it."""
+        self._require_raw_storage_capacity()
         frame_hash = hashlib.sha256(raw).hexdigest()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -194,12 +236,19 @@ class IngestionStorage:
                 (received_at, frame_hash, raw, "invalid" if error_code == "crc_mismatch" else "not_checked"),
             )
             raw_id = int(cursor.lastrowid)
-            self._write_attempt(connection, raw_id, "failed_header", error_code)
+            connection.execute(
+                "INSERT INTO ingest_frame_protocols(raw_frame_id, protocol_family, parser_version) VALUES (?, ?, ?)",
+                (raw_id, protocol_family, parser_version),
+            )
+            self._write_attempt(connection, raw_id, "failed_header", error_code, parser_version=parser_version)
             self._write_error(connection, raw_id, error_code)
             connection.commit()
             return raw_id
 
     def record_connection_error(self, error_code: str) -> None:
+        # Framing errors are raw-receipt evidence too. They may not bypass the same
+        # capacity guard that protects complete parseable and unparseable frames.
+        self._require_raw_storage_capacity()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._write_error(connection, None, error_code)
@@ -207,13 +256,14 @@ class IngestionStorage:
 
     def persist_parsed(
         self,
-        frame: ParsedFrame,
+        frame: IngestFrame,
         auth: AuthenticationResult,
         received_at: str,
         *,
         quarantine_error: str | None = None,
     ) -> tuple[int, bool]:
         """Persist one parsed frame and its attempt. Returns raw id and duplicate status."""
+        self._require_raw_storage_capacity()
         frame_hash = hashlib.sha256(frame.raw).hexdigest()
         logical_hash = hashlib.sha256(frame.logical_key.encode("ascii")).hexdigest()
         disposition = "pending_parse" if auth.status == "authenticated" and not quarantine_error else "quarantined"
@@ -250,7 +300,11 @@ class IngestionStorage:
                 ),
             )
             raw_id = int(cursor.lastrowid)
-            self._write_attempt(connection, raw_id, "parsed_header", quarantine_error)
+            connection.execute(
+                "INSERT INTO ingest_frame_protocols(raw_frame_id, protocol_family, parser_version) VALUES (?, ?, ?)",
+                (raw_id, frame.protocol_family, frame.parser_version),
+            )
+            self._write_attempt(connection, raw_id, "parsed_header", quarantine_error, parser_version=frame.parser_version)
             if quarantine_error:
                 self._write_error(connection, raw_id, quarantine_error)
             elif auth.status in {"unknown_endpoint", "credential_failed"}:
@@ -533,6 +587,10 @@ class StationIngestServer:
         while True:
             raw_id = await self._normalization_queue.get()
             try:
+                # Normalization is retryable projection work. Never let its SQLite
+                # write transaction compete with an acknowledged raw-receipt backlog.
+                while self._queued_frames:
+                    await asyncio.sleep(0.01)
                 await asyncio.to_thread(normalize_raw_frame, self.storage.database, raw_id)
             except Exception as exc:
                 LOGGER.warning("station monitoring normalization deferred: %s", type(exc).__name__)
@@ -568,16 +626,16 @@ class StationIngestServer:
                         LOGGER.warning("station ingest error evidence persistence failed: %s", type(exc).__name__)
                     continue
                 try:
-                    ack = await asyncio.to_thread(self._process_raw, item.raw, item.received_at)
+                    outcome = await asyncio.to_thread(self._process_raw_result, item.raw, item.received_at)
                 except Exception as exc:  # raw persistence failure must never generate an acknowledgement
                     LOGGER.warning("station ingest raw persistence failed: %s", type(exc).__name__)
-                    ack = None
+                    outcome = ProcessingResult(None, False)
                 if item.reply is not None and not item.reply.done():
-                    item.reply.set_result(ack)
+                    item.reply.set_result(outcome)
             except Exception as exc:  # defensive last line: only an explicit stop may end this worker
                 LOGGER.warning("station ingest persistence worker item failed: %s", type(exc).__name__)
                 if item.reply is not None and not item.reply.done():
-                    item.reply.set_result(None)
+                    item.reply.set_result(ProcessingResult(None, False))
             finally:
                 if item.kind == "frame":
                     async with self._queued_bytes_lock:
@@ -587,53 +645,76 @@ class StationIngestServer:
                     self._queued_errors = max(0, self._queued_errors - 1)
                 self._queue.task_done()
 
-    def _process_raw(self, raw: bytes, received_at: str) -> bytes | None:
+    def _process_raw_result(self, raw: bytes, received_at: str) -> ProcessingResult:
         try:
-            frame = parse_frame(raw)
+            frame: ParsedFrame | ParsedHJ212Frame
+            frame = parse_hj212_frame(raw) if raw.startswith(b"##") else parse_frame(raw)
         except FrameError as exc:
-            self.storage.persist_unparseable(raw, exc.code, received_at)
-            return None
+            self.storage.persist_unparseable(
+                raw, exc.code, received_at,
+                protocol_family="hj212" if raw.startswith(b"##") else "sl651",
+                parser_version=HJ212_PARSER_VERSION if raw.startswith(b"##") else PARSER_VERSION,
+            )
+            return ProcessingResult(None, False)
+        if isinstance(frame, ParsedHJ212Frame):
+            auth = self.storage.authenticate(frame)
+            if frame.command == "3020":
+                self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
+                return ProcessingResult(build_hj212_9011_response(frame), True) if auth.may_acknowledge else ProcessingResult(None, False)
+            if frame.command != "2011":
+                self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
+                return ProcessingResult(None, False)
+            raw_id, duplicate = self.storage.persist_parsed(frame, auth, received_at)
+            if auth.status == "authenticated" and not duplicate:
+                self._schedule_normalization(raw_id)
+            # CN=2011 has no confirmed application reply, but a durable receipt is
+            # successful and must not discard later sticky frames on this TCP stream.
+            return ProcessingResult(None, auth.status == "authenticated")
         if frame.direction != "up":
-            self.storage.persist_unparseable(raw, "unexpected_downlink", received_at)
-            return None
+            self.storage.persist_unparseable(raw, "unexpected_downlink", received_at, protocol_family="sl651", parser_version=PARSER_VERSION)
+            return ProcessingResult(None, False)
         auth = self.storage.authenticate(frame)
         if frame.function_code not in self.supported_uplink_function_codes:
             self.storage.persist_parsed(frame, auth, received_at, quarantine_error="unsupported_function_code")
-            return None
+            return ProcessingResult(None, False)
         raw_id, duplicate = self.storage.persist_parsed(frame, auth, received_at)
         # Normalization is deliberately after the durable raw receipt and ACK path.
         # A mapping or parser defect remains retryable evidence on restart.
         if auth.status == "authenticated" and not duplicate:
             self._schedule_normalization(raw_id)
         if not auth.may_acknowledge:
-            return None
-        return build_ack(frame)
+            return ProcessingResult(None, False)
+        return ProcessingResult(build_ack(frame), True)
 
-    async def _enqueue(self, raw: bytes, source: str) -> bytes | None:
+    def _process_raw(self, raw: bytes, received_at: str) -> bytes | None:
+        """Compatibility seam for direct storage tests; networking uses the full result."""
+        return self._process_raw_result(raw, received_at).reply
+
+    async def _enqueue(self, raw: bytes, source: str) -> ProcessingResult:
         if len(raw) > MAX_FRAME_BYTES:
             self._enqueue_error("frame_too_large", source)
-            return None
+            return ProcessingResult(None, False)
         async with self._queued_bytes_lock:
             if self._queued_frames >= self._queue_max_frames or self._queued_bytes + len(raw) > self.queue_max_bytes:
                 self._enqueue_error("queue_full", source)
-                return None
+                return ProcessingResult(None, False)
             self._queued_frames += 1
             self._queued_bytes += len(raw)
             self.queue_peak_frames = max(self.queue_peak_frames, self._queued_frames)
             self.queue_peak_bytes = max(self.queue_peak_bytes, self._queued_bytes)
-            reply: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+            reply: asyncio.Future[ProcessingResult] = asyncio.get_running_loop().create_future()
             try:
                 self._queue.put_nowait(_QueuedWork("frame", raw, _utc_now(), reply))
             except asyncio.QueueFull:  # reserved error capacity should make this unreachable.
                 self._queued_frames -= 1
                 self._queued_bytes -= len(raw)
                 self._enqueue_error("queue_full", source)
-                return None
+                return ProcessingResult(None, False)
         try:
             return await asyncio.wait_for(reply, timeout=self.read_timeout_seconds)
         except asyncio.TimeoutError:
             self._enqueue_error("persistence_timeout", source)
-            return None
+            return ProcessingResult(None, False)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         source = self._source_key(writer)
@@ -654,17 +735,21 @@ class StationIngestServer:
                 if not chunk:
                     break
                 buffer += chunk
-                frames, buffer, errors = extract_frames(buffer)
+                frames, buffer, errors = extract_ingestion_frames(buffer)
                 for error_code in errors:
                     self._enqueue_error(error_code, source)
+                close_after_batch = False
                 for raw in frames:
-                    ack = await self._enqueue(raw, source)
-                    if ack is None:
-                        writer.close()
-                        await writer.wait_closed()
-                        return
-                    writer.write(ack)
-                    await writer.drain()
+                    outcome = await self._enqueue(raw, source)
+                    if not outcome.keep_connection:
+                        close_after_batch = True
+                    if outcome.reply is not None:
+                        writer.write(outcome.reply)
+                        await writer.drain()
+                if close_after_batch:
+                    writer.close()
+                    await writer.wait_closed()
+                    return
         finally:
             writer.close()
             try:
@@ -682,9 +767,10 @@ async def run_server(
     port: int = DEFAULT_PORT,
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
     mapping_path: Path = DEFAULT_MAPPING_PATH,
+    storage_policy: StoragePolicy | None = None,
 ) -> StationIngestServer:
     server = StationIngestServer(
-        IngestionStorage(database, credential_pepper),
+        IngestionStorage(database, credential_pepper, storage_policy=storage_policy),
         host=host,
         port=port,
         max_connections=max_connections,
@@ -710,16 +796,21 @@ def main() -> int:
     parser.add_argument("--port", default=int(os.environ.get("SL651_PORT", DEFAULT_PORT)), type=int)
     parser.add_argument("--max-connections", default=DEFAULT_MAX_CONNECTIONS, type=int)
     parser.add_argument("--mapping", default=DEFAULT_MAPPING_PATH, type=Path)
+    parser.add_argument("--raw-storage-dir", default=os.environ.get("SL651_RAW_STORAGE_DIR"), type=Path)
+    parser.add_argument("--storage-mode", choices=("long_term", "validation"), default=os.environ.get("SL651_STORAGE_MODE", "long_term"))
     parser.add_argument("--healthcheck", action="store_true")
     arguments = parser.parse_args()
     pepper = os.environ.get("SL651_CREDENTIAL_PEPPER", "")
-    storage = IngestionStorage(arguments.database, pepper)
+    storage_policy = storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode) if arguments.raw_storage_dir else None
+    storage = IngestionStorage(arguments.database, pepper, storage_policy=storage_policy)
     if arguments.healthcheck:
         storage.healthcheck()
         asyncio.run(_listener_healthcheck(arguments.host, arguments.port))
         return 0
     if not pepper:
         raise SystemExit("SL651_CREDENTIAL_PEPPER must be injected through private runtime configuration")
+    if storage_policy is None:
+        raise SystemExit("SL651_RAW_STORAGE_DIR must name the independent raw archive storage")
 
     async def serve() -> None:
         server = await run_server(
@@ -729,6 +820,7 @@ def main() -> int:
             port=arguments.port,
             max_connections=arguments.max_connections,
             mapping_path=arguments.mapping,
+            storage_policy=storage_policy,
         )
         LOGGER.info("station ingestion receiver started on loopback-or-explicit host")
         try:
