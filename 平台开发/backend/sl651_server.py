@@ -261,12 +261,13 @@ class IngestionStorage:
         received_at: str,
         *,
         quarantine_error: str | None = None,
+        configuration_pending: bool = False,
     ) -> tuple[int, bool]:
         """Persist one parsed frame and its attempt. Returns raw id and duplicate status."""
         self._require_raw_storage_capacity()
         frame_hash = hashlib.sha256(frame.raw).hexdigest()
         logical_hash = hashlib.sha256(frame.logical_key.encode("ascii")).hexdigest()
-        disposition = "pending_parse" if auth.status == "authenticated" and not quarantine_error else "quarantined"
+        disposition = "pending_parse" if auth.status == "authenticated" and not quarantine_error and not configuration_pending else "quarantined"
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             duplicate_of = None
@@ -307,12 +308,20 @@ class IngestionStorage:
             self._write_attempt(connection, raw_id, "parsed_header", quarantine_error, parser_version=frame.parser_version)
             if quarantine_error:
                 self._write_error(connection, raw_id, quarantine_error)
+            elif configuration_pending:
+                self._write_error(connection, raw_id, "configuration_pending")
             elif auth.status in {"unknown_endpoint", "credential_failed"}:
                 self._write_error(connection, raw_id, auth.status)
             elif auth.status == "unbound_authenticated":
                 self._write_error(connection, raw_id, "unbound_authenticated_endpoint")
             connection.commit()
             return raw_id, duplicate_of is not None
+
+    def endpoint_has_monitoring_profile(self, endpoint_id: int) -> bool:
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT 1 FROM monitoring_endpoint_profiles WHERE endpoint_id=? AND enabled=1 LIMIT 1", (endpoint_id,)
+            ).fetchone() is not None
 
     def pending_normalization_page(self, after_id: int, limit: int) -> list[int]:
         """Read a bounded due-work page; callers must not materialize the full backlog."""
@@ -664,9 +673,16 @@ class StationIngestServer:
             if frame.command != "2011":
                 self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(None, False)
-            raw_id, duplicate = self.storage.persist_parsed(frame, auth, received_at)
+            configuration_pending = (
+                auth.status == "authenticated"
+                and not self.storage.endpoint_has_monitoring_profile(int(auth.endpoint_id or 0))
+            )
+            raw_id, duplicate = self.storage.persist_parsed(
+                frame, auth, received_at, configuration_pending=configuration_pending,
+            )
             if auth.status == "authenticated" and not duplicate:
-                self._schedule_normalization(raw_id)
+                if not configuration_pending:
+                    self._schedule_normalization(raw_id)
             # CN=2011 has no confirmed application reply, but a durable receipt is
             # successful and must not discard later sticky frames on this TCP stream.
             return ProcessingResult(None, auth.status == "authenticated")

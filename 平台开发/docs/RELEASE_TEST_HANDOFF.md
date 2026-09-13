@@ -1,3 +1,34 @@
+# r17 identity-first receiver candidate gate (2026-09-13)
+
+Target candidate tag: `release-20260913-cross-module-freeze-r17`
+
+r17 is the only candidate accepted by `deploy/release-candidates.json`; r1 through r16 are immutable historical tags and remain rejected. Relative to r16, it adds reviewed B1 identity-first station provisioning, unaffiliated authenticated HJ212 `CN=2011` evidence retention, station-separated restricted discovery, and explicit configuration-gated, idempotent replay. It does not add a B2 monitoring template, production station identity, credential, endpoint configuration, deployment, or UI.
+
+## r17 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 627/627 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across all 40 current `*.test.js` files | 0 |
+| Combined syntax gate | 181 JavaScript/Python files passed | 0 |
+| React Node tests | 95/95 passed across all 17 current `src/**/*.test.js` files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS; 1747 modules transformed | 0 |
+| Backup archive and candidate guard unittest | 7/7 passed; r1-r16 rejected by guard | 0 |
+| Station ingestion direct contracts | 100/100 passed; L1 2,980 frames, queue peak 81, 160 isolated Web writes, p95=0.706s, p99=1.876s | 0 |
+| Docker Compose station-ingest configuration validation | PASS with placeholder-only configuration; no container started | 0 |
+| Candidate verification | r17 accepted; r1-r16 rejected | 0 |
+
+## r17 first-run correction
+
+The first full backend run had one failure in the unchanged `test_mobile_photo_provenance` idempotency test. Its direct retry and the subsequent complete backend run both passed without candidate changes. The first React run in the clean worktree had no ignored `node_modules`, and the backup test initially resolved the unavailable WSL relay `bash`; the isolated test tree was linked to the existing local dependency cache and Git Bash was selected explicitly. No candidate source, test contract, production configuration, service, container, listener, or private input changed.
+
+## r17 evidence boundary
+
+All checks used temporary databases, uploads, virtual station identities and placeholder-only Compose configuration. The Compose command rendered configuration only; it did not build or start a container. Real 43-station identity application, credential injection, B2 profile/mapping configuration, real traffic receipt or replay, four-hour observation, UI, package, push, deployment and production access remain **NOT RUN**.
+
+---
+
 # r16 HJ212 real-traffic adaptation and retention candidate gate (2026-09-12)
 
 Target candidate tag: `release-20260912-cross-module-freeze-r16`

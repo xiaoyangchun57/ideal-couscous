@@ -449,6 +449,140 @@ def _station_code_import_summary(preview: dict[str, object], template: dict[str,
     }
 
 
+def _station_code_identity_summary(preview: dict[str, object]) -> dict[str, object]:
+    """Lock B1 identity imports to workbook identities, never to a B2 template."""
+    fingerprint_source = {
+        "candidates": [
+            {"station_name": str(item["station_name"]), "station_code": str(item["station_code"])}
+            for item in sorted(preview["planned"], key=lambda item: (str(item["station_name"]), str(item["station_code"])))
+        ],
+    }
+    encoded = json.dumps(fingerprint_source, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "accepted_rows": int(preview["accepted_rows"]),
+        "ignored_rows": int(preview["ignored_rows"]),
+        "conflict_categories": list(preview["errors"]),
+        "fingerprint": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16],
+    }
+
+
+def preview_station_code_identity_import(database: Path, workbook: Path) -> dict[str, object]:
+    """Preview the B1 station identity transaction without requiring a monitoring profile."""
+    preview = preview_station_code_import(database, workbook)
+    database = _require_existing_database(database)
+    with closing(_connect(database)) as connection:
+        disabled_codes = {
+            str(row["station_code"])
+            for row in connection.execute("SELECT station_code FROM trusted_endpoints WHERE enabled=0 OR endpoint_state='disabled'")
+        }
+    if any(str(item["station_code"]) in disabled_codes for item in preview["planned"]):
+        preview = dict(preview, errors=sorted(set(preview["errors"]) | {"disabled_station_code"}))
+    return preview
+
+
+def _validate_station_code_identity_request(
+    preview: dict[str, object], expected_fingerprint: str | None,
+    expected_accepted_rows: int | None, expected_ignored_rows: int | None,
+) -> dict[str, object]:
+    if (not expected_fingerprint or expected_accepted_rows != FORMAL_STATION_CODE_ROWS
+            or expected_ignored_rows != FORMAL_STATION_CODE_IGNORED_ROWS):
+        raise ProvisionError("station identity import requires the formal preview fingerprint and 43+1 expected counts")
+    if preview["errors"]:
+        raise ProvisionError("station identity import validation failed")
+    summary = _station_code_identity_summary(preview)
+    if summary["fingerprint"] != expected_fingerprint:
+        raise ProvisionError("station identity workbook changed after preview")
+    return summary
+
+
+def _apply_station_code_identity(connection: sqlite3.Connection, item: dict[str, object], credential: bytes) -> None:
+    endpoint = connection.execute("SELECT * FROM trusted_endpoints WHERE station_code=?", (item["station_code"],)).fetchone()
+    expected_hmac = credential_hmac(credential, _credential_pepper())
+    if endpoint is None:
+        connection.execute(
+            """INSERT INTO trusted_endpoints(station_code,credential_hmac,business_site_id,endpoint_state)
+               VALUES (?,?,?,'bound')""",
+            (item["station_code"], expected_hmac, item["business_site_id"]),
+        )
+        return
+    if endpoint["business_site_id"] != item["business_site_id"]:
+        raise ProvisionError("station code is already bound to another business site")
+    if not endpoint["enabled"] or endpoint["endpoint_state"] == "disabled":
+        raise ProvisionError("disabled station identity must not be silently re-enabled")
+    if endpoint["credential_hmac"] != expected_hmac:
+        raise ProvisionError("station identity is already bound with different credentials")
+    if endpoint["endpoint_state"] != "bound":
+        connection.execute("UPDATE trusted_endpoints SET endpoint_state='bound',updated_at=? WHERE id=?",
+                           (datetime.now(timezone.utc).replace(microsecond=0).isoformat(), endpoint["id"]))
+
+
+def apply_station_code_identity_import(
+    database: Path, workbook: Path, *, credential: bytes, offline_confirmed: bool,
+    expected_fingerprint: str | None, expected_accepted_rows: int | None, expected_ignored_rows: int | None,
+) -> dict[str, int]:
+    """Atomically apply only B1 authentication identities; profiles and mappings are untouched."""
+    if not offline_confirmed:
+        raise ProvisionError("offline confirmation is required before writing station identities")
+    if not credential or len(credential) > 128 or not credential.isascii():
+        raise ProvisionError("HJ212 credential must be non-empty ASCII text")
+    database = _require_existing_database(database)
+    records, ignored_rows = load_station_code_workbook(workbook)
+    with closing(_connect(database)) as connection:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            preview = _station_code_preview_from_connection(connection, records, ignored_rows)
+            disabled_codes = {
+                str(row["station_code"])
+                for row in connection.execute("SELECT station_code FROM trusted_endpoints WHERE enabled=0 OR endpoint_state='disabled'")
+            }
+            if any(str(item["station_code"]) in disabled_codes for item in preview["planned"]):
+                preview = dict(preview, errors=sorted(set(preview["errors"]) | {"disabled_station_code"}))
+            _validate_station_code_identity_request(
+                preview, expected_fingerprint, expected_accepted_rows, expected_ignored_rows,
+            )
+            for item in preview["planned"]:
+                _apply_station_code_identity(connection, item, credential)
+            for endpoint_id in preview["disable_endpoint_ids"]:
+                connection.execute("UPDATE trusted_endpoints SET enabled=0,endpoint_state='disabled',updated_at=? WHERE id=?",
+                                   (datetime.now(timezone.utc).replace(microsecond=0).isoformat(), endpoint_id))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    return {"accepted_rows": int(preview["accepted_rows"]), "ignored_rows": int(preview["ignored_rows"]),
+            "disabled_endpoints": len(preview["disable_endpoint_ids"])}
+
+
+def verify_station_code_identity_import(
+    database: Path, workbook: Path, *, credential: bytes, expected_fingerprint: str,
+    expected_accepted_rows: int, expected_ignored_rows: int,
+) -> dict[str, object]:
+    if not credential or len(credential) > 128 or not credential.isascii():
+        raise ProvisionError("HJ212 credential must be non-empty ASCII text")
+    database = _require_existing_database(database)
+    records, ignored_rows = load_station_code_workbook(workbook)
+    with closing(_connect(database)) as connection:
+        preview = _station_code_preview_from_connection(connection, records, ignored_rows)
+        disabled_codes = {
+            str(row["station_code"])
+            for row in connection.execute("SELECT station_code FROM trusted_endpoints WHERE enabled=0 OR endpoint_state='disabled'")
+        }
+        if any(str(item["station_code"]) in disabled_codes for item in preview["planned"]):
+            preview = dict(preview, errors=sorted(set(preview["errors"]) | {"disabled_station_code"}))
+        summary = _validate_station_code_identity_request(
+            preview, expected_fingerprint, expected_accepted_rows, expected_ignored_rows,
+        )
+        expected_hmac = credential_hmac(credential, _credential_pepper())
+        for item in preview["planned"]:
+            endpoint = connection.execute("SELECT * FROM trusted_endpoints WHERE station_code=?", (item["station_code"],)).fetchone()
+            if (endpoint is None or endpoint["business_site_id"] != item["business_site_id"] or not endpoint["enabled"]
+                    or endpoint["endpoint_state"] != "bound"):
+                raise ProvisionError("station identity endpoint is unavailable")
+            if endpoint["credential_hmac"] != expected_hmac:
+                raise ProvisionError("station identity credential summary differs from the private input")
+    return summary
+
+
 def load_station_code_import_template(path: Path) -> dict[str, Any]:
     """Load the common, non-secret profile/mapping contract for all workbook sites."""
     try:
@@ -725,7 +859,11 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline station-monitoring provisioning")
-    parser.add_argument("action", choices=("plan", "apply", "verify", "disable", "station-codes-plan", "station-codes-apply", "station-codes-verify"))
+    parser.add_argument("action", choices=(
+        "plan", "apply", "verify", "disable",
+        "station-codes-plan", "station-codes-apply", "station-codes-verify",
+        "station-identities-plan", "station-identities-apply", "station-identities-verify",
+    ))
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--workbook", type=Path)
@@ -739,7 +877,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reason")
     arguments = parser.parse_args(argv)
     try:
-        if arguments.action.startswith("station-codes-"):
+        if arguments.action.startswith("station-identities-"):
+            if arguments.config is not None or arguments.workbook is None or arguments.template is not None:
+                raise ProvisionError("station identity actions require --workbook without --template")
+            preview = preview_station_code_identity_import(arguments.database, arguments.workbook)
+            if arguments.action == "station-identities-plan":
+                outcome = _station_code_identity_summary(preview)
+                outcome["result"] = "ready" if not outcome["conflict_categories"] else "conflicted"
+            elif arguments.action == "station-identities-verify":
+                if not arguments.credential_stdin:
+                    raise ProvisionError("station identity verify requires private credential stdin")
+                outcome = verify_station_code_identity_import(
+                    arguments.database, arguments.workbook, credential=_read_hj212_credential_from_stdin(),
+                    expected_fingerprint=arguments.expected_fingerprint or "",
+                    expected_accepted_rows=arguments.expected_accepted_rows or 0,
+                    expected_ignored_rows=arguments.expected_ignored_rows or 0,
+                )
+                outcome["result"] = "verified"
+            else:
+                if (not arguments.offline_confirmation or not arguments.credential_stdin
+                        or not arguments.expected_fingerprint):
+                    raise ProvisionError("station identity apply requires offline confirmation, credential stdin, and formal preview lock")
+                outcome = apply_station_code_identity_import(
+                    arguments.database, arguments.workbook, credential=_read_hj212_credential_from_stdin(),
+                    offline_confirmed=True, expected_fingerprint=arguments.expected_fingerprint,
+                    expected_accepted_rows=arguments.expected_accepted_rows,
+                    expected_ignored_rows=arguments.expected_ignored_rows,
+                )
+                outcome.update(_station_code_identity_summary(preview))
+                outcome["result"] = "applied"
+        elif arguments.action.startswith("station-codes-"):
             if arguments.config is not None or arguments.workbook is None or arguments.template is None:
                 raise ProvisionError("station-code actions require --workbook and --template only")
             template = load_station_code_import_template(arguments.template)
