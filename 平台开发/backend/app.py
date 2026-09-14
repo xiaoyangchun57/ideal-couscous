@@ -32099,6 +32099,125 @@ def _monitoring_query_time(value, field):
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat(), None
 
 
+def _station_monitoring_projection(db, site_id):
+    """Build the first-wave read-only station monitoring contract from normalized facts."""
+    site = db.execute(
+        "SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, gps_lng AS lng, manager, phone FROM sites WHERE id=?",
+        (site_id,),
+    ).fetchone()
+    if not site:
+        return None
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    profile = db.execute(
+        """SELECT * FROM monitoring_endpoint_profiles
+           WHERE business_site_id=? AND enabled=1 AND effective_from<=?
+             AND (effective_to IS NULL OR effective_to>?)
+           ORDER BY effective_from DESC LIMIT 1""", (site_id, now, now)
+    ).fetchone()
+    base = {
+        'id': site['id'], 'site_id': site['id'], 'code': site['code'], 'name': site['name'],
+        'type': site['type'], 'district': site['district'] or '', 'address': site['address'] or '',
+        'river': site['river'] or '', 'basin': site['basin'] or '', 'lat': site['lat'], 'lng': site['lng'],
+        'manager': site['manager'] or '', 'status': 'not_connected',
+        'status_label': '未接入', 'reason_code': 'not_connected', 'reason': '未配置启用的监测身份',
+        'last_communication_at': None, 'last_valid_observation_at': None, 'published_factor_count': 0,
+    }
+    if not profile:
+        return base
+    raw = db.execute(
+        """SELECT MAX(received_at) AS received_at FROM ingest_raw_frames
+           WHERE endpoint_id=? AND authentication_status='authenticated'""", (profile['endpoint_id'],)
+    ).fetchone()
+    last_communication = raw['received_at'] if raw and raw['received_at'] else None
+    configs = monitoring_factor_configurations(db, site_id)
+    values = monitoring_latest_values(db, site_id)
+    base['last_communication_at'] = last_communication
+    base['last_valid_observation_at'] = max((item.get('observed_at') for item in values if item.get('observed_at')), default=None)
+    base['published_factor_count'] = len(configs)
+    if not last_communication:
+        base.update(status='awaiting_first_frame', status_label='等待首帧', reason_code='no_authenticated_frame', reason='身份已接入，尚未收到认证原文')
+    elif not configs:
+        base.update(status='raw_received_config_pending', status_label='档案待批准', reason_code='monitoring_config_pending', reason='已收到认证原文，监测档案或因子尚未批准')
+    elif not values:
+        base.update(status='waiting_first_valid', status_label='等待首个有效观测', reason_code='no_valid_observation', reason='监测档案已生效，尚未形成有效观测')
+    else:
+        summary = _station_monitoring_summary_projection(db, site_id, profile, configs, values, last_communication)
+        base.update(status=summary['status'], status_label=summary['status_label'], reason_code=summary['reason_code'], reason=summary['reason'])
+    return base
+
+
+def _station_monitoring_summary_projection(db, site_id, profile, configs=None, values=None, last_communication=None):
+    configs = configs if configs is not None else monitoring_factor_configurations(db, site_id)
+    values = values if values is not None else monitoring_latest_values(db, site_id)
+    if last_communication is None:
+        row = db.execute("SELECT MAX(received_at) AS received_at FROM ingest_raw_frames WHERE endpoint_id=? AND authentication_status='authenticated'", (profile['endpoint_id'],)).fetchone()
+        last_communication = row['received_at'] if row else None
+    freshness = [_monitoring_freshness(item.get('observed_at'), item.get('expected_interval_seconds'), item.get('tolerance_seconds')) for item in values]
+    intervals = [item.get('expected_interval_seconds') for item in configs if item.get('expected_interval_seconds')]
+    if not intervals:
+        return {'status': 'interval_unconfigured', 'status_label': '周期未配置', 'reason_code': 'interval_unconfigured', 'reason': '已接入但采集周期尚未配置'}
+    if freshness and all(item['state'] == 'fresh' for item in freshness):
+        return {'status': 'normal', 'status_label': '正常', 'reason_code': None, 'reason': '最近有效观测在配置周期内'}
+    return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'stale_observation', 'reason': '最近有效观测超出配置周期或存在缺口'}
+
+
+def _station_monitoring_overview(db, site_id):
+    projection = _station_monitoring_projection(db, site_id)
+    if projection is None:
+        return None
+    profile, error = _monitoring_site_context(db, site_id)
+    if error:
+        profile = None
+    configs = monitoring_factor_configurations(db, site_id) if profile else []
+    values = monitoring_latest_values(db, site_id) if profile else []
+    latest = values if projection['status'] in {'normal', 'attention', 'interval_unconfigured'} else []
+    axes = {'communication': {'state': 'received' if projection['last_communication_at'] else 'not_configured', 'last_received_at': projection['last_communication_at']},
+            'data': {'state': 'not_configured' if projection['status'] in {'not_connected', 'awaiting_first_frame', 'raw_received_config_pending'} else projection['status'], 'reason': projection['reason']},
+            'instrument': {'state': 'not_configured' if not configs else 'configured', 'reason': None if configs else 'no_approved_factor'}}
+    instruments = [dict(item, status='has_valid_observation' if any(v.get('instrument_asset_code') == item.get('instrument_asset_code') for v in values) else 'health_unknown') for item in configs]
+    has_trend_facts = any(item.get('aggregation_source') == 'server_aggregated' for item in values)
+    return {'site': projection, 'monitoring': {'latest_values': latest, 'axes': axes, 'instruments': instruments, 'recent_items': [], 'capabilities': {'latest': bool(latest), 'trend': has_trend_facts, 'instruments': bool(configs)}},
+            'section_status': {'latest_values': 'ready' if latest else 'not_configured', 'trend': 'ready' if has_trend_facts else 'not_configured', 'instruments': 'ready' if instruments else 'not_configured'}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+
+
+@app.route('/api/station-monitoring/sites')
+@login_required
+def station_monitoring_sites():
+    allowed = _filter_site_ids()
+    with get_db() as db:
+        where, params = ('', []) if allowed is None else (' WHERE s.id IN (' + ','.join('?' * len(allowed)) + ')', allowed)
+        rows = db.execute('SELECT s.id FROM sites s' + where + ' ORDER BY s.name, s.id', params).fetchall() if allowed != [] else []
+        items = [_station_monitoring_projection(db, row['id']) for row in rows]
+        items = [item for item in items if item]
+        counts = {state: sum(item['status'] == state for item in items) for state in ('not_connected', 'awaiting_first_frame', 'raw_received_config_pending', 'waiting_first_valid', 'interval_unconfigured', 'normal', 'attention')}
+        return jsonify({'summary': dict(total=len(items), **counts), 'items': items, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
+
+
+@app.route('/api/station-monitoring/sites/<int:site_id>/overview')
+@login_required
+def station_monitoring_overview(site_id):
+    denied = _site_access_denied(site_id, '读取站点监测')
+    if denied:
+        return denied
+    with get_db() as db:
+        result = _station_monitoring_overview(db, site_id)
+        if result is None:
+            return jsonify({'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND'}), 404
+        return jsonify(result)
+
+
+@app.route('/api/station-monitoring/access-summary')
+@login_required
+def station_monitoring_access_summary():
+    if not _has_any_role(g.current_user, 'admin'):
+        return jsonify({'error': '监测接入摘要仅管理员可读', 'code': 'MONITORING_ACCESS_FORBIDDEN'}), 403
+    with get_db() as db:
+        endpoint_count = db.execute("SELECT COUNT(*) FROM monitoring_endpoint_profiles WHERE enabled=1").fetchone()[0]
+        site_count = db.execute("SELECT COUNT(DISTINCT business_site_id) FROM monitoring_endpoint_profiles WHERE enabled=1").fetchone()[0]
+        quality_count = db.execute("SELECT COUNT(*) FROM monitoring_quality_issues WHERE status='open'").fetchone()[0]
+        return jsonify({'runtime': {'enabled_endpoints': endpoint_count, 'bound_sites': site_count}, 'identity': {'coverage': site_count}, 'quality': {'open_items': quality_count}, 'storage': {'raw_frames': db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 'observation_batches': db.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0]}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
+
+
 @app.route('/api/station-monitoring/sites/<int:site_id>/summary')
 @login_required
 def station_monitoring_summary(site_id):

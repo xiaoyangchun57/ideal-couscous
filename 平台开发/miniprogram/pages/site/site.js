@@ -15,7 +15,7 @@ const PARTS_FULFILLMENT_OPTIONS = [
 
 Page({
   data: {
-    siteId: null, site: null, readOnlySource: false, checkingIn: false, online: true, syncCount: 0,
+    siteId: null, site: null, readOnlySource: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
@@ -28,7 +28,7 @@ Page({
 
   onLoad(options) {
     const id = options.site_id || app.globalData.selSiteId;
-    const readOnlySource = options.source === 'inspection_readonly';
+    const readOnlySource = options.source === 'inspection_readonly' || options.source === 'responsible_sites_monitoring';
     this.setData({ siteId: id, readOnlySource });
     if (id) this.loadSite(id);
   },
@@ -67,14 +67,18 @@ Page({
   },
 
   loadSite(id) {
-    api.siteTasks(id)
-      .then(res => {
-        const checkedIn = !!(res.site && res.site.checked_in);
-        this.setData({ site: Object.assign({}, res.site || {}, { checked_in: checkedIn, can_check_in: !!(res.site && res.site.can_check_in && !checkedIn), checkin_sync_pending: false }) });
+    if (this.data.readOnlySource) this.setData({ monitoringLoading: true, monitoringError: '' });
+    const request = this.data.readOnlySource ? api.stationMonitoringOverview(id) : api.siteTasks(id);
+    request.then(res => {
+        const source = this.data.readOnlySource ? (res.site || {}) : (res.site || {});
+        const checkedIn = !!source.checked_in;
+        this.setData({ site: Object.assign({}, source, { checked_in: checkedIn, can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn), checkin_sync_pending: false, monitoring: res.monitoring || { latest_values: [] } }), monitoringLoading: false, monitoringError: '' });
       })
-      .catch(() => wx.showToast({ title: '加载失败', icon: 'none' }));
+      .catch(() => { if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: '监测信息加载失败，请重试' }); wx.showToast({ title: '加载失败', icon: 'none' }); });
     if (!this.data.readOnlySource) this.loadPartsInventory();
   },
+
+  onRetryMonitoring() { if (this.data.siteId) this.loadSite(this.data.siteId); },
 
   loadPartsInventory() {
     if (this.data.partsInventoryStatus === 'loading') return;

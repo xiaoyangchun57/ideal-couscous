@@ -17,7 +17,7 @@ global.wx = {
 };
 
 const api = require('../services/api.js');
-const originals = { siteTasks: api.siteTasks, partsInventory: api.partsInventory };
+const originals = { siteTasks: api.siteTasks, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory };
 require('../pages/site/site.js');
 
 function createPage() {
@@ -36,11 +36,13 @@ function createPage() {
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
 
     let siteTaskCalls = 0;
+    let monitoringCalls = 0;
     let inventoryCalls = 0;
     api.siteTasks = id => {
       siteTaskCalls += 1;
       return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } });
     };
+    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', status_label: '未接入' }, monitoring: { latest_values: [] } }); };
     api.partsInventory = () => {
       inventoryCalls += 1;
       return Promise.resolve([]);
@@ -51,7 +53,8 @@ function createPage() {
     await flush();
     assert.equal(readonlyPage.data.readOnlySource, true);
     assert.equal(readonlyPage.data.site.id, 20);
-    assert.equal(siteTaskCalls, 1);
+    assert.equal(siteTaskCalls, 0);
+    assert.equal(monitoringCalls, 1);
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
 
     const standardPage = createPage();
@@ -59,7 +62,7 @@ function createPage() {
     await flush();
     assert.equal(standardPage.data.readOnlySource, false);
     assert.equal(standardPage.data.site.id, 20);
-    assert.equal(siteTaskCalls, 2);
+    assert.equal(siteTaskCalls, 1);
     assert.equal(inventoryCalls, 1, 'existing site entry preserves parts-application loading');
 
     const inspection = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.js'), 'utf8');

@@ -32,6 +32,8 @@ const api = {
   myToday: () => request('/api/mobile/my-today', 'GET'),
   // 当前登录人服务端授权的站点；手工异常上报不能使用登录缓存代替此范围。
   sites: () => request('/api/sites', 'GET', {}, { queue: false }),
+  stationMonitoringSites: () => request('/api/station-monitoring/sites', 'GET', {}, { queue: false }),
+  stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
   anomalyCodes: () => request('/api/anomaly-codes', 'GET'),
   // 失败必须由上报页保留草稿并显式重试，不能在未知网络结果下悄悄排队二次写入。
   submitManualReport: (payload) => request('/api/manual-reports', 'POST', payload, { queue: false }),

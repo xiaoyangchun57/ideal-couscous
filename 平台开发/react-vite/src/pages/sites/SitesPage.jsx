@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table, Input, Select, Button, Space, Tag, Badge,
   Modal, Descriptions, Tabs, Typography, message, Spin, Empty, Alert,
@@ -44,6 +44,12 @@ const tagStyle = { borderRadius: 4, fontSize: 11 };
 
 const statusConfig = {
   normal: { color: 'green', text: '在线' },
+  attention: { color: 'orange', text: '需关注' },
+  not_connected: { color: 'default', text: '未接入' },
+  awaiting_first_frame: { color: 'blue', text: '等待首帧' },
+  raw_received_config_pending: { color: 'gold', text: '档案待批准' },
+  waiting_first_valid: { color: 'blue', text: '等待首个有效观测' },
+  interval_unconfigured: { color: 'default', text: '周期未配置' },
   online: { color: 'green', text: '在线' },
   offline: { color: 'red', text: '离线' },
   maintenance: { color: 'orange', text: '维护中' },
@@ -57,6 +63,7 @@ function getStatusCfg(status) {
 // Component
 // ---------------------------------------------------------------------------
 export default function SitesPage() {
+  const navigate = useNavigate();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -117,12 +124,19 @@ export default function SitesPage() {
     setLoading(true);
     setFetchError(null);
     try {
-      const data = await api.getStrict('/sites');
+      const [siteResult, monitoringResult] = await Promise.allSettled([
+        api.getStrict('/sites'),
+        api.stationMonitoringSites(),
+      ]);
+      if (siteResult.status === 'rejected') throw siteResult.reason;
+      const data = siteResult.value;
+      const monitoringItems = monitoringResult.status === 'fulfilled' ? (monitoringResult.value?.items || []) : [];
+      const monitoringById = new Map(monitoringItems.map(item => [Number(item.id), item]));
       if (data && Array.isArray(data)) {
-        setSites(data);
+        setSites(data.map(site => Object.assign({}, site, monitoringById.get(Number(site.id)) || {})));
       } else if (data && Array.isArray(data.data)) {
         // handle { data: [...] } wrapper
-        setSites(data.data);
+        setSites(data.data.map(site => Object.assign({}, site, monitoringById.get(Number(site.id)) || {})));
       } else {
         setFetchError('站点列表返回格式异常，请稍后重试');
       }
@@ -549,19 +563,11 @@ export default function SitesPage() {
         width: 100,
         fixed: 'right',
         render: (_, record) => (
-          <Button
-            type="link"
-            size="small"
-            icon={<FileSearchOutlined />}
-            aria-label={`查看 ${record.name} 的站点档案`}
-            onClick={() => openArchive(record.id)}
-          >
-            档案
-          </Button>
+          <Space size={0}><Button type="link" size="small" onClick={() => navigate(`/sites/${record.id}`)}>监测</Button><Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
         ),
       },
     ],
-    [openArchive],
+    [navigate, openArchive],
   );
 
   // ========================================================================

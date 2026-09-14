@@ -221,4 +221,7 @@ export const api = {
     },
   }),
   trackEvent: (eventName, context) => api.track(eventName, context),
+  stationMonitoringSites: () => strictRequest('/station-monitoring/sites'),
+  stationMonitoringOverview: (siteId) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`),
+  stationMonitoringAccessSummary: () => strictRequest('/station-monitoring/access-summary'),
 };
