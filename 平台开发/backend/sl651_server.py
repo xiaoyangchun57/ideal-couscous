@@ -685,7 +685,7 @@ class StationIngestServer:
                     self._schedule_normalization(raw_id)
             # CN=2011 has no confirmed application reply, but a durable receipt is
             # successful and must not discard later sticky frames on this TCP stream.
-            return ProcessingResult(None, auth.status == "authenticated")
+            return ProcessingResult(None, auth.status in {"authenticated", "unbound_authenticated"})
         if frame.direction != "up":
             self.storage.persist_unparseable(raw, "unexpected_downlink", received_at, protocol_family="sl651", parser_version=PARSER_VERSION)
             return ProcessingResult(None, False)

@@ -178,6 +178,39 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'").fetchone()[0], 3)
 
+    async def test_unbound_hj212_receipts_keep_the_same_connection_without_an_application_reply(self):
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO trusted_endpoints(station_code,credential_hmac,endpoint_state) VALUES (?,?, 'unbound')",
+                ("TESTHJ01", credential_hmac(password.encode("ascii"), self.pepper)),
+            )
+            connection.commit()
+        reader, writer = await self.connect()
+        writer.write(make_hj212(qn="20260911164900001") + make_hj212(qn="20260911164900002"))
+        await writer.drain()
+        for _ in range(100):
+            with closing(sqlite3.connect(self.database)) as connection:
+                received = connection.execute(
+                    "SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'"
+                ).fetchone()[0]
+            if received == 2:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.wait_for(self.server._queue.join(), timeout=3)
+        with closing(sqlite3.connect(self.database)) as connection:
+            rows = connection.execute(
+                "SELECT authentication_status,disposition FROM ingest_raw_frames WHERE station_code='TESTHJ01' ORDER BY id"
+            ).fetchall()
+            self.assertEqual(rows, [("unbound_authenticated", "quarantined")] * 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0], 0)
+        self.assertFalse(writer.is_closing())
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readexactly(1), timeout=0.1)
+        writer.close()
+        await writer.wait_closed()
+        del reader
+
     async def test_hj212_persistence_failure_closes_without_a_silent_success(self):
         password = "long-ascii-password"
         with closing(sqlite3.connect(self.database)) as connection:

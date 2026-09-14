@@ -216,15 +216,16 @@ def replay_hj212(
         raise DiscoveryError("endpoint ID must be a positive integer")
     database = _existing_database(database)
     clause, values, selection = _selection(
-        "protocol.protocol_family='hj212' AND raw.authentication_status='authenticated' AND raw.endpoint_id=?",
+        "protocol.protocol_family='hj212' AND raw.authentication_status IN ('authenticated','unbound_authenticated') AND raw.endpoint_id=?",
         start_id, end_id, received_from, received_to,
     )
     with closing(sqlite3.connect(str(database))) as connection:
         connection.row_factory = sqlite3.Row
         endpoint = connection.execute(
-            "SELECT id,enabled,endpoint_state FROM trusted_endpoints WHERE id=?", (endpoint_id,)
+            "SELECT id,business_site_id,enabled,endpoint_state FROM trusted_endpoints WHERE id=?", (endpoint_id,)
         ).fetchone()
-        if endpoint is None or not endpoint["enabled"] or endpoint["endpoint_state"] == "disabled":
+        if (endpoint is None or not endpoint["enabled"] or endpoint["endpoint_state"] != "bound"
+                or endpoint["business_site_id"] is None):
             raise DiscoveryError("replay endpoint is unavailable")
         rows = connection.execute(
             f"""SELECT raw.id,raw.raw_frame FROM ingest_raw_frames raw
@@ -277,7 +278,7 @@ def replay_hj212(
     outcomes: Counter[str] = Counter()
     for raw_id in raw_ids:
         try:
-            result = normalize_raw_frame(database, raw_id)
+            result = normalize_raw_frame(database, raw_id, allow_unbound_replay=True)
         except Exception as exc:
             outcomes[f"failed:{type(exc).__name__}"] += 1
         else:

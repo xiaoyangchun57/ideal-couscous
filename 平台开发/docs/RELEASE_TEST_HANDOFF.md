@@ -1,3 +1,28 @@
+# r18 B1 unbound identity candidate gate (2026-09-14)
+
+Target candidate tag: `release-20260914-cross-module-freeze-r18`
+
+r18 is the only candidate in `deploy/release-candidates.json`; r1 through r17 are immutable historical tags and remain rejected. Relative to r17, this candidate includes only the B1 identity-first follow-up: approved identities without a business site retain authenticated raw evidence; a later single-site binding requires explicit target, confirmation, credential check and atomic retirement of the same-site superseded endpoint. Import and binding require an independently supplied full 43+1 source fingerprint, including deferred rows. The actual approved fingerprint and credentials remain outside Git; no real identity application, B2 monitoring profile/mapping, production listener or deployment is claimed.
+
+## r18 isolated candidate gate
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 634/634 passed | 0 |
+| Miniprogram Node tests | 212/212 passed across 40 `*.test.js` files | 0 |
+| Combined JavaScript/Python syntax | 181 files passed | 0 |
+| React Node tests | 95/95 passed across 17 files | 0 |
+| React ESLint | PASS | 0 |
+| React production build | PASS | 0 |
+| Backup archive and candidate guard | 7/7 passed; r1-r17 rejected | 0 |
+| B1 identity and station ingestion direct contracts | 94/94 passed; L1 2,980 isolated frames and 160 isolated Web writes | 0 |
+| Placeholder-only Docker Compose render | PASS; no container started | 0 |
+| Candidate verification | r18 accepted; r17 and all earlier tags rejected | 0 |
+
+The gate uses a temporary worktree containing only the nine whitelisted r18 differences and a local dependency-cache link. After writing this evidence into the candidate, the complete gate is rerun from the beginning on the final snapshot; no historical r17 result is reused. The unchanged working-tree changes outside the nine paths are excluded. Real approved source fingerprint, credentials, database, RTU, UI, package, push and deployment remain **NOT RUN**. This freeze alone does not authorize a production switch.
+
+---
+
 # r17 identity-first receiver candidate gate (2026-09-13)
 
 Target candidate tag: `release-20260913-cross-module-freeze-r17`

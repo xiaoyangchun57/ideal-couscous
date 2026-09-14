@@ -90,7 +90,10 @@ def _mark_waiting(connection, raw_id, site_id, issue_type, summary):
     return "waiting_reparse"
 
 
-def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: str = NORMALIZATION_VERSION) -> str:
+def normalize_raw_frame(
+    database: Path, raw_id: int, *, normalization_version: str = NORMALIZATION_VERSION,
+    allow_unbound_replay: bool = False,
+) -> str:
     """Normalize one raw receipt and leave mapping/parser waits diagnostically stable."""
     with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
         connection.row_factory = sqlite3.Row
@@ -110,7 +113,8 @@ def normalize_raw_frame(database: Path, raw_id: int, *, normalization_version: s
                 return _mark_waiting(connection, raw_id, None, "normalization_reparse_required", "existing retryable result needs a new parser version")
             connection.rollback()
             return "already_normalized"
-        if raw["authentication_status"] != "authenticated" or raw["disposition"] == "duplicate":
+        replayable_unbound = allow_unbound_replay and raw["authentication_status"] == "unbound_authenticated"
+        if (raw["authentication_status"] != "authenticated" and not replayable_unbound) or raw["disposition"] == "duplicate":
             connection.rollback()
             return "not_projectable"
         try:
