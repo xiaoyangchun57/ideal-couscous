@@ -103,6 +103,8 @@
 
 初轮测试曾因按钮图标可访问名称和弹窗定位超时失败，修正标签/测试定位后最终复跑全部通过；Vite 沙箱写临时配置曾报 EPERM，经授权重跑成功。这些失败没有被当作通过。
 
+Vite 日志另出现旧站点表单 `Instance created by useForm is not connected to any Form element` 开发警告。浏览器测试断言的是 `pageerror` 页面运行异常和业务写请求，不断言所有控制台警告为空；此警告尚未定位整改，留给主项目 Code Review，不宣称控制台零警告。验收使用 `http://127.0.0.1:5187/`，本轮临时 Vite 服务与最终测试浏览器已停止。
+
 本机截图目录：`C:\Users\LENOVO\AppData\Local\Temp\station-web-collaborator-20260915`，含 `detail-desktop.png`、`access-desktop.png`、`directory-desktop.png`、`detail-mobile.png`、`access-mobile.png`。截图、浏览器缓存和夹具运行产物不提交；主项目可按下列命令重新生成。
 
 复跑监测直接测试：
