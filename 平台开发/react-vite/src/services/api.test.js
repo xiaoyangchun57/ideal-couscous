@@ -105,6 +105,24 @@ test('getStrict distinguishes a timeout', async () => {
   });
 });
 
+test('getStrict distinguishes caller cancellation from timeout', async () => {
+  globalThis.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    });
+  });
+  const controller = new AbortController();
+  const pending = api.getStrict('/example', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, (error) => {
+    assert.equal(error.code, 'REQUEST_ABORTED');
+    assert.equal(error.retryable, false);
+    return true;
+  });
+});
+
 test('getStrict clears authentication and redirects on 401', async () => {
   let redirectedTo = '';
   globalThis.window.location.assign = (path) => { redirectedTo = path; };

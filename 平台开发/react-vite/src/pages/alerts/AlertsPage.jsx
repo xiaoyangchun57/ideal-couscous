@@ -1034,9 +1034,17 @@ export default function AlertsPage() {
         const severity = alertSeverityTag[record.level] || { color: tokens.colorTextTertiary, label: '?', desc: '未知' };
         return (
           <div>
-            <Text strong style={{ color: tokens.colorText, display: 'block', marginBottom: 4 }}>
-              {record.site_name || record.site_code || '-'}
-            </Text>
+            {record.site_id ? (
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0, height: 'auto', color: tokens.colorText, fontWeight: 600, marginBottom: 4 }}
+                aria-label={`查看${record.site_name || record.site_code || '该站点'}监测详情`}
+                onClick={() => navigate(`/sites/${record.site_id}`)}
+              >
+                {record.site_name || record.site_code || '-'}
+              </Button>
+            ) : <Text strong style={{ color: tokens.colorText, display: 'block', marginBottom: 4 }}>{record.site_name || record.site_code || '-'}</Text>}
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <Tag
                 color={severity.color}

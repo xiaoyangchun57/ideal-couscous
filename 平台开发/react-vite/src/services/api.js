@@ -80,9 +80,12 @@ async function request(url, options = {}) {
 }
 
 async function strictRequest(url, options = {}) {
-  const { method = 'GET', body, timeout = 30000 } = options;
+  const { method = 'GET', body, timeout = 30000, signal } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const abortFromCaller = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', abortFromCaller, { once: true });
 
   try {
     const headers = { ...authHeaders() };
@@ -137,14 +140,26 @@ async function strictRequest(url, options = {}) {
     return { success: true };
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    const timedOut = error?.name === 'AbortError';
+    const aborted = error?.name === 'AbortError';
+    const cancelled = aborted && signal?.aborted;
     throw new ApiError(
-      timedOut ? '请求超时，请检查网络后重试' : '网络连接失败，请检查网络后重试',
-      { code: timedOut ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR', retryable: true, cause: error },
+      cancelled ? '请求已取消' : aborted ? '请求超时，请检查网络后重试' : '网络连接失败，请检查网络后重试',
+      {
+        code: cancelled ? 'REQUEST_ABORTED' : aborted ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR',
+        retryable: !cancelled,
+        cause: error,
+      },
     );
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
+}
+
+function strictGetOptions(timeoutOrOptions) {
+  return timeoutOrOptions && typeof timeoutOrOptions === 'object'
+    ? timeoutOrOptions
+    : { timeout: timeoutOrOptions };
 }
 
 async function strictDownload(url, timeout = 60000) {
@@ -201,7 +216,7 @@ export const api = {
   postForm: (url, data, timeout) => request(url, { method: 'POST', body: data, timeout }),
   put: (url, data, timeout) => request(url, { method: 'PUT', body: data, timeout }),
   delete: (url, timeout) => request(url, { method: 'DELETE', timeout }),
-  getStrict: (url, timeout) => strictRequest(url, { timeout }),
+  getStrict: (url, timeoutOrOptions) => strictRequest(url, strictGetOptions(timeoutOrOptions)),
   postStrict: (url, data, timeout) => strictRequest(url, { method: 'POST', body: data, timeout }),
   postFormStrict: (url, data, timeout) => strictRequest(url, { method: 'POST', body: data, timeout }),
   putStrict: (url, data, timeout) => strictRequest(url, { method: 'PUT', body: data, timeout }),
@@ -221,7 +236,7 @@ export const api = {
     },
   }),
   trackEvent: (eventName, context) => api.track(eventName, context),
-  stationMonitoringSites: () => strictRequest('/station-monitoring/sites'),
-  stationMonitoringOverview: (siteId) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`),
-  stationMonitoringAccessSummary: () => strictRequest('/station-monitoring/access-summary'),
+  stationMonitoringSites: (options = {}) => strictRequest('/station-monitoring/sites', options),
+  stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
+  stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),
 };

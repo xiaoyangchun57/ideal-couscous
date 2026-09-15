@@ -9,7 +9,7 @@ export function buildGlobalSearchPath(item) {
   const identifier = encodeURIComponent(item?.identifier ?? item?.id ?? '');
   switch (item?.type) {
     case 'site':
-      return identifier ? `/sites?archive=${identifier}` : '/sites';
+      return identifier ? `/sites/${identifier}` : '/sites';
     case 'workorder':
       return identifier ? `/workorders?search=${identifier}` : '/workorders';
     case 'device':
