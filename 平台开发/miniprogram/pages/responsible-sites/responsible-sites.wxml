@@ -1,27 +1,119 @@
 <view class="page">
-  <view class="intro">
-    <text class="intro-title">负责站点</text>
-    <text class="intro-copy">以下站点由服务端授权范围提供。进入站点后可查看监测信息与站点资料。</text>
-  </view>
-
-  <view wx:if="{{!sites.length && error}}" class="empty"><text class="empty-tx">{{error}}</text><button class="btn-ghost" bindtap="onRetry">重试</button></view>
-  <view wx:if="{{sites.length}}" class="site-list">
-    <view class="card site-row" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}">
-      <view class="site-main">
-        <text class="site-name">{{item.name}}</text>
-        <text class="site-meta">{{item.code || '未录入编码'}} · {{item.type_cn || '其他站点'}} · {{item.monitoring_status_label || '状态未知'}}</text>
+  <!-- 范围切换 + 搜索（管理员时显示） -->
+  <view class="mon-toolbar" wx:if="{{canViewAll}}">
+    <!-- 分段控件：我负责 / 全部站点 -->
+    <view class="mon-seg-wrap">
+      <view class="mon-seg">
+        <view class="mon-seg-item {{scope === 'mine' ? 'mon-seg-active' : ''}}" data-scope="mine" bindtap="onScopeMine">
+          <text class="mon-seg-tx">我负责</text>
+          <text class="mon-seg-count" wx:if="{{scopeCounts.mine !== null}}">{{scopeCounts.mine}}</text>
+        </view>
+        <view class="mon-seg-item {{scope === 'all' ? 'mon-seg-active' : ''}}" data-scope="all" bindtap="onScopeAll">
+          <text class="mon-seg-tx">全部站点</text>
+          <text class="mon-seg-count" wx:if="{{scopeCounts.all !== null}}">{{scopeCounts.all}}</text>
+        </view>
       </view>
-      <text class="site-action">查看站点 ›</text>
+    </view>
+
+    <!-- 搜索栏（仅全部站点时显示） -->
+    <view class="mon-search-wrap" wx:if="{{scope === 'all'}}">
+      <view class="mon-search-bar">
+        <image class="mon-search-ico" src="/images/station-monitoring/icon-search.svg" mode="aspectFit"/>
+        <input
+          class="mon-search-input"
+          value="{{keywordInput}}"
+          bindinput="onKeywordInput"
+          confirm-type="search"
+          bindconfirm="onSearch"
+          placeholder="搜索站点名称或编号"
+          placeholder-class="mon-search-placeholder"
+        />
+        <view class="mon-search-clear" wx:if="{{keywordInput}}" bindtap="onClearSearch">
+          <view class="mon-search-clear-ico"></view>
+        </view>
+      </view>
+      <text class="mon-search-cancel" bindtap="onSearch">搜索</text>
     </view>
   </view>
 
-  <view wx:if="{{sites.length && error}}" class="sync-bar"><text>{{error}}</text><button class="btn-ghost" bindtap="onRetry">重试</button></view>
+  <!-- 首次失败 -->
+  <view wx:if="{{!sites.length && error}}" class="mon-empty">
+    <image class="mon-empty-ico" src="/images/station-monitoring/empty-unavailable.svg" mode="aspectFit"/>
+    <text class="mon-empty-tx">站点信息加载失败</text>
+    <text class="mon-empty-sub">{{error}}</text>
+    <button class="btn-ghost btn-md" bindtap="onRetry">重试</button>
+  </view>
 
-  <view wx:if="{{!sites.length && loading && !error}}" class="empty">
-    <text class="empty-tx">加载中…</text>
+  <!-- 加载中 -->
+  <view wx:elif="{{!sites.length && loading}}" class="mon-empty">
+    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+    <text class="mon-empty-tx">加载中…</text>
   </view>
-  <view wx:if="{{!sites.length && !loading && !error}}" class="empty">
-    <view class="empty-circle"></view>
-    <text class="empty-tx">暂未分配负责站点</text>
+
+  <!-- 搜索无结果 -->
+  <view wx:elif="{{!sites.length && !loading && scope === 'all' && keyword}}" class="mon-empty">
+    <image class="mon-empty-ico" src="/images/station-monitoring/empty-search.svg" mode="aspectFit"/>
+    <text class="mon-empty-tx">未找到匹配站点</text>
+    <text class="mon-empty-sub">请更换站点名称或编号后重试</text>
   </view>
+
+  <!-- 全部站点空态（无搜索词） -->
+  <view wx:elif="{{!sites.length && !loading && scope === 'all'}}" class="mon-empty">
+    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+    <text class="mon-empty-tx">暂无站点</text>
+    <text class="mon-empty-sub">当前暂无可查看站点</text>
+  </view>
+
+  <!-- 我负责空态 -->
+  <view wx:elif="{{!sites.length && !loading}}" class="mon-empty">
+    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+    <text class="mon-empty-tx">暂未分配负责站点</text>
+    <text class="mon-empty-sub">当前账号下暂无监测站点，如有疑问请联系管理员</text>
+  </view>
+
+  <!-- 站点列表 -->
+  <block wx:else>
+    <view class="mon-list">
+      <view class="mon-site-card" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}" hover-class="mon-site-card-active">
+        <view class="mon-site-top">
+          <text class="mon-site-name">{{item.name}}</text>
+          <view class="mon-site-tags">
+            <view class="mon-tag mon-tag-info" wx:if="{{scope === 'all' && item.is_responsible}}">
+              <text class="mon-tag-tx">我负责</text>
+            </view>
+            <view class="mon-status-chip mon-status-{{item.monitoring_status || 'unknown'}}">
+              <text class="mon-status-tx">{{item.monitoring_status_label || '状态未知'}}</text>
+            </view>
+          </view>
+        </view>
+        <text class="mon-site-code">站点编号 {{item.code || '未录入'}}</text>
+        <text class="mon-site-reason" wx:if="{{item.monitoring_reason}}">{{item.monitoring_reason}}</text>
+        <view class="mon-site-meta">
+          <view class="mon-meta-item" wx:if="{{item.last_communication_at}}">
+            <image class="mon-meta-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
+            <text class="mon-meta-tx">最后通信 {{item.last_communication_at}}</text>
+          </view>
+          <view class="mon-meta-item" wx:if="{{item.last_valid_observation_at}}">
+            <image class="mon-meta-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
+            <text class="mon-meta-tx">有效观测 {{item.last_valid_observation_at}}</text>
+          </view>
+        </view>
+        <view class="mon-site-bottom" wx:if="{{item.published_factor_count > 0}}">
+          <text class="mon-factor-count">{{item.published_factor_count}} 个监测因子</text>
+          <text class="mon-site-chevron">›</text>
+        </view>
+        <view class="mon-site-bottom" wx:else>
+          <text class="mon-factor-count mon-factor-count--muted">暂无已发布因子</text>
+          <text class="mon-site-chevron">›</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- 刷新失败提示 -->
+    <view wx:if="{{error}}" class="mon-stale-bar">
+      <view class="mon-stale-dot"></view>
+      <text class="mon-stale-tx">{{error}}</text>
+      <button class="btn-ghost btn-sm" bindtap="onRetry">重试</button>
+    </view>
+  </block>
 </view>

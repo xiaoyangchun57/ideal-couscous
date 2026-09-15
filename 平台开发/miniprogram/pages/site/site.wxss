@@ -21,11 +21,37 @@
 .op-btn { flex: 1; margin: 0; font-size: 26rpx; }
 .parts-apply-btn { width: 100%; margin: 16rpx 0 0; font-size: 26rpx; }
 
-.site-info-heading { margin-top: 36rpx; }
+.site-info-heading {
+  margin-top: 36rpx;
+  padding-top: 0;
+  padding-bottom: 12rpx;
+}
 .info-card { margin: 24rpx; padding: 8rpx 28rpx; }
 .info-row { display: flex; align-items: center; justify-content: space-between; padding: 24rpx 0; }
 .info-k { font-size: 27rpx; color: var(--color-text-secondary); }
 .info-v { font-size: 27rpx; color: var(--color-text-primary); }
+
+.info-row--action {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.info-row--hover {
+  opacity: 0.6;
+}
+
+.info-action {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+}
+
+.info-chevron {
+  font-size: 36rpx;
+  color: var(--palette-gray-400);
+  line-height: 1;
+  font-weight: 400;
+}
 .parts-linked-site { margin-bottom: 16rpx; padding: 16rpx 18rpx; color: var(--color-text-secondary); background: var(--color-muted); border-radius: 10rpx; font-size: 24rpx; }
 .field-picker { display: flex; align-items: center; justify-content: space-between; min-height: 76rpx; margin-top: 16rpx; padding: 0 18rpx; color: var(--color-text-primary); background: var(--color-card); border-radius: 10rpx; font-size: 25rpx; }
 .parts-route-note { margin: 16rpx 0 4rpx; padding: 16rpx 18rpx; color: var(--color-text-secondary); background: var(--color-muted); border-left: 6rpx solid var(--color-primary); border-radius: 8rpx; font-size: 23rpx; line-height: 1.5; }
@@ -181,6 +207,295 @@
   min-height: 88rpx;
   gap: 16rpx;
   box-sizing: border-box;
+}
+
+/* ============================================================
+   站点监测模块（只读监测入口）
+   ============================================================ */
+
+/* 状态标签（与列表页 mon-status-chip 保持一致） */
+.mon-status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4rpx 16rpx;
+  border-radius: var(--radius-xs);
+  background: var(--color-type-bg);
+}
+
+.mon-status-tx {
+  font-size: 22rpx;
+  font-weight: 500;
+  color: var(--color-type-text);
+  line-height: 1.4;
+}
+
+.mon-status-normal {
+  background: var(--color-success-surface);
+}
+.mon-status-normal .mon-status-tx {
+  color: var(--color-success);
+}
+.mon-status-attention,
+.mon-status-warning,
+.mon-status-stale {
+  background: var(--color-warning-surface);
+}
+.mon-status-attention .mon-status-tx,
+.mon-status-warning .mon-status-tx,
+.mon-status-stale .mon-status-tx {
+  color: var(--color-warning);
+}
+.mon-status-error,
+.mon-status-offline,
+.mon-status-unavailable {
+  background: var(--color-error-surface);
+}
+.mon-status-error .mon-status-tx,
+.mon-status-offline .mon-status-tx,
+.mon-status-unavailable .mon-status-tx {
+  color: var(--color-error);
+}
+.mon-status-info,
+.mon-status-pending {
+  background: var(--color-info-surface);
+}
+.mon-status-info .mon-status-tx,
+.mon-status-pending .mon-status-tx {
+  color: var(--color-info);
+}
+
+/* 监测状态首屏卡片 */
+.mon-hero-card {
+  margin: 16rpx 24rpx 24rpx;
+  padding: 32rpx 28rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.mon-hero-chip-wrap {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.mon-hero-chip-wrap .mon-status-chip {
+  padding: 6rpx 20rpx;
+}
+.mon-hero-chip-wrap .mon-status-tx {
+  font-size: 24rpx;
+}
+
+.mon-hero-reason {
+  font-size: 30rpx;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.mon-hero-reason--muted {
+  color: var(--color-text-tertiary);
+  font-weight: 400;
+}
+
+.mon-hero-times {
+  display: flex;
+  align-items: stretch;
+  padding-top: 20rpx;
+  border-top: 0.5rpx solid var(--color-divider);
+}
+
+.mon-time-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.mon-time-divider {
+  width: 0.5rpx;
+  background: var(--color-divider);
+  margin: 0 24rpx;
+}
+
+.mon-time-ico {
+  width: 28rpx;
+  height: 28rpx;
+  display: block;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.mon-time-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+  min-width: 0;
+}
+
+.mon-time-label {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1;
+}
+
+.mon-time-value {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+/* 区块通用 */
+.mon-section {
+  margin-bottom: 24rpx;
+}
+
+.mon-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32rpx 12rpx;
+}
+
+.mon-section-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 1rpx;
+}
+
+.mon-section-count {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* 有效值卡片 */
+.mon-values-card {
+  margin: 0 24rpx;
+  padding: 4rpx 28rpx;
+}
+
+.mon-value-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 0;
+  border-bottom: 0.5rpx solid var(--color-divider);
+  gap: 16rpx;
+}
+
+.mon-value-row:last-child {
+  border-bottom: none;
+}
+
+.mon-value-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 28rpx;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mon-value-right {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6rpx;
+}
+
+.mon-value-num {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-value-unit {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* 行内空态 */
+.mon-empty-inline {
+  margin: 0 24rpx;
+  padding: 48rpx 28rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.mon-empty-inline--small {
+  padding: 32rpx 28rpx;
+}
+
+.mon-empty-inline-ico {
+  width: 80rpx;
+  height: 80rpx;
+  margin-bottom: 20rpx;
+  display: block;
+  opacity: 0.8;
+}
+
+.mon-empty-inline--small .mon-empty-inline-ico {
+  display: none;
+}
+
+.mon-empty-inline-tx {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.mon-empty-inline-sub {
+  font-size: 24rpx;
+  color: var(--color-text-tertiary);
+  margin-top: 8rpx;
+  line-height: 1.5;
+}
+
+/* 分轴状态卡片 */
+.mon-axes-card {
+  margin: 0 24rpx;
+  padding: 4rpx 28rpx;
+}
+
+.mon-axis-row {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 0;
+  gap: 16rpx;
+}
+
+.mon-axis-row--border {
+  border-top: 0.5rpx solid var(--color-divider);
+}
+
+.mon-axis-ico {
+  width: 32rpx;
+  height: 32rpx;
+  display: block;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.mon-axis-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 28rpx;
+  color: var(--color-text-primary);
+}
+
+.mon-axis-row .mon-status-chip {
+  flex: none;
 }
 
 .wop-picker-value {

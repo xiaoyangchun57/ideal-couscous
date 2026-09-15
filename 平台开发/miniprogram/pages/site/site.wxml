@@ -9,11 +9,98 @@
     </view>
   </view>
   <view wx:if="{{monitoringError}}" class="sync-bar"><text>{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
-  <view wx:if="{{readOnlySource}}" class="card info-card">
-    <view class="info-row"><text class="info-k">监测状态</text><text class="info-v">{{site.monitoring_status_label || '状态未知'}}</text></view>
-    <view class="info-row"><text class="info-k">状态说明</text><text class="info-v">{{site.monitoring_reason || '—'}}</text></view>
-    <view class="info-row"><text class="info-k">最后有效观测</text><text class="info-v">{{site.last_valid_observation_at || '—'}}</text></view>
-    <view wx:if="{{site.monitoring.latest_values.length}}" class="info-row"><text class="info-k">最新值</text><text class="info-v">{{site.monitoring.latest_values[0].standard_value}} {{site.monitoring.latest_values[0].standard_unit}}</text></view>
+  <!-- 监测信息区（只读监测入口） -->
+  <view wx:if="{{readOnlySource}}">
+    <!-- 监测状态卡片 -->
+    <view class="mon-hero-card">
+      <view class="mon-hero-chip-wrap">
+        <view class="mon-status-chip mon-status-{{site.monitoring_status || 'unknown'}}">
+          <text class="mon-status-tx">{{site.monitoring_status_label || '状态未知'}}</text>
+        </view>
+      </view>
+      <text class="mon-hero-reason" wx:if="{{site.monitoring_reason}}">{{site.monitoring_reason}}</text>
+      <text class="mon-hero-reason mon-hero-reason--muted" wx:else>暂无状态说明</text>
+      <view class="mon-hero-times">
+        <view class="mon-time-item">
+          <image class="mon-time-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
+          <view class="mon-time-copy">
+            <text class="mon-time-label">最后通信</text>
+            <text class="mon-time-value">{{site.last_communication_at || '暂无记录'}}</text>
+          </view>
+        </view>
+        <view class="mon-time-divider"></view>
+        <view class="mon-time-item">
+          <image class="mon-time-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
+          <view class="mon-time-copy">
+            <text class="mon-time-label">最后有效观测</text>
+            <text class="mon-time-value">{{site.last_valid_observation_at || '暂无有效观测'}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 有效观测值 -->
+    <view class="mon-section">
+      <view class="mon-section-head">
+        <text class="mon-section-title">有效观测值</text>
+        <text class="mon-section-count" wx:if="{{site.monitoring.latest_values.length > 0}}">{{site.monitoring.latest_values.length}} 项</text>
+      </view>
+      <view class="card mon-values-card" wx:if="{{site.monitoring.latest_values.length > 0}}">
+        <view class="mon-value-row" wx:for="{{site.monitoring.latest_values}}" wx:key="protocol_code">
+          <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
+          <view class="mon-value-right">
+            <text class="mon-value-num">{{item.standard_value}}</text>
+            <text class="mon-value-unit">{{item.standard_unit}}</text>
+          </view>
+        </view>
+      </view>
+      <view class="mon-empty-inline" wx:else>
+        <image class="mon-empty-inline-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+        <text class="mon-empty-inline-tx">暂无有效观测值</text>
+        <text class="mon-empty-inline-sub">站点尚未形成有效观测数据</text>
+      </view>
+    </view>
+
+    <!-- 分轴状态 -->
+    <view class="mon-section">
+      <view class="mon-section-head">
+        <text class="mon-section-title">分轴状态</text>
+      </view>
+      <view class="card mon-axes-card" wx:if="{{site.monitoring.axes && (site.monitoring.axes.communication || site.monitoring.axes.data || site.monitoring.axes.rtu || site.monitoring.axes.instrument)}}">
+        <view class="mon-axis-row" wx:if="{{site.monitoring.axes.communication}}">
+          <image class="mon-axis-ico" src="/images/station-monitoring/icon-communication.svg" mode="aspectFit"/>
+          <text class="mon-axis-name">{{site.monitoring.axes.communication.name || '通信轴'}}</text>
+          <view class="mon-status-chip mon-status-{{site.monitoring.axes.communication.status || 'unknown'}}">
+            <text class="mon-status-tx">{{site.monitoring.axes.communication.status_label || '未知'}}</text>
+          </view>
+        </view>
+        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.data}}">
+          <image class="mon-axis-ico" src="/images/station-monitoring/icon-data.svg" mode="aspectFit"/>
+          <text class="mon-axis-name">{{site.monitoring.axes.data.name || '数据轴'}}</text>
+          <view class="mon-status-chip mon-status-{{site.monitoring.axes.data.status || 'unknown'}}">
+            <text class="mon-status-tx">{{site.monitoring.axes.data.status_label || '未知'}}</text>
+          </view>
+        </view>
+        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.rtu}}">
+          <image class="mon-axis-ico" src="/images/station-monitoring/icon-rtu.svg" mode="aspectFit"/>
+          <text class="mon-axis-name">{{site.monitoring.axes.rtu.name || 'RTU'}}</text>
+          <view class="mon-status-chip mon-status-{{site.monitoring.axes.rtu.status || 'unknown'}}">
+            <text class="mon-status-tx">{{site.monitoring.axes.rtu.status_label || '未知'}}</text>
+          </view>
+        </view>
+        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.instrument}}">
+          <image class="mon-axis-ico" src="/images/station-monitoring/icon-instrument.svg" mode="aspectFit"/>
+          <text class="mon-axis-name">{{site.monitoring.axes.instrument.name || '仪器'}}</text>
+          <view class="mon-status-chip mon-status-{{site.monitoring.axes.instrument.status || 'unknown'}}">
+            <text class="mon-status-tx">{{site.monitoring.axes.instrument.status_label || '未知'}}</text>
+          </view>
+        </view>
+      </view>
+      <view class="mon-empty-inline mon-empty-inline--small" wx:else>
+        <text class="mon-empty-inline-tx">暂无分轴数据</text>
+        <text class="mon-empty-inline-sub">分轴状态尚未接入</text>
+      </view>
+    </view>
   </view>
 
   <view wx:if="{{!readOnlySource}}" class="task-status {{site.task_state === 'carryover' ? 'task-status-carryover' : (site.can_check_in ? 'task-status-ready' : 'task-status-blocked')}}">
@@ -33,18 +120,26 @@
     <button wx:if="{{!readOnlySource}}" class="btn-primary checkin-btn" loading="{{checkingIn}}" disabled="{{checkingIn || !site.can_check_in}}" bindtap="onCheckIn">{{site.checked_in ? '已完成到站打卡' : (site.can_check_in ? (site.has_carryover ? '到站打卡并继续' : '到站打卡') : '暂不可打卡')}}</button>
     <view class="secondary-ops">
       <button class="btn-ghost op-btn" bindtap="onNavigate">导航到站</button>
-      <button wx:if="{{!readOnlySource && site.can_calibrate}}" class="btn-ghost op-btn" bindtap="onCalibrate">位置校准</button>
     </view>
     <button wx:if="{{!readOnlySource}}" class="btn-ghost parts-apply-btn" bindtap="onOpenPartsApply">申请备品备件</button>
   </view>
 
-  <view class="section site-info-heading"><text class="section-title">站点资料</text></view>
+  <view class="section-header site-info-heading"><text class="section-title">站点资料</text></view>
   <view class="card info-card">
     <view class="info-row"><text class="info-k">经度</text><text class="info-v">{{site.lng || '—'}}</text></view>
     <view class="hairline"></view>
     <view class="info-row"><text class="info-k">纬度</text><text class="info-v">{{site.lat || '—'}}</text></view>
     <view class="hairline"></view>
     <view class="info-row"><text class="info-k">类型</text><text class="info-v">{{site.type_cn}}</text></view>
+    <block wx:if="{{site.can_calibrate && (!readOnlySource || monitoringSource)}}">
+      <view class="hairline"></view>
+      <view class="info-row info-row--action" bindtap="onCalibrate" hover-class="info-row--hover">
+        <text class="info-k">位置校准</text>
+        <view class="info-action">
+          <text class="info-chevron">›</text>
+        </view>
+      </view>
+    </block>
   </view>
 
   <view class="sheet-mask" wx:if="{{!readOnlySource && partsApply.open}}" bindtap="onClosePartsApply"></view>

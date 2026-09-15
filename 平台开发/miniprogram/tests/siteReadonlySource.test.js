@@ -31,11 +31,17 @@ function createPage() {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/site/site.wxml'), 'utf8');
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="task-status/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-primary checkin-btn/);
-    assert.match(wxml, /wx:if="\{\{!readOnlySource && site\.can_calibrate\}\}"/);
+    assert.match(wxml, /wx:if="\{\{site\.can_calibrate && \(!readOnlySource \|\| monitoringSource\)\}\}"/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
     assert.match(wxml, /!site && monitoringError/);
     assert.match(wxml, /monitoringError.*bindtap="onRetryMonitoring"/s);
+    assert.match(wxml, /item\.factor_name_cn \|\| '监测因子'/);
+    assert.doesNotMatch(wxml, /item\.factor_name\s*\|\||item\.standard_factor/);
+    assert.match(wxml, /site\.monitoring\.axes\.communication\.status_label/);
+    assert.match(wxml, /site\.monitoring\.axes\.data\.status_label/);
+    assert.match(wxml, /site\.monitoring\.axes\.rtu\.status_label/);
+    assert.match(wxml, /site\.monitoring\.axes\.instrument\.status_label/);
     const responsibleWxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(responsibleWxml, /!sites\.length && error/);
     assert.match(responsibleWxml, /sites\.length && error/);
@@ -48,7 +54,7 @@ function createPage() {
       siteTaskCalls += 1;
       return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } });
     };
-    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', status_label: '未接入' }, monitoring: { latest_values: [] } }); };
+    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true }, monitoring: { latest_values: [], axes: {} } }); };
     api.partsInventory = () => {
       inventoryCalls += 1;
       return Promise.resolve([]);
@@ -58,10 +64,38 @@ function createPage() {
     readonlyPage.onLoad({ site_id: '20', source: 'inspection_readonly' });
     await flush();
     assert.equal(readonlyPage.data.readOnlySource, true);
+    assert.equal(readonlyPage.data.monitoringSource, false);
     assert.equal(readonlyPage.data.site.id, 20);
     assert.equal(siteTaskCalls, 0);
     assert.equal(monitoringCalls, 1);
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
+
+    const monitoringPage = createPage();
+    monitoringPage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    await flush();
+    assert.equal(monitoringPage.data.readOnlySource, true);
+    assert.equal(monitoringPage.data.monitoringSource, true);
+    assert.equal(monitoringPage.data.site.can_calibrate, true);
+
+    const pending = [];
+    api.stationMonitoringOverview = () => new Promise(resolve => pending.push(resolve));
+    const racePage = createPage();
+    racePage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    racePage.loadSite(20);
+    pending[1]({ site: { id: 20, name: '新结果' }, monitoring: { latest_values: [], axes: {} } });
+    await flush();
+    pending[0]({ site: { id: 20, name: '旧结果' }, monitoring: { latest_values: [], axes: {} } });
+    await flush();
+    assert.equal(racePage.data.site.name, '新结果', 'older detail response cannot overwrite the latest request');
+
+    const hiddenPending = [];
+    api.stationMonitoringOverview = () => new Promise(resolve => hiddenPending.push(resolve));
+    const hiddenPage = createPage();
+    hiddenPage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    hiddenPage.onHide();
+    hiddenPending[0]({ site: { id: 20, name: '离页结果' }, monitoring: { latest_values: [], axes: {} } });
+    await flush();
+    assert.equal(hiddenPage.data.site, null, 'a response arriving after page hide is ignored');
 
     api.stationMonitoringOverview = () => Promise.reject(new Error('network'));
     readonlyPage.loadSite(20);
@@ -77,6 +111,20 @@ function createPage() {
     assert.equal(standardPage.data.site.id, 20);
     assert.equal(siteTaskCalls, 1);
     assert.equal(inventoryCalls, 1, 'existing site entry preserves parts-application loading');
+
+    const standardPending = [];
+    api.siteTasks = () => new Promise(resolve => standardPending.push(resolve));
+    const hiddenStandardPage = createPage();
+    hiddenStandardPage.onLoad({ site_id: '20' });
+    hiddenStandardPage.onShow();
+    hiddenStandardPage.onHide();
+    standardPending[0]({ site: { id: 20, name: '已失效结果' } });
+    await flush();
+    assert.equal(hiddenStandardPage.data.site, null);
+    hiddenStandardPage.onShow();
+    standardPending[1]({ site: { id: 20, name: '返回后结果' } });
+    await flush();
+    assert.equal(hiddenStandardPage.data.site.name, '返回后结果', 'standard entry reloads if its first response was invalidated while hidden');
 
     const inspection = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.js'), 'utf8');
     assert.match(inspection, /\/pages\/site\/site\?site_id=' \+ this\.data\.selSiteId \+ '&source=inspection_readonly'/);

@@ -32165,13 +32165,60 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
     if last_communication is None:
         row = db.execute("SELECT MAX(received_at) AS received_at FROM ingest_raw_frames WHERE endpoint_id=? AND authentication_status='authenticated'", (profile['endpoint_id'],)).fetchone()
         last_communication = row['received_at'] if row else None
-    freshness = [_monitoring_freshness(item.get('observed_at'), item.get('expected_interval_seconds'), item.get('tolerance_seconds')) for item in values]
-    intervals = [item.get('expected_interval_seconds') for item in configs if item.get('expected_interval_seconds')]
-    if not intervals:
+    profile_data = dict(profile)
+    communication = _monitoring_freshness(last_communication, profile_data.get('expected_interval_seconds'))
+    value_by_config = {
+        (item.get('endpoint_id'), item.get('protocol_code'), item.get('business_metric'), item.get('instrument_asset_code')): item
+        for item in values
+    }
+    factor_freshness = []
+    for config in configs:
+        key = (config.get('endpoint_id'), config.get('protocol_code'), config.get('business_metric'), config.get('instrument_asset_code'))
+        value = value_by_config.get(key)
+        factor_freshness.append(_monitoring_freshness(
+            value.get('observed_at') if value else None,
+            config.get('expected_interval_seconds'), config.get('tolerance_seconds'),
+        ))
+    if not profile_data.get('expected_interval_seconds') or any(not item.get('expected_interval_seconds') for item in configs):
         return {'status': 'interval_unconfigured', 'status_label': '周期未配置', 'reason_code': 'interval_unconfigured', 'reason': '已接入但采集周期尚未配置'}
-    if freshness and all(item['state'] == 'fresh' for item in freshness):
+    if communication['state'] == 'stale':
+        return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'stale_communication', 'reason': '最近通信已超出端点配置周期'}
+    if any(item['reason_code'] == 'no_observation' for item in factor_freshness):
+        return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'missing_observation', 'reason': '当前配置因子存在缺测'}
+    if factor_freshness and all(item['state'] == 'fresh' for item in factor_freshness):
         return {'status': 'normal', 'status_label': '正常', 'reason_code': None, 'reason': '最近有效观测在配置周期内'}
     return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'stale_observation', 'reason': '最近有效观测超出配置周期或存在缺口'}
+
+
+def _station_monitoring_can_calibrate(db, site_id):
+    user = getattr(g, 'current_user', None) or {}
+    if _has_any_role(user, 'admin'):
+        return True
+    if not _has_any_role(user, 'operator'):
+        return False
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        return bool(_mobile_site_execution_plans(db, user.get('id'), site_id, today))
+    except sqlite3.OperationalError:
+        return False
+
+
+def _station_monitoring_axis(name, state, label, *, status='info', reason=None, **extra):
+    return dict({'name': name, 'state': state, 'status': status, 'status_label': label, 'reason': reason}, **extra)
+
+
+_STATION_MONITORING_FACTOR_LABELS = {
+    'water_temp': '水温', 'ph': 'pH', 'dissolved_oxygen': '溶解氧',
+    'conductivity': '电导率', 'turbidity': '浊度', 'codmn': '高锰酸盐指数',
+    'ammonia': '氨氮', 'total_phosphorus': '总磷', 'total_nitrogen': '总氮',
+    'total_organic_carbon': '总有机碳', 'total_tin': '总锡', 'total_lead': '总铅',
+    'total_copper': '总铜', 'total_zinc': '总锌',
+}
+
+_STATION_MONITORING_SITE_TYPE_LABELS = {
+    'water_quality': '水质自动站', 'manual_station': '水质手动站',
+    'drinking_source': '饮用水源站', 'cross_boundary': '跨界断面站', 'groundwater': '地下水站',
+}
 
 
 def _station_monitoring_overview(db, site_id):
@@ -32181,15 +32228,53 @@ def _station_monitoring_overview(db, site_id):
     profile, error = _monitoring_site_context(db, site_id)
     if error:
         profile = None
-    configs = monitoring_factor_configurations(db, site_id) if profile else []
-    values = monitoring_latest_values(db, site_id) if profile else []
+    configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
+    values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     latest = values if projection['monitoring_status'] in {'normal', 'attention', 'interval_unconfigured'} else []
-    axes = {'communication': {'state': 'received' if projection['last_communication_at'] else 'not_configured', 'last_received_at': projection['last_communication_at']},
-            'data': {'state': 'not_configured' if projection['monitoring_status'] in {'not_connected', 'awaiting_first_frame', 'raw_received_config_pending'} else projection['monitoring_status'], 'reason': projection['monitoring_reason']},
-            'instrument': {'state': 'not_configured' if not configs else 'configured', 'reason': None if configs else 'no_approved_factor'}}
+    latest = [dict(item, factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(item.get('business_metric'), f'监测因子{index + 1}')) for index, item in enumerate(latest)]
+    status = projection['monitoring_status']
+    communication_freshness = _monitoring_freshness(
+        projection['last_communication_at'], dict(profile).get('expected_interval_seconds') if profile else None)
+    communication_state = communication_freshness['state'] if projection['last_communication_at'] else 'not_configured'
+    communication_label = ('未接入' if not projection['last_communication_at'] and status == 'not_connected'
+        else '等待首帧' if not projection['last_communication_at']
+        else '通信正常' if communication_state == 'fresh'
+        else '通信已过期' if communication_state == 'stale'
+        else '通信周期未配置')
+    data_labels = {
+        'not_connected': '未接入', 'awaiting_first_frame': '等待首帧',
+        'raw_received_config_pending': '档案待批准', 'waiting_first_valid': '等待有效观测',
+        'interval_unconfigured': '周期未配置', 'normal': '观测正常', 'attention': '需关注',
+    }
+    data_style = 'normal' if status == 'normal' else ('attention' if status == 'attention' else 'pending')
+    instrument_state = 'has_valid_observation' if values else ('no_valid_observation' if configs else 'not_configured')
+    instrument_label = '有有效观测' if values else ('暂无有效观测' if configs else '尚未配置')
+    confirmed_rtu = db.execute(
+        """SELECT event.received_at FROM monitoring_status_events event
+           JOIN observation_batches batch ON batch.id=event.observation_batch_id AND batch.is_current=1
+           WHERE event.business_site_id=? AND event.endpoint_id=? AND event.event_axis='rtu'
+             AND event.source='confirmed_protocol' ORDER BY event.received_at DESC, event.id DESC LIMIT 1""",
+        (site_id, profile['endpoint_id']),
+    ).fetchone() if profile else None
+    axes = {
+        'communication': _station_monitoring_axis('通信', communication_state, communication_label,
+            status='normal' if communication_state == 'fresh' else ('attention' if communication_state == 'stale' else 'pending'),
+            reason='最近通信已超出端点配置周期' if communication_state == 'stale' else ('端点通信周期尚未配置' if projection['last_communication_at'] and communication_state == 'unknown' else None),
+            last_received_at=projection['last_communication_at']),
+        'data': _station_monitoring_axis('数据', status, data_labels.get(status, '状态未知'),
+            status=data_style, reason=projection['monitoring_reason']),
+        'rtu': _station_monitoring_axis('RTU', 'reported' if confirmed_rtu else 'unknown',
+            '已确认上报' if confirmed_rtu else '状态未知', status='info' if confirmed_rtu else 'pending',
+            reason=None if confirmed_rtu else '暂无经确认的 RTU 状态',
+            last_confirmed_at=confirmed_rtu['received_at'] if confirmed_rtu else None),
+        'instrument': _station_monitoring_axis('仪器', instrument_state, instrument_label, status='info',
+            reason=None if configs else '暂无已批准因子'),
+    }
     instruments = [dict(item, status='has_valid_observation' if any(v.get('instrument_asset_code') == item.get('instrument_asset_code') for v in values) else 'health_unknown') for item in configs]
     has_trend_facts = any(item.get('aggregation_source') == 'server_aggregated' for item in values)
     monitoring = {'latest_values': latest, 'axes': axes, 'instruments': instruments, 'recent_items': [], 'capabilities': {'latest': bool(latest), 'trend': has_trend_facts, 'instruments': bool(configs)}}
+    projection['can_calibrate'] = _station_monitoring_can_calibrate(db, site_id)
+    projection['type_cn'] = _STATION_MONITORING_SITE_TYPE_LABELS.get(projection.get('type'), '其他站点')
     return {'site': projection, 'monitoring': monitoring, 'axes': axes, 'instruments': instruments, 'recent_items': [], 'capabilities': monitoring['capabilities'],
             'section_status': {'latest_values': 'ready' if latest else 'not_configured', 'trend': 'ready' if has_trend_facts else 'not_configured', 'instruments': 'ready' if instruments else 'not_configured'}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
 
@@ -32258,14 +32343,56 @@ def _station_monitoring_batch_projections(db, site_rows):
 @app.route('/api/station-monitoring/sites')
 @login_required
 def station_monitoring_sites():
-    allowed = _filter_site_ids()
+    scope = (request.args.get('scope') or 'mine').strip().lower()
+    if scope not in {'mine', 'all'}:
+        return jsonify({'error': '站点范围参数无效', 'code': 'INVALID_MONITORING_SCOPE'}), 400
+    is_admin = _has_any_role(g.current_user, 'admin')
+    if scope == 'all' and not is_admin:
+        return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_MONITORING_SCOPE'}), 403
+    keyword = (request.args.get('keyword') or '').strip()
     with get_db() as db:
-        where, params = ('', []) if allowed is None else (' WHERE s.id IN (' + ','.join('?' * len(allowed)) + ')', allowed)
-        site_where, site_params = ('', []) if allowed is None else (' WHERE id IN (' + ','.join('?' * len(allowed)) + ')', allowed)
-        site_rows = db.execute('SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, gps_lng AS lng, manager, phone FROM sites' + site_where + ' ORDER BY name, id', site_params).fetchall() if allowed != [] else []
+        responsible_ids = [row['site_id'] for row in db.execute(
+            'SELECT site_id FROM user_sites WHERE user_id=? ORDER BY site_id', (g.current_user['id'],)
+        ).fetchall()]
+        mine_count = len(responsible_ids)
+        all_count = db.execute('SELECT COUNT(*) FROM sites').fetchone()[0] if is_admin else None
+        where = []
+        params = []
+        if scope == 'mine':
+            if not responsible_ids:
+                site_rows = []
+            else:
+                where.append('id IN (' + ','.join('?' * len(responsible_ids)) + ')')
+                params.extend(responsible_ids)
+        if keyword and (scope != 'mine' or responsible_ids):
+            escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            where.append("(name LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')")
+            params.extend((f'%{escaped}%', f'%{escaped}%'))
+        if scope != 'mine' or responsible_ids:
+            order = 'name, id'
+            if scope == 'all' and responsible_ids:
+                responsible_marks = ','.join('?' * len(responsible_ids))
+                order = f'CASE WHEN id IN ({responsible_marks}) THEN 0 ELSE 1 END, name, id'
+                params.extend(responsible_ids)
+            clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+            site_rows = db.execute(
+                'SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, '
+                'gps_lng AS lng, manager, phone FROM sites' + clause + ' ORDER BY ' + order,
+                params,
+            ).fetchall()
         items = _station_monitoring_batch_projections(db, site_rows)
+        responsible_set = set(responsible_ids)
+        for item in items:
+            item['is_responsible'] = item['site_id'] in responsible_set
         counts = {state: sum(item['monitoring_status'] == state for item in items) for state in ('not_connected', 'awaiting_first_frame', 'raw_received_config_pending', 'waiting_first_valid', 'interval_unconfigured', 'normal', 'attention')}
-        return jsonify({'summary': dict(total=len(items), **counts), 'items': items, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
+        return jsonify({
+            'scope': scope,
+            'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
+            'scope_counts': {'mine': mine_count, 'all': all_count},
+            'summary': dict(total=len(items), **counts),
+            'items': items,
+            'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        })
 
 
 @app.route('/api/station-monitoring/sites/<int:site_id>/overview')

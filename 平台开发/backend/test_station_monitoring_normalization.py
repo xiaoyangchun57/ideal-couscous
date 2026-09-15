@@ -523,10 +523,124 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('status', body['site'])
         self.assertNotIn('status_label', body['site'])
         self.assertNotIn('reason', body['site'])
+        self.assertTrue(body['site']['can_calibrate'])
+        self.assertEqual(body['site']['type_cn'], '其他站点')
+        for axis in ('communication', 'data', 'rtu', 'instrument'):
+            self.assertIn('name', body['axes'][axis])
+            self.assertIn('status', body['axes'][axis])
+            self.assertIn('status_label', body['axes'][axis])
+
+    def test_station_monitoring_list_uses_explicit_server_scopes_and_responsibility(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('INSERT INTO user_sites(user_id,site_id) VALUES (?,?)', (self.admin_id, self.site_id))
+            connection.execute("UPDATE sites SET name='本人水站', code='MINE-001' WHERE id=?", (self.site_id,))
+            connection.execute("UPDATE sites SET name='其他水站', code='OTHER-002' WHERE id=?", (self.other_site_id,))
+            connection.commit()
+        client = web_app.app.test_client()
+        admin = self._headers('monitor-admin')
+        default_response = client.get('/api/station-monitoring/sites', headers=admin)
+        self.assertEqual(default_response.status_code, 200, default_response.get_json())
+        default_body = default_response.get_json()
+        self.assertEqual(default_body['scope'], 'mine')
+        self.assertEqual(default_body['available_scopes'], ['mine', 'all'])
+        self.assertEqual(default_body['scope_counts'], {'mine': 1, 'all': 2})
+        self.assertEqual(default_body['summary']['total'], 1)
+        self.assertEqual([item['site_id'] for item in default_body['items']], [self.site_id])
+        self.assertTrue(default_body['items'][0]['is_responsible'])
+        all_body = client.get('/api/station-monitoring/sites?scope=all', headers=admin).get_json()
+        self.assertEqual(all_body['summary']['total'], 2)
+        self.assertEqual(all_body['items'][0]['site_id'], self.site_id)
+        self.assertEqual([item['is_responsible'] for item in all_body['items']], [True, False])
+        by_name = client.get('/api/station-monitoring/sites?scope=all&keyword=%E5%85%B6%E4%BB%96', headers=admin).get_json()
+        self.assertEqual([item['site_id'] for item in by_name['items']], [self.other_site_id])
+        self.assertEqual(by_name['summary']['total'], 1)
+        self.assertEqual(by_name['scope_counts'], {'mine': 1, 'all': 2})
+        by_code = client.get('/api/station-monitoring/sites?scope=all&keyword=MINE-001', headers=admin).get_json()
+        self.assertEqual([item['site_id'] for item in by_code['items']], [self.site_id])
+        cleared = client.get('/api/station-monitoring/sites?scope=all&keyword=%20%20', headers=admin).get_json()
+        self.assertEqual(cleared['summary']['total'], 2)
+
+    def test_station_monitoring_scope_enforces_operator_and_zero_assignment_boundaries(self):
+        client = web_app.app.test_client()
+        operator = self._headers('monitor-operator')
+        mine = client.get('/api/station-monitoring/sites?scope=mine', headers=operator)
+        self.assertEqual(mine.status_code, 200, mine.get_json())
+        self.assertEqual(mine.get_json()['available_scopes'], ['mine'])
+        self.assertEqual(mine.get_json()['scope_counts'], {'mine': 1, 'all': None})
+        self.assertEqual([item['site_id'] for item in mine.get_json()['items']], [self.site_id])
+        self.assertEqual(client.get('/api/station-monitoring/sites?scope=all', headers=operator).status_code, 403)
+        self.assertEqual(client.get('/api/station-monitoring/sites?scope=team', headers=operator).status_code, 400)
+        admin = self._headers('monitor-admin')
+        zero_mine = client.get('/api/station-monitoring/sites?scope=mine', headers=admin)
+        self.assertEqual(zero_mine.status_code, 200, zero_mine.get_json())
+        self.assertEqual(zero_mine.get_json()['items'], [])
+        self.assertEqual(zero_mine.get_json()['scope_counts'], {'mine': 0, 'all': 2})
+        all_response = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+        self.assertEqual(all_response.status_code, 200, all_response.get_json())
+        self.assertEqual(all_response.get_json()['summary']['total'], 2)
+
+    def test_station_monitoring_keyword_is_literal_and_stays_inside_mine_scope(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE sites SET name='百分号%站', code='LITERAL_01' WHERE id=?", (self.site_id,))
+            connection.execute("UPDATE sites SET name='普通站', code='OTHER-02' WHERE id=?", (self.other_site_id,))
+            connection.commit()
+        client = web_app.app.test_client()
+        operator = self._headers('monitor-operator')
+        percent = client.get('/api/station-monitoring/sites?scope=mine&keyword=%25', headers=operator)
+        self.assertEqual([item['site_id'] for item in percent.get_json()['items']], [self.site_id])
+        underscore = client.get('/api/station-monitoring/sites?scope=mine&keyword=_', headers=operator)
+        self.assertEqual([item['site_id'] for item in underscore.get_json()['items']], [self.site_id])
+        outside = client.get('/api/station-monitoring/sites?scope=mine&keyword=OTHER', headers=operator)
+        self.assertEqual(outside.get_json()['items'], [])
+        self.assertEqual(outside.get_json()['scope_counts']['mine'], 1)
+
+    def test_station_monitoring_overview_projects_chinese_factor_name(self):
+        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=62)
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        response = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=self._headers('monitor-admin'))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        latest = response.get_json()['monitoring']['latest_values']
+        self.assertEqual(latest[0]['factor_name_cn'], '水温')
+        self.assertEqual(response.get_json()['axes']['communication']['state'], 'stale')
+        self.assertEqual(response.get_json()['axes']['communication']['status_label'], '通信已过期')
+
+    def test_station_monitoring_normal_requires_every_configured_factor_fresh(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        profile = {'endpoint_id': self.endpoint_id, 'expected_interval_seconds': 60}
+        configs = [
+            {'endpoint_id': self.endpoint_id, 'protocol_code': code, 'business_metric': metric,
+             'instrument_asset_code': 'INST-A', 'expected_interval_seconds': 60, 'tolerance_seconds': 15}
+            for code, metric in (('0311', 'water_temp'), ('4612', 'ph'), ('4A11', 'codmn'), ('4C1A', 'ammonia'))
+        ]
+        result = web_app._station_monitoring_summary_projection(
+            None, self.site_id, profile, configs, [dict(configs[0], observed_at=now)], now)
+        self.assertEqual(result['status'], 'attention')
+        self.assertEqual(result['reason_code'], 'missing_observation')
+
+    def test_station_monitoring_marks_stale_endpoint_communication(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        profile = {'endpoint_id': self.endpoint_id, 'expected_interval_seconds': 60}
+        config = {'endpoint_id': self.endpoint_id, 'protocol_code': '0311', 'business_metric': 'water_temp',
+                  'instrument_asset_code': 'INST-A', 'expected_interval_seconds': 60, 'tolerance_seconds': 15}
+        result = web_app._station_monitoring_summary_projection(
+            None, self.site_id, profile, [config], [dict(config, observed_at=now)], '2020-01-01T00:00:00+00:00')
+        self.assertEqual(result['status'], 'attention')
+        self.assertEqual(result['reason_code'], 'stale_communication')
+
+    def test_all_published_monitoring_factors_have_distinct_chinese_names(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            metrics = [row[0] for row in connection.execute(
+                'SELECT DISTINCT business_metric FROM monitoring_factor_definitions WHERE is_published=1 AND business_metric IS NOT NULL')]
+        labels = [web_app._STATION_MONITORING_FACTOR_LABELS.get(metric) for metric in metrics]
+        self.assertNotIn(None, labels)
+        self.assertEqual(len(labels), len(set(labels)))
 
     def test_station_monitoring_overview_permissions_and_missing_site(self):
         client = web_app.app.test_client()
-        self.assertEqual(client.get(f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=self._headers('monitor-operator')).status_code, 403)
+        operator = self._headers('monitor-operator')
+        self.assertFalse(client.get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=operator).get_json()['site']['can_calibrate'])
+        self.assertEqual(client.get(f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=operator).status_code, 403)
         self.assertEqual(client.get('/api/station-monitoring/sites/99999/overview', headers=self._headers('monitor-admin')).status_code, 404)
 
     def test_access_summary_counts_independent_identity_axes(self):
@@ -544,7 +658,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute('UPDATE monitoring_endpoint_profiles SET enabled=0 WHERE endpoint_id=?', (self.endpoint_id,))
             connection.commit()
-        response = web_app.app.test_client().get('/api/station-monitoring/sites', headers=self._headers('monitor-admin'))
+        response = web_app.app.test_client().get('/api/station-monitoring/sites?scope=all', headers=self._headers('monitor-admin'))
         self.assertEqual(response.status_code, 200, response.get_json())
         item = next(item for item in response.get_json()['items'] if item['site_id'] == self.site_id)
         self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
@@ -554,7 +668,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             connection.execute("UPDATE monitoring_endpoint_profiles SET effective_to='2020-01-01T00:00:00+00:00'")
             connection.commit()
         headers = self._headers('monitor-admin')
-        listed = web_app.app.test_client().get('/api/station-monitoring/sites', headers=headers)
+        listed = web_app.app.test_client().get('/api/station-monitoring/sites?scope=all', headers=headers)
         detail = web_app.app.test_client().get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
         self.assertEqual(listed.status_code, 200, listed.get_json())
         self.assertEqual(detail.status_code, 200, detail.get_json())
@@ -571,7 +685,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             connection.execute('UPDATE trusted_endpoints SET business_site_id=? WHERE id=?', (self.other_site_id, self.endpoint_id))
             connection.commit()
         headers = self._headers('monitor-admin')
-        listed = web_app.app.test_client().get('/api/station-monitoring/sites', headers=headers).get_json()
+        listed = web_app.app.test_client().get('/api/station-monitoring/sites?scope=all', headers=headers).get_json()
         item = next(item for item in listed['items'] if item['site_id'] == self.site_id)
         detail = web_app.app.test_client().get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers).get_json()
         self.assertEqual(item['monitoring_status'], 'not_connected')

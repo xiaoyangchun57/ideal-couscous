@@ -15,7 +15,7 @@ const PARTS_FULFILLMENT_OPTIONS = [
 
 Page({
   data: {
-    siteId: null, site: null, readOnlySource: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
+    siteId: null, site: null, readOnlySource: false, monitoringSource: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
@@ -27,13 +27,20 @@ Page({
   },
 
   onLoad(options) {
+    this._unloaded = false;
+    this._inactive = false;
+    this._hasShown = false;
     const id = options.site_id || app.globalData.selSiteId;
-    const readOnlySource = options.source === 'inspection_readonly' || options.source === 'responsible_sites_monitoring';
-    this.setData({ siteId: id, readOnlySource });
+    const monitoringSource = options.source === 'responsible_sites_monitoring';
+    const readOnlySource = options.source === 'inspection_readonly' || monitoringSource;
+    this.setData({ siteId: id, readOnlySource, monitoringSource });
     if (id) this.loadSite(id);
   },
 
   onShow() {
+    this._inactive = false;
+    if (this._hasShown && this.data.siteId && (this.data.readOnlySource || !this.data.site)) this.loadSite(this.data.siteId);
+    this._hasShown = true;
     this.refreshSyncState();
   },
 
@@ -67,18 +74,36 @@ Page({
   },
 
   loadSite(id) {
+    const requestId = (this._siteRequestId || 0) + 1;
+    this._siteRequestId = requestId;
     if (this.data.readOnlySource) this.setData({ monitoringLoading: true, monitoringError: '' });
     const request = this.data.readOnlySource ? api.stationMonitoringOverview(id) : api.siteTasks(id);
     request.then(res => {
+        if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
         const source = this.data.readOnlySource ? (res.site || {}) : (res.site || {});
         const checkedIn = !!source.checked_in;
         this.setData({ site: Object.assign({}, source, { checked_in: checkedIn, can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn), checkin_sync_pending: false, monitoring: res.monitoring || { latest_values: [] } }), monitoringLoading: false, monitoringError: '' });
       })
-      .catch(() => { if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: '监测信息加载失败，请重试' }); wx.showToast({ title: '加载失败', icon: 'none' }); });
+      .catch(() => {
+        if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
+        if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: '监测信息加载失败，请重试' });
+        wx.showToast({ title: '加载失败', icon: 'none' });
+      });
     if (!this.data.readOnlySource) this.loadPartsInventory();
   },
 
   onRetryMonitoring() { if (this.data.siteId) this.loadSite(this.data.siteId); },
+
+  onHide() {
+    this._inactive = true;
+    this._siteRequestId = (this._siteRequestId || 0) + 1;
+  },
+
+  onUnload() {
+    this._unloaded = true;
+    this._siteRequestId = (this._siteRequestId || 0) + 1;
+    this._partsInventoryRequest = (this._partsInventoryRequest || 0) + 1;
+  },
 
   loadPartsInventory() {
     if (this.data.partsInventoryStatus === 'loading') return;

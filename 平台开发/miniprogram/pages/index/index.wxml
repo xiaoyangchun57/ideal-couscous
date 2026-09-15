@@ -14,7 +14,7 @@
       <text class="greeting-date">{{dateLabel}}</text>
     </view>
     <view class="greeting-bell" bindtap="goMessages">
-      <image class="bell-icon" src="/images/icon-bell.png" mode="aspectFit" />
+      <image class="bell-icon" src="/images/icon-bell.svg" mode="aspectFit" />
       <view class="bell-badge" wx:if="{{unreadDisplay}}">{{unreadDisplay}}</view>
     </view>
   </view>
@@ -119,8 +119,7 @@
     <!-- ===== 全部工单（低强调导航行） ===== -->
     <view class="workorder-entry" bindtap="goWorkorder">
       <view class="wo-entry-icon">
-        <view class="wo-icon-doc"></view>
-        <view class="wo-icon-lines"></view>
+        <image class="wo-entry-ico-img" src="/images/icon-clipboard-check.svg" mode="aspectFit"/>
       </view>
       <view class="wo-entry-text">
         <text class="wo-entry-title">全部工单</text>
