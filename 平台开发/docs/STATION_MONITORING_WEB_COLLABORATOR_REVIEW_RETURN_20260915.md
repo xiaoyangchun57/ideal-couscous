@@ -1,9 +1,12 @@
 # 站点监测 Web 协作者提交与 Review 回传
 
-> 日期：2026-09-15  
-> 协作者：`LI991020`  
-> 依据：用户提供的 `STATION_MONITORING_WEB_COLLABORATOR_HANDOFF_20260914(1).md`  
-> 状态：`WEB_IMPLEMENTED / READY_FOR_PRODUCT_CODE_REVIEW`，不是冻结或发布候选。  
+> 日期：2026-09-15
+>
+> 协作者：`LI991020`
+>
+> 依据：用户提供的 `STATION_MONITORING_WEB_COLLABORATOR_HANDOFF_20260914(1).md`
+>
+> 状态：`WEB_IMPLEMENTED / READY_FOR_PRODUCT_CODE_REVIEW`，不是冻结或发布候选。
 > 本文件只描述下列独立协作分支；不描述旧工作树中未提交的后端修缮。
 
 ## 1. 提交身份与范围
