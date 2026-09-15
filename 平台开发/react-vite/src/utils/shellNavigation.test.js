@@ -9,7 +9,7 @@ import {
 } from './shellNavigation.js';
 
 test('global search paths use the destination page query contract', () => {
-  assert.equal(buildGlobalSearchPath({ type: 'site', identifier: 35 }), '/sites?archive=35');
+  assert.equal(buildGlobalSearchPath({ type: 'site', identifier: 35 }), '/sites/35');
   assert.equal(buildGlobalSearchPath({ type: 'workorder', identifier: 'WO-1' }), '/workorders?search=WO-1');
   assert.equal(buildGlobalSearchPath({ type: 'device', identifier: 'WB-003-01' }), '/equipment?q=WB-003-01');
 });

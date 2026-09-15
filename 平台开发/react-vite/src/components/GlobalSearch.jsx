@@ -80,7 +80,8 @@ export default function GlobalSearch({ open, onClose }) {
 
   const openResult = (item) => {
     onClose();
-    navigate(item.path || buildGlobalSearchPath(item));
+    const path = item.type === 'site' ? buildGlobalSearchPath(item) : (item.path || buildGlobalSearchPath(item));
+    navigate(path);
   };
 
   const activateResult = (event, item) => {

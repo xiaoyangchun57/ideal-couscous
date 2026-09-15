@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table, Input, Select, Button, Space, Tag, Badge,
@@ -22,6 +22,7 @@ import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
+import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems } from './stationMonitoring';
 
 const { Text } = Typography;
 
@@ -69,8 +70,12 @@ export default function SitesPage() {
 
   // ---- data state ----
   const [sites, setSites] = useState([]);
+  const sitesRef = useRef([]);
+  const fetchRequestRef = useRef({ id: 0, controller: null });
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
+  const [monitoringSummary, setMonitoringSummary] = useState({});
+  const [monitoringError, setMonitoringError] = useState(null);
 
   // ---- filter state ----
   const searchText = searchParams.get('q') || '';
@@ -115,40 +120,51 @@ export default function SitesPage() {
   const [siteCreateForm] = Form.useForm();
 
   const { user } = useAuth();
-  const isAdmin = (user?.roles || [user?.role]).includes('admin');
+  const isAdmin = hasAdminRole(user);
 
   // ========================================================================
   // Fetch all sites
   // ========================================================================
   const fetchSites = useCallback(async () => {
+    fetchRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = fetchRequestRef.current.id + 1;
+    fetchRequestRef.current = { id: requestId, controller };
     setLoading(true);
     setFetchError(null);
+    setMonitoringError(null);
     try {
       const [siteResult, monitoringResult] = await Promise.allSettled([
-        api.getStrict('/sites'),
-        api.stationMonitoringSites(),
+        api.getStrict('/sites', { signal: controller.signal }),
+        api.stationMonitoringSites({ signal: controller.signal }),
       ]);
+      if (fetchRequestRef.current.id !== requestId) return;
       if (siteResult.status === 'rejected') throw siteResult.reason;
       const data = siteResult.value;
-      const monitoringItems = monitoringResult.status === 'fulfilled' ? (monitoringResult.value?.items || []) : [];
-      const monitoringById = new Map(monitoringItems.map(item => [Number(item.id), item]));
-      if (data && Array.isArray(data)) {
-        setSites(data.map(site => Object.assign({}, site, monitoringById.get(Number(site.id)) || {})));
-      } else if (data && Array.isArray(data.data)) {
-        // handle { data: [...] } wrapper
-        setSites(data.data.map(site => Object.assign({}, site, monitoringById.get(Number(site.id)) || {})));
-      } else {
+      if (monitoringResult.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
+      else setMonitoringSummary(monitoringResult.value?.summary || {});
+      const rows = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
+      if (!rows) {
         setFetchError('站点列表返回格式异常，请稍后重试');
+        return;
       }
+      const merged = mergeMonitoringSites(rows, monitoringResult.status === 'fulfilled' ? monitoringResult.value : null, sitesRef.current);
+      sitesRef.current = merged;
+      setSites(merged);
     } catch (err) {
+      if (fetchRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
       setFetchError(err.message || '网络异常，无法加载站点列表');
     } finally {
-      setLoading(false);
+      if (fetchRequestRef.current.id === requestId) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     fetchSites();
+    return () => {
+      fetchRequestRef.current.id += 1;
+      fetchRequestRef.current.controller?.abort();
+    };
   }, [fetchSites]);
 
   const openSiteCreate = useCallback(async () => {
@@ -231,7 +247,7 @@ export default function SitesPage() {
   // ========================================================================
   // Client-side filtering + sorting (abnormal sites first)
   // ========================================================================
-  const statusPriority = { offline: 0, maintenance: 1, normal: 2, online: 2 };
+  const statusPriority = { attention: 0, data_unavailable: 1, awaiting_first_frame: 2, raw_received_config_pending: 3, waiting_first_valid: 4, interval_unconfigured: 5, normal: 6, not_connected: 7 };
   const filteredSites = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
     const result = sites.filter((site) => {
@@ -247,8 +263,8 @@ export default function SitesPage() {
     });
     // Sort: abnormal (offline/maintenance) first, then by name
     result.sort((a, b) => {
-      const pa = statusPriority[a.status] ?? 2;
-      const pb = statusPriority[b.status] ?? 2;
+      const pa = statusPriority[a.monitoring_status] ?? 99;
+      const pb = statusPriority[b.monitoring_status] ?? 99;
       if (pa !== pb) return pa - pb;
       return (a.name || '').localeCompare(b.name || '', 'zh');
     });
@@ -489,15 +505,6 @@ export default function SitesPage() {
   const columns = useMemo(
     () => [
       {
-        title: '站点编码',
-        dataIndex: 'code',
-        key: 'code',
-        width: 140,
-        ellipsis: true,
-        sorter: (a, b) => (a.code || '').localeCompare(b.code || ''),
-        render: (text) => text || '-',
-      },
-      {
         title: '站点名称',
         dataIndex: 'name',
         key: 'name',
@@ -510,6 +517,15 @@ export default function SitesPage() {
             {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}
           </Space>
         ),
+      },
+      {
+        title: '站点编码',
+        dataIndex: 'code',
+        key: 'code',
+        width: 140,
+        ellipsis: true,
+        sorter: (a, b) => (a.code || '').localeCompare(b.code || ''),
+        render: (text) => text || '-',
       },
       {
         title: '区县/地址',
@@ -542,13 +558,27 @@ export default function SitesPage() {
       },
       {
         title: '监测状态',
-        dataIndex: 'status',
+        dataIndex: 'monitoring_status',
         key: 'status',
-        width: 100,
-        render: (status) => {
-          const cfg = getStatusCfg(status);
-          return <Badge color={cfg.color} text={cfg.text} />;
+        width: 180,
+        render: (_, record) => {
+          const view = monitoringStatusView(record);
+          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
         },
+      },
+      {
+        title: '最后通信',
+        dataIndex: 'last_communication_at',
+        key: 'last_communication_at',
+        width: 170,
+        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
+      },
+      {
+        title: '最后有效观测',
+        dataIndex: 'last_valid_observation_at',
+        key: 'last_valid_observation_at',
+        width: 170,
+        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
       },
       {
         title: '负责人',
@@ -621,7 +651,7 @@ export default function SitesPage() {
       },
       {
         key: 'status',
-        label: '监测状态',
+        label: '站点业务状态',
         children: (() => {
           const cfg = getStatusCfg(status);
           return <Badge color={cfg.color} text={cfg.text} />;
@@ -1125,8 +1155,10 @@ export default function SitesPage() {
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
+      statusItems={monitoringSummaryItems(monitoringSummary)}
       primaryAction={<Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
+        {isAdmin && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
         <Button
           icon={<CloudServerOutlined />}
           onClick={() => { setImportModalOpen(true); setImportResult(null); fetchDataSources(); }}
@@ -1211,6 +1243,16 @@ export default function SitesPage() {
           showIcon
           message="站点列表刷新失败，当前保留上次加载的数据"
           description={fetchError}
+          action={<Button size="small" onClick={fetchSites}>重新加载</Button>}
+          style={{ marginBottom: 12 }}
+        />
+      ) : null}
+      {monitoringError && sites.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="监测状态刷新失败，当前保留上次成功结果"
+          description={monitoringError}
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>}
           style={{ marginBottom: 12 }}
         />

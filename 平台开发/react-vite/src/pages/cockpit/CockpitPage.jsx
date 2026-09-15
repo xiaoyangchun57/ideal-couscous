@@ -38,6 +38,7 @@ import {
   PushpinOutlined,
   PushpinFilled,
   MinusCircleOutlined,
+  EyeOutlined,
 } from '@ant-design/icons';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
@@ -1025,17 +1026,22 @@ function SiteMonitoringView() {
                   })()}
 
                   {/* Footer with Archive Button */}
-                  <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0', borderTop: `1px solid ${isDark ? 'rgba(0,200,180,0.1)' : 'rgba(0,0,0,0.06)'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', gap: 8, padding: '8px 0', borderTop: `1px solid ${isDark ? 'rgba(0,200,180,0.1)' : 'rgba(0,0,0,0.06)'}` }}>
                     <Button
                       type="primary"
+                      size="small"
+                      icon={<EyeOutlined />}
+                      onClick={() => navigate(`/sites/${site.id}`)}
+                    >
+                      查看监测
+                    </Button>
+                    <Button
                       size="small"
                       icon={<FileSearchOutlined />}
                       onClick={() => {
                         navigate(`/sites?archive=${site.id}`);
                       }}
                       style={{
-                        background: tokens.colorPrimary,
-                        border: 'none',
                         borderRadius: 6,
                       }}
                     >

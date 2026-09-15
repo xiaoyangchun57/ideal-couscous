@@ -96,7 +96,7 @@ function AppRoutes() {
           <PageRoute path="/sites"><Deferred><SitesPage /></Deferred></PageRoute>
         )} />
         <Route path="sites/data-access" element={(
-          <PageRoute path="/sites"><Deferred><StationAccessPage /></Deferred></PageRoute>
+          <PageRoute path="/sites/data-access"><Deferred><StationAccessPage /></Deferred></PageRoute>
         )} />
         <Route path="sites/:siteId" element={(
           <PageRoute path="/sites"><Deferred><SiteMonitoringPage /></Deferred></PageRoute>
