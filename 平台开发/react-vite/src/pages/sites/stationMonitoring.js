@@ -22,6 +22,7 @@ const MONITORING_FIELDS = [
   'monitoring_status',
   'monitoring_status_label',
   'monitoring_reason',
+  'monitoring_reason_code',
   'reason_code',
   'last_communication_at',
   'last_valid_observation_at',
@@ -55,6 +56,7 @@ export function mergeMonitoringSite(site, monitoring = {}) {
     if (Object.prototype.hasOwnProperty.call(monitoring, field)) merged[field] = monitoring[field];
   });
   if (!Object.prototype.hasOwnProperty.call(monitoring, 'monitoring_status')) {
+    MONITORING_FIELDS.forEach((field) => { delete merged[field]; });
     merged.monitoring_status = null;
     merged.monitoring_contract_missing = true;
   } else {
@@ -73,7 +75,7 @@ export function mergeMonitoringSites(siteRows, monitoringPayload, previousRows =
     const key = String(site.id);
     const current = byId.get(key);
     if (current) return mergeMonitoringSite(site, current);
-    const previous = previousById.get(key);
+    const previous = monitoringPayload == null ? previousById.get(key) : null;
     return previous ? mergeMonitoringSite(site, previous) : mergeMonitoringSite(site);
   });
 }
@@ -103,7 +105,7 @@ export function axisView(key, axis = {}) {
     key,
     label: AXIS_META[key] || key,
     state,
-    stateLabel: labels[state] || '待确认',
+    stateLabel: labels[state] || MONITORING_STATUS_META[state]?.label || '待确认',
     reason: axis?.reason || '',
     lastReceivedAt: axis?.last_received_at || null,
   };
@@ -117,6 +119,18 @@ export function formatMonitoringTime(value) {
 
 export function capabilityLabel(enabled) {
   return enabled ? '可用' : '暂无服务端事实';
+}
+
+export function monitoringTrendView(capabilities = {}, monitoring = {}) {
+  const items = Array.isArray(monitoring.trend) ? monitoring.trend : [];
+  const available = capabilities.trend === true && items.length > 0;
+  return {
+    available,
+    items: available ? items : [],
+    emptyReason: capabilities.trend === true
+      ? '服务端已声明趋势能力，但当前未返回聚合事实，趋势暂不可用'
+      : '暂无服务端聚合事实，趋势暂不可用',
+  };
 }
 
 export function hasAdminRole(user = {}) {

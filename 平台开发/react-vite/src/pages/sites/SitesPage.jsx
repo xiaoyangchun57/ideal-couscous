@@ -1251,7 +1251,7 @@ export default function SitesPage() {
         <Alert
           type="warning"
           showIcon
-          message="监测状态刷新失败，当前保留上次成功结果"
+          message={sites.some((site) => site.monitoring_status) ? '监测状态刷新失败，当前保留上次成功结果' : '监测状态加载失败，站点台账仍可使用'}
           description={monitoringError}
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>}
           style={{ marginBottom: 12 }}

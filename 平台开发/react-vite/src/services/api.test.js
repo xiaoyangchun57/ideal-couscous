@@ -105,6 +105,18 @@ test('getStrict distinguishes a timeout', async () => {
   });
 });
 
+test('monitoring services propagate scope denial and missing sites without a fallback request', async () => {
+  for (const status of [403, 404]) {
+    const urls = [];
+    globalThis.fetch = async (url) => {
+      urls.push(url);
+      return response({ error: '站点不可访问', code: `MONITORING_${status}` }, { status });
+    };
+    await assert.rejects(api.stationMonitoringOverview(7), (error) => error.status === status);
+    assert.deepEqual(urls, ['/api/station-monitoring/sites/7/overview']);
+  }
+});
+
 test('getStrict distinguishes caller cancellation from timeout', async () => {
   globalThis.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => {

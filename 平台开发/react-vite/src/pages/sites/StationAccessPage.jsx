@@ -68,7 +68,7 @@ export default function StationAccessPage() {
   }
   if (loading && !data) return <div style={{ padding: 40, textAlign: 'center' }}><Spin size="large" /></div>;
   if (error && !data) {
-    return <Alert type="error" showIcon message="接入摘要加载失败" description={error} action={<Button icon={<ReloadOutlined />} onClick={load}>重试</Button>} style={{ margin: 24 }} />;
+    return <Alert type="error" showIcon message="接入摘要加载失败" description={error} action={<Button aria-label="重试" icon={<ReloadOutlined />} onClick={load}>重试</Button>} style={{ margin: 24 }} />;
   }
   if (!data) return <Empty description="暂无接入观察摘要" style={{ margin: 40 }} />;
 
@@ -84,10 +84,11 @@ export default function StationAccessPage() {
       <Space direction="vertical" size={18} style={{ width: '100%' }}>
         <Space align="start" wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/sites')}>返回站点目录</Button>
+          <Button aria-label="刷新" icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
           <div><Title level={3} style={{ margin: 0 }}>监测数据接入观察</Title><Text type="secondary">运行、配置、质量与存储概览</Text></div>
           <Tag color="blue">管理员</Tag>
         </Space>
-        {error && <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error} action={<Button size="small" icon={<ReloadOutlined />} onClick={load}>重新加载</Button>} />}
+        {error && <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error} action={<Button aria-label="重新加载" size="small" loading={loading} icon={<ReloadOutlined />} onClick={load}>重新加载</Button>} />}
 
         <SummarySection
           title="身份与运行"
@@ -103,8 +104,8 @@ export default function StationAccessPage() {
           description="逐站监测配置摘要"
           items={[
             { key: 'profiles', label: '已配置站点', value: profile.configured_profiles ?? profile.configured_sites ?? profile.profiles },
-            { key: 'factors', label: '已批准因子', value: profile.approved_factors ?? profile.factors },
-            { key: 'intervals', label: '已配置周期', value: profile.configured_intervals ?? profile.intervals },
+            { key: 'factors', label: '已批准因子', value: profile.approved_factors },
+            { key: 'intervals', label: '已配置周期', value: profile.configured_intervals },
           ]}
         />
         <SummarySection
@@ -113,7 +114,7 @@ export default function StationAccessPage() {
           items={[
             { key: 'sites', label: '形成观测站点', value: observation.sites_with_values ?? observation.valid_sites ?? observation.sites },
             { key: 'batches', label: '当前观测批次', value: observation.observation_batches },
-            { key: 'values', label: '有效值数量', value: observation.valid_values ?? observation.values },
+            { key: 'values', label: '有效值数量', value: observation.valid_values },
           ]}
         />
         <SummarySection
