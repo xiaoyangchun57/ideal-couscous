@@ -7,6 +7,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import {
   AXIS_META, axisView, capabilityLabel, formatMonitoringTime, monitoringStatusView,
+  monitoringTrendView,
 } from './stationMonitoring';
 
 const { Title, Text } = Typography;
@@ -36,7 +37,7 @@ function LatestValues({ values }) {
       renderItem={(item) => (
         <List.Item>
           <Space direction="vertical" size={0}>
-            <Text strong>{item.business_metric || item.protocol_factor || '未命名因子'}</Text>
+            <Text strong>{item.business_metric || '未命名业务因子'}</Text>
             <Text>{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}</Text>
           </Space>
           <Text type="secondary">{formatMonitoringTime(item.observed_at)}</Text>
@@ -66,6 +67,9 @@ export default function SiteMonitoringPage() {
     try {
       const next = await api.stationMonitoringOverview(siteId, { signal: controller.signal });
       if (requestRef.current.id !== requestId) return;
+      if (!next?.site || String(next.site.id) !== String(siteId)) {
+        throw new Error('服务端返回的站点监测资料与当前站点不匹配，请重试');
+      }
       loadedSiteIdRef.current = siteId;
       setData(next);
     } catch (err) {
@@ -88,7 +92,7 @@ export default function SiteMonitoringPage() {
 
   if (loading && !visibleData) return <div style={{ padding: 40, textAlign: 'center' }}><Spin size="large" /></div>;
   if (error && !visibleData) {
-    return <Alert type="error" showIcon message="站点监测加载失败" description={error} action={<Button icon={<ReloadOutlined />} onClick={load}>重试</Button>} style={{ margin: 24 }} />;
+    return <Alert type="error" showIcon message="站点监测加载失败" description={error} action={<Button aria-label="重试" icon={<ReloadOutlined />} onClick={load}>重试</Button>} style={{ margin: 24 }} />;
   }
   if (!visibleData) return <Empty description="暂无站点监测资料" style={{ margin: 40 }} />;
 
@@ -98,6 +102,7 @@ export default function SiteMonitoringPage() {
   const axesPayload = visibleData.axes || monitoring.axes || {};
   const axes = Object.keys(AXIS_META).map((key) => axisView(key, axesPayload[key] || {}));
   const capabilities = visibleData.capabilities || monitoring.capabilities || {};
+  const trend = monitoringTrendView(capabilities, monitoring);
   const instrumentsPayload = visibleData.instruments || monitoring.instruments;
   const recentItemsPayload = visibleData.recent_items || monitoring.recent_items;
   const instruments = Array.isArray(instrumentsPayload) ? instrumentsPayload : [];
@@ -108,6 +113,7 @@ export default function SiteMonitoringPage() {
       <Space direction="vertical" size={18} style={{ width: '100%' }}>
         <Space align="start" wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/sites')}>返回站点目录</Button>
+          <Button aria-label="刷新" icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
           <div>
             <Space size={8} wrap>
               <Title level={3} style={{ margin: 0 }}>{site.name || '未命名站点'}</Title>
@@ -117,7 +123,7 @@ export default function SiteMonitoringPage() {
           </div>
         </Space>
 
-        {error && <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error} action={<Button size="small" icon={<ReloadOutlined />} onClick={load}>重新加载</Button>} />}
+        {error && <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error} action={<Button aria-label="重新加载" size="small" loading={loading} icon={<ReloadOutlined />} onClick={load}>重新加载</Button>} />}
         {status.contractMissing && <Alert type="warning" showIcon message="监测状态暂不可确认" description="服务端尚未返回 monitoring_status 契约字段，页面不会用旧站点状态推断监测结果。" />}
 
         <Card title="可信状态">
@@ -139,12 +145,10 @@ export default function SiteMonitoringPage() {
             <Card title="最新有效值" extra={<Tag>{capabilityLabel(capabilities.latest)}</Tag>}><LatestValues values={monitoring.latest_values} /></Card>
           </Col>
           <Col xs={24} xl={12}>
-            <Card title="趋势" extra={<Tag color={capabilities.trend ? 'green' : 'default'}>{capabilityLabel(capabilities.trend)}</Tag>}>
-              {capabilities.trend ? (
-                Array.isArray(monitoring.trend) && monitoring.trend.length > 0
-                  ? <List size="small" dataSource={monitoring.trend} renderItem={(item) => <List.Item>{item.label || item.business_metric || '趋势指标'}<Text type="secondary">{item.summary || item.value || '已提供聚合事实'}</Text></List.Item>} />
-                  : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端已声明趋势可用，但当前未返回趋势数据" />
-              ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无服务端聚合事实，趋势暂不可用" />}
+            <Card title="趋势" extra={<Tag color={trend.available ? 'green' : 'default'}>{capabilityLabel(trend.available)}</Tag>}>
+              {trend.available
+                ? <List size="small" dataSource={trend.items} renderItem={(item) => <List.Item>{item.label || item.business_metric || '趋势指标'}<Text type="secondary">{item.summary ?? item.value ?? '已提供聚合事实'}</Text></List.Item>} />
+                : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={trend.emptyReason} />}
             </Card>
           </Col>
         </Row>
@@ -157,7 +161,7 @@ export default function SiteMonitoringPage() {
           {instruments.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已批准的仪器或因子配置" /> : (
             <List size="small" dataSource={instruments} renderItem={(item) => (
               <List.Item>
-                <Space direction="vertical" size={0}><Text strong>{item.instrument_asset_code || '未提供仪器资产编码'}</Text><Text type="secondary">{item.business_metric || item.protocol_code || '未命名因子'}</Text></Space>
+                <Space direction="vertical" size={0}><Text strong>{item.instrument_asset_code || '未提供仪器资产编码'}</Text><Text type="secondary">{item.business_metric || '未命名业务因子'}</Text></Space>
                 <Tag color={item.status === 'has_valid_observation' ? 'green' : 'default'}>{item.status === 'has_valid_observation' ? '已有有效观测' : '健康状态未知'}</Tag>
               </List.Item>
             )} />
@@ -165,7 +169,7 @@ export default function SiteMonitoringPage() {
         </Card>
 
         <Card title="近期告警、工单与巡检">
-          {recentItems.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无服务端返回的近期事项" /> : <List size="small" dataSource={recentItems} renderItem={(item) => <List.Item><Text>{item.title || item.type || '近期事项'}</Text><Text type="secondary">{formatMonitoringTime(item.occurred_at || item.created_at)}</Text></List.Item>} />}
+          {recentItems.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无服务端返回的近期事项" /> : <List size="small" dataSource={recentItems} renderItem={(item) => <List.Item><Text>{item.title || item.type || '近期事项'}</Text><Text type="secondary">{formatMonitoringTime(item.occurred_at)}</Text></List.Item>} />}
         </Card>
       </Space>
     </div>
