@@ -8,9 +8,10 @@
       <text class="tag">编码 {{site.code}}</text>
     </view>
   </view>
+  <view wx:if="{{monitoringError}}" class="sync-bar"><text>{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
   <view wx:if="{{readOnlySource}}" class="card info-card">
-    <view class="info-row"><text class="info-k">监测状态</text><text class="info-v">{{site.status_label || '状态未知'}}</text></view>
-    <view class="info-row"><text class="info-k">状态说明</text><text class="info-v">{{site.reason || '—'}}</text></view>
+    <view class="info-row"><text class="info-k">监测状态</text><text class="info-v">{{site.monitoring_status_label || '状态未知'}}</text></view>
+    <view class="info-row"><text class="info-k">状态说明</text><text class="info-v">{{site.monitoring_reason || '—'}}</text></view>
     <view class="info-row"><text class="info-k">最后有效观测</text><text class="info-v">{{site.last_valid_observation_at || '—'}}</text></view>
     <view wx:if="{{site.monitoring.latest_values.length}}" class="info-row"><text class="info-k">最新值</text><text class="info-v">{{site.monitoring.latest_values[0].standard_value}} {{site.monitoring.latest_values[0].standard_unit}}</text></view>
   </view>
@@ -135,5 +136,5 @@
     </view>
   </view>
 </view>
-<view class="empty" wx:elif="{{monitoringError}}"><text class="empty-tx">{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
-<view class="empty" wx:else>站点信息加载中…</view>
+<view class="empty" wx:if="{{!site && monitoringError}}"><text class="empty-tx">{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
+<view class="empty" wx:if="{{!site && !monitoringError}}">站点信息加载中…</view>

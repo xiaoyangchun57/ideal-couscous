@@ -34,6 +34,12 @@ function createPage() {
     assert.match(wxml, /wx:if="\{\{!readOnlySource && site\.can_calibrate\}\}"/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
+    assert.match(wxml, /!site && monitoringError/);
+    assert.match(wxml, /monitoringError.*bindtap="onRetryMonitoring"/s);
+    const responsibleWxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
+    assert.match(responsibleWxml, /!sites\.length && error/);
+    assert.match(responsibleWxml, /sites\.length && error/);
+    assert.match(responsibleWxml, /bindtap="onRetry"/);
 
     let siteTaskCalls = 0;
     let monitoringCalls = 0;
@@ -56,6 +62,13 @@ function createPage() {
     assert.equal(siteTaskCalls, 0);
     assert.equal(monitoringCalls, 1);
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
+
+    api.stationMonitoringOverview = () => Promise.reject(new Error('network'));
+    readonlyPage.loadSite(20);
+    await flush();
+    assert.equal(readonlyPage.data.site.id, 20, 'refresh failure keeps the last successful detail');
+    assert.match(readonlyPage.data.monitoringError, /重试/);
+    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入' }, monitoring: { latest_values: [] } }); };
 
     const standardPage = createPage();
     standardPage.onLoad({ site_id: '20' });

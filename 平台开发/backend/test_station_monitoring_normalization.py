@@ -512,6 +512,75 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(water['last_valid']['instrument_asset_code'], 'INST-A')
         self.assertNotIn('RETIRED-INST', {item['instrument_asset_code'] for item in items})
 
+    def test_station_monitoring_overview_uses_independent_monitoring_fields(self):
+        response = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=self._headers('monitor-admin'))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertIn('axes', body)
+        self.assertIn('capabilities', body)
+        self.assertIn('monitoring_status', body['site'])
+        self.assertNotIn('status', body['site'])
+        self.assertNotIn('status_label', body['site'])
+        self.assertNotIn('reason', body['site'])
+
+    def test_station_monitoring_overview_permissions_and_missing_site(self):
+        client = web_app.app.test_client()
+        self.assertEqual(client.get(f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=self._headers('monitor-operator')).status_code, 403)
+        self.assertEqual(client.get('/api/station-monitoring/sites/99999/overview', headers=self._headers('monitor-admin')).status_code, 404)
+
+    def test_access_summary_counts_independent_identity_axes(self):
+        client = web_app.app.test_client()
+        admin = self._headers('monitor-admin')
+        response = client.get('/api/station-monitoring/access-summary', headers=admin)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body['runtime']['enabled_endpoints'], 1)
+        self.assertEqual(body['identity']['bound_sites'], 1)
+        self.assertEqual(body['identity']['received_raw_sites'], 0)
+        self.assertEqual(client.get('/api/station-monitoring/access-summary', headers=self._headers('monitor-operator')).status_code, 403)
+
+    def test_bound_identity_without_profile_is_not_reported_as_not_connected(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('UPDATE monitoring_endpoint_profiles SET enabled=0 WHERE endpoint_id=?', (self.endpoint_id,))
+            connection.commit()
+        response = web_app.app.test_client().get('/api/station-monitoring/sites', headers=self._headers('monitor-admin'))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        item = next(item for item in response.get_json()['items'] if item['site_id'] == self.site_id)
+        self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
+
+    def test_list_and_detail_share_bound_identity_and_exclude_expired_profile(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE monitoring_endpoint_profiles SET effective_to='2020-01-01T00:00:00+00:00'")
+            connection.commit()
+        headers = self._headers('monitor-admin')
+        listed = web_app.app.test_client().get('/api/station-monitoring/sites', headers=headers)
+        detail = web_app.app.test_client().get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+        self.assertEqual(listed.status_code, 200, listed.get_json())
+        self.assertEqual(detail.status_code, 200, detail.get_json())
+        item = next(item for item in listed.get_json()['items'] if item['site_id'] == self.site_id)
+        self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
+        self.assertEqual(detail.get_json()['site']['monitoring_status'], item['monitoring_status'])
+
+    def test_rebound_endpoint_does_not_leak_identity_or_configuration_to_old_site(self):
+        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=61)
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        before = web_app.app.test_client().get('/api/station-monitoring/access-summary', headers=self._headers('monitor-admin')).get_json()
+        self.assertEqual(before['observation']['valid_sites'], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('UPDATE trusted_endpoints SET business_site_id=? WHERE id=?', (self.other_site_id, self.endpoint_id))
+            connection.commit()
+        headers = self._headers('monitor-admin')
+        listed = web_app.app.test_client().get('/api/station-monitoring/sites', headers=headers).get_json()
+        item = next(item for item in listed['items'] if item['site_id'] == self.site_id)
+        detail = web_app.app.test_client().get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers).get_json()
+        self.assertEqual(item['monitoring_status'], 'not_connected')
+        self.assertEqual(detail['site']['monitoring_status'], 'not_connected')
+        self.assertEqual(item['published_factor_count'], 0)
+        summary = web_app.app.test_client().get('/api/station-monitoring/access-summary', headers=headers).get_json()
+        self.assertEqual(summary['configuration']['configured_sites'], 0)
+        self.assertEqual(summary['observation']['valid_sites'], 0)
+
     def test_retry_exhaustion_is_bounded_and_stable(self):
         raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=51)
         for _ in range(3):
