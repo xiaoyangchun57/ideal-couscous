@@ -9,6 +9,7 @@ import {
   AXIS_META, axisView, capabilityLabel, formatMonitoringTime, monitoringStatusView,
   monitoringFactorName, monitoringTrendView,
 } from './stationMonitoring';
+import './SiteMonitoringPage.css';
 
 const { Title, Text } = Typography;
 
@@ -109,7 +110,8 @@ export default function SiteMonitoringPage() {
   const recentItems = Array.isArray(recentItemsPayload) ? recentItemsPayload : [];
 
   return (
-    <div className="workspace-page" style={{ padding: 24 }}>
+    <div className="workspace-page site-monitoring-page" style={{ padding: 24 }}>
+      <div className="site-monitoring-page__scroll" role="region" aria-label="站点监测正文" tabIndex={0}>
       <Space direction="vertical" size={18} style={{ width: '100%' }}>
         <Space align="start" wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/sites')}>返回站点目录</Button>
@@ -172,6 +174,7 @@ export default function SiteMonitoringPage() {
           {recentItems.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无服务端返回的近期事项" /> : <List size="small" dataSource={recentItems} renderItem={(item) => <List.Item><Text>{item.title || item.type || '近期事项'}</Text><Text type="secondary">{formatMonitoringTime(item.occurred_at)}</Text></List.Item>} />}
         </Card>
       </Space>
+      </div>
     </div>
   );
 }

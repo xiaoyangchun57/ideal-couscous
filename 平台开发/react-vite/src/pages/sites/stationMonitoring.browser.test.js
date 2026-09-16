@@ -434,10 +434,71 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.goto(`${baseURL}/sites/data-access`);
       await visible(page.locator('.page-location').getByText('接入观察', { exact: true }));
       await visible(page.locator('.app-sidebar .ant-menu-item-selected').getByText('站点全景', { exact: true }));
+      await visible(page.getByText('2026/9/15 08:00:00', { exact: true }));
+      assert.equal(await page.getByText(summary.updated_at, { exact: true }).count(), 0);
       await page.goto(`${baseURL}/sites/7`);
       await visible(page.locator('.page-location').getByText('站点全景', { exact: true }));
       await page.goto(`${baseURL}/unknown`);
       await visible(page.locator('.page-location').getByText('页面不存在', { exact: true }));
+    } finally { await close(); }
+  });
+
+  await t.test('desktop site table keeps core columns and actions reachable without toolbar growth', async () => {
+    const rows = Array.from({ length: 37 }, (_, index) => ({
+      ...row,
+      id: index + 1,
+      name: `隔离测试站${String(index + 1).padStart(2, '0')}`,
+      code: `WEB-${String(index + 1).padStart(3, '0')}`,
+      address: `测试地址${index + 1}号`,
+    }));
+    const monitoringItems = rows.map((item) => ({ ...overview(indexToStatus(item.id), item.id).site, ...item }));
+    function indexToStatus(id) { return id % 2 ? 'normal' : 'attention'; }
+    const { page, close } = await session(['admin'], { width: 1280, height: 720 }, async (route, url) => {
+      if (url.pathname === '/api/sites') { await route.fulfill({ json: rows }); return true; }
+      if (url.pathname === '/api/station-monitoring/sites') {
+        await route.fulfill({ json: { scope: 'all', available_scopes: ['all', 'mine'], items: monitoringItems, summary: { normal: 19, attention: 18 } } });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      await visible(page.getByRole('columnheader', { name: '站点身份', exact: true }));
+      for (const heading of ['监测状态', '关键时间', '负责人', '操作']) {
+        await visible(page.getByRole('columnheader', { name: heading, exact: true }));
+      }
+      const action = page.getByRole('button', { name: /查看 隔离测试站01 的站点档案/ });
+      const actionBox = await action.boundingBox();
+      assert.ok(actionBox && actionBox.x + actionBox.width <= 1280, 'fixed action stays in the viewport');
+      const tableBody = page.locator('.workspace-table .ant-table-body');
+      const tableSizes = await tableBody.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+      assert.ok(tableSizes.scrollHeight > tableSizes.clientHeight, JSON.stringify(tableSizes));
+      const toolbar = page.locator('.workspace-toolbar');
+      const before = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+      await page.getByRole('textbox', { name: '站点搜索' }).fill('WEB-030');
+      await visible(page.getByText('已筛选 1 条', { exact: true }));
+      assert.equal(await page.getByText('当前结果', { exact: true }).count(), 0);
+      const after = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+      assert.ok(after <= before + 1, `toolbar height changed from ${before} to ${after}`);
+      await snapshot(page, 'sites-desktop-table-filter');
+    } finally { await close(); }
+  });
+
+  await t.test('short desktop monitoring body scroll reaches the final section', async () => {
+    const { page, close } = await session(['admin'], { width: 1280, height: 600 });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      const region = page.getByRole('region', { name: '站点监测正文' });
+      await visible(region);
+      const sizes = await region.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+      assert.ok(sizes.scrollHeight > sizes.clientHeight, JSON.stringify(sizes));
+      await region.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      const finalHeading = page.getByText('近期告警、工单与巡检', { exact: true });
+      await visible(finalHeading);
+      const finalBox = await finalHeading.boundingBox();
+      const regionBox = await region.boundingBox();
+      assert.ok(finalBox && regionBox && finalBox.y >= regionBox.y && finalBox.y + finalBox.height <= regionBox.y + regionBox.height + 1);
+      await snapshot(page, 'monitoring-short-desktop-bottom');
     } finally { await close(); }
   });
 

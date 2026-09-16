@@ -10,6 +10,7 @@ import {
   monitoringSummaryItems,
   monitoringTrendView,
   monitoringFactorName,
+  formatMonitoringTime,
 } from './stationMonitoring.js';
 
 test('monitoring status metadata covers the eight product states', () => {
@@ -126,4 +127,11 @@ test('Chinese factor names precede business display names and internal metric id
   assert.equal(monitoringFactorName({ business_name: '业务名称', label: '业务标签', business_metric: 'ph_internal' }), '业务名称');
   assert.equal(monitoringFactorName({ label: '业务标签', business_metric: 'ph_internal' }), '业务标签');
   assert.equal(monitoringFactorName({ business_metric: 'ph_internal' }), 'ph_internal');
+});
+
+test('monitoring timestamps render as local user-facing time instead of ISO source text', () => {
+  const source = '2026-09-16T06:51:11+00:00';
+  const formatted = formatMonitoringTime(source);
+  assert.doesNotMatch(formatted, /T|\+00:00|Z$/);
+  assert.match(formatted, /2026/);
 });

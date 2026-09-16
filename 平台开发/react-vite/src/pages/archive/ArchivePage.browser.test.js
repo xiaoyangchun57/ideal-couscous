@@ -168,6 +168,35 @@ test('image archive grid and table behavior with isolated server pagination', {
     } finally { await close(); }
   });
 
+  await t.test('internal source values render as Chinese business labels in table and detail', async () => {
+    const { page, close } = await session(undefined, async (route, url) => {
+      const item = payload(url, 1).items[0];
+      await route.fulfill({ json: { total: 1, items: [{ ...item, source_type: 'manual_report', capture_source: 'unknown' }] } });
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/archive?scope=history`);
+      await visible(page.getByRole('row').filter({ hasText: '人工上报' }));
+      assert.equal(await page.getByText('manual_report', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('unknown', { exact: true }).count(), 0);
+      await page.getByRole('button', { name: '详情', exact: true }).click();
+      await visible(page.getByText('待确认', { exact: true }));
+      await visible(page.getByText('人工上报', { exact: true }));
+    } finally { await close(); }
+  });
+
+  await t.test('filtered empty result explains the filter and keeps a reset action', async () => {
+    const { page, close } = await session(undefined, async (route) => {
+      await route.fulfill({ json: { total: 0, items: [] } });
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/archive?scope=history&keyword=不存在`);
+      await visible(page.getByText('没有符合当前筛选条件的记录', { exact: true }));
+      await visible(page.getByText('重置筛选', { exact: true }));
+    } finally { await close(); }
+  });
+
   await t.test('switching history/current scope cancels pending pagination and ignores stale records', async () => {
     let release;
     let started;

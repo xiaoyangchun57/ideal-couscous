@@ -57,6 +57,7 @@ import { statusColors } from '../../theme/tokens';
 import { relativeTimeStr, truncate } from '../../utils/helpers';
 import OperationsTodayView from './OperationsTodayView';
 import { buildMonitoringDeviceIndex, devicesForSite } from './cockpitDevices';
+import { completenessPresentation, qualityRate } from './dataQualityPresentation';
 import './CockpitPage.css';
 
 const { Text, Title } = Typography;
@@ -1312,9 +1313,9 @@ function SiteMonitoringView() {
                     }}>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                         {[
-                          ['完整性', dataHealth.total.completeness_rate],
-                          ['有效性', dataHealth.total.validity_rate],
-                          ['及时性', dataHealth.total.timeliness_rate],
+                          ['完整性', qualityRate(dataHealth.total, 'completeness_rate')],
+                          ['有效性', qualityRate(dataHealth.total, 'validity_rate')],
+                          ['及时性', qualityRate(dataHealth.total, 'timeliness_rate')],
                         ].map(([label, value]) => (
                           <div key={label}>
                             <div style={{
@@ -1334,8 +1335,8 @@ function SiteMonitoringView() {
                         缺报 {dataHealth.total.missing?.toLocaleString?.() || dataHealth.total.missing} · 超限 {dataHealth.total.over_limit?.toLocaleString?.() || dataHealth.total.over_limit}（考核周期：{dataHealth.period_label}）
                       </div>
                       {Number(dataHealth.total.actual || 0) === 0 && (
-                        <div style={{ fontSize: 10, color: tokens.colorWarning, marginTop: 6, lineHeight: 1.45 }}>
-                          本考核周期尚无采集数据接入，因此完整性和及时性为 0%。请先核对设备接入与数据采集状态。
+                        <div style={{ fontSize: 10, color: tokens.colorTextTertiary, marginTop: 6, lineHeight: 1.45 }}>
+                          本考核周期尚无采集样本，暂不评价数据质量。请先核对设备接入与数据采集状态。
                         </div>
                       )}
                     </div>
@@ -1347,8 +1348,9 @@ function SiteMonitoringView() {
                       <div style={{ fontSize: 11, color: tokens.colorTextTertiary, marginBottom: 6 }}>按负责人定位（排障参考）</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         {healthByManager.map((m) => {
-                          const rate = m.completeness_rate;
-                          const barColor = rate >= 95 ? tokens.colorSuccess
+                          const presentation = completenessPresentation(m);
+                          const { rate } = presentation;
+                          const barColor = rate == null ? tokens.colorTextTertiary : rate >= 95 ? tokens.colorSuccess
                             : rate >= 80 ? tokens.colorWarning : tokens.colorError;
                           return (
                             <div key={m.manager}>
@@ -1356,14 +1358,14 @@ function SiteMonitoringView() {
                                 <Text style={{ fontSize: 11, color: tokens.colorTextSecondary }}>
                                   {m.manager}
                                   <span style={{ color: tokens.colorTextQuaternary, marginLeft: 4 }}>
-                                    {m.site_count} 站 · 有效 {m.validity_rate == null ? '无样本' : `${m.validity_rate}%`} · 及时 {m.timeliness_rate == null ? '无样本' : `${m.timeliness_rate}%`}
+                                    {m.site_count} 站 · 有效 {qualityRate(m, 'validity_rate') == null ? '无样本' : `${qualityRate(m, 'validity_rate')}%`} · 及时 {qualityRate(m, 'timeliness_rate') == null ? '无样本' : `${qualityRate(m, 'timeliness_rate')}%`}
                                   </span>
                                 </Text>
                                 <Space size={4}>
-                                  {rate >= 95 && <CheckCircleOutlined style={{ color: tokens.colorSuccess, fontSize: 11 }} />}
-                                  {rate < 95 && <CloseCircleOutlined style={{ color: tokens.colorError, fontSize: 11 }} />}
+                                  {rate != null && rate >= 95 && <CheckCircleOutlined style={{ color: tokens.colorSuccess, fontSize: 11 }} />}
+                                  {rate != null && rate < 95 && <CloseCircleOutlined style={{ color: tokens.colorError, fontSize: 11 }} />}
                                   <Text style={{ fontSize: 11, fontWeight: 600, color: barColor, fontFamily: 'monospace' }}>
-                                    {rate}%
+                                    {presentation.label}
                                   </Text>
                                 </Space>
                               </div>
@@ -1372,11 +1374,11 @@ function SiteMonitoringView() {
                                 background: isDark ? 'rgba(0,200,180,0.08)' : 'rgba(0,0,0,0.06)',
                                 overflow: 'hidden',
                               }}>
-                                <div style={{
+                                {presentation.hasSample && <div style={{
                                   width: `${rate}%`, height: '100%',
                                   background: barColor, borderRadius: 3,
-                                  transition: 'width 0.6s ease', minWidth: 4,
-                                }} />
+                                  transition: 'width 0.6s ease',
+                                }} />}
                               </div>
                             </div>
                           );
@@ -1394,8 +1396,9 @@ function SiteMonitoringView() {
                           .slice()
                           .sort((a, b) => a.rate - b.rate)
                           .map((s) => {
-                            const rate = s.rate;
-                            const c = rate >= 95 ? tokens.colorSuccess
+                            const presentation = completenessPresentation({ ...s, completeness_rate: s.completeness_rate ?? s.rate });
+                            const { rate } = presentation;
+                            const c = rate == null ? tokens.colorTextTertiary : rate >= 95 ? tokens.colorSuccess
                               : rate >= 80 ? tokens.colorWarning : tokens.colorError;
                             return (
                               <div key={s.site_id} className="health-site-row" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, alignItems: 'center' }}>
@@ -1404,7 +1407,7 @@ function SiteMonitoringView() {
                                   <span style={{ color: tokens.colorTextQuaternary, marginLeft: 3 }}>{s.manager}</span>
                                 </span>
                                 <span style={{ color: c, fontFamily: 'monospace', flexShrink: 0, marginLeft: 6 }}>
-                                  {rate}%{s.missing > 0 || s.over_limit > 0 ? ` ·缺${s.missing}/超${s.over_limit}` : ''}
+                                  {presentation.label}{presentation.hasSample && (s.missing > 0 || s.over_limit > 0) ? ` ·缺${s.missing}/超${s.over_limit}` : ''}
                                 </span>
                               </div>
                             );

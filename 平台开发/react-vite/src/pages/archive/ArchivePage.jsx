@@ -18,6 +18,7 @@ import {
   archiveHistoryStatus, rejectedPurgeEligibility,
 } from './attachmentDeletion';
 import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
+import { archiveCaptureLabel, archiveSourceLabel, hasArchiveFilters } from './archivePresentation';
 import './ArchivePage.css';
 
 const { Text } = Typography;
@@ -33,15 +34,6 @@ const BUSINESS_OPTIONS = [
   { value: 'test', label: '试验资料' },
   { value: 'other', label: '其他资料' },
 ];
-
-const SOURCE_LABELS = {
-  inspection: '巡检', workorder: '工单', site_photo: '现场影像', calibration: '校准',
-  reagent: '试剂作业', vehicle: '车辆记录', maintenance: '设备养护', test: '试验资料',
-};
-
-const CAPTURE_LABELS = {
-  camera: '小程序现场拍摄', watermark_album: '水印相册', web_upload: '网页补充',
-};
 
 const HISTORY_STATUS = {
   pending: { label: '待所属业务审核', color: 'processing' },
@@ -64,7 +56,7 @@ function filtersFromParams(params) {
 }
 
 function sourceLabel(item) {
-  return SOURCE_LABELS[item.source_type] || item.source_type || '未记录';
+  return archiveSourceLabel(item.source_type);
 }
 
 function itemLabel(item) {
@@ -93,6 +85,7 @@ export default function ArchivePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { page, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
   const applied = useMemo(() => filtersFromParams(new URLSearchParams(filterQuery)), [filterQuery]);
+  const hasAppliedFilters = useMemo(() => hasArchiveFilters(applied), [applied]);
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
   const [sites, setSites] = useState([]);
   const [items, setItems] = useState([]);
@@ -261,7 +254,7 @@ export default function ArchivePage() {
     },
     {
       title: '来源', width: 150,
-      render: (_, item) => CAPTURE_LABELS[item.capture_source] || item.capture_source || '未记录',
+      render: (_, item) => archiveCaptureLabel(item.capture_source),
     },
     ...(archiveMode === 'history' ? [{
       title: '记录状态', width: 130,
@@ -275,6 +268,7 @@ export default function ArchivePage() {
   ], [archiveMode]);
 
   const emptyActions = <Space wrap>
+    {hasAppliedFilters && <Button type="primary" icon={<ReloadOutlined />} onClick={resetFilters}>重置筛选</Button>}
     <Button onClick={() => navigate('/audit?tab=inspection')}>前往巡检质控</Button>
     <Button onClick={() => navigate('/audit?tab=workorder')}>前往工单审核</Button>
   </Space>;
@@ -309,12 +303,12 @@ export default function ArchivePage() {
       {error && <WorkspaceEmpty type="error" description={error} onRefresh={load} />}
       {!error && <div className="archive-results"><Spin spinning={loading}>
         {!loading && items.length === 0 ? <WorkspaceEmpty
-          type={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
-          description={archiveMode === 'current'
+          type={hasAppliedFilters ? 'filtered' : 'empty'}
+          description={hasAppliedFilters ? '没有符合当前筛选条件的记录' : archiveMode === 'current'
             ? '当前没有已完成业务审核且仍有效的影像；巡检照片在巡检质控审核，工单照片随工单审核。'
             : '当前没有驳回、作废、替换、待审或补充材料记录。'}
           onRefresh={load}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
-          loading={loading} fillHeight emptyType={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
+          loading={loading} fillHeight emptyType={hasAppliedFilters ? 'filtered' : 'empty'}
           onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
           pagination={total > ARCHIVE_PAGE_SIZE ? { current: page, pageSize: ARCHIVE_PAGE_SIZE, total, showSizeChanger: false, disabled: loading,
             showTotal: value => `共 ${value} 条`, onChange: (next) => writeUrl(applied, view, archiveMode, next) } : false} /> :
@@ -357,7 +351,7 @@ export default function ArchivePage() {
           <Descriptions bordered size="small" column={2}>
             <Descriptions.Item label="拍摄时间">{detail.taken_at || '-'}</Descriptions.Item>
             <Descriptions.Item label="上传时间">{detail.created_at || '-'}</Descriptions.Item>
-            <Descriptions.Item label="采集来源">{CAPTURE_LABELS[detail.capture_source] || detail.capture_source || '未记录'}</Descriptions.Item>
+            <Descriptions.Item label="采集来源">{archiveCaptureLabel(detail.capture_source)}</Descriptions.Item>
             <Descriptions.Item label="站点">{detail.site_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="业务来源">{sourceLabel(detail)}</Descriptions.Item>
             <Descriptions.Item label="检查项">{itemLabel(detail)}</Descriptions.Item>

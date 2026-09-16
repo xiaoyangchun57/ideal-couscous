@@ -17,7 +17,7 @@ import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, { FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
@@ -519,32 +519,26 @@ export default function SitesPage() {
   const columns = useMemo(
     () => [
       {
-        title: '站点名称',
-        dataIndex: 'name',
-        key: 'name',
-        width: 180,
+        title: '站点身份',
+        key: 'identity',
+        width: 230,
         ellipsis: true,
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
-        render: (text, record) => (
-          <Space size={6}>
-            <Text strong>{text}</Text>
-            {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}
-          </Space>
+        render: (_, record) => (
+          <div>
+            <Space size={6}><Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
+              {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}</Space>
+            <Space size={6} style={{ display: 'flex', marginTop: 2 }}>
+              <Text type="secondary" copyable={{ text: record.code || '' }}>{record.code || '未提供编码'}</Text>
+              <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
+            </Space>
+          </div>
         ),
-      },
-      {
-        title: '站点编码',
-        dataIndex: 'code',
-        key: 'code',
-        width: 140,
-        ellipsis: true,
-        sorter: (a, b) => (a.code || '').localeCompare(b.code || ''),
-        render: (text) => text || '-',
       },
       {
         title: '区县/地址',
         key: 'location',
-        width: 240,
+        width: 180,
         ellipsis: true,
         render: (_, record) => {
           if (!record.district && !record.address) {
@@ -560,51 +554,37 @@ export default function SitesPage() {
         },
       },
       {
-        title: '站点类型',
-        dataIndex: 'type',
-        key: 'type',
-        width: 120,
-        render: (type) => {
-          const label = stationTypeMap[type] || type;
-          const color = typeColorMap[type] || 'default';
-          return <Tag color={color} style={tagStyle}>{label}</Tag>;
-        },
-      },
-      {
         title: '监测状态',
         dataIndex: 'monitoring_status',
         key: 'status',
-        width: 180,
+        width: 170,
         render: (_, record) => {
           const view = monitoringStatusView(record);
           return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
         },
       },
       {
-        title: '最后通信',
-        dataIndex: 'last_communication_at',
-        key: 'last_communication_at',
-        width: 170,
-        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
-      },
-      {
-        title: '最后有效观测',
-        dataIndex: 'last_valid_observation_at',
-        key: 'last_valid_observation_at',
-        width: 170,
-        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
+        title: '关键时间',
+        key: 'monitoring_times',
+        width: 235,
+        render: (_, record) => (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>通信：{record.last_communication_at ? dayjs(record.last_communication_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>观测：{record.last_valid_observation_at ? dayjs(record.last_valid_observation_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
+          </Space>
+        ),
       },
       {
         title: '负责人',
         dataIndex: 'manager',
         key: 'manager',
-        width: 110,
+        width: 100,
         ellipsis: true,
       },
       {
         title: '操作',
         key: 'actions',
-        width: 100,
+        width: 110,
         fixed: 'right',
         render: (_, record) => (
           <Space size={0}><Button type="link" size="small" onClick={() => navigate(`/sites/${record.id}`)}>监测</Button><Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
@@ -1248,7 +1228,11 @@ export default function SitesPage() {
           options={managerOptions}
           style={{ width: filterSelectWidth }}
         /></FilterField>
-        {(searchText || typeFilter || districtFilter || managerFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredSites.length} 条</ToolbarMeta>}
+        {(searchText || typeFilter || districtFilter || managerFilter) && (
+          <Text type="secondary" className="sites-filter-summary" style={{ minHeight: 32, display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}>
+            已筛选 {filteredSites.length} 条
+          </Text>
+        )}
       </WorkspaceToolbar>
 
       {fetchError && sites.length > 0 ? (
@@ -1283,7 +1267,8 @@ export default function SitesPage() {
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
-          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight />
+          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
+          scroll={{ x: 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
       )}
 
       <Modal

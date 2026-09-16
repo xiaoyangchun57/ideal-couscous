@@ -1202,9 +1202,9 @@ export default function PlanSchedulesPage() {
         {detailLoading && <div style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!detailLoading && detail && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {!hasScheduledSites ? (
+            {showPreExecutionRisks && !hasScheduledSites ? (
               <Alert type="warning" showIcon message="该排程尚未安排站点，无法生成现场执行任务。请补充站点后重新提交。" />
-            ) : shouldWarnMissingExecution && generatedPlanCount === 0 ? (
+            ) : showPreExecutionRisks && shouldWarnMissingExecution && generatedPlanCount === 0 ? (
               <Alert type="error" showIcon message={`该排程已安排 ${detail.site_count} 个站点，但尚未生成现场执行任务。请联系管理员核对审批流转。`} />
             ) : null}
             {/* 基本信息 */}
