@@ -7,17 +7,17 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import {
   AXIS_META, axisView, capabilityLabel, formatMonitoringTime, monitoringStatusView,
-  monitoringTrendView,
+  monitoringFactorName, monitoringTrendView,
 } from './stationMonitoring';
 
 const { Title, Text } = Typography;
 
 function AxisCard({ axis }) {
   return (
-    <div style={{ border: '1px solid rgba(127, 127, 127, 0.24)', borderRadius: 6, padding: 12, minHeight: 112 }}>
+    <div role="group" aria-label={axis.label} style={{ border: '1px solid rgba(127, 127, 127, 0.24)', borderRadius: 6, padding: 12, minHeight: 112 }}>
       <Space direction="vertical" size={4}>
         <Text strong>{axis.label}</Text>
-        <Badge status={axis.state === 'attention' ? 'warning' : axis.state === 'normal' ? 'success' : 'default'} text={axis.stateLabel} />
+        <Badge status={axis.badgeStatus} text={axis.stateLabel} />
         {axis.lastReceivedAt && <Text type="secondary">最近记录：{formatMonitoringTime(axis.lastReceivedAt)}</Text>}
         {axis.reason && <Text type="secondary">{axis.reason}</Text>}
         {!axis.state && <Text type="secondary">服务端未提供该分轴事实</Text>}
@@ -37,7 +37,7 @@ function LatestValues({ values }) {
       renderItem={(item) => (
         <List.Item>
           <Space direction="vertical" size={0}>
-            <Text strong>{item.business_metric || '未命名业务因子'}</Text>
+            <Text strong>{monitoringFactorName(item)}</Text>
             <Text>{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}</Text>
           </Space>
           <Text type="secondary">{formatMonitoringTime(item.observed_at)}</Text>
@@ -147,7 +147,7 @@ export default function SiteMonitoringPage() {
           <Col xs={24} xl={12}>
             <Card title="趋势" extra={<Tag color={trend.available ? 'green' : 'default'}>{capabilityLabel(trend.available)}</Tag>}>
               {trend.available
-                ? <List size="small" dataSource={trend.items} renderItem={(item) => <List.Item>{item.label || item.business_metric || '趋势指标'}<Text type="secondary">{item.summary ?? item.value ?? '已提供聚合事实'}</Text></List.Item>} />
+                ? <List size="small" dataSource={trend.items} renderItem={(item) => <List.Item>{monitoringFactorName(item)}<Text type="secondary">{item.summary ?? item.value ?? '已提供聚合事实'}</Text></List.Item>} />
                 : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={trend.emptyReason} />}
             </Card>
           </Col>
@@ -161,7 +161,7 @@ export default function SiteMonitoringPage() {
           {instruments.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已批准的仪器或因子配置" /> : (
             <List size="small" dataSource={instruments} renderItem={(item) => (
               <List.Item>
-                <Space direction="vertical" size={0}><Text strong>{item.instrument_asset_code || '未提供仪器资产编码'}</Text><Text type="secondary">{item.business_metric || '未命名业务因子'}</Text></Space>
+                <Space direction="vertical" size={0}><Text strong>{item.instrument_asset_code || '未提供仪器资产编码'}</Text><Text type="secondary">{monitoringFactorName(item)}</Text></Space>
                 <Tag color={item.status === 'has_valid_observation' ? 'green' : 'default'}>{item.status === 'has_valid_observation' ? '已有有效观测' : '健康状态未知'}</Tag>
               </List.Item>
             )} />

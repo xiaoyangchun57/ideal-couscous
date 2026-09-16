@@ -9,6 +9,7 @@ import {
   monitoringStatusView,
   monitoringSummaryItems,
   monitoringTrendView,
+  monitoringFactorName,
 } from './stationMonitoring.js';
 
 test('monitoring status metadata covers the eight product states', () => {
@@ -93,4 +94,36 @@ test('trend availability requires both server capability and returned aggregate 
   const available = monitoringTrendView({ trend: true }, { trend: [{ value: 0 }] });
   assert.equal(available.available, true);
   assert.equal(available.items[0].value, 0);
+});
+
+test('all four monitoring axes preserve server labels and status visual semantics', () => {
+  for (const key of Object.keys(AXIS_META)) {
+    for (const [status, badge] of [['normal', 'success'], ['attention', 'warning'], ['missing', 'default'], ['unavailable', 'error']]) {
+      const view = axisView(key, { status, status_label: `服务端自定义:${key}:${status}`, state: 'unknown' });
+      assert.equal(view.label, AXIS_META[key]);
+      assert.equal(view.state, status);
+      assert.equal(view.stateLabel, `服务端自定义:${key}:${status}`);
+      assert.equal(view.badgeStatus, badge);
+    }
+  }
+});
+
+test('known compatibility axis states are never collapsed to unknown or device health', () => {
+  for (const [status, label, badge] of [
+    ['fresh', '在配置周期内', 'success'], ['stale', '超出配置周期', 'warning'],
+    ['has_valid_observation', '已有有效观测', 'default'], ['no_valid_observation', '暂无有效观测', 'default'],
+  ]) {
+    const view = axisView('instrument', { state: status });
+    assert.equal(view.stateLabel, label);
+    assert.equal(view.badgeStatus, badge);
+  }
+  assert.equal(axisView('rtu').stateLabel, '暂无分轴事实');
+  assert.equal(axisView('rtu', { status: 'server_new_status' }).stateLabel, '服务端未提供状态名称');
+});
+
+test('Chinese factor names precede business display names and internal metric identifiers', () => {
+  assert.equal(monitoringFactorName({ factor_name_cn: '酸碱度', business_name: '业务名称', business_metric: 'ph_internal' }), '酸碱度');
+  assert.equal(monitoringFactorName({ business_name: '业务名称', label: '业务标签', business_metric: 'ph_internal' }), '业务名称');
+  assert.equal(monitoringFactorName({ label: '业务标签', business_metric: 'ph_internal' }), '业务标签');
+  assert.equal(monitoringFactorName({ business_metric: 'ph_internal' }), 'ph_internal');
 });

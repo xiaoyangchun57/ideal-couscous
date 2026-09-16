@@ -66,8 +66,11 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       if (handler && await handler(route, url)) return;
       let body = {};
       if (url.pathname === '/api/auth/me') body = { user: { id: 991020, username: 'web-test', role: roles[0], roles }, site_ids: [7, 8] };
-      else if (url.pathname === '/api/sites') body = [row, { ...row, id: 8, name: '隔离测试站乙', code: 'WEB-TEST-8' }];
-      else if (url.pathname === '/api/station-monitoring/sites') body = { items: [overview().site, overview('normal', 8).site], summary: { interval_unconfigured: 1, normal: 1 } };
+      else if (url.pathname === '/api/sites') body = roles.includes('admin') ? [row, { ...row, id: 8, name: '隔离测试站乙', code: 'WEB-TEST-8' }] : [row];
+      else if (url.pathname === '/api/station-monitoring/sites') body = {
+        scope: roles.includes('admin') ? 'all' : 'mine', available_scopes: roles.includes('admin') ? ['all', 'mine'] : ['mine'],
+        items: roles.includes('admin') ? [overview().site, overview('normal', 8).site] : [overview().site], summary: { interval_unconfigured: 1, normal: roles.includes('admin') ? 1 : 0 },
+      };
       else if (/\/station-monitoring\/sites\/\d+\/overview$/.test(url.pathname)) body = overview('interval_unconfigured', Number(url.pathname.split('/').at(-2)));
       else if (url.pathname === '/api/station-monitoring/access-summary') body = summary;
       else if (url.pathname === '/api/sites/7/archive') body = { ...row, has_sensor_data: false, equipment: [] };
@@ -276,7 +279,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     const { page, close } = await session(['admin'], undefined, async (route, url) => {
       if (url.pathname !== '/api/station-monitoring/sites') return false;
       await route.fulfill(mode === 'failure' ? { status: 503, json: { error: '监测投影暂不可用' } }
-        : { json: { items: mode === 'missing' ? [] : [overview().site], summary: { interval_unconfigured: 1 } } });
+        : { json: { scope: 'all', available_scopes: ['all', 'mine'], items: mode === 'missing' ? [] : [overview().site], summary: { interval_unconfigured: 1 } } });
       return true;
     });
     try {
@@ -329,6 +332,112 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.getByRole('button', { name: `站点：${row.name}`, exact: true }).click();
       await page.waitForURL(`${baseURL}/sites/7`);
       await visible(page.getByRole('heading', { name: row.name }));
+    } finally { await close(); }
+  });
+
+  await t.test('directory explicitly requests all for admins and mine for reviewers and operators', async () => {
+    for (const roles of [['admin'], ['reviewer'], ['operator'], ['reviewer', 'admin']]) {
+      const scopes = [];
+      const { page, close } = await session(roles, undefined, async (_route, url) => {
+        if (url.pathname === '/api/station-monitoring/sites') scopes.push(url.searchParams.get('scope'));
+        return false;
+      });
+      try {
+        await page.goto(`${baseURL}/sites`);
+        await visible(page.getByText(row.name, { exact: true }));
+        const expected = roles.includes('admin') ? 'all' : 'mine';
+        assert.ok(scopes.length > 0);
+        assert.ok(scopes.every((scope) => scope === expected));
+        if (expected === 'all') {
+          const other = page.getByRole('row').filter({ hasText: '隔离测试站乙' });
+          await visible(other.getByText('正常', { exact: true }));
+        }
+        await visible(page.getByText(`监测范围：${expected === 'all' ? '全部有权站点' : '本人负责站点'}`, { exact: true }));
+      } finally { await close(); }
+    }
+  });
+
+  await t.test('server scope facts stay authoritative and a superseded refresh cannot overwrite the latest result', async () => {
+    let calls = 0;
+    let release;
+    let started;
+    let finished;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const requested = new Promise((resolve) => { started = resolve; });
+    const settled = new Promise((resolve) => { finished = resolve; });
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (url.pathname !== '/api/station-monitoring/sites') return false;
+      assert.equal(url.searchParams.get('scope'), 'all');
+      calls += 1;
+      const current = calls;
+      if (current === 2) { started(); await pending; }
+      const result = {
+        scope: current === 1 ? 'mine' : 'all', available_scopes: current === 1 ? ['mine'] : ['mine', 'all'],
+        items: [{ ...overview(current === 3 ? 'attention' : 'normal').site, monitoring_reason: current === 3 ? '最新刷新事实' : '较早刷新事实' }], summary: {},
+      };
+      try { await route.fulfill({ json: result }); } catch { /* A newer refresh may have cancelled the held request. */ }
+      if (current === 2) finished();
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      await visible(page.getByText('监测范围：本人负责站点', { exact: true }));
+      await page.getByRole('button', { name: /刷新/ }).click();
+      await requested;
+      await page.getByRole('button', { name: '重新加载', exact: true }).click();
+      await visible(page.getByText('最新刷新事实', { exact: true }));
+      release();
+      await settled;
+      await absent(page, '较早刷新事实');
+      await visible(page.getByText('监测范围：全部有权站点', { exact: true }));
+    } finally { release(); await close(); }
+  });
+
+  await t.test('four axes honor server status labels and Chinese factor names hide metric identifiers', async () => {
+    let axes;
+    const payload = overview();
+    for (const item of [...payload.monitoring.latest_values, ...payload.monitoring.instruments]) {
+      item.factor_name_cn = '服务端中文因子名'; item.business_metric = 'internal_metric_identifier';
+    }
+    payload.monitoring.capabilities.trend = true;
+    payload.monitoring.trend = [{ factor_name_cn: '服务端中文因子名', business_metric: 'internal_metric_identifier', value: 0 }];
+    const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
+      if (!url.pathname.endsWith('/7/overview')) return false;
+      await route.fulfill({ json: { ...payload, axes } });
+      return true;
+    });
+    try {
+      for (const [status, badge] of [['normal', 'success'], ['attention', 'warning'], ['missing', 'default'], ['unavailable', 'error']]) {
+        axes = Object.fromEntries(['communication', 'data', 'rtu', 'instrument'].map((key) => [key, { status, state: 'unknown', status_label: `中文分轴:${key}:${status}` }]));
+        await page.goto(`${baseURL}/sites/7`);
+        for (const [key, label] of [['communication', '通信'], ['data', '数据'], ['rtu', 'RTU'], ['instrument', '仪器']]) {
+          const group = page.getByRole('group', { name: label, exact: true });
+          await visible(group.getByText(`中文分轴:${key}:${status}`, { exact: true }));
+          assert.match(await group.locator('.ant-badge-status-dot').getAttribute('class'), new RegExp(`ant-badge-status-${badge}`));
+        }
+      }
+      for (const title of ['最新有效值', '趋势', '仪器与因子']) {
+        const card = page.locator('.ant-card').filter({ has: page.locator('.ant-card-head-title').getByText(title, { exact: true }) });
+        assert.match(await card.innerText(), /服务端中文因子名/);
+        assert.doesNotMatch(await card.innerText(), /internal_metric_identifier/);
+      }
+      axes = { communication: { status: 'fresh' }, data: { status: 'stale' }, rtu: { status: 'has_valid_observation' }, instrument: { status: 'no_valid_observation' } };
+      await page.getByRole('button', { name: '刷新', exact: true }).click();
+      for (const text of ['在配置周期内', '超出配置周期', '已有有效观测', '暂无有效观测']) await visible(page.getByText(text, { exact: true }));
+      await snapshot(page, 'server-axes-factor-names');
+    } finally { await close(); }
+  });
+
+  await t.test('access breadcrumb uses its exact title while the site parent menu stays selected', async () => {
+    const { page, close } = await session(['admin']);
+    try {
+      await page.goto(`${baseURL}/sites/data-access`);
+      await visible(page.locator('.page-location').getByText('接入观察', { exact: true }));
+      await visible(page.locator('.app-sidebar .ant-menu-item-selected').getByText('站点全景', { exact: true }));
+      await page.goto(`${baseURL}/sites/7`);
+      await visible(page.locator('.page-location').getByText('站点全景', { exact: true }));
+      await page.goto(`${baseURL}/unknown`);
+      await visible(page.locator('.page-location').getByText('页面不存在', { exact: true }));
     } finally { await close(); }
   });
 
