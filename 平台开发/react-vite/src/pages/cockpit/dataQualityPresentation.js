@@ -8,7 +8,9 @@ export function qualityRate(record = {}, rateKey) {
     ? (Object.hasOwn(record, 'sampled_metric_count') ? 'sampled_metric_count' : 'actual')
     : RATE_DENOMINATORS[rateKey];
   if (!denominatorKey || Number(record[denominatorKey] || 0) <= 0) return null;
-  const rate = Number(record[rateKey]);
+  const rawRate = record[rateKey];
+  if (rawRate == null || (typeof rawRate === 'string' && rawRate.trim() === '')) return null;
+  const rate = Number(rawRate);
   return Number.isFinite(rate) ? rate : null;
 }
 

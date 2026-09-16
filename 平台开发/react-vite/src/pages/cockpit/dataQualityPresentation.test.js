@@ -17,3 +17,11 @@ test('rates remain visible when their server denominators are positive', () => {
   assert.equal(qualityRate(sampled, 'timeliness_rate'), 90);
   assert.equal(qualityRate({ actual: 8, timeliness_rate: 90 }, 'timeliness_rate'), 90);
 });
+
+test('missing rate values stay neutral even when their denominator is positive', () => {
+  for (const missingRate of [null, undefined, '', '   ']) {
+    assert.equal(qualityRate({ actual: 8, timeliness_rate: missingRate }, 'timeliness_rate'), null);
+  }
+  assert.equal(qualityRate({ actual: 8, timeliness_rate: 0 }, 'timeliness_rate'), 0);
+  assert.equal(qualityRate({ actual: 8, timeliness_rate: '0' }, 'timeliness_rate'), 0);
+});

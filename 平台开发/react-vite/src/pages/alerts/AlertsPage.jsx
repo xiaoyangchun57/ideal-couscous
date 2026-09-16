@@ -34,7 +34,7 @@ import {
 } from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
 import { StatusStrip, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
-import { ALERT_DATE_RANGE_OPTIONS, isAlertInDateRange } from './alertDateRange';
+import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
 
@@ -800,6 +800,10 @@ export default function AlertsPage() {
 
     return list;
   }, [allAlerts, statusFilter, levelFilter, dateRange, searchText]);
+  const listCoverage = useMemo(
+    () => alertListCoverage(allAlerts.length, counts.total),
+    [allAlerts.length, counts.total],
+  );
 
   // 管理视角先看事件簇，明细表仍保留用于逐条追溯和处置。
   const incidentGroups = useMemo(() => {
@@ -1201,7 +1205,7 @@ export default function AlertsPage() {
           <>
             <div style={{ flexShrink: 0 }}>
               <StatusStrip items={statCards.map((item) => ({ key: item.title, label: item.title, value: item.value, color: item.color }))} />
-              <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>汇总统计：全部历史记录</Text>
+              <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>{listCoverage.summaryText}</Text>
             </div>
 
             {/* Filter Bar */}
@@ -1262,10 +1266,13 @@ export default function AlertsPage() {
                     />
                     {(statusFilter || levelFilter || dateRange || searchText) && (
                       <ToolbarMeta label="列表范围">
-                        {ALERT_DATE_RANGE_OPTIONS.find((option) => option.value === dateRange)?.label} · {filteredAlerts.length} 条
+                        {ALERT_DATE_RANGE_OPTIONS.find((option) => option.value === dateRange)?.label} · 筛选后 {filteredAlerts.length} 条
                       </ToolbarMeta>
                     )}
             </WorkspaceToolbar>
+            {listCoverage.truncated && (
+              <Alert type="warning" showIcon message="告警列表未完整加载" description={listCoverage.truncationText} />
+            )}
 
             {/* Batch Operations Bar */}
             {selectedRowKeys.length > 0 && (
@@ -1382,7 +1389,7 @@ export default function AlertsPage() {
               {(!error || allAlerts.length > 0) && !loading && filteredAlerts.length === 0 && (
                 <WorkspaceEmpty
                   type={searchText || statusFilter || levelFilter || dateRange !== 'all' ? 'filtered' : 'empty'}
-                  description={dateRange !== 'all' ? '当前所选列表范围没有告警记录，可切换“全部历史”查看历史记录。' : undefined}
+                  description={dateRange !== 'all' ? '当前所选列表范围没有告警记录，可切换“已加载历史”查看当前已加载记录。' : undefined}
                   onRefresh={fetchAlerts}
                 />
               )}
