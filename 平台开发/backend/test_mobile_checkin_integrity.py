@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -13,6 +14,49 @@ import app as app_module
 
 
 class MobileCheckinIntegrityTest(unittest.TestCase):
+    def test_300m_geofence_checkin_workorder_capture_and_checkout_boundaries(self):
+        self.assertEqual(app_module.SITE_GEOFENCE_M, 300)
+        self.assertEqual(app_module.GPS_DEVIATION_M, app_module.SITE_GEOFENCE_M)
+        with app_module.get_db() as db:
+            db.executescript("""CREATE TABLE vehicle_applications
+                (id INTEGER PRIMARY KEY, vehicle_id INTEGER, status TEXT, no_vehicle_required INTEGER,
+                 vehicle_exception_reason TEXT, work_order_no TEXT, applicant_id INTEGER);
+                INSERT INTO vehicle_applications VALUES (1,NULL,'approved',1,'步行','WO-1',2);""")
+        headers = self.headers('operator-token')
+        payload = {'site_id': 1, 'lat': 28.68, 'lng': 115.73}
+        for distance in (300.01, 450, None):
+            with self.subTest(distance=distance), mock.patch.object(app_module, '_checkin_distance_to_site', return_value=distance):
+                for extra in ({}, {'order_no': 'WO-1'}):
+                    response = self.client.post('/api/mobile/check-in', headers=headers, json=dict(payload, **extra))
+                    self.assertIn(response.status_code, (400, 409), response.json)
+                capture = self.client.post('/api/mobile/photo-capture-session', headers=headers,
+                    json={'site_id': 1, 'plan_id': 20, 'item_id': 30, 'gps_lat': 28.68, 'gps_lng': 115.73})
+                self.assertEqual(capture.status_code, 409, capture.json)
+                with app_module.get_db() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 0)
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0], 0)
+                    self.assertIsNone(db.execute("SELECT check_in_time FROM work_orders WHERE order_no='WO-1'").fetchone()[0])
+        for distance in (299.9, 300):
+            with mock.patch.object(app_module, '_checkin_distance_to_site', return_value=distance):
+                response = self.client.post('/api/mobile/check-in', headers=headers, json=payload)
+                self.assertEqual(response.status_code, 200, response.json)
+                workorder = self.client.post('/api/mobile/check-in', headers=headers, json=dict(payload, order_no='WO-1'))
+                self.assertEqual(workorder.status_code, 200, workorder.json)
+                capture = self.client.post('/api/mobile/photo-capture-session', headers=headers,
+                    json={'site_id': 1, 'plan_id': 20, 'item_id': 30, 'gps_lat': 28.68, 'gps_lng': 115.73})
+                self.assertEqual(capture.status_code, 200, capture.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=30")
+        for distance in (300.01, None):
+            with mock.patch.object(app_module, '_checkin_distance_to_site', return_value=distance):
+                checkout = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out', headers=headers, json=payload)
+                self.assertIn(checkout.status_code, (400, 409), checkout.json)
+                with app_module.get_db() as db:
+                    self.assertIsNone(db.execute('SELECT check_out_time FROM insp_plan_items WHERE id=30').fetchone()[0])
+        with mock.patch.object(app_module, '_checkin_distance_to_site', return_value=300):
+            checkout = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out', headers=headers, json=payload)
+            self.assertEqual(checkout.status_code, 200, checkout.json)
+
     def setUp(self):
         temp = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         temp.close()
@@ -406,7 +450,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.json)
         self.assertIn('坐标', response.json['error'])
 
-    def test_calibration_requires_assigned_task_and_explicit_confirmation(self):
+    def test_calibration_requires_authorized_site_and_explicit_confirmation(self):
         operator_confirmed = self.client.put('/api/sites/1/calibrate', headers=self.headers('operator-token'), json={
             'lat': 28.6801, 'lng': 115.7301, 'confirm': True, 'site_name': '测试站一',
         })
@@ -427,12 +471,53 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         })
         self.assertEqual(confirmed.status_code, 200, confirmed.json)
 
+    def test_calibration_all_scoped_roles_without_today_task_and_failure_zero_write(self):
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM insp_plan_items')
+            db.execute('DELETE FROM insp_plans')
+        for role in ('operator', 'reviewer', 'manager'):
+            token = role + '-scoped'
+            app_module._tokens[token] = {'id': 2, 'role': role, 'username': role}
+            response = self.client.put('/api/sites/1/calibrate', headers=self.headers(token), json={
+                'lat': 28.681, 'lng': 115.731, 'confirm': True, 'site_name': '测试站一'})
+            self.assertEqual(response.status_code, 200, response.json)
+            projected = self.client.get('/api/mobile/site-tasks/1', headers=self.headers(token))
+            self.assertTrue(projected.json['site']['can_calibrate'])
+        with app_module.get_db() as db:
+            before = tuple(db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone())
+            audits = db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0]
+        for site_id, payload, status in (
+            (3, {'lat': 28.68, 'lng': 115.73, 'confirm': True}, 403),
+            (1, {'lat': 91, 'lng': 115.73, 'confirm': True}, 400),
+            (1, {'lat': 28.68, 'lng': 115.73, 'confirm': True, 'site_name': '错误站'}, 409),
+            (1, {'lat': 28.68, 'lng': 115.73}, 409),
+        ):
+            response = self.client.put(f'/api/sites/{site_id}/calibrate', headers=self.headers('operator-token'), json=payload)
+            self.assertEqual(response.status_code, status, response.json)
+        with app_module.get_db() as db:
+            self.assertEqual(tuple(db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone()), before)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0], audits)
+
     def test_item_submission_requires_a_same_day_site_checkin(self):
         response = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
             'item_id': 31, 'plan_id': 20, 'result': 'normal', 'remark': '现场记录',
         })
         self.assertEqual(response.status_code, 400, response.json)
         self.assertIn('打卡', response.json['error'])
+
+    def test_photo_minimum_and_maximum_fail_before_result_review_or_binding_writes(self):
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET required_photos=4 WHERE id=30')
+            db.execute("INSERT INTO inspection_checkins(site_id,user_id,check_time) VALUES (1,2,datetime('now','localtime'))")
+        for count in (3,7):
+            response = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
+                'item_id':30, 'plan_id':20, 'result':'normal', 'remark':'现场记录',
+                'photo_urls':json.dumps([f'/uploads/test-{index}.jpg' for index in range(count)]),
+                '_idempotency_key':f'photo-limit-{count}'})
+            self.assertEqual(response.status_code,400,response.json)
+            with app_module.get_db() as db:
+                self.assertEqual(tuple(db.execute('SELECT result,check_time,photo_urls,actual_photos FROM insp_plan_items WHERE id=30').fetchone()),(None,None,None,0))
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM mobile_idempotency').fetchone()[0],0)
 
     def test_submit_item_consumes_calibration_only_for_qaqc_category(self):
         with app_module.get_db() as db:
@@ -527,7 +612,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
             checkins = db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0]
         self.assertEqual(session['capture_source'], 'camera')
         self.assertTrue(session['rework_required_at'])
-        self.assertLess(session['distance_m'], 500)
+        self.assertLess(session['distance_m'], 300)
         self.assertEqual(checkins, 1)
 
     def test_site_checkout_requires_completion_and_closes_the_loop(self):

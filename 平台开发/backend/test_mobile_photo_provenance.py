@@ -679,7 +679,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             ('old', (datetime.now() - timedelta(minutes=5)).strftime('%Y.%m.%d %H:%M'),
              28.071303, 115.539684, 'ANTIOLD12345', '早于本轮补拍要求'),
             ('wrong-site', datetime.now().strftime('%Y.%m.%d %H:%M'),
-             30.0, 116.0, 'ANTIWRONG123', '超过500米'),
+             30.0, 116.0, 'ANTIWRONG123', '超过300米'),
         )
         for index, (label, taken_at, lat, lng, code, reason_fragment) in enumerate(scenarios):
             with self.subTest(label=label):

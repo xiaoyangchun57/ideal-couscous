@@ -180,7 +180,7 @@ Page({
       const newCoords = `${Number(gps.lat).toFixed(6)}, ${Number(gps.lng).toFixed(6)}`;
       wx.showModal({
         title: '确认校准站点位置',
-        content: `站点：${s.name}\n原坐标：${oldCoords}\n当前位置：${newCoords}\n校准会改变 500 米打卡范围，仅在确认站点无误且确实位于现场时操作。`,
+        content: `站点：${s.name}\n原坐标：${oldCoords}\n当前位置：${newCoords}\n校准会改变 300 米打卡范围，仅在确认站点无误且确实位于现场时操作。`,
         confirmText: '确认更新',
         cancelText: '取消',
         success: (modal) => {

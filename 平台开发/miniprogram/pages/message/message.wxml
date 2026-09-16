@@ -71,5 +71,7 @@
       <text class="msg-sub-tx">订阅告警与审批通知</text>
     </view>
     <text class="msg-sub-hint">用于下一次待审或审批结果提醒</text>
+    <text class="msg-sub-hint" wx:if="{{subscriptionConfigState === 'loading'}}">订阅配置加载中</text>
+    <view class="msg-retry-btn" wx:if="{{subscriptionConfigState === 'error'}}" bindtap="onRetrySubscriptionConfig">{{subscriptionConfigError}}</view>
   </view>
 </view>

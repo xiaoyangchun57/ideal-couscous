@@ -1,7 +1,5 @@
 {
-  "navigationStyle": "custom",
+  "navigationBarTitleText": "新建计划",
   "enablePullDownRefresh": false,
-  "usingComponents": {
-    "custom-navbar": "/components/custom-navbar/custom-navbar"
-  }
+  "usingComponents": {}
 }

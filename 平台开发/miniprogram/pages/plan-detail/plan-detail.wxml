@@ -49,6 +49,19 @@
   </view>
 
   <!-- ===== 卡片1：作业路线 ===== -->
+  <view class="info-card" wx:if="{{loaded && detail.cancellation}}">
+    <view class="card-header">取消记录</view>
+    <view class="info-row"><text class="info-label">取消原因</text><text class="info-value info-value-multiline">{{detail.cancellation.reason}}</text></view>
+    <view class="info-row"><text class="info-label">操作人</text><text class="info-value">{{detail.cancellation.operator_name}}</text></view>
+    <view class="info-row"><text class="info-label">操作时间</text><text class="info-value">{{detail.cancellation.occurred_at}}</text></view>
+  </view>
+  <view class="info-card" wx:if="{{loaded && detail.template_context.length}}">
+    <view class="card-header">检查内容</view>
+    <view class="info-row" wx:for="{{detail.template_context}}" wx:key="index">
+      <text class="info-label">{{item.date}} {{item.site_name}}</text>
+      <text class="info-value">{{item.frequency_cn || item.template_name}} · {{item.item_count}} 项</text>
+    </view>
+  </view>
   <view class="info-card" wx:if="{{loaded && (generatedPlans.length > 0 || days.length > 0)}}">
     <view class="card-header">作业路线</view>
     <view class="site-list">

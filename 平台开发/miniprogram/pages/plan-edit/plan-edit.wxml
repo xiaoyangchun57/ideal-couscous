@@ -31,66 +31,73 @@
     if (!editId) return '新建计划';
     return '编辑计划';
   };
+  module.exports.freqLabel = function(scheduleType) {
+    if (scheduleType === 'weekly') return '周检计划';
+    if (scheduleType === 'monthly') return '月检计划';
+    if (scheduleType === 'quarterly') return '季检计划';
+    if (scheduleType === 'yearly') return '年检计划';
+    return '巡检计划';
+  };
 </wxs>
 
 <view class="pe-page" wx:if="{{detailState === 'ready' && loaded}}">
 
-  <!-- 自定义导航栏（sticky 固定 + 返回键 + compact 标题） -->
-  <view class="pe-nav-wrap">
-    <custom-navbar showBorder="{{true}}">
-      <view slot="left" class="pe-nav-left-group">
-        <view class="pe-nav-back" data-action="back" bindtap="onNavBack">
-          <view class="pe-nav-back-icon"></view>
+  <!-- 系统级错误 banner（仅网络/版本冲突/未知服务端失败） -->
+  <view class="pe-banner-group" wx:if="{{submitError || draftSaveError || detailState === 'error'}}">
+    <!-- 提交失败（系统级） -->
+    <view class="pe-banner pe-banner-error" wx:if="{{submitError}}">
+      <view class="pe-banner-row">
+        <view class="pe-banner-icon-wrap pe-banner-icon-error">
+          <view class="pe-banner-icon-dot">!</view>
         </view>
-        <text class="pe-nav-title">{{ft.pageTitle(isChange, editId, scheduleType)}}</text>
+        <view class="pe-banner-content">
+          <text class="pe-banner-title">提交失败</text>
+          <text class="pe-banner-text">{{submitError}}</text>
+        </view>
       </view>
-    </custom-navbar>
+      <button class="pe-banner-btn pe-banner-btn-error" bindtap="onSubmit">重试</button>
+    </view>
+    <!-- 草稿保存失败 -->
+    <view class="pe-banner pe-banner-error" wx:if="{{draftSaveError}}">
+      <view class="pe-banner-row">
+        <view class="pe-banner-icon-wrap pe-banner-icon-error">
+          <view class="pe-banner-icon-dot">!</view>
+        </view>
+        <view class="pe-banner-content">
+          <text class="pe-banner-title">草稿未保存</text>
+          <text class="pe-banner-text">{{draftSaveError}}</text>
+        </view>
+      </view>
+    </view>
   </view>
 
-  <!-- 原因 / 失败提示区 -->
-  <view class="pe-banner-group">
-    <!-- 变更原因 -->
+  <!-- 变更原因 / 退回原因（业务上下文，非错误） -->
+  <view class="pe-banner-group" wx:if="{{isChange || rejectReason}}">
     <view class="pe-banner pe-banner-info" wx:if="{{isChange}}">
       <text class="pe-banner-title">变更原因</text>
       <text class="pe-banner-text">{{changeReason || '—'}}</text>
       <text class="pe-banner-sub">完成修改后需提交管理员审核</text>
     </view>
-
-    <!-- 退回原因 -->
     <view class="pe-banner pe-banner-warning" wx:if="{{rejectReason}}">
       <text class="pe-banner-title">退回原因</text>
       <text class="pe-banner-text">{{rejectReason}}</text>
     </view>
-
-    <!-- 提交失败 -->
-    <view class="pe-banner pe-banner-error" wx:if="{{submitError}}">
-      <text class="pe-banner-title">提交未完成</text>
-      <text class="pe-banner-text">{{submitError}}</text>
-    </view>
-
-    <!-- 草稿保存失败 -->
-    <view class="pe-banner pe-banner-error" wx:if="{{draftSaveError}}">
-      <text class="pe-banner-title">草稿未保存</text>
-      <text class="pe-banner-text">{{draftSaveError}}</text>
-    </view>
   </view>
 
-  <!-- Section 1: 巡检频次 + 周期范围 -->
-  <view class="pe-card">
-    <text class="pe-section-title">巡检频次</text>
-    <view class="pe-segmented">
-      <view class="pe-seg-item {{scheduleType === 'weekly' ? 'active' : ''}}" data-type="weekly" bindtap="onFreqChip" wx:if="{{!editId}}">周检</view>
-      <view class="pe-seg-item {{scheduleType === 'monthly' ? 'active' : ''}}" data-type="monthly" bindtap="onFreqChip" wx:if="{{!editId}}">月检</view>
-      <view class="pe-seg-item {{scheduleType === 'quarterly' ? 'active' : ''}}" data-type="quarterly" bindtap="onFreqChip" wx:if="{{!editId}}">季检</view>
-      <view class="pe-seg-item {{scheduleType === 'yearly' ? 'active' : ''}}" data-type="yearly" bindtap="onFreqChip" wx:if="{{!editId}}">年检</view>
-      <view class="pe-seg-item active" wx:if="{{editId}}">{{scheduleType === 'weekly' ? '周检' : (scheduleType === 'monthly' ? '月检' : (scheduleType === 'quarterly' ? '季检' : '年检'))}}</view>
+  <!-- ========== 区块①：周期与用车 ========== -->
+  <view id="plan-period-section" class="pe-card">
+    <view class="pe-section-header">
+      <text class="pe-section-title">周期与用车</text>
+      <view class="pe-freq-tag" wx:if="{{editId}}">
+        <text class="pe-freq-tag-tx">{{ft.freqLabel(scheduleType)}}</text>
+      </view>
     </view>
 
-    <text class="pe-section-title pe-section-title-gap">周期范围</text>
+    <!-- 周期范围 -->
     <view class="pe-list-group">
       <picker mode="date" value="{{periodStart}}" bindchange="onPeriodStart">
         <view class="pe-list-row">
-          <text class="pe-list-row-label">开始日期</text>
+          <text class="pe-list-row-label">开始日期 <text class="pe-required-mark">*</text></text>
           <view class="pe-list-row-right">
             <text class="pe-list-row-value">{{periodStart}}</text>
             <view class="pe-chevron"></view>
@@ -99,7 +106,7 @@
       </picker>
       <picker mode="date" value="{{periodEnd}}" bindchange="onPeriodEnd">
         <view class="pe-list-row pe-list-row-last">
-          <text class="pe-list-row-label">结束日期</text>
+          <text class="pe-list-row-label">结束日期 <text class="pe-required-mark">*</text></text>
           <view class="pe-list-row-right">
             <text class="pe-list-row-value">{{periodEnd}}</text>
             <view class="pe-chevron"></view>
@@ -107,164 +114,277 @@
         </view>
       </picker>
     </view>
+
+    <!-- 用车选择（单选） -->
+    <view class="pe-field-error" wx:if="{{fieldErrors.period_start || fieldErrors.period_end}}">
+      <view class="pe-error-icon"></view><text class="pe-error-text">{{fieldErrors.period_start || fieldErrors.period_end}}</text>
+    </view>
+    <view class="pe-vehicle-section">
+      <text class="pe-sub-title pe-sub-title-top">计划用车 <text class="pe-required-mark">*</text></text>
+      <view class="pe-radio-group">
+        <view class="pe-radio-item {{!noVehicleRequired ? 'pe-radio-active' : ''}}" data-mode="vehicle" bindtap="onVehicleModeSelect">
+          <view class="pe-radio-dot">
+            <view class="pe-radio-dot-inner"></view>
+          </view>
+          <text class="pe-radio-label">需要用车</text>
+        </view>
+        <view class="pe-radio-item {{noVehicleRequired ? 'pe-radio-active' : ''}}" data-mode="none" bindtap="onVehicleModeSelect">
+          <view class="pe-radio-dot">
+            <view class="pe-radio-dot-inner"></view>
+          </view>
+          <text class="pe-radio-label">无需用车</text>
+        </view>
+      </view>
+
+      <!-- 车辆选择展开 -->
+      <view class="pe-expand-area" wx:if="{{!noVehicleRequired}}">
+        <view id="plan-vehicle-row" class="pe-list-row-expand {{fieldErrors.planVehicleId ? 'pe-row-error' : ''}}">
+          <picker mode="selector" range="{{vehicles}}" range-key="name"
+                  value="{{ft.vehicleIdx(vehicles, planVehicleId)}}" bindchange="onPlanVehicleChange">
+            <view class="pe-expand-inner">
+              <text class="{{planVehicleId ? 'pe-expand-value' : 'pe-expand-placeholder'}}">{{ft.vehicleName(vehicles, planVehicleId)}}</text>
+              <view class="pe-chevron"></view>
+            </view>
+          </picker>
+        </view>
+        <view class="pe-field-error" wx:if="{{fieldErrors.planVehicleId}}">
+          <view class="pe-error-icon"></view>
+          <text class="pe-error-text">{{fieldErrors.planVehicleId}}</text>
+        </view>
+      </view>
+
+      <!-- 无车说明（仅历史编辑态且有原因时只读展示） -->
+      <view class="pe-expand-area" wx:if="{{noVehicleRequired && editId && vehicleExceptionReason}}">
+        <view class="pe-historical-reason">
+          <text class="pe-historical-reason-label">历史原因</text>
+          <text class="pe-historical-reason-text">{{vehicleExceptionReason}}</text>
+        </view>
+      </view>
+    </view>
   </view>
 
   <!-- 添加作业日（月/季/年检） -->
-  <view class="pe-card" wx:if="{{scheduleType !== 'weekly'}}">
-    <view class="pe-add-day-row">
-      <picker mode="date" value="{{periodStart}}" start="{{periodStart}}" end="{{periodEnd}}" bindchange="onAddDay">
-        <view class="pe-add-day-btn">
-          <text class="pe-add-day-plus">＋</text>
-          <text>添加作业日</text>
-        </view>
-      </picker>
-      <text class="pe-add-day-count">已选 {{days.length}} 天</text>
+  <view class="pe-add-day-card" wx:if="{{scheduleType !== 'weekly'}}">
+    <picker mode="date" value="{{periodStart}}" start="{{periodStart}}" end="{{periodEnd}}" bindchange="onAddDay">
+      <view class="pe-add-day-btn">
+        <view class="pe-add-day-plus">+</view>
+        <text class="pe-add-day-tx">添加作业日</text>
+      </view>
+    </picker>
+    <text class="pe-add-day-count">已选 {{days.length}} 天</text>
+  </view>
+
+  <!-- ========== 区块②：作业日与站点安排 ========== -->
+  <view id="plan-sites" class="pe-sites-section">
+    <text class="pe-section-title pe-sites-title">站点配置</text>
+    <view class="pe-field-error pe-field-error--sites" wx:if="{{fieldErrors.sites}}">
+      <view class="pe-error-icon"></view>
+      <text class="pe-error-text">{{fieldErrors.sites}}</text>
     </view>
   </view>
 
-  <!-- Section 2: 计划用车 -->
-  <view class="pe-card">
-    <text class="pe-section-title">计划用车</text>
-    <view class="pe-list-group">
-      <view class="pe-list-row" data-mode="vehicle" bindtap="onVehicleModeSelect">
-        <text class="pe-list-row-label">需要用车</text>
-        <view class="pe-list-row-right">
-          <text class="pe-list-row-suffix" wx:if="{{planVehicleId && !noVehicleRequired}}">{{ft.vehicleName(vehicles, planVehicleId)}}</text>
-          <view class="pe-checkmark" wx:if="{{!noVehicleRequired}}"></view>
-        </view>
-      </view>
-      <view class="pe-list-row" data-mode="none" bindtap="onVehicleModeSelect">
-        <text class="pe-list-row-label">无需用车</text>
-        <view class="pe-list-row-right">
-          <view class="pe-checkmark" wx:if="{{noVehicleRequired}}"></view>
-        </view>
-      </view>
-    </view>
-
-    <!-- 车辆选择 -->
-    <view class="pe-expand-area" wx:if="{{!noVehicleRequired}}">
-      <picker mode="selector" range="{{vehicles}}" range-key="name"
-              value="{{ft.vehicleIdx(vehicles, planVehicleId)}}" bindchange="onPlanVehicleChange">
-        <view class="pe-list-row pe-list-row-expand">
-          <text class="pe-list-row-label pe-list-row-label-sub">选择车辆</text>
-          <view class="pe-list-row-right">
-            <text class="{{planVehicleId ? 'pe-list-row-value' : 'pe-placeholder'}}">{{ft.vehicleName(vehicles, planVehicleId)}}</text>
-            <view class="pe-chevron"></view>
-          </view>
-        </view>
-      </picker>
-    </view>
-
-    <!-- 无车原因 -->
-    <view class="pe-expand-area" wx:if="{{noVehicleRequired}}">
-      <textarea class="pe-textarea" placeholder="请说明无需车辆的具体原因，如站点位于办公区内且可步行到达"
-        value="{{vehicleExceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200" />
-    </view>
-  </view>
-
-  <!-- Section 3: 作业日与站点 -->
-  <view class="pe-card pe-day-card" wx:for="{{days}}" wx:key="date" wx:for-item="day" wx:for-index="di">
+  <!-- 作业日卡片 -->
+  <view id="plan-day-{{di}}" class="pe-card pe-day-card" wx:for="{{days}}" wx:key="date" wx:for-item="day" wx:for-index="di">
     <view class="pe-day-header">
       <view class="pe-day-date-group">
         <text class="pe-day-date">{{day.date}}</text>
         <text class="pe-day-weekday">{{day.weekday_cn}}</text>
       </view>
       <view class="pe-day-actions">
-        <view class="pe-day-count" wx:if="{{ft.daySiteCount(day)}}">{{ft.daySiteCount(day)}}站</view>
-        <text class="pe-day-action" data-day-idx="{{di}}" bindtap="onToggleAll">{{day.allSitesSelected ? '全不选' : '全选'}}</text>
-        <text class="pe-day-action pe-day-action-danger" wx:if="{{scheduleType !== 'weekly'}}" data-date="{{day.date}}" bindtap="onRemoveDay">移除</text>
+        <view class="pe-day-count" wx:if="{{ft.daySiteCount(day)}}">{{ft.daySiteCount(day)}} 站</view>
+        <text class="pe-day-link" data-day-idx="{{di}}" bindtap="onToggleAll">{{day.allSitesSelected ? '全不选' : '全选'}}</text>
+        <text class="pe-day-link pe-day-link--danger" wx:if="{{scheduleType !== 'weekly'}}" data-date="{{day.date}}" bindtap="onRemoveDay">移除</text>
       </view>
     </view>
 
     <view class="pe-day-warning" wx:if="{{day.warning_text}}">
-      <text>{{day.warning_text}}</text>
+      <view class="pe-warning-icon"></view>
+      <text class="pe-warning-tx">{{day.warning_text}}</text>
+    </view>
+    <view class="pe-day-warning pe-route-suggestion" wx:for="{{day.route_suggestions}}" wx:key="orderText" wx:for-item="route">
+      <view class="pe-warning-icon"></view>
+      <view class="pe-route-copy">
+        <text class="pe-route-order">{{route.orderText}}</text>
+        <text class="pe-route-meta">{{route.metaText}}</text>
+      </view>
     </view>
 
-    <text class="pe-sub-title">选择站点</text>
+    <!-- 站点选择 -->
     <view class="pe-chip-group">
       <view class="pe-chip {{ft.hasSite(day.sites, site.id) ? 'pe-chip-on' : ''}}"
             wx:for="{{mySites}}" wx:key="id" wx:for-item="site"
             data-day-idx="{{di}}" data-site-id="{{site.id}}" bindtap="onToggleSite">
         {{site.name}}
-        <text class="pe-chip-suffix" wx:if="{{siteScores[site.id]}}">·{{siteScores[site.id]}}</text>
       </view>
     </view>
 
-    <!-- 已选站点的检查项 -->
+    <!-- 已选站点的检查项分组 -->
     <block wx:for="{{day.sites}}" wx:key="*this" wx:for-item="selectedSiteId">
-      <text class="pe-sub-title pe-sub-title-group">{{siteNameById[selectedSiteId]}}</text>
-      <view class="pe-chip-group pe-chip-group-sm" wx:if="{{inspectionItemOptions[selectedSiteId].length}}">
-        <view class="pe-chip pe-chip-sm {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'pe-chip-on' : ''}}"
-              wx:for="{{inspectionItemOptions[selectedSiteId]}}" wx:key="id" wx:for-item="item"
-              data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-item-id="{{item.id}}" bindtap="onToggleInspectionItem">{{item.item_name}}</view>
+      <view class="pe-inspect-site-block">
+        <text class="pe-inspect-site-name">{{siteNameById[selectedSiteId]}}</text>
+
+        <block wx:if="{{inspectionSiteStates[selectedSiteId].state === 'loading'}}">
+          <view class="pe-inspect-loading">
+            <view class="pe-inspect-loading-dot"></view>
+            <text class="pe-inspect-loading-tx">正在读取适用检查项…</text>
+          </view>
+        </block>
+
+        <block wx:elif="{{inspectionSiteStates[selectedSiteId].state === 'unavailable'}}">
+          <view class="pe-inspect-retry" data-site-id="{{selectedSiteId}}" bindtap="loadInspectionItems">
+            <text class="pe-inspect-retry-tx">{{inspectionSiteStates[selectedSiteId].error}}</text>
+            <text class="pe-inspect-retry-link">，点击重试</text>
+          </view>
+        </block>
+
+        <block wx:else>
+          <block wx:for="{{day.inspectionGroups[selectedSiteId]}}" wx:key="frequency" wx:for-item="group">
+            <!-- 跳过：无适用项的按需分组（不显示 0/0） -->
+            <block wx:if="{{group.count > 0 || !group.optional}}">
+              <view class="pe-inspect-group-head {{group.optional ? 'pe-inspect-group-head--optional' : ''}} {{group.optional && group.expanded ? 'pe-inspect-group-head--optional-expanded' : ''}}"
+                    data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-frequency="{{group.frequency}}"
+                    bindtap="onToggleInspectionGroup">
+                <view class="pe-inspect-group-left">
+                  <view class="pe-inspect-caret pe-inspect-caret-{{group.expanded ? 'down' : 'right'}}"></view>
+                  <text class="pe-inspect-group-label">{{group.label}}</text>
+                  <view class="pe-inspect-group-tag {{group.optional ? 'pe-tag-optional' : 'pe-tag-default'}}">
+                    <text class="pe-inspect-group-tag-tx">{{group.optional ? '按需' : '默认'}}</text>
+                  </view>
+                </view>
+                <view class="pe-inspect-group-right">
+                  <!-- 到期提醒（头内右侧，小标签） -->
+                  <view class="pe-inspect-due-tag" wx:if="{{group.dueLabels}}">
+                    <text class="pe-inspect-due-tag-tx">{{group.dueLabels}}</text>
+                  </view>
+                  <text class="pe-inspect-group-count">{{group.selectedCount}}/{{group.count}}</text>
+                </view>
+              </view>
+
+              <!-- 展开内容：检查项 chips -->
+              <view class="pe-inspect-group-body {{group.optional ? 'pe-inspect-group-body--optional' : ''}}" wx:if="{{group.expanded}}">
+                <view class="pe-chip-group pe-chip-group-sm pe-chip-group--inspect">
+                  <view class="pe-chip pe-chip-sm {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'pe-chip-on' : ''}}"
+                        wx:for="{{group.items}}" wx:key="id" wx:for-item="item"
+                        data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-item-id="{{item.id}}"
+                        bindtap="onToggleInspectionItem">{{item.item_name}}</view>
+                </view>
+              </view>
+            </block>
+          </block>
+
+          <!-- 本站无适用检查项（ready 态且无任何分组时兜底） -->
+          <view class="pe-inspect-empty" wx:if="{{inspectionSiteStates[selectedSiteId].state === 'ready' && (!day.inspectionGroups[selectedSiteId] || day.inspectionGroups[selectedSiteId].length === 0)}}">
+            <text class="pe-inspect-empty-tx">本站当前设备没有适用检查项</text>
+          </view>
+        </block>
       </view>
-      <text class="pe-empty-line" wx:elif="{{inspectionItemsState === 'loading'}}">正在读取适用检查项…</text>
-      <view class="pe-retry-line" wx:elif="{{inspectionItemsState === 'unavailable'}}"
-            bindtap="loadInspectionItems">{{inspectionItemsError}}，点击重试</view>
-      <text class="pe-empty-line" wx:else>本站当前设备没有适用检查项</text>
     </block>
 
     <!-- 当日备注 -->
-    <textarea class="pe-textarea pe-textarea-sm" placeholder="当日备注（选填）" value="{{day.notes}}"
-      data-day-idx="{{di}}" bindinput="onDayNotes" maxlength="200" />
+    <view class="pe-day-notes">
+      <textarea class="pe-textarea pe-textarea-sm" placeholder="当日备注（选填）" value="{{day.notes}}"
+        data-day-idx="{{di}}" bindinput="onDayNotes" maxlength="200" />
+    </view>
   </view>
 
   <!-- 无作业日空态 -->
-  <view class="pe-card" wx:if="{{scheduleType !== 'weekly' && !days.length}}">
-    <view class="pe-empty-inline">
-      <view class="pe-empty-icon">
-        <view class="pe-empty-calendar"></view>
-      </view>
-      <text class="pe-empty-title">暂无作业日</text>
-      <text class="pe-empty-desc">点击上方"添加作业日"开始排程</text>
+  <view class="pe-card pe-empty-day-card" wx:if="{{scheduleType !== 'weekly' && !days.length}}">
+    <view class="pe-empty-icon">
+      <view class="pe-empty-calendar"></view>
     </view>
+    <text class="pe-empty-title">暂无作业日</text>
+    <text class="pe-empty-desc">点击上方"添加作业日"开始排程</text>
   </view>
 
-  <!-- 未覆盖站点提示（站点编辑完成后自然遇到） -->
-  <view class="pe-card" wx:if="{{coverageWarning}}">
-    <view class="pe-banner pe-banner-warning">
-      <text class="pe-banner-title">未覆盖站点</text>
-      <text class="pe-banner-text">{{coverageWarning}}</text>
-    </view>
-  </view>
-
-  <!-- Section 4: 备件配置 -->
-  <view class="pe-card">
-    <view class="pe-section-header">
-      <text class="pe-section-title">备件配置</text>
-      <text class="pe-section-sub">按站点实际情况选择</text>
-    </view>
-    <view class="pe-chip-group" wx:if="{{partsInventory.length}}">
-      <view class="pe-chip {{ft.partSelected(selectedParts, part.id) ? 'pe-chip-on' : ''}}"
-            wx:for="{{partsInventory}}" wx:key="id" wx:for-item="part"
-            data-part-id="{{part.id}}" bindtap="onTogglePart">
-        {{part.name}}
-        <text class="pe-chip-suffix">· 库存{{part.quantity}}{{part.unit}}</text>
+  <!-- ========== 区块③：漏站例外（仅存在漏站时以卡片呈现；全覆盖时轻量提示） ========== -->
+  <!-- 有漏站：完整卡片，未覆盖站点 + 原因输入同一上下文 -->
+  <view class="pe-card pe-coverage-card" wx:if="{{coverageRequired}}">
+    <view class="pe-coverage-head">
+      <text class="pe-section-title">漏站例外</text>
+      <view class="pe-coverage-badge pe-coverage-badge--warning">
+        <text class="pe-coverage-badge-tx">未覆盖 {{missingCount}} 站</text>
       </view>
     </view>
-    <text class="pe-empty-line" wx:elif="{{partsInventoryState === 'loading'}}">正在读取可用备件库存…</text>
-    <view class="pe-retry-line" wx:elif="{{partsInventoryState === 'unavailable'}}" bindtap="loadPartsInventory">
-      暂时无法读取备件库存，<text class="pe-retry-link">点击重试</text>
+
+    <view class="pe-missing-sites">
+      <text class="pe-missing-name" wx:for="{{missingSiteList}}" wx:key="*this" wx:for-item="name">{{name}}</text>
     </view>
-    <view class="pe-empty-inline-sm" wx:else>
-      <text class="pe-empty-line">当前没有可用备件库存</text>
-      <text class="pe-empty-sub">可先保存计划，提交后按需发起备件申请</text>
+    <textarea
+      id="plan-coverage-reason"
+      focus="{{focusedErrorField === 'coverage_exception_reason'}}"
+      class="pe-textarea {{fieldErrors.coverage_exception_reason ? 'pe-textarea--error' : ''}}"
+      placeholder="{{coverageRequired ? '请说明漏站原因，如封路、站点停运或应急调度' : '如有漏站请说明原因（选填）'}}"
+      value="{{coverageExceptionReason}}"
+      bindinput="onCoverageExceptionReason"
+      maxlength="200"
+    />
+    <view class="pe-field-error" wx:if="{{fieldErrors.coverage_exception_reason}}">
+      <view class="pe-error-icon"></view>
+      <text class="pe-error-text">{{fieldErrors.coverage_exception_reason}}</text>
     </view>
   </view>
 
-  <!-- Section 5: 计划备注 -->
-  <view class="pe-card">
-    <text class="pe-section-title">备注</text>
-    <textarea class="pe-textarea" placeholder="补充说明，如特殊安排、注意事项等" value="{{remarks}}" bindinput="onRemarks" maxlength="200" />
+  <!-- 全覆盖：轻量行内提示，不打断主任务 -->
+  <view class="pe-coverage-ok-line" wx:elif="{{scheduleType === 'weekly' && !missingCount}}">
+    <view class="pe-coverage-check"></view>
+    <text class="pe-coverage-ok-tx">全部站点已覆盖</text>
   </view>
 
-  <!-- 漏站例外说明（仅周检） -->
-  <view class="pe-card" wx:if="{{scheduleType === 'weekly'}}">
-    <text class="pe-section-title">漏站例外说明</text>
-    <textarea class="pe-textarea" placeholder="如遇封路、站点停运或应急调度，请说明原因" value="{{coverageExceptionReason}}" bindinput="onCoverageExceptionReason" maxlength="200" />
+  <!-- ========== 区块④：备件配置（默认收起，低优先级） ========== -->
+  <view class="pe-card pe-parts-card">
+    <view class="pe-collapse-head" bindtap="onToggleParts">
+      <view class="pe-collapse-left">
+        <text class="pe-section-title">备件配置</text>
+        <text class="pe-collapse-count" wx:if="{{selectedParts.length}}">已选 {{selectedParts.length}} 种</text>
+      </view>
+      <view class="pe-collapse-right">
+        <text class="pe-collapse-link">{{partsExpanded ? '收起' : '展开'}}</text>
+        <view class="pe-chevron pe-chevron-rotate-{{partsExpanded}}"></view>
+      </view>
+    </view>
+
+    <view class="pe-collapse-body" wx:if="{{partsExpanded}}">
+      <view class="pe-chip-group" wx:if="{{partsInventory.length}}">
+        <view class="pe-chip {{ft.partSelected(selectedParts, part.id) ? 'pe-chip-on' : ''}}"
+              wx:for="{{partsInventory}}" wx:key="id" wx:for-item="part"
+              data-part-id="{{part.id}}" bindtap="onTogglePart">
+          {{part.name}}
+          <text class="pe-chip-suffix">· 库存{{part.quantity}}{{part.unit}}</text>
+        </view>
+      </view>
+      <view class="pe-inspect-loading" wx:elif="{{partsInventoryState === 'loading'}}">
+        <view class="pe-inspect-loading-dot"></view>
+        <text class="pe-inspect-loading-tx">正在读取可用备件库存…</text>
+      </view>
+      <view class="pe-inspect-retry" wx:elif="{{partsInventoryState === 'unavailable'}}" bindtap="loadPartsInventory">
+        <text class="pe-inspect-retry-tx">暂时无法读取备件库存</text>
+        <text class="pe-inspect-retry-link">，点击重试</text>
+      </view>
+      <view class="pe-parts-empty" wx:else>
+        <text class="pe-parts-empty-tx">当前没有可用备件库存</text>
+        <text class="pe-parts-empty-sub">可先保存计划，提交后按需发起备件申请</text>
+      </view>
+    </view>
   </view>
 
-  <!-- 排程参考 -->
+  <!-- ========== 区块⑤：备注（低优先级） ========== -->
+  <view class="pe-card pe-remark-card">
+    <view class="pe-collapse-head" bindtap="onToggleRemark">
+      <view class="pe-collapse-left">
+        <text class="pe-section-title">备注</text>
+        <text class="pe-collapse-count" wx:if="{{remarks}}">已填写</text>
+      </view>
+      <view class="pe-collapse-right">
+        <text class="pe-collapse-link">{{remarkExpanded ? '收起' : '展开'}}</text>
+        <view class="pe-chevron pe-chevron-rotate-{{remarkExpanded}}"></view>
+      </view>
+    </view>
+    <view class="pe-collapse-body" wx:if="{{remarkExpanded}}">
+      <textarea class="pe-textarea pe-textarea-sm" placeholder="补充说明，如特殊安排、注意事项等" value="{{remarks}}" bindinput="onRemarks" maxlength="200" />
+    </view>
+  </view>
+
+  <!-- 排程参考（低频辅助信息，保持折叠） -->
   <view class="pe-card" wx:if="{{displaySuggestions.length}}">
     <view class="pe-section-header pe-section-header-expand" bindtap="onToggleSchedulingReference">
       <view class="pe-section-header-left">
@@ -296,16 +416,6 @@
 
 <!-- 加载骨架屏 -->
 <view class="pe-page pe-page-loading" wx:if="{{detailState === 'loading'}}">
-  <view class="pe-nav-wrap">
-    <custom-navbar showBorder="{{true}}">
-      <view slot="left" class="pe-nav-left-group">
-        <view class="pe-nav-back" data-action="back" bindtap="onNavBack">
-          <view class="pe-nav-back-icon"></view>
-        </view>
-        <text class="pe-nav-title">{{editId ? '编辑计划' : '新建计划'}}</text>
-      </view>
-    </custom-navbar>
-  </view>
   <view class="pe-skeleton-group">
     <view class="pe-card pe-skeleton-card">
       <view class="pe-skeleton-line pe-skeleton-line-sm"></view>
@@ -315,6 +425,7 @@
     </view>
     <view class="pe-card pe-skeleton-card">
       <view class="pe-skeleton-line pe-skeleton-line-sm"></view>
+      <view class="pe-skeleton-line pe-skeleton-line-md"></view>
       <view class="pe-skeleton-line pe-skeleton-line-lg"></view>
     </view>
     <view class="pe-card pe-skeleton-card">
@@ -327,16 +438,6 @@
 
 <!-- 详情加载失败 -->
 <view class="pe-page" wx:if="{{detailState === 'error'}}">
-  <view class="pe-nav-wrap">
-    <custom-navbar showBorder="{{true}}">
-      <view slot="left" class="pe-nav-left-group">
-        <view class="pe-nav-back" data-action="back" bindtap="onNavBack">
-          <view class="pe-nav-back-icon"></view>
-        </view>
-        <text class="pe-nav-title">编辑计划</text>
-      </view>
-    </custom-navbar>
-  </view>
   <view class="pe-card">
     <view class="pe-banner pe-banner-error">
       <text class="pe-banner-title">计划详情加载失败</text>

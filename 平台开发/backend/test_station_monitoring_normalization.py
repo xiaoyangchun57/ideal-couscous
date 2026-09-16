@@ -639,7 +639,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
     def test_station_monitoring_overview_permissions_and_missing_site(self):
         client = web_app.app.test_client()
         operator = self._headers('monitor-operator')
-        self.assertFalse(client.get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=operator).get_json()['site']['can_calibrate'])
+        self.assertTrue(client.get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=operator).get_json()['site']['can_calibrate'])
         self.assertEqual(client.get(f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=operator).status_code, 403)
         self.assertEqual(client.get('/api/station-monitoring/sites/99999/overview', headers=self._headers('monitor-admin')).status_code, 404)
 

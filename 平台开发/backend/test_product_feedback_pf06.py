@@ -14,6 +14,49 @@ import app as app_module
 
 
 class ProductFeedbackPf06Test(unittest.TestCase):
+    def test_new_plan_weekly_authority_keeps_historical_frequencies_and_creation_replay(self):
+        from test_plan_resource_archive_flow import PlanResourceArchiveFlowTest
+        fixture = PlanResourceArchiveFlowTest()
+        fixture.setUp()
+        try:
+            headers = fixture.headers('operator-token')
+            for frequency in ('monthly', 'quarterly', 'yearly'):
+                payload = fixture.creation_payload(key='new-' + frequency)
+                payload['schedule_type'] = frequency
+                response = fixture.client.post('/api/plan-schedules', headers=headers, json=payload)
+                self.assertEqual((response.status_code, response.json['code']), (400,'PLAN_CREATE_FREQUENCY_INVALID'))
+            with fixture.db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0], 0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedule_events').fetchone()[0], 0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_creation_intents').fetchone()[0], 0)
+            for sid, frequency in enumerate(('monthly','quarterly','yearly'), 950):
+                fixture.add_submitted_schedule(sid, vehicle_id=None, no_vehicle_reason='步行')
+                with fixture.db() as db:
+                    db.execute("UPDATE plan_schedules SET status='draft',schedule_type=? WHERE id=?", (frequency,sid))
+                detail = fixture.client.get(f'/api/plan-schedules/{sid}',headers=headers)
+                self.assertEqual(detail.status_code,200,detail.json)
+                self.assertEqual(detail.json['schedule_type'],frequency)
+                updated = fixture.client.put(f'/api/plan-schedules/{sid}',headers=headers,json={'version':1,'remarks':'保留历史频次'})
+                self.assertEqual(updated.status_code,200,updated.json)
+                with fixture.db() as db:
+                    self.assertEqual(db.execute('SELECT schedule_type FROM plan_schedules WHERE id=?',(sid,)).fetchone()[0],frequency)
+            payload = fixture.creation_payload(key='weekly-intent')
+            payload.update(schedule_type='weekly',coverage_exception_reason='本周只安排测试站一')
+            first = fixture.client.post('/api/plan-schedules',headers=headers,json=payload)
+            self.assertEqual(first.status_code,201,first.json)
+            with fixture.db() as db:
+                notifications = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+            replay = fixture.client.post('/api/plan-schedules',headers=headers,json=payload)
+            self.assertEqual(replay.status_code,200,replay.json)
+            self.assertEqual((replay.json['id'],replay.json['status']),(first.json['id'],'submitted'))
+            conflict = fixture.client.post('/api/plan-schedules',headers=headers,json=dict(payload,remarks='changed'))
+            self.assertEqual((conflict.status_code,conflict.json['code']),(409,'PLAN_CREATE_INTENT_CONFLICT'))
+            with fixture.db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0],notifications)
+        finally:
+            fixture.tearDown()
+
     def setUp(self):
         handle = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
         handle.close()
@@ -100,6 +143,43 @@ class ProductFeedbackPf06Test(unittest.TestCase):
                        (template_id, '水质模板', '水质', 'monthly', '', 'active', 1))
             db.execute("INSERT INTO inspection_template_items (id,template_id,item_name,category,frequency_level,photo_required,sort_order) VALUES (?,?,?,?,?,?,?)",
                        (item_id, template_id, '浊度', '水质', 'mid', 1, 1))
+
+    def test_weekly_optional_items_preserve_frequency_counts_and_historical_snapshots(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO sites(id,code,name,type) VALUES (10,'S10','测试站','water_quality')")
+            db.execute('INSERT INTO user_sites VALUES (2,10)')
+            for index, frequency in enumerate(('weekly', 'monthly', 'quarterly', 'yearly'), 1):
+                db.execute('INSERT INTO inspection_templates VALUES (?,?,?,?,?,?,?)',
+                           (index, frequency, '水质', frequency, '', 'active', index))
+                db.execute('INSERT INTO inspection_template_items(id,template_id,item_name,category,photo_required,max_photos) VALUES (?,?,?,?,?,?)',
+                           (index * 10, index, frequency, '设备', 1, 1))
+            self.assertEqual([item['id'] for item in app_module._ps_site_template_items(db,10,'weekly')], [10])
+            data = {'2026-09-21': {'sites': [10], 'inspection_items': {'10': [10,20,30,20]}}}
+            normalized = app_module._ps_validate_item_selections(db, data, 'weekly')
+            self.assertEqual(normalized['2026-09-21']['inspection_items']['10'], [10,20,30])
+            self.assertEqual(app_module._ps_generatable_item_count(db,normalized,'weekly'),3)
+            self.assertEqual(app_module._ps_add_site_tasks(db,501,10,'weekly',[10,20,30]),3)
+            self.assertEqual([row[0] for row in db.execute('SELECT frequency FROM insp_plan_items WHERE plan_id=501 ORDER BY id')], ['weekly','monthly','quarterly'])
+            for invalid in ([40], [999], ['weekly'], [True], [10.5]):
+                with self.assertRaises(app_module.PlanScheduleSiteScopeError):
+                    app_module._ps_validate_item_selections(db, {'2026-09-21': {'sites':[10],'inspection_items':{'10':invalid}}}, 'weekly')
+            db.execute("UPDATE inspection_templates SET frequency='yearly' WHERE id=2")
+            self.assertEqual(db.execute('SELECT frequency FROM insp_plan_items WHERE plan_id=501 AND template_id=2').fetchone()[0], 'monthly')
+
+    def test_photo_minimum_rules_and_active_template_migration_are_idempotent(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO inspection_templates VALUES (1,'周检','水质','weekly','','active',1)")
+            cases = [('五参数仪器质控','质控校准',2,4), ('氨氮仪器质控','质控校准',2,1),
+                     ('门口','站房环境',1,2), ('配件','站房环境',4,4), ('其他','设备',3,3)]
+            for index,(name,category,current,expected) in enumerate(cases,1):
+                db.execute('INSERT INTO inspection_template_items(id,template_id,item_name,category,photo_required,max_photos) VALUES (?,1,?,?,1,?)', (index,name,category,current))
+                self.assertEqual(app_module._inspection_required_photos({'item_name':name,'category':category,'photo_required':1,'max_photos':current}),expected)
+            app_module._apply_inspection_photo_requirements(db)
+            self.assertEqual([row[0] for row in db.execute('SELECT max_photos FROM inspection_template_items ORDER BY id')], [4,1,2,4,3])
+            self.assertEqual(app_module._apply_inspection_photo_requirements(db),0)
+        self.assertIsNotNone(app_module.validate_submission_photos('normal',4,json.dumps(['/uploads/a.jpg'] * 3)))
+        self.assertIsNone(app_module.validate_submission_photos('normal',4,json.dumps(['/uploads/a.jpg'] * 4)))
+        self.assertIsNotNone(app_module.validate_submission_photos('normal',1,json.dumps(['/uploads/a.jpg'] * 7)))
 
     def test_template_config_and_item_history_are_delete_protected(self):
         self._insert_template()
@@ -205,13 +285,14 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             db.execute("INSERT INTO device_shadows VALUES (?,?,?,?)", (1, 10, 'pump', 'online'))
         weekly = self.client.get('/api/inspection-v2/configs/match?site_id=10&schedule_type=weekly', headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(weekly.status_code, 200, weekly.json)
-        self.assertEqual([item['id'] for item in weekly.json['items']], [11])
+        self.assertEqual([item['id'] for item in weekly.json['items']], [11, 12])
+        self.assertEqual([item['frequency'] for item in weekly.json['items']], ['weekly', 'monthly'])
         monthly = self.client.get('/api/inspection-v2/configs/match?site_id=10&schedule_type=monthly', headers=self.headers())
         self.assertEqual([item['id'] for item in monthly.json['items']], [12])
         with app_module.get_db() as db:
             db.execute("UPDATE device_shadows SET status='retired' WHERE id=1")
         retired = self.client.get('/api/inspection-v2/configs/match?site_id=10&schedule_type=weekly', headers=self.headers())
-        self.assertEqual([item['id'] for item in retired.json['items']], [11])
+        self.assertEqual([item['id'] for item in retired.json['items']], [11, 12])
         self.assertEqual(retired.json['device_types'], [])
         forbidden = self.client.get('/api/inspection-v2/configs/match?site_id=11&schedule_type=weekly', headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(forbidden.status_code, 403, forbidden.json)
@@ -421,6 +502,7 @@ class ProductFeedbackPf06Test(unittest.TestCase):
                        (88, 1, 'draft', '2026-08-20', '2026-08-20', '{}', '{}', '[]', '[]', 1))
         response = self.client.put('/api/plan-schedules/88', headers=self.headers(), json={
             'version': 1, 'vehicle_id': 7, 'vehicle_days': [],
+            'no_vehicle_required': False,
         })
         self.assertEqual(response.status_code, 400, response.json)
         self.assertEqual(response.json['code'], 'PLAN_RESOURCE_DATA_INVALID')
@@ -434,9 +516,12 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             self.assertFalse(app_module._table_has_column(db, 'plan_schedules', 'vehicle_id'))
             self.assertTrue(app_module._ensure_plan_schedule_vehicle_column(db))
             self.assertTrue(app_module._table_has_column(db, 'plan_schedules', 'vehicle_id'))
-            db.execute("INSERT INTO plan_schedules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute("""INSERT INTO plan_schedules
+                (id,user_id,status,period_start,period_end,created_at,tasks_generated,
+                 plan_data,vehicle_days,spare_parts,work_order_ids,vehicle_id,no_vehicle_required)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (100, 1, 'draft', '2026-08-01', '2026-08-07', '2026-08-01', 0,
-                        '{}', '{"2026-08-01": 8}', '[]', '[]', 8))
+                        '{}', '{"2026-08-01": 8}', '[]', '[]', 8, 0))
             row = db.execute('SELECT vehicle_id, vehicle_days FROM plan_schedules WHERE id=100').fetchone()
         self.assertEqual(row['vehicle_id'], 8)
         self.assertEqual(json.loads(row['vehicle_days']), {'2026-08-01': 8})

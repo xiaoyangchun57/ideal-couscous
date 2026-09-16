@@ -69,6 +69,7 @@ const original = {
 
 async function main() {
   try {
+    api.subscriptionTemplates = () => Promise.resolve({ templates: [] });
     api.notifications = () => Promise.resolve({ notifications: [] });
     let exactNotificationId = null;
     let focusedReadCount = 0;
@@ -241,6 +242,10 @@ async function main() {
     api.bindOpenId = () => Promise.resolve({ success: true, bound: true });
     const subscribePage = pageInstance();
     subscribePage.onSubscribe();
+    assert.equal(subscriptions.length, 0, 'no authorization before template preload');
+    await subscribePage.preloadSubscriptionTemplates();
+    subscribePage.onSubscribe();
+    assert.equal(subscriptions.length, 1, 'authorization executes synchronously in the click stack');
     subscribePage.onSubscribe();
     await flush();
     assert.equal(subscriptions.length, 1, 'subscription requests are also gated');
@@ -261,13 +266,15 @@ async function main() {
 
     api.subscriptionTemplates = () => Promise.resolve({ templates: [
       { purpose: 'alert', template_id: alertTemplate },
-      { purpose: 'approval_pending', template_id: 'pending-template' },
+      { purpose: 'approval_pending', template_id: resultTemplate },
       { purpose: 'approval_result', template_id: resultTemplate }
     ] });
     api.bindOpenId = () => Promise.resolve({ success: true, bound: true });
+    await subscribePage.preloadSubscriptionTemplates();
     subscribePage.onSubscribe();
     await flush();
     const allAccepted = subscriptions.pop();
+    assert.deepEqual(allAccepted.tmplIds, [alertTemplate, resultTemplate], 'shared approval ID deduplicated');
     allAccepted.success({ [alertTemplate]: 'accept', 'pending-template': 'accept', [resultTemplate]: 'accept' });
     logins.pop().success({ code: 'wx-code-all' });
     await flush();
@@ -293,6 +300,7 @@ async function main() {
       assert.equal(toasts.at(-1).title, title);
       assert.equal(subscribePage._lastSubscribeFailure.category, category);
       assert.equal(subscribePage._lastSubscribeFailure.errCode, String(errCode));
+      assert.equal(subscribePage._lastSubscribeFailure.errMsg, 'wechat failure');
     }
 
     subscribePage.onSubscribe();
@@ -300,8 +308,29 @@ async function main() {
     subscriptions.pop().fail({ errCode: 99999, errMsg: 'unexpected' });
     assert.equal(toasts.at(-1).title, '订阅失败，请重试');
     assert.equal(subscribePage._lastSubscribeFailure.errCode, '99999');
+    subscribePage.onSubscribe();
+    subscriptions.pop().fail({ errCode: 10005, errMsg: 'must be invoked by user tap gesture' });
+    assert.equal(subscribePage._lastSubscribeFailure.category, 'USER_GESTURE_REQUIRED');
+    assert.equal(subscribePage._lastSubscribeFailure.errMsg, 'must be invoked by user tap gesture');
+
+    const delayedConfig = deferred();
+    api.subscriptionTemplates = () => delayedConfig.promise;
+    const configPage = pageInstance();
+    const configPromise = configPage.preloadSubscriptionTemplates();
+    await flush();
+    configPage.onUnload();
+    delayedConfig.resolve({ templates: [{ purpose: 'alert', template_id: alertTemplate }] });
+    await configPromise;
+    assert.equal(configPage._subscriptionTemplates, null, 'unloaded preload response discarded');
+
+    api.subscriptionTemplates = () => Promise.reject({ code: 'NETWORK_TIMEOUT', error: 'template network timeout' });
+    await subscribePage.preloadSubscriptionTemplates();
+    assert.equal(subscribePage._lastSubscribeFailure.category, 'CONFIG_LOAD_FAILED');
+    assert.equal(subscribePage._lastSubscribeFailure.errCode, 'NETWORK_TIMEOUT');
+    assert.equal(subscribePage._lastSubscribeFailure.errMsg, 'template network timeout');
 
     api.subscriptionTemplates = () => Promise.resolve({ templates: [] });
+    await subscribePage.preloadSubscriptionTemplates();
     subscribePage.onSubscribe();
     await flush();
     assert.equal(toasts.at(-1).title, '订阅配置加载失败，请重试');
@@ -310,6 +339,7 @@ async function main() {
       { purpose: 'alert', template_id: alertTemplate }
     ] });
     api.bindOpenId = () => Promise.resolve({ success: true, bound: false, warn: '绑定未完成' });
+    await subscribePage.preloadSubscriptionTemplates();
     subscribePage.onSubscribe();
     await flush();
     subscriptions.pop().success({ [alertTemplate]: 'accept' });
@@ -335,6 +365,7 @@ async function main() {
     assert.equal(toasts.at(-1).title, '微信账号绑定失败，请重试');
 
     const hiddenSubscribePage = pageInstance();
+    await hiddenSubscribePage.preloadSubscriptionTemplates();
     hiddenSubscribePage.onSubscribe();
     await flush();
     const hiddenRequest = subscriptions.pop();
@@ -342,6 +373,16 @@ async function main() {
     hiddenSubscribePage.onHide();
     hiddenRequest.success({ [alertTemplate]: 'accept' });
     assert.equal(logins.length, loginCount, 'an unloaded page never starts openid binding');
+    const hiddenLoginPage = pageInstance();
+    await hiddenLoginPage.preloadSubscriptionTemplates();
+    let binds = 0;
+    api.bindOpenId = () => { binds += 1; return Promise.resolve({ bound: true }); };
+    hiddenLoginPage.onSubscribe();
+    subscriptions.pop().success({ [alertTemplate]: 'accept' });
+    const lateLogin = logins.pop();
+    hiddenLoginPage.onUnload();
+    lateLogin.success({ code: 'late-login' });
+    assert.equal(binds, 0, 'unloaded login callback cannot bind openid');
     assert.doesNotMatch(JSON.stringify(toasts.concat(modals)), /message\.js|SUBSCRIBE_TMPL|公众平台|模板 ID/);
 
     console.log('messageConnection tests passed');

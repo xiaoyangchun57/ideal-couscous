@@ -81,13 +81,15 @@ function reconcilePeriodDays(start, end, existing, fillRange) {
   });
 }
 
-function initializeInspectionItemSelections(days, options) {
+function initializeInspectionItemSelections(days, options, scheduleType = 'weekly') {
   return (days || []).map(day => {
     const selected = Object.assign({}, day.inspection_items || {});
     (day.sites || []).forEach(siteId => {
       const key = String(siteId);
-      if (!(key in selected)) {
-        selected[key] = (options && options[siteId] || []).map(item => Number(item.id));
+      if (!(key in selected) && options && Object.prototype.hasOwnProperty.call(options, siteId)) {
+        selected[key] = (options && options[siteId] || [])
+          .filter(item => !item.frequency || item.frequency === scheduleType)
+          .map(item => Number(item.id));
       }
     });
     return Object.assign({}, day, { inspection_items: selected });
@@ -104,6 +106,28 @@ function dayHasBusinessContent(day) {
         && Object.keys(inspectionItems).some(key => Array.isArray(inspectionItems[key])
           ? inspectionItems[key].length > 0 : !!inspectionItems[key]))
   ));
+}
+
+function inspectionGroupsForDays(days, options, scheduleType) {
+  return (days || []).map(day => {
+    const groups = {};
+    (day.sites || []).forEach(siteId => {
+      const selected = new Set((day.inspection_items && day.inspection_items[siteId] || []).map(Number));
+      groups[siteId] = (scheduleType === 'weekly' ? ['weekly', 'monthly', 'quarterly'] : [scheduleType]).map(frequency => {
+        const items = (options[siteId] || []).filter(item => (item.frequency || scheduleType) === frequency);
+        const overdue = items.filter(item => item.due_status === 'overdue').length;
+        const soon = items.filter(item => item.due_status === 'due_soon').length;
+        return {
+          frequency, label: SCHEDULE_LABELS[frequency], optional: frequency !== scheduleType,
+          expanded: frequency === scheduleType || !!(day.expandedInspectionGroups && day.expandedInspectionGroups[siteId + ':' + frequency]),
+          count: items.length, selectedCount: items.filter(item => selected.has(Number(item.id))).length,
+          dueLabels: frequency === 'weekly' ? '' : [overdue ? overdue + '项已到期' : '',
+            soon ? soon + '项临近周期' : ''].filter(Boolean).join('；'), items
+        };
+      }).filter(group => group.count > 0);
+    });
+    return Object.assign({}, day, { inspectionGroups: groups });
+  });
 }
 
 function planSubmitFingerprint(payload) {
@@ -232,8 +256,6 @@ Page({
     editId: null,
     version: null,
     scheduleType: 'weekly',
-    scheduleTypeOptions: ['周检', '月检', '季检', '年检'],
-    typeKeys: ['weekly', 'monthly', 'quarterly', 'yearly'],
     periodStart: '',
     periodEnd: '',
     days: [],           // [{date, weekday_cn, sites:[], vehicle_id:null}]
@@ -247,12 +269,15 @@ Page({
     displaySuggestions: [],
     referenceSummary: '',
     referenceExpanded: false,
+    partsExpanded: false,
+    remarkExpanded: false,
     siteScores: {},     // {site_id: score}
     templateContext: [],
     templateSummaries: [],
     inspectionItemOptions: {},
     inspectionItemsState: 'idle', // idle | loading | ready | unavailable
     inspectionItemsError: '',
+    inspectionSiteStates: {},
     coverageWarning: '',
     remarks: '',
     coverageExceptionReason: '',
@@ -276,6 +301,7 @@ Page({
     this._pageActive = true;
     this._detailLoadRequestId = 0;
     this._detailLoadPending = false;
+    this.setPageTitle(opts.id ? '编辑计划' : '新建计划');
     if (!app.globalData.token) {
       wx.reLaunch({ url: '/pages/login/login' });
       return;
@@ -296,8 +322,16 @@ Page({
     this.loadSuggestions();
   },
 
+  setPageTitle(title) {
+    if (wx.setNavigationBarTitle) wx.setNavigationBarTitle({ title });
+  },
+
   onShow() {
     this._pageActive = true;
+    if (this._inspectionReloadNeeded && this.data.detailState === 'ready') {
+      this._inspectionReloadNeeded = false;
+      this.loadInspectionItems();
+    }
     if (this.data.editId && this.data.detailState === 'loading' && !this._detailLoadPending) {
       this.loadExisting(this.data.editId);
     }
@@ -305,13 +339,19 @@ Page({
 
   onHide() {
     this._pageActive = false;
+    this._validationSerial = (this._validationSerial || 0) + 1;
+    if (this._validationTimer) clearTimeout(this._validationTimer);
+    this._inspectionReloadNeeded = Object.values(this.data.inspectionSiteStates).some(state => state.state === 'loading');
+    this._inspectionItemsRequest = (this._inspectionItemsRequest || 0) + 1;
     this._detailLoadRequestId = (this._detailLoadRequestId || 0) + 1;
     this._detailLoadPending = false;
   },
 
   onUnload() {
     this._pageAlive = false;
+    this._validationSerial = (this._validationSerial || 0) + 1;
     this._pageActive = false;
+    this._inspectionItemsRequest = (this._inspectionItemsRequest || 0) + 1;
     this._detailLoadRequestId = (this._detailLoadRequestId || 0) + 1;
     this._detailLoadPending = false;
     if (this._validationTimer) clearTimeout(this._validationTimer);
@@ -334,24 +374,6 @@ Page({
   },
 
   // 切换频次（仅新建时可切换；编辑已有排程锁定频次）
-  onFreqChip(e) {
-    if (this.data.editId) return;
-    const type = e.currentTarget.dataset.type;
-    if (type === this.data.scheduleType) return;
-    const idx = this.data.typeKeys.indexOf(type);
-    if (idx < 0) return;
-    this.initPeriod(type);
-    this.loadSuggestions(type);
-  },
-
-  onTypeChange(e) {
-    if (this.data.editId) return;
-    const idx = parseInt(e.detail.value);
-    const type = this.data.typeKeys[idx];
-    this.initPeriod(type);
-    this.loadSuggestions(type);
-  },
-
   // 月、季、年选择实际执行日期；周检日期由周期自动生成。
   onAddDay(e) {
     if (this.data.scheduleType === 'weekly') return;
@@ -450,6 +472,7 @@ Page({
         });
         const days = withDaySiteSelectionState(
           reconcilePeriodDays(start, end, existingDays, type === 'weekly'), this.data.mySites);
+        const resolvedVehicleId = res.vehicle_id || (legacyVehicleIds.length === 1 ? legacyVehicleIds[0] : null);
         this.setData({
           loaded: true,
           detailState: 'ready',
@@ -467,13 +490,14 @@ Page({
           siteNameById: projectSiteNameMap(res.site_map, this.data.mySites),
           remarks: res.remarks || '',
           coverageExceptionReason: res.coverage_exception_reason || '',
-          noVehicleRequired: !!res.vehicle_exception_reason,
-          planVehicleId: res.vehicle_id || (legacyVehicleIds.length === 1 ? legacyVehicleIds[0] : null),
+          noVehicleRequired: !!res.no_vehicle_required,
+          planVehicleId: resolvedVehicleId,
           vehicleExceptionReason: res.vehicle_exception_reason || '',
           isChange: res.status === 'modifying',
           changeReason: res.change_reason || ''
         }, () => {
           if (!isCurrent()) return;
+          this.setPageTitle(res.status === 'modifying' ? '计划变更' : '编辑计划');
           this.loadVehicles();
           this.loadInspectionItems();
         });
@@ -593,36 +617,57 @@ Page({
     this.setData({ ['days[' + dayIdx + '].notes']: e.detail.value }, () => this.refreshValidation());
   },
 
-  loadInspectionItems() {
-    const requestId = (this._inspectionItemsRequest || 0) + 1;
-    this._inspectionItemsRequest = requestId;
+  projectInspectionState() {
+    const ids = [...new Set(this.data.days.flatMap(day => day.sites || []).map(Number))];
+    const states = ids.map(id => (this.data.inspectionSiteStates[id] || {}).state || 'loading');
+    const confirmed = {};
+    ids.forEach(id => {
+      const state = this.data.inspectionSiteStates[id];
+      if (state && state.state === 'ready' && state.frequency === this.data.scheduleType) confirmed[id] = this.data.inspectionItemOptions[id] || [];
+    });
+    this.setData({ inspectionItemsState: states.includes('unavailable') ? 'unavailable'
+      : states.includes('loading') ? 'loading' : 'ready',
+      inspectionItemsError: states.includes('unavailable') ? '部分站点检查项加载失败，请重试该站点' : '',
+      days: inspectionGroupsForDays(initializeInspectionItemSelections(this.data.days, confirmed, this.data.scheduleType),
+        this.data.inspectionItemOptions, this.data.scheduleType) });
+  },
+
+  loadInspectionItems(event) {
+    this.updateFieldGuidance();
+    const requestId = this._inspectionItemsRequest || 0;
     const siteIds = [...new Set((this.data.days || []).flatMap(day => day.sites || []).map(Number).filter(Boolean))];
-    if (!siteIds.length) {
-      this.setData({ inspectionItemOptions: {}, inspectionItemsState: 'ready', inspectionItemsError: '' });
-      return;
-    }
-    const pendingOptions = {};
-    siteIds.forEach(siteId => { pendingOptions[siteId] = this.data.inspectionItemOptions[siteId] || []; });
-    this.setData({ inspectionItemOptions: pendingOptions, inspectionItemsState: 'loading', inspectionItemsError: '' });
     const scheduleType = this.data.scheduleType;
-    Promise.all(siteIds.map(siteId => api.inspectionConfigMatches(siteId, scheduleType)
-      .then(result => [siteId, Array.isArray(result && result.items) ? result.items : []])))
-      .then(entries => {
-        if (requestId !== this._inspectionItemsRequest) return;
-        const inspectionItemOptions = {};
-        entries.forEach(([siteId, items]) => { inspectionItemOptions[siteId] = items; });
-        this.setData({
-          inspectionItemOptions,
-          days: initializeInspectionItemSelections(this.data.days, inspectionItemOptions),
-          inspectionItemsState: 'ready',
-          inspectionItemsError: ''
-        });
-      })
-      .catch(err => {
-        if (requestId !== this._inspectionItemsRequest) return;
-        this.setData({ inspectionItemOptions: {}, inspectionItemsState: 'unavailable',
-          inspectionItemsError: (err && (err.error || err.message)) || '检查项加载失败，请重试后再保存' });
+    const retryId = Number(event && event.currentTarget && event.currentTarget.dataset.siteId);
+    this._inspectionSiteSerials = this._inspectionSiteSerials || {};
+    const requests = siteIds.filter(siteId => retryId ? siteId === retryId
+      : !this.data.inspectionSiteStates[siteId] || this.data.inspectionSiteStates[siteId].frequency !== scheduleType
+        || this.data.inspectionSiteStates[siteId].state !== 'ready');
+    return Promise.all(requests.map(siteId => {
+      const serial = (this._inspectionSiteSerials[siteId] || 0) + 1;
+      this._inspectionSiteSerials[siteId] = serial;
+      this.setData({ inspectionSiteStates: Object.assign({}, this.data.inspectionSiteStates,
+        { [siteId]: { state: 'loading', error: '', frequency: scheduleType } }) });
+      const current = () => this._pageAlive !== false && requestId === (this._inspectionItemsRequest || 0)
+        && serial === this._inspectionSiteSerials[siteId] && scheduleType === this.data.scheduleType
+        && this.data.days.some(day => (day.sites || []).map(Number).includes(siteId));
+      this.projectInspectionState();
+      return Promise.resolve().then(() => api.inspectionConfigMatches(siteId, scheduleType)).then(result => {
+        if (!current()) return;
+        if (!result || !Array.isArray(result.items)) throw { error: '站点检查项响应不完整，请重试' };
+        const inspectionItemOptions = Object.assign({}, this.data.inspectionItemOptions, { [siteId]: result.items });
+        this.setData({ inspectionItemOptions,
+          days: initializeInspectionItemSelections(this.data.days, { [siteId]: result.items }, scheduleType),
+          inspectionSiteStates: Object.assign({}, this.data.inspectionSiteStates,
+            { [siteId]: { state: 'ready', error: '', frequency: scheduleType } }) });
+        this.projectInspectionState();
+      }).catch(error => {
+        if (!current()) return;
+        this.setData({ inspectionSiteStates: Object.assign({}, this.data.inspectionSiteStates,
+          { [siteId]: { state: 'unavailable', frequency: scheduleType,
+            error: (error && (error.error || error.message)) || '检查项加载失败，请重试' } }) });
+        this.projectInspectionState();
       });
+    })).then(() => { if (this._pageAlive !== false && requestId === (this._inspectionItemsRequest || 0)) this.projectInspectionState(); });
   },
 
   onToggleInspectionItem(e) {
@@ -635,13 +680,28 @@ Page({
     const position = ids.indexOf(Number(itemId));
     if (position >= 0) ids.splice(position, 1); else ids.push(Number(itemId));
     selected[key] = ids;
-    this.setData({ ['days[' + dayIdx + '].inspection_items']: selected }, () => this.refreshValidation());
+    const days = this.data.days.slice();
+    days[dayIdx] = Object.assign({}, day, { inspection_items: selected });
+    this.setData({ days: inspectionGroupsForDays(days, this.data.inspectionItemOptions, this.data.scheduleType) }, () => this.refreshValidation());
+  },
+
+  onToggleInspectionGroup(e) {
+    const { dayIdx, siteId, frequency } = e.currentTarget.dataset;
+    const days = this.data.days.slice();
+    const day = days[dayIdx];
+    if (!day) return;
+    const expanded = Object.assign({}, day.expandedInspectionGroups || {});
+    expanded[siteId + ':' + frequency] = !expanded[siteId + ':' + frequency];
+    days[dayIdx] = Object.assign({}, day, { expandedInspectionGroups: expanded });
+    this.setData({ days: inspectionGroupsForDays(days, this.data.inspectionItemOptions, this.data.scheduleType) });
   },
 
   onPlanVehicleChange(e) {
     const idx = parseInt(e.detail.value);
     const vehicleId = idx >= 0 && this.data.vehicles[idx] ? this.data.vehicles[idx].id : null;
-    this.setData({ planVehicleId: vehicleId }, () => this.refreshValidation());
+    const updates = { planVehicleId: vehicleId };
+    if (vehicleId) updates.vehicleExceptionReason = '';
+    this.setData(updates, () => this.refreshValidation());
   },
 
   onTogglePart(e) {
@@ -663,7 +723,7 @@ Page({
   },
 
   onCoverageExceptionReason(e) {
-    this.setData({ coverageExceptionReason: e.detail.value });
+    this.setData({ coverageExceptionReason: e.detail.value }, () => this.refreshValidation());
   },
 
   onVehicleModeSelect(e) {
@@ -672,8 +732,6 @@ Page({
     if (enabled) {
       updates.days = this.data.days.map(day => Object.assign({}, day, { vehicle_id: null }));
       updates.planVehicleId = null;
-    } else {
-      updates.vehicleExceptionReason = '';
     }
     this.setData(updates, () => this.refreshValidation());
   },
@@ -681,6 +739,9 @@ Page({
   onToggleSchedulingReference() {
     this.setData({ referenceExpanded: !this.data.referenceExpanded });
   },
+
+  onToggleParts() { this.setData({ partsExpanded: !this.data.partsExpanded }); },
+  onToggleRemark() { this.setData({ remarkExpanded: !this.data.remarkExpanded }); },
 
   onNavBack() {
     if (this._navBackPending) {
@@ -731,17 +792,18 @@ Page({
       .filter(s => s.type === 'work_order' && selectedSiteIds.has(Number(s.site_id)) && s.ref_id)
       .map(s => s.ref_id);
     return {
-      schedule_type: scheduleType,
+      schedule_type: this.data.editId ? scheduleType : 'weekly',
       period_start: periodStart,
       period_end: periodEnd,
       plan_data: planData,
       vehicle_days: vehicleDays,
       vehicle_id: noVehicleRequired ? null : (planVehicleId || null),
+      no_vehicle_required: !!noVehicleRequired,
       spare_parts: selectedParts,
       work_order_ids: Array.from(new Set(linkedWorkOrderIds)),
       remarks: remarks,
       coverage_exception_reason: coverageExceptionReason,
-      vehicle_exception_reason: noVehicleRequired ? vehicleExceptionReason.trim() : '',
+      vehicle_exception_reason: planVehicleId ? '' : vehicleExceptionReason.trim(),
       submit: !!submit,
       ...(this.data.editId ? { version } : {})
     };
@@ -749,28 +811,138 @@ Page({
 
   // 将后端结构化风险直接挂到对应日期，避免用户只看到文字后再手工查找站点。
   applyValidation(vr) {
-    const details = vr.warning_details || [];
+    const details = (vr.error_details || []).concat(vr.warning_details || []);
     const byDate = {};
-    let coverageWarning = '';
+    const routesByDate = {};
     details.forEach(w => {
-      if (w.type === 'coverage_missing') coverageWarning = w.text;
-      if (w.date) (byDate[w.date] || (byDate[w.date] = [])).push(w.text);
+      if (w.date && w.type === 'route_backtrack' && Array.isArray(w.suggested_site_names)) {
+        (routesByDate[w.date] || (routesByDate[w.date] = [])).push({
+          orderText: '建议顺序：' + w.suggested_site_names.join(' → '),
+          metaText: Number.isFinite(Number(w.estimated_distance_saved_km))
+            ? '预计少绕行约 ' + Number(w.estimated_distance_saved_km).toFixed(1) + ' km · 按站点位置估算'
+            : '按站点位置估算',
+        });
+      } else if (w.date && !['vehicle_id', 'vehicle_days'].includes(w.field)) {
+        (byDate[w.date] || (byDate[w.date] = [])).push(w.text);
+      }
     });
-    const days = this.data.days.map(d => Object.assign({}, d, { warning_text: (byDate[d.date] || []).join('\n') }));
-    this.setData({ days, coverageWarning });
+    const days = this.data.days.map(d => Object.assign({}, d, {
+      warning_text: (byDate[d.date] || []).join('\n'),
+      route_suggestions: routesByDate[d.date] || [],
+    }));
+    this.setData({ days });
   },
 
   refreshValidation() {
+    this.updateFieldGuidance();
+    const validationSerial = (this._validationSerial || 0) + 1;
+    this._validationSerial = validationSerial;
     if (this._validationTimer) clearTimeout(this._validationTimer);
     this._validationTimer = setTimeout(() => {
       const payload = this.buildPayload(false);
       api.validatePlanSchedule(Object.assign({ user_id: (getUser() || {}).id }, payload))
-        .then(vr => this.applyValidation(vr || {}))
+        .then(vr => {
+          if (validationSerial === this._validationSerial) this.applyValidation(vr || {});
+        })
         .catch(() => {});
     }, 250);
   },
 
   // 提交审批
+  createNewPlan(payload) {
+    const actorId = (getUser() || {}).id;
+    const fingerprint = JSON.stringify([actorId, payload]);
+    if (!this._newCreationIntent || this._newCreationIntent.fingerprint !== fingerprint) {
+      this._newCreationIntent = { fingerprint,
+        key: 'plan-create-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2) };
+    }
+    return api.createPlanSchedule(Object.assign({}, payload, { _idempotency_key: this._newCreationIntent.key }));
+  },
+
+  isCurrentCreation(payload) {
+    return this._pageAlive !== false && JSON.stringify(payload) === JSON.stringify(this.buildPayload(payload.submit));
+  },
+
+  updateFieldGuidance() {
+    const selected = new Set(this.data.days.flatMap(day => day.sites || []).map(Number));
+    const missing = (this.data.mySites || []).filter(site => !selected.has(Number(site.id)));
+    const coverageRequired = this.data.scheduleType === 'weekly' && missing.length > 0;
+    const fieldErrors = {};
+    if (!selected.size) fieldErrors.sites = '请至少安排一个巡检站点';
+    if (!this.data.noVehicleRequired && !this.data.planVehicleId) fieldErrors.planVehicleId = '请选择计划车辆';
+    if (coverageRequired && !String(this.data.coverageExceptionReason || '').trim()) {
+      fieldErrors.coverage_exception_reason = '请说明未覆盖站点的原因';
+    }
+    const missingSiteList = coverageRequired ? missing.map(site => site.name) : [];
+    this.setData({ coverageRequired, missingSiteNames: missingSiteList.join('、'), missingSiteList,
+      missingCount: missingSiteList.length, coverageWarning: coverageRequired ? '本周存在未覆盖站点' : '', fieldErrors });
+    return fieldErrors;
+  },
+
+  scrollToErrorAnchor(selector) {
+    if (!selector || !wx.pageScrollTo) return;
+    if (!wx.createSelectorQuery) {
+      wx.pageScrollTo({ selector, duration: 200 });
+      return;
+    }
+    const query = wx.createSelectorQuery();
+    query.select('.pe-nav-wrap').boundingClientRect();
+    query.select(selector).boundingClientRect();
+    query.selectViewport().scrollOffset();
+    query.exec(results => {
+      const nav = results && results[0];
+      const target = results && results[1];
+      const viewport = results && results[2];
+      if (!nav || !target || !viewport || !Number.isFinite(target.top)
+          || !Number.isFinite(nav.bottom) || !Number.isFinite(viewport.scrollTop)) {
+        wx.pageScrollTo({ selector, duration: 200 });
+        return;
+      }
+      const safetyGap = 12;
+      wx.pageScrollTo({
+        scrollTop: Math.max(0, viewport.scrollTop + target.top - nav.bottom - safetyGap),
+        duration: 200,
+      });
+    });
+  },
+
+  locateSubmitError(error) {
+    const errors = this.updateFieldGuidance();
+    const structured = error && (error.validation || error) || {};
+    const dates = structured.dates || [];
+    const details = structured.error_details || structured.warning_details || [];
+    const detail = details.find(item => item.date || item.field || (item.site_ids && item.site_ids.length));
+    let field = structured.field || (detail && detail.field) || (!error && Object.keys(errors)[0]);
+    if (field === 'vehicle_id' || field === 'vehicle_days') field = 'planVehicleId';
+    if (field === 'vehicle_exception_reason' && !this.data.noVehicleRequired) field = 'planVehicleId';
+    const date = dates[0] || (detail && detail.date);
+    const siteIds = structured.site_ids || (detail && detail.site_ids) || [];
+    const index = field === 'planVehicleId' ? -1 : this.data.days.findIndex(day => date ? day.date === date
+      : siteIds.some(id => (day.sites || []).map(Number).includes(Number(id))));
+    let selector = index >= 0 ? '#plan-day-' + index : '';
+    if (field === 'vehicle_exception_reason' && this.data.noVehicleRequired) selector = '#plan-vehicle-reason';
+    if (field === 'coverage_exception_reason') selector = '#plan-coverage-reason';
+    if (field === 'planVehicleId') selector = '#plan-vehicle-row';
+    if (field === 'period_start' || field === 'period_end') selector = '#plan-period-section';
+    if (!selector && field) selector = ({ sites: '#plan-sites', site_ids: '#plan-sites',
+      vehicle_exception_reason: '#plan-vehicle-reason', coverage_exception_reason: '#plan-coverage-reason',
+      period_start: '#plan-period-section', period_end: '#plan-period-section', plan_data: '#plan-sites' })[field] || '';
+    if (field && structured.error) errors[field] = structured.error;
+    if (field && detail && detail.text) errors[field] = detail.text;
+    if (index >= 0) {
+      const days = this.data.days.slice();
+      days[index] = Object.assign({}, days[index], { warning_text: structured.error || (detail && detail.text)
+        || (structured.errors || []).join('\n') || '请检查本日站点安排' });
+      this.setData({ days });
+    }
+    const reveal = () => this.setData({ fieldErrors: errors, focusedErrorField: '' }, () => {
+      this.scrollToErrorAnchor(selector);
+    });
+    if (this.data.focusedErrorField) this.setData({ focusedErrorField: '' }, reveal);
+    else reveal();
+    return !!selector;
+  },
+
   onSubmit() {
     if (this.data.submitting) return;
     if (this.data.detailState !== 'ready') {
@@ -785,9 +957,10 @@ Page({
       return;
     }
     // 前端基本校验
-    const hasSites = this.data.days.some(d => d.sites.length > 0);
-    if (!hasSites) {
-      wx.showToast({ title: '请至少安排一天的巡检站点', icon: 'none' });
+    const fieldErrors = this.updateFieldGuidance();
+    if (Object.keys(fieldErrors).length) {
+      this.setData({ submitError: '' });
+      this.locateSubmitError();
       return;
     }
     this.setData({ submitting: true, submitError: '' });
@@ -805,11 +978,7 @@ Page({
         this.applyValidation(vr || {});
         if (vr.errors && vr.errors.length) {
           this.setData({ submitting: false });
-          wx.showModal({
-            title: '校验不通过',
-            content: vr.errors.join('\n'),
-            showCancel: false
-          });
+          if (!this.locateSubmitError(vr)) this.setData({ submitError: vr.errors.join('\n') });
           return Promise.reject('blocked');
         }
         // 有警告时提示但允许继续
@@ -836,33 +1005,38 @@ Page({
               return api.submitPlanSchedule(this.data.editId, saved.version);
             });
         }
-        return api.createPlanSchedule(payload);
+        if (this._pageAlive === false) return Promise.reject('cancel');
+        return this.createNewPlan(payload);
       });
 
     submission
       .then(submitted => {
+        if (!this.data.editId && !this.isCurrentCreation(payload)) return;
         if (this.data.isChange && (!submitted || submitted.status !== 'change_submitted')) {
           throw { error: '服务端未确认计划变更已进入待审核，请直接重试' };
         }
         this._pendingFormalSubmit = null;
-        wx.showToast({ title: '已提交审批', icon: 'success' });
-        setTimeout(() => wx.navigateBack(), 1200);
+        this.setData({ submitError: '' });
+        wx.showToast({ title: this.data.editId || (submitted && submitted.status === 'submitted') ? '已提交审批' : '计划已恢复，请查看当前状态', icon: 'success' });
+        setTimeout(() => {
+          if (this._pageAlive !== false && (this.data.editId || this.isCurrentCreation(payload))) wx.navigateBack();
+        }, 1200);
       })
       .catch(err => {
+        if (!this.data.editId && !this.isCurrentCreation(payload)) return;
         if (err === 'blocked' || err === 'cancel') return;
         const message = (err && (err.error || err.message)) || '提交失败，请重试';
+        if (!(err && (err.network || err.code === 'PLAN_VERSION_CONFLICT')) && this.locateSubmitError(err)) {
+          this.setData({ submitError: '' });
+          return;
+        }
         const nextAction = err && err.code === 'PLAN_VERSION_CONFLICT'
           ? '计划已被其他操作更新，请返回计划详情刷新后重新编辑。'
           : '修改内容已保留，请确认后直接重试。';
         const failureText = message + '\n' + nextAction;
         this.setData({ submitError: failureText });
-        wx.showModal({
-          title: '提交未完成',
-          content: failureText,
-          showCancel: false
-        });
       })
-      .finally(() => this.setData({ submitting: false }));
+      .finally(() => { if (this._pageAlive !== false) this.setData({ submitting: false }); });
   },
 
   // 存草稿
@@ -883,27 +1057,36 @@ Page({
     const payload = this.buildPayload(false);
     const p = this.data.editId
       ? api.updatePlanSchedule(this.data.editId, payload)
-      : api.createPlanSchedule(payload);
+      : this.createNewPlan(payload);
     p.then(saved => {
+      if (!this.data.editId && !this.isCurrentCreation(payload)) return;
       const successPatch = { draftSaveError: '' };
       if (this.data.editId && saved && saved.version) successPatch.version = saved.version;
       this.setData(successPatch);
       const issueCount = Number(saved && saved.draft_issue_count || 0);
-      wx.showToast({ title: issueCount ? `已保存，${issueCount}项待完善` : '已保存草稿', icon: 'none' });
-      setTimeout(() => wx.navigateBack(), 1000);
+      wx.showToast({ title: !this.data.editId && saved && saved.status !== 'draft' ? '计划已恢复，请查看当前状态'
+        : (issueCount ? `已保存，${issueCount}项待完善` : '已保存草稿'), icon: 'none' });
+      setTimeout(() => {
+        if (this._pageAlive !== false && (this.data.editId || this.isCurrentCreation(payload))) wx.navigateBack();
+      }, 1000);
     })
     .catch(err => {
+      if (!this.data.editId && !this.isCurrentCreation(payload)) return;
       const reason = (err && (err.error || err.message)) || '保存失败';
-      const failureText = reason + '\n内容已保留，可重试';
+      if (!(err && (err.network || err.code === 'PLAN_VERSION_CONFLICT')) && this.locateSubmitError(err)) {
+        this.setData({ draftSaveError: '' });
+        return;
+      }
+      const failureText = reason + (err && err.code === 'PLAN_VERSION_CONFLICT'
+        ? '\n计划已更新，请返回详情刷新后重新编辑。' : '\n内容已保留，可重试');
       this.setData({ draftSaveError: failureText });
-      wx.showToast({ title: reason + '，请重试', icon: 'none' });
     })
-    .finally(() => this.setData({ submitting: false }));
+    .finally(() => { if (this._pageAlive !== false) this.setData({ submitting: false }); });
   }
 });
 
 module.exports = {
   initializeInspectionItemSelections, dayHasBusinessContent, planSubmitFingerprint,
   periodDates, reconcilePeriodDays, summarizeTemplateContext, schedulingReferencePresentation,
-  projectSiteNameMap, availableSiteIds, hasAllAvailableSites, withDaySiteSelectionState
+  projectSiteNameMap, availableSiteIds, hasAllAvailableSites, withDaySiteSelectionState, inspectionGroupsForDays
 };

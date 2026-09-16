@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import contextmanager
 
 from PIL import Image
@@ -157,6 +158,16 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
             watermark_confidence=0.91, watermark_status='recognized')
         self.assertEqual((conflict['qualification'], conflict['basis']),
                          ('ineligible', 'time_conflict'))
+
+    def test_evidence_site_geofence_300m_boundary_without_mutation(self):
+        for distance, qualification in ((299.9, 'qualified'), (300, 'qualified'),
+                                        (300.01, 'ineligible'), (450, 'ineligible'), (None, 'ineligible')):
+            with self.subTest(distance=distance), mock.patch.object(app_module, '_haversine', return_value=distance):
+                assessment = self.assess(exif_taken_at='2026-08-12 10:05:00')
+                self.assertEqual(assessment['qualification'], qualification)
+                with app_module.get_db() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM attachment_evidence_evaluations').fetchone()[0], 0)
 
     def test_archive_name_never_uses_upload_time_as_capture_time(self):
         with app_module.get_db() as db:

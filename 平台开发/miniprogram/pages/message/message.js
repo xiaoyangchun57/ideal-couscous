@@ -20,7 +20,11 @@ const SUBSCRIPTION_LABELS = {
 function subscribeFailureFeedback(error) {
   const rawCode = error && (error.errCode !== undefined ? error.errCode : error.err_code);
   const errCode = rawCode === undefined || rawCode === null ? '' : String(rawCode);
-  const errMsg = String(error && (error.errMsg || error.err_msg || error.message) || '').toLowerCase();
+  const rawMessage = String(error && (error.errMsg || error.err_msg || error.message) || '');
+  const errMsg = rawMessage.toLowerCase();
+  if (/user.*(tap|click|gesture)|gesture|用户.*点击/.test(errMsg)) {
+    return { category: 'USER_GESTURE_REQUIRED', errCode, errMsg: rawMessage, message: '请直接点击订阅按钮重新授权' };
+  }
   const known = {
     10002: ['WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
     10003: ['WECHAT_SERVICE_RETRY', '微信订阅服务暂不可用，请稍后重试'],
@@ -34,12 +38,12 @@ function subscribeFailureFeedback(error) {
     20013: ['TEMPLATE_SUBSCRIBE_NOT_ALLOWED', '当前订阅模板不支持此订阅方式，请联系管理员核对配置']
   };
   if (known[errCode]) {
-    return { category: known[errCode][0], errCode, message: known[errCode][1] };
+    return { category: known[errCode][0], errCode, errMsg: rawMessage, message: known[errCode][1] };
   }
   if (/network|timeout|service/.test(errMsg)) {
-    return { category: 'WECHAT_UNAVAILABLE', errCode, message: '微信订阅服务暂不可用，请稍后重试' };
+    return { category: 'WECHAT_UNAVAILABLE', errCode, errMsg: rawMessage, message: '微信订阅服务暂不可用，请稍后重试' };
   }
-  return { category: 'UNKNOWN', errCode, message: '订阅失败，请重试' };
+  return { category: 'UNKNOWN', errCode, errMsg: rawMessage, message: '订阅失败，请重试' };
 }
 
 function decorate(n) {
@@ -74,12 +78,14 @@ Page({
     this._viewEpoch = (this._viewEpoch || 0) + 1;
     if (!app.globalData.token) { wx.reLaunch({ url: '/pages/login/login' }); return; }
     this.load(true);
+    this.preloadSubscriptionTemplates();
   },
 
   onHide() {
     this._alive = false;
     this._loadToken = (this._loadToken || 0) + 1;
     this._viewEpoch = (this._viewEpoch || 0) + 1;
+    this._subscriptionConfigSerial = (this._subscriptionConfigSerial || 0) + 1;
   },
 
   onUnload() { this.onHide(); },
@@ -331,7 +337,38 @@ Page({
       });
   },
 
+  preloadSubscriptionTemplates() {
+    const serial = (this._subscriptionConfigSerial || 0) + 1;
+    this._subscriptionConfigSerial = serial;
+    this._subscriptionTemplates = null;
+    this.setData({ subscriptionConfigState: 'loading', subscriptionConfigError: '' });
+    return Promise.resolve().then(() => api.subscriptionTemplates()).then(config => {
+      if (this._alive === false || serial !== this._subscriptionConfigSerial) return;
+      const templates = Array.isArray(config && config.templates) ? config.templates : [];
+      if (!templates.length || templates.some(item => !item || !SUBSCRIPTION_LABELS[item.purpose]
+          || typeof item.template_id !== 'string' || !item.template_id.trim())) {
+        throw { errCode: 'CONFIG_MISSING', errMsg: 'Subscription template configuration missing or invalid' };
+      }
+      this._subscriptionTemplates = templates.map(item => Object.assign({}, item, { template_id: item.template_id.trim() }));
+      this.setData({ subscriptionConfigState: 'ready', subscriptionConfigError: '' });
+    }).catch(error => {
+      if (this._alive === false || serial !== this._subscriptionConfigSerial) return;
+      this._lastSubscribeFailure = { category: error && error.errCode === 'CONFIG_MISSING' ? 'CONFIG_MISSING' : 'CONFIG_LOAD_FAILED',
+        errCode: String(error && (error.errCode || error.code) || ''),
+        errMsg: String(error && (error.errMsg || error.error || error.message) || '') };
+      this.setData({ subscriptionConfigState: 'error', subscriptionConfigError: '订阅配置加载失败，请重试' });
+    });
+  },
+
+  onRetrySubscriptionConfig() { return this.preloadSubscriptionTemplates(); },
+
   onSubscribe() {
+    if (this._alive === false) return;
+    const templates = this._subscriptionTemplates;
+    if (!templates || !templates.length) {
+      wx.showToast({ title: this.data.subscriptionConfigError || '订阅配置正在加载，请稍候', icon: 'none' });
+      return;
+    }
     if (this._subscribing) {
       wx.showToast({ title: '正在处理，请稍候', icon: 'none' });
       return;
@@ -344,15 +381,9 @@ Page({
       finished = true;
       this._subscribing = false;
     };
-    api.subscriptionTemplates()
-      .then(config => {
-        if (!this._isActiveView(viewEpoch)) { finish(); return; }
-        const templates = Array.isArray(config && config.templates)
-          ? config.templates.filter(item => item && item.purpose && item.template_id)
-          : [];
-        if (!templates.length) throw new Error('NO_SUBSCRIPTION_TEMPLATE');
+    try {
         wx.requestSubscribeMessage({
-          tmplIds: templates.map(item => item.template_id),
+          tmplIds: [...new Set(templates.map(item => item.template_id))],
           success: result => {
             const accepted = templates.filter(item => result && result[item.template_id] === 'accept');
             const banned = templates.filter(item => result && result[item.template_id] === 'ban');
@@ -360,6 +391,8 @@ Page({
             const unacceptedLabels = templates.filter(item => result && result[item.template_id] !== 'accept')
               .map(item => SUBSCRIPTION_LABELS[item.purpose] || '相关通知');
             if (!accepted.length) {
+              this._lastSubscribeFailure = { category: banned.length ? 'MESSAGE_SWITCH_DISABLED' : 'USER_REJECTED',
+                errCode: '', errMsg: String(result && result.errMsg || ''), result };
               finish();
               if (!this._isActiveView(viewEpoch)) return;
               wx.showModal({
@@ -373,6 +406,7 @@ Page({
             if (!this._isActiveView(viewEpoch)) { finish(); return; }
             wx.login({
               success: loginResult => {
+                if (!this._isActiveView(viewEpoch)) { finish(); return; }
                 if (!loginResult || !loginResult.code) {
                   finish();
                   if (this._isActiveView(viewEpoch)) wx.showToast({ title: '微信账号绑定失败，请重试', icon: 'none' });
@@ -383,6 +417,8 @@ Page({
                     finish();
                     if (!this._isActiveView(viewEpoch)) return;
                     if (!boundResult || boundResult.bound !== true) {
+                      this._lastSubscribeFailure = { category: 'BIND_FAILED', errCode: String(boundResult && boundResult.code || ''),
+                        errMsg: String(boundResult && (boundResult.error || boundResult.warn) || '微信账号绑定未完成') };
                       wx.showToast({ title: (boundResult && (boundResult.error || boundResult.warn)) || '微信账号绑定失败，请重试', icon: 'none' });
                       return;
                     }
@@ -399,6 +435,8 @@ Page({
                   })
                   .catch(error => {
                     finish();
+                    this._lastSubscribeFailure = { category: 'BIND_FAILED', errCode: String(error && error.code || ''),
+                      errMsg: String(error && (error.error || error.warn || error.message) || '') };
                     const message = error && (error.error || error.warn);
                     if (this._isActiveView(viewEpoch)) wx.showToast({
                       title: message || '微信账号绑定失败，请重试', icon: 'none'
@@ -419,10 +457,10 @@ Page({
             if (this._isActiveView(viewEpoch)) wx.showToast({ title: feedback.message, icon: 'none' });
           }
         });
-      })
-      .catch(() => {
-        finish();
-        if (this._isActiveView(viewEpoch)) wx.showToast({ title: '订阅配置加载失败，请重试', icon: 'none' });
-      });
+    } catch (error) {
+      finish();
+      this._lastSubscribeFailure = subscribeFailureFeedback(error);
+      if (this._isActiveView(viewEpoch)) wx.showToast({ title: this._lastSubscribeFailure.message, icon: 'none' });
+    }
   }
 });

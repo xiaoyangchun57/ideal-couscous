@@ -5,6 +5,318 @@ const requestPath = require.resolve('../utils/request.js');
 const apiPath = require.resolve('../services/api.js');
 const originalRequestModule = require.cache[requestPath];
 const pagePath = require.resolve('../pages/plan-edit/plan-edit.js');
+
+test('required guidance reacts to selections and submit scrolls to first error without discarding input', () => {
+  let definition;
+  const scrolls = [];
+  global.getApp = () => ({ globalData: {} });
+  global.Page = value => { definition = value; };
+  global.wx = { pageScrollTo: options => scrolls.push(options) };
+  delete require.cache[pagePath];
+  require(pagePath);
+  const page = Object.assign({}, definition, { data: Object.assign({}, definition.data, {
+    detailState: 'ready', inspectionItemsState: 'ready', scheduleType: 'weekly',
+    mySites: [{id:1,name:'A'}, {id:2,name:'B'}], days: [{date:'2026-09-15',sites:[]}],
+    noVehicleRequired: true, vehicleExceptionReason: '', coverageExceptionReason: '', remarks: 'keep'
+  }) });
+  page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+  page.onSubmit();
+  assert.equal(scrolls.at(-1).selector, '#plan-sites');
+  assert.equal(page.data.submitting, false);
+  page.data.days[0].sites = [1];
+  page.data.noVehicleRequired = false;
+  page.data.focusedErrorField = 'coverage_exception_reason';
+  page.onSubmit();
+  assert.equal(scrolls.at(-1).selector, '#plan-vehicle-row');
+  assert.equal(page.data.focusedErrorField, '', 'previous textarea focus must be released');
+  page.data.noVehicleRequired = true;
+  page.onSubmit();
+  assert.equal(scrolls.at(-1).selector, '#plan-coverage-reason');
+  assert.equal(page.data.coverageRequired, true);
+  assert.equal(page.data.missingSiteNames, 'B');
+  page.data.days[0].sites = [1,2];
+  assert.deepEqual(page.updateFieldGuidance(), {});
+  assert.equal(page.data.coverageRequired, false);
+  page.locateSubmitError({ dates: ['2026-09-15'], error: 'date invalid' });
+  assert.equal(scrolls.at(-1).selector, '#plan-day-0');
+  page.locateSubmitError({ field: 'vehicle_exception_reason', error: 'reason invalid' });
+  assert.equal(page.data.fieldErrors.vehicle_exception_reason, 'reason invalid');
+  const count = scrolls.length;
+  page.locateSubmitError({ error: 'unknown server failure' });
+  assert.equal(scrolls.length, count, 'unknown errors do not guess a field');
+  assert.equal(page.data.remarks, 'keep');
+  delete global.getApp;
+  delete global.Page;
+  delete global.wx;
+});
+
+test('vehicle error scroll measures the sticky header and keeps the field below it', () => {
+  let definition;
+  const scrolls = [];
+  const selected = [];
+  global.getApp = () => ({ globalData: {} });
+  global.Page = value => { definition = value; };
+  global.wx = {
+    pageScrollTo: options => scrolls.push(options),
+    createSelectorQuery: () => ({
+      select(selector) { selected.push(selector); return this; },
+      boundingClientRect() { return this; },
+      selectViewport() { return this; },
+      scrollOffset() { return this; },
+      exec(callback) { callback([{ bottom: 88 }, { top: 310 }, { scrollTop: 140 }]); },
+    }),
+  };
+  delete require.cache[pagePath]; require(pagePath);
+  const page = Object.assign({}, definition, { data: Object.assign({}, definition.data, {
+    days: [{ date: '2026-09-16', sites: [1] }], mySites: [{ id: 1, name: 'A' }],
+    noVehicleRequired: false, planVehicleId: null,
+  }) });
+  page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+  page.locateSubmitError({ field: 'vehicle_id', error: '已选择需要用车，请先选择计划车辆' });
+  assert.deepEqual(selected, ['.pe-nav-wrap', '#plan-vehicle-row']);
+  assert.deepEqual(scrolls.at(-1), { scrollTop: 350, duration: 200 });
+  assert.equal(page.data.fieldErrors.planVehicleId, '已选择需要用车，请先选择计划车辆');
+  delete global.getApp; delete global.Page; delete global.wx;
+});
+
+test('new plan draft and submit recover response loss with stable keys and discard unloaded callbacks', async t => {
+  let definition;
+  let navigations = 0;
+  const toasts = [];
+  global.getApp = () => ({ globalData: {} });
+  global.Page = value => { definition = value; };
+  global.wx = { getStorageSync: () => ({ id: 2 }), showToast: value => toasts.push(value),
+    showModal: () => {}, pageScrollTo: () => {}, navigateBack: () => { navigations += 1; } };
+  delete require.cache[pagePath];
+  require(pagePath);
+  const api = require(apiPath);
+  const originalCreate = api.createPlanSchedule;
+  const originalValidate = api.validatePlanSchedule;
+  const originalTimer = global.setTimeout;
+  t.after(() => {
+    api.createPlanSchedule = originalCreate;
+    api.validatePlanSchedule = originalValidate;
+    global.setTimeout = originalTimer;
+    delete global.getApp; delete global.Page; delete global.wx;
+  });
+  global.setTimeout = callback => { callback(); return 1; };
+  api.validatePlanSchedule = () => Promise.resolve({ errors: [], warnings: [] });
+  const newPage = () => {
+    const page = Object.assign({}, definition, { data: Object.assign({}, definition.data, {
+      editId: null, detailState: 'ready', inspectionItemsState: 'ready', scheduleType: 'monthly',
+      periodStart: '2026-09-15', periodEnd: '2026-09-15',
+      days: [{date:'2026-09-15',sites:[1],inspection_items:{'1':[10]}}], mySites: [{id:1,name:'A'}],
+      noVehicleRequired: true, vehicleExceptionReason: '步行', coverageExceptionReason: '', remarks: 'keep'
+    }) });
+    page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+    return page;
+  };
+  for (const action of ['onSaveDraft', 'onSubmit']) {
+    const requests = [];
+    api.createPlanSchedule = payload => {
+      requests.push(JSON.parse(JSON.stringify(payload)));
+      return requests.length === 1 ? Promise.reject({error:'response lost'})
+        : Promise.resolve({id:71,status:'approved'});
+    };
+    const page = newPage();
+    page[action]();
+    await flushAsync();
+    assert.match(action === 'onSubmit' ? page.data.submitError : page.data.draftSaveError, /response lost/);
+    assert.equal(page.data.remarks, 'keep');
+    page[action]();
+    await flushAsync();
+    assert.ok(requests[0]._idempotency_key);
+    assert.deepEqual(requests[0], requests[1], 'manual retry carries the same key and payload');
+    assert.equal(action === 'onSubmit' ? page.data.submitError : page.data.draftSaveError, '');
+    assert.equal(toasts.at(-1).title, '计划已恢复，请查看当前状态');
+    const originalKey = requests[1]._idempotency_key;
+    page.data.remarks = 'changed';
+    await page.createNewPlan(page.buildPayload(action === 'onSubmit'));
+    assert.notEqual(requests[2]._idempotency_key, originalKey, 'edited payload forms new intent');
+
+    const pending = deferred();
+    api.createPlanSchedule = () => pending.promise;
+    const unloaded = newPage();
+    unloaded[action]();
+    await flushAsync();
+    unloaded.onUnload();
+    const before = JSON.stringify(unloaded.data);
+    const navBefore = navigations;
+    pending.resolve({id:72,status:'submitted'});
+    await flushAsync();
+    assert.equal(JSON.stringify(unloaded.data), before);
+    assert.equal(navigations, navBefore);
+  }
+  assert.equal(navigations, 2, 'both successful replays leave the page once');
+});
+
+test('independent optional sections and immediate missing-site projection never alter business payload', () => {
+  let definition;
+  global.getApp = () => ({globalData:{}});
+  global.Page = value => { definition = value; };
+  global.wx = {};
+  delete require.cache[pagePath]; require(pagePath);
+  const page = Object.assign({}, definition, {data: Object.assign({},definition.data, {
+    mySites:[{id:1,name:'A'},{id:2,name:'B'}], days:[{date:'2026-09-15',sites:[1]}],
+    noVehicleRequired:true,vehicleExceptionReason:'walk',remarks:'keep',selectedParts:[{part_id:3,quantity:1}]
+  })});
+  page.setData = (patch,done) => {Object.assign(page.data,patch);if(done)done();};
+  const original = page.buildPayload(false);
+  assert.equal(page.data.partsExpanded,false); assert.equal(page.data.remarkExpanded,false);
+  page.onToggleParts(); assert.equal(page.data.partsExpanded,true); assert.equal(page.data.remarkExpanded,false);
+  page.onToggleRemark(); page.onToggleParts();
+  assert.deepEqual(page.buildPayload(false),original);
+  page.updateFieldGuidance();
+  assert.deepEqual(page.data.missingSiteList,['B']); assert.equal(page.data.missingCount,1);
+  page.applyValidation({warning_details:[{type:'coverage_missing',text:'old async warning'}]});
+  page.data.days[0].sites=[1,2]; page.updateFieldGuidance();
+  assert.equal(page.data.coverageRequired,false);assert.equal(page.data.missingCount,0);
+  page.data.scheduleType='yearly'; assert.equal(page.buildPayload(false).schedule_type,'weekly');
+  page.data.editId=42; assert.equal(page.buildPayload(false).schedule_type,'yearly');
+  assert.equal(page.onFreqChip,undefined);assert.equal(page.onTypeChange,undefined);
+  delete global.getApp;delete global.Page;delete global.wx;
+});
+
+test('route advice uses structured two-level projection and keeps legacy and other warnings readable', () => {
+  let definition;
+  global.getApp = () => ({ globalData: {} });
+  global.Page = value => { definition = value; };
+  global.wx = {};
+  delete require.cache[pagePath]; require(pagePath);
+  const page = Object.assign({}, definition, { data: Object.assign({}, definition.data, {
+    days: [{ date: '2026-09-16', sites: [1, 2, 3] }],
+  }) });
+  page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+  page.applyValidation({ warning_details: [
+    { type: 'route_backtrack', date: '2026-09-16',
+      suggested_site_names: ['青云', '室内定位测试站（团结路）', '扬子洲'],
+      estimated_distance_saved_km: 13.8, text: 'compatibility text' },
+    { type: 'day_overload', date: '2026-09-16', text: '作业窗口提醒' },
+  ] });
+  assert.deepEqual(page.data.days[0].route_suggestions, [{
+    orderText: '建议顺序：青云 → 室内定位测试站（团结路） → 扬子洲',
+    metaText: '预计少绕行约 13.8 km · 按站点位置估算',
+  }]);
+  assert.equal(page.data.days[0].warning_text, '作业窗口提醒');
+  page.applyValidation({ warning_details: [
+    { type: 'route_backtrack', date: '2026-09-16', text: '旧服务端路线提示' },
+  ] });
+  assert.deepEqual(page.data.days[0].route_suggestions, []);
+  assert.equal(page.data.days[0].warning_text, '旧服务端路线提示');
+  delete global.getApp; delete global.Page; delete global.wx;
+});
+
+test('site-specific inspection failures preserve successful sites, selections and retry only the failed site', async t => {
+  let definition;
+  global.getApp = () => ({globalData:{}});global.Page = value => {definition=value;};
+  global.wx={showToast:()=>{}};
+  delete require.cache[pagePath];const {inspectionGroupsForDays}=require(pagePath);
+  const api=require(apiPath);const original=api.inspectionConfigMatches;
+  const calls=[];let fail=true;let writes=0;
+  api.inspectionConfigMatches=(id,type)=>{calls.push([id,type]);return id===2&&fail?Promise.reject({error:'site B failed'})
+    :Promise.resolve({items:id===1?[{id:10,frequency:'weekly'},{id:11,frequency:'monthly'}]:[{id:20,frequency:'weekly'}]});};
+  t.after(()=>{api.inspectionConfigMatches=original;delete global.getApp;delete global.Page;delete global.wx;});
+  const page=Object.assign({},definition,{data:Object.assign({},definition.data,{
+    detailState:'ready',days:[{date:'2026-09-15',sites:[1,2]}],mySites:[{id:1,name:'A'},{id:2,name:'B'}],
+    noVehicleRequired:true,vehicleExceptionReason:'walk'
+  })});
+  page.setData=(patch,done)=>{Object.assign(page.data,patch);if(done)done();};
+  page.createNewPlan=()=>{writes++;return Promise.resolve({});};
+  await page.loadInspectionItems();
+  assert.equal(page.data.inspectionSiteStates[1].state,'ready');
+  assert.equal(page.data.inspectionSiteStates[2].state,'unavailable');
+  assert.deepEqual(page.data.days[0].inspection_items[1],[10]);
+  assert.equal(page.data.days[0].inspection_items[2],undefined);
+  page.onSaveDraft();page.onSubmit();assert.equal(writes,0);
+  page.data.days[0].inspection_items[1]=[11];
+  page.onToggleInspectionGroup({currentTarget:{dataset:{dayIdx:0,siteId:1,frequency:'monthly'}}});
+  fail=false;await page.loadInspectionItems({currentTarget:{dataset:{siteId:2}}});
+  assert.deepEqual(calls,[[1,'weekly'],[2,'weekly'],[2,'weekly']]);
+  assert.deepEqual(page.data.days[0].inspection_items[1],[11]);
+  assert.deepEqual(page.data.days[0].inspection_items[2],[20]);
+  assert.equal(page.data.inspectionItemsState,'ready');
+  await page.loadInspectionItems();assert.equal(calls.length,3);
+  assert.deepEqual(inspectionGroupsForDays([{sites:[1]}],{1:[]},'weekly')[0].inspectionGroups[1],[]);
+  assert.deepEqual(inspectionGroupsForDays([{sites:[1]}],{1:[{id:1,frequency:'monthly'}]},'weekly')[0].inspectionGroups[1].map(g=>g.frequency),['monthly']);
+});
+
+test('vehicle and server field errors use inline anchors while system failures preserve a stable retry area', async t => {
+  let definition;const scrolls=[];const modals=[];
+  global.getApp=()=>({globalData:{}});global.Page=value=>{definition=value;};
+  global.wx={getStorageSync:()=>({id:2}),pageScrollTo:options=>scrolls.push(options),
+    showModal:options=>modals.push(options),showToast:()=>{}};
+  delete require.cache[pagePath];require(pagePath);
+  const api=require(apiPath);const originalCreate=api.createPlanSchedule;const originalValidate=api.validatePlanSchedule;
+  t.after(()=>{api.createPlanSchedule=originalCreate;api.validatePlanSchedule=originalValidate;
+    delete global.getApp;delete global.Page;delete global.wx;});
+  const page=Object.assign({},definition,{data:Object.assign({},definition.data,{
+    detailState:'ready',inspectionItemsState:'ready',days:[{date:'2026-09-15',sites:[1]}],
+    mySites:[{id:1,name:'A'}],periodStart:'2026-09-15',periodEnd:'2026-09-15',noVehicleRequired:false,remarks:'keep'
+  })});page.setData=(patch,done)=>{Object.assign(page.data,patch);if(done)done();};
+  page.onSubmit();assert.equal(scrolls.at(-1).selector,'#plan-vehicle-row');
+  assert.equal(page.data.submitError,'');assert.match(page.data.fieldErrors.planVehicleId,/车辆/);
+  page.applyValidation({error_details:[{field:'vehicle_id',date:'2026-09-15',text:'missing vehicle'}]});
+  assert.equal(page.data.days[0].warning_text,'');
+  page.locateSubmitError({error_details:[{field:'vehicle_id',date:'2026-09-15',text:'missing vehicle'}]});
+  assert.equal(scrolls.at(-1).selector,'#plan-vehicle-row');
+  assert.equal(page.data.days[0].warning_text,'');
+  page.applyValidation({error_details:[{field:'plan_data',date:'2026-09-15',text:'real vehicle conflict'}]});
+  assert.equal(page.data.days[0].warning_text,'real vehicle conflict');
+  page.data.planVehicleId=7;page.updateFieldGuidance();assert.equal(page.data.fieldErrors.planVehicleId,undefined);
+  api.validatePlanSchedule=()=>Promise.resolve({errors:[],warnings:[]});
+  for(const field of ['vehicle_id','vehicle_days']) {
+    api.createPlanSchedule=()=>Promise.reject({field,error:'vehicle invalid'});
+    page.onSubmit();await flushAsync();
+    assert.equal(scrolls.at(-1).selector,'#plan-vehicle-row');assert.equal(page.data.submitError,'');
+    assert.equal(page.data.fieldErrors.planVehicleId,'vehicle invalid');
+  }
+  api.createPlanSchedule=()=>Promise.reject({dates:['2026-09-15'],error:'invalid day'});
+  page.onSubmit();await flushAsync();assert.equal(scrolls.at(-1).selector,'#plan-day-0');
+  assert.equal(page.data.days[0].warning_text,'invalid day');assert.equal(page.data.submitError,'');
+  api.createPlanSchedule=()=>Promise.reject({field:'period_end',error:'invalid period'});
+  page.onSubmit();await flushAsync();assert.equal(scrolls.at(-1).selector,'#plan-period-section');
+  assert.equal(page.data.fieldErrors.period_end,'invalid period');
+  const scrollCount=scrolls.length;
+  for(const error of [{network:true,error:'network failure'},{error:'unknown failure'},
+    {code:'PLAN_VERSION_CONFLICT',error:'stale version'}]) {
+    api.createPlanSchedule=()=>Promise.reject(error);page.onSubmit();await flushAsync();
+    assert.match(page.data.submitError,new RegExp(error.error));assert.equal(page.data.remarks,'keep');
+  }
+  assert.equal(scrolls.length,scrollCount);assert.equal(modals.length,0);
+  assert.match(page.data.submitError,/刷新/);
+  page.data.focusedErrorField='coverage_exception_reason';
+  api.createPlanSchedule=()=>Promise.reject({field:'sites',error:'site required'});
+  page.onSaveDraft();await flushAsync();
+  assert.equal(scrolls.at(-1).selector,'#plan-sites');
+  assert.equal(page.data.focusedErrorField,'');
+  assert.equal(page.data.draftSaveError,'');
+});
+
+test('weekly plans default weekly items only and expose collapsed optional groups without invented due dates', () => {
+  global.getApp = () => ({ globalData: {} });
+  global.Page = () => {};
+  delete require.cache[pagePath];
+  const { initializeInspectionItemSelections, inspectionGroupsForDays } = require(pagePath);
+  const options = { 10: [{ id: 1, frequency: 'weekly', due_status: 'overdue' }, { id: 2, frequency: 'monthly', due_status: 'due_soon', due_label: '临近计划日期 2026-09-20' }, { id: 3, frequency: 'quarterly' }] };
+  const days = initializeInspectionItemSelections([{ sites: [10] }], options, 'weekly');
+  assert.deepEqual(days[0].inspection_items['10'], [1]);
+  const groups = inspectionGroupsForDays(days, options, 'weekly')[0].inspectionGroups[10];
+  assert.deepEqual(groups.map(group => group.expanded), [true, false, false]);
+  assert.deepEqual(groups.map(group => group.selectedCount), [1, 0, 0]);
+  assert.equal(groups[0].dueLabels, '');
+  assert.equal(groups[1].dueLabels, '1项临近周期');
+  assert.equal(options[10][1].due_label, '临近计划日期 2026-09-20');
+  const overdueGroups = inspectionGroupsForDays(days, {10: [
+    {id: 2, frequency: 'monthly', due_status: 'overdue'},
+    {id: 4, frequency: 'monthly', due_status: 'overdue'},
+    {id: 3, frequency: 'quarterly', due_status: 'overdue'}
+  ]}, 'weekly')[0].inspectionGroups[10];
+  assert.deepEqual(overdueGroups.map(group => group.dueLabels), ['2项已到期', '1项已到期']);
+  assert.equal(groups[2].dueLabels, '');
+  assert.deepEqual(initializeInspectionItemSelections([{sites:[10]}],options,'monthly')[0].inspection_items['10'], [2]);
+  delete global.getApp;
+  delete global.Page;
+});
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -39,6 +351,7 @@ function existingPlanDetail(overrides) {
     template_context: [],
     remarks: '原计划备注',
     coverage_exception_reason: '',
+    no_vehicle_required: true,
     vehicle_exception_reason: '无需用车',
     change_reason: '',
   }, overrides || {});
@@ -228,6 +541,11 @@ test('vehicle mode and scheduling reference toggles change only their intended t
   assert.equal(page.data.days[0].vehicle_id, null);
   page.onVehicleModeSelect({ currentTarget: { dataset: { mode: 'vehicle' } } });
   assert.equal(page.data.noVehicleRequired, false);
+  assert.equal(page.data.vehicleExceptionReason, '步行', 'changing mode alone must preserve historical explanation');
+  assert.equal(page.buildPayload(false).vehicle_exception_reason, '步行');
+  page.data.vehicles = [{ id: 9, name: 'V9' }];
+  page.onPlanVehicleChange({ detail: { value: '0' } });
+  assert.equal(page.data.planVehicleId, 9);
   assert.equal(page.data.vehicleExceptionReason, '');
   assert.equal(page.buildPayload(false).vehicle_exception_reason, '');
 
@@ -251,17 +569,20 @@ test('plan editor puts vehicle and daily scheduling before compact reference wit
   assert.doesNotMatch(source, /<switch\b/);
   assert.match(source, /data-mode="vehicle"[^>]*bindtap="onVehicleModeSelect"/);
   assert.match(source, /data-mode="none"[^>]*bindtap="onVehicleModeSelect"/);
-  assert.match(source, /wx:if="{{!noVehicleRequired}}"[\s\S]*选择车辆/);
-  assert.match(source, /wx:if="{{noVehicleRequired}}"[\s\S]*vehicleExceptionReason/);
+  assert.match(source, /wx:if="{{!noVehicleRequired}}"[\s\S]*id="plan-vehicle-row"[\s\S]*<picker mode="selector" range="{{vehicles}}" range-key="name"[\s\S]*bindchange="onPlanVehicleChange"/);
+  assert.match(source, /fieldErrors\.planVehicleId[\s\S]*ft\.vehicleName\(vehicles, planVehicleId\)/);
+  assert.match(source, /wx:if="{{noVehicleRequired && editId && vehicleExceptionReason}}"[\s\S]*历史原因/);
+  assert.doesNotMatch(source, /bindinput="onVehicleExceptionReason"/);
   assert.match(source, /referenceExpanded[\s\S]*展开|展开[\s\S]*referenceExpanded/);
   assert.doesNotMatch(source, /审批后自动生成检查项/);
   assert.doesNotMatch(source, /按实际设备选择/);
-  assert.match(source, /按站点实际情况选择/);
+  assert.match(source, /bindtap="onToggleInspectionItem"/);
+  assert.match(source, /group\.selectedCount[\s\S]*group\.count/);
 });
 
 test('unavailable inspection item state exposes a direct retry binding', () => {
   const source = fs.readFileSync(path.join(__dirname, '../pages/plan-edit/plan-edit.wxml'), 'utf8');
-  assert.match(source, /inspectionItemsState === 'unavailable'[\s\S]*bindtap="loadInspectionItems"/);
+  assert.match(source, /inspectionSiteStates\[selectedSiteId\]\.state === 'unavailable'[\s\S]*data-site-id="{{selectedSiteId}}" bindtap="loadInspectionItems"/);
   assert.match(source, /点击重试/);
   assert.match(source, /wx:if="{{scheduleType !== 'weekly'}}"[\s\S]*添加作业日/);
   assert.match(source, /wx:if="{{scheduleType !== 'weekly'}}"[^>]*data-date="{{day\.date}}"[^>]*bindtap="onRemoveDay"/);
@@ -383,8 +704,7 @@ test('change submit retries the same saved payload without another PUT after res
   assert.match(page.data.submitError, /提交响应丢失/);
   assert.equal(navigations, 0);
   assert.equal(toasts.some(item => item.title === '已提交审批'), false);
-  assert.equal(modals.length, 1);
-  assert.match(modals[0].content, /重试/);
+  assert.equal(modals.length, 0, 'network failure uses stable failure area without a duplicate modal');
 
   submitShouldFail = false;
   const originalSetTimeout = global.setTimeout;
@@ -519,25 +839,13 @@ test('daily site selection projects all-state safely and keeps inspection choice
   delete global.wx;
 });
 
-test('all three plan editor back affordances share one guarded navigation handler', t => {
+test('native navigation keeps new edit and change titles correct across loading and failure', t => {
   let definition;
-  const toasts = [];
-  let navigateCalls = 0;
-  let navigation;
-  let writes = 0;
-  global.getApp = () => ({ globalData: {} });
+  const titles = [];
+  global.getApp = () => ({ globalData: { token: 'token' } });
   global.Page = value => { definition = value; };
-  global.wx = {
-    showToast: value => toasts.push(value),
-    navigateBack: value => { navigateCalls += 1; navigation = value; },
-  };
-  const api = require(apiPath);
-  const originals = { create: api.createPlanSchedule, update: api.updatePlanSchedule };
-  api.createPlanSchedule = () => { writes += 1; return Promise.resolve({}); };
-  api.updatePlanSchedule = () => { writes += 1; return Promise.resolve({}); };
+  global.wx = { setNavigationBarTitle: value => titles.push(value.title), getStorageSync: () => [] };
   t.after(() => {
-    api.createPlanSchedule = originals.create;
-    api.updatePlanSchedule = originals.update;
     delete global.getApp;
     delete global.Page;
     delete global.wx;
@@ -545,22 +853,22 @@ test('all three plan editor back affordances share one guarded navigation handle
   delete require.cache[pagePath];
   require(pagePath);
 
-  const source = fs.readFileSync(path.join(__dirname, '../pages/plan-edit/plan-edit.wxml'), 'utf8');
-  assert.equal((source.match(/<view class="pe-nav-back" data-action="back" bindtap="onNavBack">/g) || []).length, 3,
-    'ready/loading/error 三个返回热区必须绑定同一处理器');
-  const page = Object.assign({}, definition, { data: Object.assign({}, definition.data) });
-  page.onNavBack();
-  page.onNavBack();
-  assert.equal(navigateCalls, 1, '导航处理中重复点击不能再次发起返回');
-  assert.equal(navigation.delta, 1);
-  assert.equal(writes, 0, '返回失败或重试不得触发任何业务写入');
-  assert.match(toasts.at(-1).title, /正在返回/);
-
-  navigation.fail({ errMsg: 'navigateBack:fail' });
-  assert.match(toasts.at(-1).title, /无法返回.*重试/);
-  page.onNavBack();
-  assert.equal(navigateCalls, 2, '失败后应释放门禁供用户重试');
-  navigation.success();
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '../pages/plan-edit/plan-edit.json'), 'utf8'));
+  assert.equal(config.navigationBarTitleText, '新建计划');
+  assert.equal(config.navigationStyle, undefined, '页面必须继续使用微信原生导航');
+  const makePage = () => {
+    const page = Object.assign({}, definition, { data: Object.assign({}, definition.data) });
+    page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+    page.loadVehicles = () => {}; page.loadPartsInventory = () => {}; page.loadSuggestions = () => {};
+    page.initPeriod = () => {}; return page;
+  };
+  const created = makePage(); created.onLoad({});
+  assert.equal(titles.at(-1), '新建计划');
+  const edited = makePage(); edited.loadExisting = () => {};
+  edited.onLoad({ id: '42' });
+  assert.equal(titles.at(-1), '编辑计划', '加载和失败前必须保持目标模式标题');
+  edited.setPageTitle('计划变更');
+  assert.equal(titles.at(-1), '计划变更');
 });
 
 test('plan editor projects rejection and real site names from authoritative detail and local sites', () => {
@@ -585,8 +893,6 @@ test('plan editor projects rejection and real site names from authoritative deta
 
   const source = fs.readFileSync(path.join(__dirname, '../pages/plan-edit/plan-edit.wxml'), 'utf8');
   assert.match(source, /detailState === 'ready' && loaded/);
-  assert.match(source, /detailState === 'loading'[\s\S]*editId \? '编辑计划' : '新建计划'/,
-    '编辑态加载骨架必须显示编辑计划，不能误称新建计划');
   assert.match(source, /siteNameById\[selectedSiteId\]/);
   assert.doesNotMatch(source, /pe-sub-title-group">{{selectedSiteId}}/);
   assert.match(source, /draftSaveError/);
@@ -652,6 +958,9 @@ test('edit detail load rejects duplicates and stale responses while keeping the 
   assert.equal(page.data.rejectReason, '请补充历史站点安排');
   assert.equal(page.data.siteNameById['91'], '历史第一水厂');
   assert.equal(page.data.siteNameById['8'], '新建可选站点');
+  assert.equal(page.data.noVehicleRequired, true);
+  assert.equal(page.data.vehicleExceptionReason, '无需用车');
+  assert.equal(page.buildPayload(false).vehicle_exception_reason, '无需用车');
 
   page.loadExisting(42);
   assert.equal(requests.length, 3);
@@ -660,6 +969,47 @@ test('edit detail load rejects duplicates and stale responses while keeping the 
   await flushAsync();
   assert.equal(page.data.rejectReason, '请补充历史站点安排', '卸载后响应不得 setData');
   assert.equal(page.data.detailState, 'loading');
+});
+
+test('no-vehicle mode follows the persisted user choice instead of vehicle presence or explanation', async t => {
+  let definition;
+  global.getApp = () => ({ globalData: { token: 'token' } });
+  global.Page = value => { definition = value; };
+  global.wx = {};
+  const api = require(apiPath);
+  const originalDetail = api.planScheduleDetail;
+  t.after(() => {
+    api.planScheduleDetail = originalDetail;
+    delete global.getApp; delete global.Page; delete global.wx;
+  });
+  delete require.cache[pagePath];
+  require(pagePath);
+  const load = async detail => {
+    api.planScheduleDetail = () => Promise.resolve(detail);
+    const page = Object.assign({}, definition, { data: JSON.parse(JSON.stringify(definition.data)) });
+    page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+    page.loadVehicles = () => {};
+    page.loadInspectionItems = () => {};
+    page._pageAlive = true;
+    page.loadExisting(detail.id);
+    await flushAsync();
+    return page;
+  };
+  const explicitNoVehicle = await load(existingPlanDetail({
+    id: 51, no_vehicle_required: true, vehicle_id: null, vehicle_days: {}, vehicle_exception_reason: '',
+  }));
+  assert.equal(explicitNoVehicle.data.noVehicleRequired, true);
+  assert.equal(explicitNoVehicle.data.vehicleExceptionReason, '');
+  assert.equal(explicitNoVehicle.buildPayload(false).no_vehicle_required, true);
+
+  const vehicleRequired = await load(existingPlanDetail({
+    id: 52, no_vehicle_required: false, vehicle_id: null, vehicle_days: {},
+    vehicle_exception_reason: '历史说明仍保留',
+  }));
+  assert.equal(vehicleRequired.data.noVehicleRequired, false);
+  assert.equal(vehicleRequired.data.vehicleExceptionReason, '历史说明仍保留');
+  assert.equal(vehicleRequired.buildPayload(false).no_vehicle_required, false);
+  assert.match(vehicleRequired.updateFieldGuidance().planVehicleId, /车辆/);
 });
 
 test('edit detail failure blocks all writes and retry restores the same edit target', async t => {

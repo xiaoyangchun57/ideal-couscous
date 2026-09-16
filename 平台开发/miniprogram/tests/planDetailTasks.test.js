@@ -225,6 +225,17 @@ test('plan cancellation gate uses owner or admin across all roles and only actio
   assert.equal(canCancelPlanSchedule({ user_id: 7, status: 'cancelled' }, { id: 9, roles: ['admin'] }), false);
 });
 
+test('cancelled detail retains server audit and actual inspection frequencies without inference', async () => {
+  const cancellation = { reason: '原路线无效', operator_name: '真实操作人', occurred_at: '2026-09-15 10:00:00' };
+  const template_context = [{ date: '2026-09-15', site_name: 'A', frequency: 'monthly', frequency_cn: '月检', item_count: 2 }];
+  const page = await loadPage(detailResponse({ status: 'cancelled', cancellation, template_context }), { id: 7, role: 'operator' });
+  assert.deepEqual(page.data.detail.cancellation, cancellation);
+  assert.deepEqual(page.data.detail.template_context, template_context);
+  const template = fs.readFileSync(templatePath, 'utf8');
+  for (const field of ['reason', 'operator_name', 'occurred_at']) assert.ok(template.includes('{{detail.cancellation.' + field + '}}'));
+  assert.match(template, /item\.frequency_cn/);
+});
+
 test('owner and admin cancellation actions load the real page and open without writing', async () => {
   let writes = 0;
   api.cancelPlanSchedule = () => {
