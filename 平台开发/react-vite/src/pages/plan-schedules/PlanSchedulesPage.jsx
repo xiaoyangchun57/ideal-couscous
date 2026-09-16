@@ -1218,10 +1218,14 @@ export default function PlanSchedulesPage() {
                 <Badge status={planExecutionPresentation(detail).color} text={planExecutionPresentation(detail).label} />
               </Descriptions.Item>
               {Number(detail.version || 1) > 1 && (
-                <Descriptions.Item label="变更版本"><Text type="secondary">v{detail.version}</Text></Descriptions.Item>
+                <Descriptions.Item label="变更版本" span={detail.submitted_at ? 1 : 2}>
+                  <Text type="secondary">v{detail.version}</Text>
+                </Descriptions.Item>
               )}
               {detail.submitted_at && (
-                <Descriptions.Item label="提交时间"><Text type="secondary">{detail.submitted_at}</Text></Descriptions.Item>
+                <Descriptions.Item label="提交时间" span={Number(detail.version || 1) > 1 ? 1 : 2}>
+                  <Text type="secondary">{detail.submitted_at}</Text>
+                </Descriptions.Item>
               )}
               {detail.approver_name && (
                 <Descriptions.Item label="审批人" span={2}><Text type="secondary">{detail.approver_name}</Text></Descriptions.Item>
