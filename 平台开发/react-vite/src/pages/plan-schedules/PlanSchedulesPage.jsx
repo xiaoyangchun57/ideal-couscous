@@ -35,6 +35,12 @@ import {
   cleanupCandidateFactRows, cleanupCandidateIdentityRows, reconcileCleanupSelection,
 } from './cleanupCandidateFacts';
 import { applyPlanVehicleSelection, buildPlanValidationPayload } from './planVehicleState';
+import {
+  normalizePlanPurgeAudits,
+  planCancellationPresentation,
+  planPurgeAuditPath,
+  planPurgeAuditPresentation,
+} from './planAuditPresentation';
 import './PlanSchedulesPage.css';
 
 const { Text } = Typography;
@@ -109,6 +115,10 @@ export default function PlanSchedulesPage() {
   const [purgeReason, setPurgeReason] = useState('');
   const [purgeError, setPurgeError] = useState('');
   const [purgeLoading, setPurgeLoading] = useState(false);
+  const [purgeAuditsOpen, setPurgeAuditsOpen] = useState(false);
+  const [purgeAudits, setPurgeAudits] = useState({ items: [], total: 0, page: 1, pageSize: 20 });
+  const [purgeAuditsLoading, setPurgeAuditsLoading] = useState(false);
+  const [purgeAuditsError, setPurgeAuditsError] = useState('');
   const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpExpanded, setFollowUpExpanded] = useState(false);
@@ -150,6 +160,7 @@ export default function PlanSchedulesPage() {
   const cleanupActionRef = useRef(false);
   const cancelActionRef = useRef(false);
   const purgeActionRef = useRef(false);
+  const purgeAuditRequestRef = useRef({ id: 0, controller: null });
   const mountedRef = useRef(true);
 
   const loadList = useCallback(async () => {
@@ -173,6 +184,39 @@ export default function PlanSchedulesPage() {
       if (mountedRef.current && requestId === listRequestRef.current) setLoading(false);
     }
   }, [statusFilter, typeFilter, attentionFilter]);
+
+  const loadPurgeAudits = useCallback(async (page = 1) => {
+    if (!isAdmin) return;
+    purgeAuditRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = purgeAuditRequestRef.current.id + 1;
+    purgeAuditRequestRef.current = { id: requestId, controller };
+    setPurgeAuditsLoading(true);
+    setPurgeAuditsError('');
+    try {
+      const payload = await api.getStrict(planPurgeAuditPath(page), { signal: controller.signal });
+      if (!mountedRef.current || requestId !== purgeAuditRequestRef.current.id) return;
+      setPurgeAudits(normalizePlanPurgeAudits(payload));
+    } catch (error) {
+      if (mountedRef.current && requestId === purgeAuditRequestRef.current.id && error?.code !== 'REQUEST_ABORTED') {
+        setPurgeAuditsError(error?.message || '删除记录加载失败，请重试');
+      }
+    } finally {
+      if (mountedRef.current && requestId === purgeAuditRequestRef.current.id) setPurgeAuditsLoading(false);
+    }
+  }, [isAdmin]);
+
+  const openPurgeAudits = useCallback(() => {
+    if (!isAdmin) return;
+    setPurgeAuditsOpen(true);
+    loadPurgeAudits(1);
+  }, [isAdmin, loadPurgeAudits]);
+
+  const closePurgeAudits = useCallback(() => {
+    purgeAuditRequestRef.current.id += 1;
+    purgeAuditRequestRef.current.controller?.abort();
+    setPurgeAuditsOpen(false);
+  }, []);
 
   const loadCleanupCandidates = useCallback(async ({ notice = '' } = {}) => {
     const requestId = ++cleanupRequestRef.current;
@@ -341,6 +385,8 @@ export default function PlanSchedulesPage() {
       mountedRef.current = false;
       listRequestRef.current += 1;
       detailRequestRef.current += 1;
+      purgeAuditRequestRef.current.id += 1;
+      purgeAuditRequestRef.current.controller?.abort();
     };
   }, []);
 
@@ -870,6 +916,33 @@ export default function PlanSchedulesPage() {
   const canReviewDetail = detail && canApprove
     && (detail.status === 'submitted' || detail.status === 'change_submitted');
   const canPurgeDetail = Boolean(detail && isAdmin);
+  const cancellationPresentation = planCancellationPresentation(detail);
+
+  const purgeAuditColumns = [
+    {
+      title: '原计划', width: 190,
+      render: (_, record) => {
+        const item = planPurgeAuditPresentation(record);
+        const statusLabel = SCHEDULE_STATUS_MAP[item.statusBeforeDelete]?.label || item.statusBeforeDelete;
+        return <><Text strong>{item.planName}</Text><Text type="secondary" style={{ display: 'block' }}>#{item.planId} · 删除前 {statusLabel}</Text></>;
+      },
+    },
+    {
+      title: '负责人 / 周期', width: 220,
+      render: (_, record) => {
+        const item = planPurgeAuditPresentation(record);
+        return <><Text>{item.ownerName}</Text><Text type="secondary" style={{ display: 'block' }}>{item.period} · {item.siteCount} 站</Text></>;
+      },
+    },
+    { title: '删除原因', width: 210, render: (_, record) => planPurgeAuditPresentation(record).reason },
+    {
+      title: '操作记录', width: 180,
+      render: (_, record) => {
+        const item = planPurgeAuditPresentation(record);
+        return <><Text>{item.operatorName}</Text><Text type="secondary" style={{ display: 'block' }}>{item.purgedAt}</Text></>;
+      },
+    },
+  ];
 
   // 详情内：风险预警汇总（校验警告 + 高危排序提示）
   const riskWarnings = useMemo(() => {
@@ -988,6 +1061,7 @@ export default function PlanSchedulesPage() {
       subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
       primaryAction={<Space>
         {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
+        {isAdmin && <Button icon={<FileSearchOutlined />} onClick={openPurgeAudits}>删除记录</Button>}
         {canCleanup && <Button icon={<DeleteOutlined />} danger onClick={openCleanup}>清理无效数据</Button>}
       </Space>}
       statusItems={[
@@ -1155,6 +1229,13 @@ export default function PlanSchedulesPage() {
               {detail.remarks?.trim() && (
                 <Descriptions.Item label="备注" span={2}>{detail.remarks}</Descriptions.Item>
               )}
+              {cancellationPresentation && (
+                <>
+                  <Descriptions.Item label="取消原因" span={2}>{cancellationPresentation.reason}</Descriptions.Item>
+                  <Descriptions.Item label="取消操作人">{cancellationPresentation.operatorName}</Descriptions.Item>
+                  <Descriptions.Item label="取消时间">{cancellationPresentation.occurredAt}</Descriptions.Item>
+                </>
+              )}
               {detail.coverage_exception_reason && (
                 <Descriptions.Item label="漏站例外说明" span={2}>
                   <Text type="warning">{detail.coverage_exception_reason}</Text>
@@ -1273,6 +1354,24 @@ export default function PlanSchedulesPage() {
             )}
 
           </div>
+        )}
+      </Drawer>
+
+      <Drawer title="删除记录" open={purgeAuditsOpen} onClose={closePurgeAudits} width={860} destroyOnHidden
+        extra={<Button icon={<ReloadOutlined />} loading={purgeAuditsLoading}
+          onClick={() => loadPurgeAudits(purgeAudits.page)}>刷新</Button>}>
+        <Alert type="info" showIcon message="删除记录为服务端保留的只读审计摘要，不提供恢复或再次删除。" style={{ marginBottom: 12 }} />
+        {purgeAuditsError ? (
+          <WorkspaceEmpty type="error" description={purgeAuditsError}
+            onRefresh={() => loadPurgeAudits(purgeAudits.page)} />
+        ) : (
+          <Table size="small" rowKey={record => planPurgeAuditPresentation(record).key}
+            loading={purgeAuditsLoading} dataSource={purgeAudits.items} columns={purgeAuditColumns}
+            scroll={{ x: 800 }} locale={{ emptyText: <Empty description="暂无删除记录" /> }}
+            pagination={purgeAudits.total > purgeAudits.pageSize ? {
+              current: purgeAudits.page, pageSize: purgeAudits.pageSize, total: purgeAudits.total,
+              showSizeChanger: false, showTotal: value => `共 ${value} 条`, onChange: loadPurgeAudits,
+            } : false} />
         )}
       </Drawer>
 
