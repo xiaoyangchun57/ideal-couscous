@@ -90,7 +90,7 @@ export function monitoringSummaryItems(summary = {}) {
 }
 
 export function axisView(key, axis = {}) {
-  const state = axis?.state;
+  const state = axis?.status || axis?.state;
   const labels = {
     received: '已收到',
     reported: '已上报',
@@ -100,15 +100,31 @@ export function axisView(key, axis = {}) {
     not_configured: '未配置',
     unavailable: '暂不可用',
     unknown: '待确认',
+    fresh: '在配置周期内',
+    stale: '超出配置周期',
+    has_valid_observation: '已有有效观测',
+    no_valid_observation: '暂无有效观测',
+    no_observation: '暂无观测',
+    missing: '暂无记录',
+    health_unknown: '健康状态未知',
+  };
+  const badgeStatuses = {
+    normal: 'success', fresh: 'success', attention: 'warning', stale: 'warning',
+    unavailable: 'error', data_unavailable: 'error',
   };
   return {
     key,
     label: AXIS_META[key] || key,
     state,
-    stateLabel: labels[state] || MONITORING_STATUS_META[state]?.label || '待确认',
+    stateLabel: axis?.status_label || labels[state] || MONITORING_STATUS_META[state]?.label || (state ? '服务端未提供状态名称' : '暂无分轴事实'),
+    badgeStatus: badgeStatuses[state] || 'default',
     reason: axis?.reason || '',
     lastReceivedAt: axis?.last_received_at || null,
   };
+}
+
+export function monitoringFactorName(item = {}) {
+  return item.factor_name_cn || item.business_name || item.label || item.business_metric || '未命名业务因子';
 }
 
 export function formatMonitoringTime(value) {

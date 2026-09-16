@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  App, Button, Card, Col, DatePicker, Descriptions, Image, Input, Modal,
-  Row, Segmented, Select, Space, Spin, Tag, Typography,
+  App, Button, Card, DatePicker, Descriptions, Image, Input, Modal,
+  Pagination, Segmented, Select, Space, Spin, Tag, Typography,
 } from 'antd';
 import {
   AppstoreOutlined, DownloadOutlined, FileTextOutlined, PictureOutlined,
@@ -17,6 +17,8 @@ import { useAuth } from '../../hooks/useAuth';
 import {
   archiveHistoryStatus, rejectedPurgeEligibility,
 } from './attachmentDeletion';
+import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
+import './ArchivePage.css';
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -89,16 +91,14 @@ export default function ArchivePage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { page, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
+  const applied = useMemo(() => filtersFromParams(new URLSearchParams(filterQuery)), [filterQuery]);
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
-  const [applied, setApplied] = useState(() => filtersFromParams(searchParams));
   const [sites, setSites] = useState([]);
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [view, setView] = useState(() => searchParams.get('view') === 'grid' ? 'grid' : 'table');
-  const [archiveMode, setArchiveMode] = useState(() => searchParams.get('scope') === 'history' ? 'history' : 'current');
   const [detail, setDetail] = useState(null);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [purgePreview, setPurgePreview] = useState(null);
@@ -106,30 +106,36 @@ export default function ArchivePage() {
   const [purgeError, setPurgeError] = useState('');
   const [purgeLoading, setPurgeLoading] = useState(false);
   const purgeRef = useRef(false);
-  const requestRef = useRef(0);
+  const requestRef = useRef({ id: 0, controller: null });
+  const gridRef = useRef(null);
   const mountedRef = useRef(true);
+  const searchParamsWriterRef = useRef(setSearchParams);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    requestRef.current += 1;
+  useEffect(() => { searchParamsWriterRef.current = setSearchParams; }, [setSearchParams]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestRef.current.id += 1;
+      requestRef.current.controller?.abort();
+    };
   }, []);
 
   useEffect(() => {
-    api.getStrict('/sites').then(data => setSites(Array.isArray(data) ? data : []))
-      .catch(() => setSites([]));
+    const controller = new AbortController();
+    api.getStrict('/sites', { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) setSites(Array.isArray(data) ? data : []);
+    }).catch(() => { if (!controller.signal.aborted) setSites([]); });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    const nextFilters = filtersFromParams(searchParams);
-    setFilters(nextFilters);
-    setApplied(nextFilters);
-    setView(searchParams.get('view') === 'grid' ? 'grid' : 'table');
-    setArchiveMode(searchParams.get('scope') === 'history' ? 'history' : 'current');
-    setPage(1);
+    setFilters(applied);
     setDetail(null);
-  }, [searchParams]);
+  }, [applied, archiveMode]);
 
-  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode) => {
+  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1) => {
     const params = new URLSearchParams();
     if (nextFilters.keyword) params.set('keyword', nextFilters.keyword);
     if (nextFilters.site_id) params.set('site_id', nextFilters.site_id);
@@ -140,51 +146,65 @@ export default function ArchivePage() {
     }
     if (nextView === 'grid') params.set('view', 'grid');
     if (nextMode === 'history') params.set('scope', 'history');
+    if (nextPage > 1) params.set('page', String(nextPage));
     setSearchParams(params, { replace: true });
   }, [archiveMode, setSearchParams, view]);
 
-  const load = useCallback(async (nextPage = 1) => {
-    const requestId = ++requestRef.current;
+  const load = useCallback(async () => {
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = requestRef.current.id + 1;
+    requestRef.current = { id: requestId, controller };
+    let correctingPage = false;
     setLoading(true);
-    const params = new URLSearchParams({ page: String(nextPage), limit: '100' });
-    if (archiveMode === 'current') params.set('current_archive', '1');
-    else { params.set('history_archive', '1'); params.set('include_voided', '1'); }
-    if (applied.keyword) params.set('keyword', applied.keyword);
-    if (applied.site_id) params.set('site_id', applied.site_id);
-    if (applied.business_type) params.set('business_type', applied.business_type);
-    if (applied.date_range?.[0] && applied.date_range?.[1]) {
-      params.set('date_from', applied.date_range[0].format('YYYY-MM-DD'));
-      params.set('date_to', applied.date_range[1].format('YYYY-MM-DD'));
-    }
     try {
-      const data = await api.getStrict(`/attachments?${params.toString()}`);
-      if (!mountedRef.current || requestId !== requestRef.current) return;
-      setItems(data.items || []);
-      setTotal(data.total || 0);
-      setPage(nextPage);
+      const data = await api.getStrict(`/attachments?${requestQuery}`, { signal: controller.signal });
+      if (!mountedRef.current || requestId !== requestRef.current.id) return;
+      if (!Array.isArray(data?.items) || !Number.isSafeInteger(data.total) || data.total < 0) {
+        throw new Error('影像档案分页数据格式异常，请重试');
+      }
+      const requestedPage = Number(new URLSearchParams(requestQuery).get('page'));
+      const lastPage = archiveLastPage(data.total);
+      if (requestedPage > lastPage) {
+        correctingPage = true;
+        searchParamsWriterRef.current((current) => {
+          const next = new URLSearchParams(current);
+          if (lastPage > 1) next.set('page', String(lastPage));
+          else next.delete('page');
+          return next;
+        }, { replace: true });
+        return;
+      }
+      setItems(data.items);
+      setTotal(data.total);
       setError('');
+      gridRef.current?.scrollTo({ top: 0 });
     } catch (requestError) {
-      if (mountedRef.current && requestId === requestRef.current) {
+      if (mountedRef.current && requestId === requestRef.current.id && requestError?.code !== 'REQUEST_ABORTED') {
         setError(requestError.message || '影像档案加载失败');
       }
     } finally {
-      if (mountedRef.current && requestId === requestRef.current) setLoading(false);
+      if (mountedRef.current && requestId === requestRef.current.id && !correctingPage) setLoading(false);
     }
-  }, [applied, archiveMode]);
+  }, [requestQuery]);
 
-  useEffect(() => { load(1); }, [load]);
+  useEffect(() => {
+    load();
+    return () => {
+      requestRef.current.id += 1;
+      requestRef.current.controller?.abort();
+    };
+  }, [load]);
 
   const applyFilters = () => {
     const next = { ...filters, keyword: filters.keyword.trim() };
     setFilters(next);
-    setApplied(next);
     writeUrl(next);
   };
 
   const resetFilters = () => {
     const next = { ...emptyFilters };
     setFilters(next);
-    setApplied(next);
     writeUrl(next);
   };
 
@@ -197,7 +217,7 @@ export default function ArchivePage() {
       const result = await api.postStrict(`/attachments/${detail.id}/purge-rejected-batch`, {});
       message.success(`已清理本次整改 ${result.count || purgePreview.count} 张已驳回照片`);
       setPurgeOpen(false); setDetail(null);
-      await load(page);
+      await load();
     } catch (requestError) {
       setPurgeError(requestError?.message || '彻底删除失败，请重试');
     } finally {
@@ -263,11 +283,11 @@ export default function ArchivePage() {
     <WorkspacePage title="影像档案" subtitle="集中查询巡检与工单等业务留存的影像记录">
       <WorkspaceToolbar className="archive-toolbar" actions={<>
         <Segmented value={archiveMode} onChange={(nextMode) => {
-          setArchiveMode(nextMode); setPage(1); setDetail(null); writeUrl(applied, view, nextMode);
+          setDetail(null); writeUrl(applied, view, nextMode);
         }} options={[{ value: 'current', label: '当前档案' }, { value: 'history', label: '历史记录' }]} />
         <Button type="primary" icon={<SearchOutlined />} onClick={applyFilters}>查询</Button>
         <Button icon={<ReloadOutlined />} onClick={resetFilters}>重置</Button>
-        <Segmented value={view} onChange={(next) => { setView(next); writeUrl(applied, next, archiveMode); }}
+        <Segmented value={view} onChange={(next) => writeUrl(applied, next, archiveMode, page)}
           options={[{ value: 'table', icon: <FileTextOutlined />, label: '表格' },
             { value: 'grid', icon: <AppstoreOutlined />, label: '网格' }]} />
       </>}>
@@ -286,20 +306,22 @@ export default function ArchivePage() {
           onChange={value => setFilters(current => ({ ...current, date_range: value }))} /></FilterField>
       </WorkspaceToolbar>
 
-      {error && <WorkspaceEmpty type="error" description={error} onRefresh={() => load(page)} />}
-      {!error && <Spin spinning={loading}>
+      {error && <WorkspaceEmpty type="error" description={error} onRefresh={load} />}
+      {!error && <div className="archive-results"><Spin spinning={loading}>
         {!loading && items.length === 0 ? <WorkspaceEmpty
           type={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
           description={archiveMode === 'current'
             ? '当前没有已完成业务审核且仍有效的影像；巡检照片在巡检质控审核，工单照片随工单审核。'
             : '当前没有驳回、作废、替换、待审或补充材料记录。'}
-          onRefresh={() => load(1)}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
-          loading={loading} emptyType={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
-          onRefresh={() => load(page)} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
-          pagination={total > 100 ? { current: page, pageSize: 100, total, showSizeChanger: false,
-            showTotal: value => `共 ${value} 条`, onChange: load } : false} /> :
-          <Row gutter={[12, 12]}>{items.map(item => <Col key={item.id} xs={24} sm={12} md={8} lg={6}>
-            <Card size="small" hoverable cover={<button type="button" onClick={() => setDetail(item)}
+          onRefresh={load}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
+          loading={loading} fillHeight emptyType={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
+          onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
+          pagination={total > ARCHIVE_PAGE_SIZE ? { current: page, pageSize: ARCHIVE_PAGE_SIZE, total, showSizeChanger: false, disabled: loading,
+            showTotal: value => `共 ${value} 条`, onChange: (next) => writeUrl(applied, view, archiveMode, next) } : false} /> :
+          <div className="archive-grid-view">
+          <div className="archive-grid-scroll" ref={gridRef} role="region" aria-label="影像档案网格" tabIndex={0}>
+          <div className="archive-grid-items">{items.map(item =>
+            <Card key={item.id} size="small" hoverable cover={<button type="button" onClick={() => setDetail(item)}
               style={{ width: '100%', height: 170, padding: 0, border: 0, overflow: 'hidden', cursor: 'pointer' }}>
               <img src={item.stored_path} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </button>} actions={[
@@ -311,8 +333,14 @@ export default function ArchivePage() {
                 {archiveMode === 'history' && (() => { const status = historyStatus(item); return <Tag color={status.color}>{status.label}</Tag>; })()}
               </Space>} />
             </Card>
-          </Col>)}</Row>}
-      </Spin>}
+          )}</div></div>
+          <div className="archive-grid-footer">
+            <Text type="secondary">共 {total} 条</Text>
+            {total > ARCHIVE_PAGE_SIZE && <Pagination current={page} pageSize={ARCHIVE_PAGE_SIZE} total={total}
+              showSizeChanger={false} showLessItems responsive size="small" disabled={loading}
+              onChange={(next) => writeUrl(applied, view, archiveMode, next)} />}
+          </div></div>}
+      </Spin></div>}
 
       <Modal title={detail ? displayTitle(detail) : '影像详情'} open={Boolean(detail)}
         onCancel={() => setDetail(null)} width={760}

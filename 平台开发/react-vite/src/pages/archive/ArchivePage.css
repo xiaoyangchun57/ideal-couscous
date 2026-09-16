@@ -1,0 +1,47 @@
+.archive-results,
+.archive-results > .ant-spin-nested-loading,
+.archive-results .ant-spin-container,
+.archive-grid-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.archive-grid-view { gap: 12px; }
+.archive-grid-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+.archive-grid-items {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.archive-grid-items > .ant-card { min-width: 0; }
+.archive-grid-items .ant-card-meta-description { overflow-wrap: anywhere; }
+.archive-grid-footer {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 1199px) {
+  .archive-grid-items { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .archive-grid-items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 639px) {
+  .archive-grid-items { grid-template-columns: minmax(0, 1fr); }
+  .archive-results { min-height: 240px; }
+  .archive-grid-footer { justify-content: flex-start; }
+}

@@ -236,7 +236,12 @@ export const api = {
     },
   }),
   trackEvent: (eventName, context) => api.track(eventName, context),
-  stationMonitoringSites: (options = {}) => strictRequest('/station-monitoring/sites', options),
+  stationMonitoringSites: ({ scope, ...options } = {}) => {
+    const params = new URLSearchParams();
+    if (scope !== undefined) params.set('scope', scope);
+    const query = params.toString();
+    return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
+  },
   stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
   stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),
 };

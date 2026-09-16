@@ -67,14 +67,20 @@ export default function SitesPage() {
   const navigate = useNavigate();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { user } = useAuth();
+  const isAdmin = hasAdminRole(user);
+  const monitoringScope = isAdmin ? 'all' : 'mine';
+  const monitoringRequestKey = `${user?.id ?? user?.username ?? ''}:${monitoringScope}`;
 
   // ---- data state ----
-  const [sites, setSites] = useState([]);
-  const sitesRef = useRef([]);
+  const [siteSnapshot, setSiteSnapshot] = useState({ key: null, rows: [] });
+  const sites = siteSnapshot.key === monitoringRequestKey ? siteSnapshot.rows : [];
+  const sitesRef = useRef({ key: null, rows: [] });
   const fetchRequestRef = useRef({ id: 0, controller: null });
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
   const [monitoringSummary, setMonitoringSummary] = useState({});
+  const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(null);
   const [monitoringError, setMonitoringError] = useState(null);
 
   // ---- filter state ----
@@ -119,9 +125,6 @@ export default function SitesPage() {
   const [siteManagers, setSiteManagers] = useState([]);
   const [siteCreateForm] = Form.useForm();
 
-  const { user } = useAuth();
-  const isAdmin = hasAdminRole(user);
-
   // ========================================================================
   // Fetch all sites
   // ========================================================================
@@ -133,31 +136,42 @@ export default function SitesPage() {
     setLoading(true);
     setFetchError(null);
     setMonitoringError(null);
+    if (sitesRef.current.key !== monitoringRequestKey) {
+      setMonitoringSummary({});
+      setMonitoringScopeFacts(null);
+    }
     try {
       const [siteResult, monitoringResult] = await Promise.allSettled([
         api.getStrict('/sites', { signal: controller.signal }),
-        api.stationMonitoringSites({ signal: controller.signal }),
+        api.stationMonitoringSites({ scope: monitoringScope, signal: controller.signal }),
       ]);
       if (fetchRequestRef.current.id !== requestId) return;
       if (siteResult.status === 'rejected') throw siteResult.reason;
       const data = siteResult.value;
       if (monitoringResult.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
-      else setMonitoringSummary(monitoringResult.value?.summary || {});
+      else {
+        setMonitoringSummary(monitoringResult.value?.summary || {});
+        setMonitoringScopeFacts({
+          scope: monitoringResult.value?.scope ?? null,
+          availableScopes: Array.isArray(monitoringResult.value?.available_scopes) ? monitoringResult.value.available_scopes : [],
+        });
+      }
       const rows = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
       if (!rows) {
         setFetchError('站点列表返回格式异常，请稍后重试');
         return;
       }
-      const merged = mergeMonitoringSites(rows, monitoringResult.status === 'fulfilled' ? monitoringResult.value : null, sitesRef.current);
-      sitesRef.current = merged;
-      setSites(merged);
+      const previousRows = sitesRef.current.key === monitoringRequestKey ? sitesRef.current.rows : [];
+      const merged = mergeMonitoringSites(rows, monitoringResult.status === 'fulfilled' ? monitoringResult.value : null, previousRows);
+      sitesRef.current = { key: monitoringRequestKey, rows: merged };
+      setSiteSnapshot({ key: monitoringRequestKey, rows: merged });
     } catch (err) {
       if (fetchRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
       setFetchError(err.message || '网络异常，无法加载站点列表');
     } finally {
       if (fetchRequestRef.current.id === requestId) setLoading(false);
     }
-  }, []);
+  }, [monitoringRequestKey, monitoringScope]);
 
   useEffect(() => {
     fetchSites();
@@ -1155,7 +1169,7 @@ export default function SitesPage() {
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
-      statusItems={monitoringSummaryItems(monitoringSummary)}
+      statusItems={monitoringSummaryItems(siteSnapshot.key === monitoringRequestKey ? monitoringSummary : {})}
       primaryAction={<Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
         {isAdmin && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
@@ -1257,6 +1271,14 @@ export default function SitesPage() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
+      {siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
+        监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}
+      </Text>}
+      {siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
+        <Alert type="warning" showIcon message="监测范围尚未确认"
+          description="服务端未确认本次请求范围，监测结果仅按实际返回的站点投影展示。"
+          action={<Button size="small" onClick={fetchSites}>重新加载</Button>} />
+      )}
       {fetchError && !loading && sites.length === 0 ? (
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (

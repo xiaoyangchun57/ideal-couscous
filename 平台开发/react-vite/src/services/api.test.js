@@ -105,6 +105,27 @@ test('getStrict distinguishes a timeout', async () => {
   });
 });
 
+test('monitoring directory encodes scope without losing caller cancellation', async () => {
+  for (const scope of ['all', 'mine', 'scope & injected=all']) {
+    const controller = new AbortController();
+    let requested;
+    globalThis.fetch = (url, { signal }) => {
+      requested = url;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+        const error = new Error('cancelled');
+        error.name = 'AbortError';
+        reject(error);
+      }));
+    };
+    const pending = api.stationMonitoringSites({ scope, signal: controller.signal });
+    controller.abort();
+    await assert.rejects(pending, (error) => error.code === 'REQUEST_ABORTED');
+    const query = new URL(requested, 'http://web-test.invalid').searchParams;
+    assert.equal(query.get('scope'), scope);
+    assert.equal(query.has('injected'), false);
+  }
+});
+
 test('monitoring services propagate scope denial and missing sites without a fallback request', async () => {
   for (const status of [403, 404]) {
     const urls = [];

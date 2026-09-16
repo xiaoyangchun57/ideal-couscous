@@ -37,6 +37,7 @@ import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
 import { getNotificationTarget } from '../utils/shellNavigation';
 import './AppShell.css';
+import { mainLayoutLocation } from './mainLayoutNavigation';
 
 const { Header, Content, Sider } = Layout;
 const { Text } = Typography;
@@ -58,11 +59,12 @@ export default function MainLayout() {
   const [notifView, setNotifView] = useState('current');
   const [markingAllRead, setMarkingAllRead] = useState(false);
 
-  const selectedKey = `/${location.pathname.split('/')[1] || ''}`;
-  const currentMeta = routeMeta[selectedKey] || { group: '页面导航', title: '页面不存在' };
-  const isCockpit = selectedKey === '/';
   const cockpitView = new URLSearchParams(location.search).get('view') === 'sites' ? 'sites' : 'operations';
   const navItems = useMemo(() => getNavigation(user?.roles || [user?.role]), [user?.role, user?.roles]);
+  const { selectedKey, metaKey, meta: currentMeta } = mainLayoutLocation(
+    location.pathname, routeMeta, navItems.flatMap((group) => group.children.map((item) => item.key)),
+  );
+  const isCockpit = metaKey === '/';
   const userRoles = useMemo(() => user?.roles?.length ? user.roles : [user?.role], [user?.role, user?.roles]);
   const userRoleLabel = useMemo(() => {
     const roles = user?.roles?.length ? user.roles : [user?.role];
@@ -281,7 +283,7 @@ export default function MainLayout() {
           <Menu
             mode="inline"
             inlineCollapsed={collapsed}
-            selectedKeys={[selectedKey]}
+            selectedKeys={selectedKey ? [selectedKey] : []}
             items={navItems}
             onClick={({ key }) => navigate(key)}
             style={{ background: 'transparent', borderInlineEnd: 0 }}
@@ -366,7 +368,7 @@ export default function MainLayout() {
       <GlobalSearch open={searchOpen} onClose={() => setSearchOpen(false)} />
       <Drawer title="功能导航" placement="left" width={260} open={mobileNavOpen}
         onClose={() => setMobileNavOpen(false)} styles={{ body: { padding: 0, background: tokens.navBg } }}>
-        <Menu mode="inline" selectedKeys={[selectedKey]} items={navItems}
+        <Menu mode="inline" selectedKeys={selectedKey ? [selectedKey] : []} items={navItems}
           onClick={({ key }) => { navigate(key); setMobileNavOpen(false); }}
           style={{ background: 'transparent', borderInlineEnd: 0 }} />
       </Drawer>
