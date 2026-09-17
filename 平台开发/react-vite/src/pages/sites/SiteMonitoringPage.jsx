@@ -9,6 +9,7 @@ import {
   AXIS_META, axisView, capabilityLabel, formatMonitoringTime, monitoringStatusView,
   monitoringFactorName, monitoringTrendView,
 } from './stationMonitoring';
+import './SiteMonitoringPage.css';
 
 const { Title, Text } = Typography;
 
@@ -103,16 +104,16 @@ export default function SiteMonitoringPage() {
   const axes = Object.keys(AXIS_META).map((key) => axisView(key, axesPayload[key] || {}));
   const capabilities = visibleData.capabilities || monitoring.capabilities || {};
   const trend = monitoringTrendView(capabilities, monitoring);
-  const instrumentsPayload = visibleData.instruments || monitoring.instruments;
-  const recentItemsPayload = visibleData.recent_items || monitoring.recent_items;
-  const instruments = Array.isArray(instrumentsPayload) ? instrumentsPayload : [];
-  const recentItems = Array.isArray(recentItemsPayload) ? recentItemsPayload : [];
+  const factorsPayload = visibleData.factors || monitoring.factors;
+  const factors = Array.isArray(factorsPayload) ? factorsPayload : [];
 
   return (
-    <div className="workspace-page" style={{ padding: 24 }}>
+    <div className="workspace-page site-monitoring-page" style={{ padding: 24 }}>
+      <div className="site-monitoring-page__scroll" role="region" aria-label="站点监测正文" tabIndex={0}>
       <Space direction="vertical" size={18} style={{ width: '100%' }}>
         <Space align="start" wrap>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/sites')}>返回站点目录</Button>
+          <Button onClick={() => navigate(`/sites?archive=${encodeURIComponent(siteId)}`)}>站点档案</Button>
           <Button aria-label="刷新" icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
           <div>
             <Space size={8} wrap>
@@ -132,10 +133,8 @@ export default function SiteMonitoringPage() {
             items={[
               { key: 'status', label: '监测状态', children: <Tag color={status.color}>{status.label}</Tag> },
               { key: 'reason', label: '主原因', children: status.reason },
-              { key: 'communication', label: '最后通信', children: formatMonitoringTime(site.last_communication_at) },
+              { key: 'communication', label: '最后收到报文', children: formatMonitoringTime(site.last_received_at || site.last_communication_at) },
               { key: 'observation', label: '最后有效观测', children: formatMonitoringTime(site.last_valid_observation_at) },
-              { key: 'district', label: '所属区县', children: site.district || '暂无资料' },
-              { key: 'address', label: '地址', children: site.address || '暂无资料' },
             ]}
           />
         </Card>
@@ -153,25 +152,18 @@ export default function SiteMonitoringPage() {
           </Col>
         </Row>
 
-        <Card title="监测分轴">
-          <Row gutter={[12, 12]}>{axes.map((axis) => <Col xs={24} sm={12} lg={6} key={axis.key}><AxisCard axis={axis} /></Col>)}</Row>
+        <Card title="数据事实">
+          <Row gutter={[12, 12]}>{axes.map((axis) => <Col xs={24} sm={12} key={axis.key}><AxisCard axis={axis} /></Col>)}</Row>
         </Card>
 
-        <Card title="仪器与因子">
-          {instruments.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已批准的仪器或因子配置" /> : (
-            <List size="small" dataSource={instruments} renderItem={(item) => (
-              <List.Item>
-                <Space direction="vertical" size={0}><Text strong>{item.instrument_asset_code || '未提供仪器资产编码'}</Text><Text type="secondary">{monitoringFactorName(item)}</Text></Space>
-                <Tag color={item.status === 'has_valid_observation' ? 'green' : 'default'}>{item.status === 'has_valid_observation' ? '已有有效观测' : '健康状态未知'}</Tag>
-              </List.Item>
-            )} />
-          )}
-        </Card>
-
-        <Card title="近期告警、工单与巡检">
-          {recentItems.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无服务端返回的近期事项" /> : <List size="small" dataSource={recentItems} renderItem={(item) => <List.Item><Text>{item.title || item.type || '近期事项'}</Text><Text type="secondary">{formatMonitoringTime(item.occurred_at)}</Text></List.Item>} />}
+        <Card title="监测因子">
+          {factors.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已批准的监测因子" /> :
+            <List size="small" dataSource={factors} renderItem={(item) => <List.Item>
+              <Text strong>{monitoringFactorName(item)}</Text><Text type="secondary">{item.standard_unit || '未配置单位'}</Text>
+            </List.Item>} />}
         </Card>
       </Space>
+      </div>
     </div>
   );
 }

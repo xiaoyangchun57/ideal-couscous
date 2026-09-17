@@ -85,6 +85,13 @@ function PageRoute({ path, children }) {
   return <ProtectedRoute roles={pageRoles[path]}>{children}</ProtectedRoute>;
 }
 
+function CapabilityRoute({ capability, fallback = '/sites', children }) {
+  const { user } = useAuth();
+  if (!user) return <RouteFallback />;
+  if (user.capabilities?.[capability] !== true) return <Navigate to={fallback} replace />;
+  return children;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -96,10 +103,10 @@ function AppRoutes() {
           <PageRoute path="/sites"><Deferred><SitesPage /></Deferred></PageRoute>
         )} />
         <Route path="sites/data-access" element={(
-          <PageRoute path="/sites/data-access"><Deferred><StationAccessPage /></Deferred></PageRoute>
+          <PageRoute path="/sites/data-access"><CapabilityRoute capability="station_monitoring_public"><Deferred><StationAccessPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="sites/:siteId" element={(
-          <PageRoute path="/sites"><Deferred><SiteMonitoringPage /></Deferred></PageRoute>
+          <PageRoute path="/sites"><CapabilityRoute capability="station_monitoring_public"><Deferred><SiteMonitoringPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="alerts" element={(
           <PageRoute path="/alerts"><Deferred><AlertsPage /></Deferred></PageRoute>

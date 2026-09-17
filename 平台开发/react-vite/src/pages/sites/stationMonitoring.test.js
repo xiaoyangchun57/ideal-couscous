@@ -10,6 +10,7 @@ import {
   monitoringSummaryItems,
   monitoringTrendView,
   monitoringFactorName,
+  formatMonitoringTime,
 } from './stationMonitoring.js';
 
 test('monitoring status metadata covers the eight product states', () => {
@@ -23,7 +24,7 @@ test('monitoring status metadata covers the eight product states', () => {
     'attention',
     'data_unavailable',
   ]);
-  assert.deepEqual(Object.keys(AXIS_META), ['communication', 'data', 'rtu', 'instrument']);
+  assert.deepEqual(Object.keys(AXIS_META), ['communication', 'data']);
 });
 
 test('monitoring status never falls back to the legacy station status', () => {
@@ -48,9 +49,8 @@ test('monitoring merge preserves the legacy site status and retains last success
 test('summary and axes expose explicit unavailable and unknown states', () => {
   const summary = monitoringSummaryItems({ data_unavailable: 2 });
   assert.equal(summary.find((item) => item.key === 'data_unavailable').value, 2);
-  assert.equal(axisView('rtu', { state: 'unknown' }).stateLabel, '待确认');
   assert.equal(axisView('communication', { state: 'reported' }).stateLabel, '已上报');
-  assert.equal(axisView('data', { state: 'interval_unconfigured' }).stateLabel, '周期未配置');
+  assert.equal(axisView('data', { state: 'interval_unconfigured' }).stateLabel, '数据周期未配置');
   assert.equal(axisView('data', { state: 'waiting_first_valid' }).stateLabel, '等待首个有效观测');
 });
 
@@ -96,7 +96,7 @@ test('trend availability requires both server capability and returned aggregate 
   assert.equal(available.items[0].value, 0);
 });
 
-test('all four monitoring axes preserve server labels and status visual semantics', () => {
+test('data reception and observation axes preserve server labels and status visual semantics', () => {
   for (const key of Object.keys(AXIS_META)) {
     for (const [status, badge] of [['normal', 'success'], ['attention', 'warning'], ['missing', 'default'], ['unavailable', 'error']]) {
       const view = axisView(key, { status, status_label: `服务端自定义:${key}:${status}`, state: 'unknown' });
@@ -108,17 +108,17 @@ test('all four monitoring axes preserve server labels and status visual semantic
   }
 });
 
-test('known compatibility axis states are never collapsed to unknown or device health', () => {
+test('known data fact states are never collapsed to unknown or device health', () => {
   for (const [status, label, badge] of [
     ['fresh', '在配置周期内', 'success'], ['stale', '超出配置周期', 'warning'],
     ['has_valid_observation', '已有有效观测', 'default'], ['no_valid_observation', '暂无有效观测', 'default'],
   ]) {
-    const view = axisView('instrument', { state: status });
+    const view = axisView('data', { state: status });
     assert.equal(view.stateLabel, label);
     assert.equal(view.badgeStatus, badge);
   }
-  assert.equal(axisView('rtu').stateLabel, '暂无分轴事实');
-  assert.equal(axisView('rtu', { status: 'server_new_status' }).stateLabel, '服务端未提供状态名称');
+  assert.equal(axisView('data').stateLabel, '暂无分轴事实');
+  assert.equal(axisView('data', { status: 'server_new_status' }).stateLabel, '服务端未提供状态名称');
 });
 
 test('Chinese factor names precede business display names and internal metric identifiers', () => {
@@ -126,4 +126,11 @@ test('Chinese factor names precede business display names and internal metric id
   assert.equal(monitoringFactorName({ business_name: '业务名称', label: '业务标签', business_metric: 'ph_internal' }), '业务名称');
   assert.equal(monitoringFactorName({ label: '业务标签', business_metric: 'ph_internal' }), '业务标签');
   assert.equal(monitoringFactorName({ business_metric: 'ph_internal' }), 'ph_internal');
+});
+
+test('monitoring timestamps render as local user-facing time instead of ISO source text', () => {
+  const source = '2026-09-16T06:51:11+00:00';
+  const formatted = formatMonitoringTime(source);
+  assert.doesNotMatch(formatted, /T|\+00:00|Z$/);
+  assert.match(formatted, /2026/);
 });

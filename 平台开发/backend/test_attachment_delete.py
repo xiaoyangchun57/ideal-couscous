@@ -115,6 +115,12 @@ class AttachmentDeleteTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT, source_id INTEGER,
                     event_type TEXT, operator TEXT, remark TEXT
                 );
+                CREATE TABLE attachment_purge_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT UNIQUE,
+                    operator_id INTEGER, idempotency_key TEXT, request_hash TEXT,
+                    response_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id,idempotency_key)
+                );
                 INSERT INTO users VALUES
                     (1, 'admin', 'Admin', 'admin', 'active'),
                     (2, 'operator', 'Operator', 'operator', 'active'),
@@ -863,6 +869,409 @@ class AttachmentDeleteTest(unittest.TestCase):
         with app_module.get_db() as db:
             self.assertEqual(db.execute(
                 'SELECT actual_photos FROM insp_plan_items WHERE id=101').fetchone()[0], 0)
+
+    def test_archive_purge_requires_admin_reason_and_existing_record(self):
+        self.assertEqual(self.client.get(
+            '/api/attachments/10/purge', headers=self.headers('operator-token')).status_code, 403)
+        missing_reason = self.client.post(
+            '/api/attachments/10/purge', headers=self.headers('admin-token'), json={'reason': '  '})
+        self.assertEqual((missing_reason.status_code, missing_reason.json.get('code')),
+                         (400, 'PURGE_REASON_REQUIRED'))
+        missing = self.client.get(
+            '/api/attachments/9999/purge', headers=self.headers('admin-token'))
+        self.assertEqual((missing.status_code, missing.json.get('code')),
+                         (404, 'ATTACHMENT_NOT_FOUND'))
+
+    def test_archive_purge_blocks_current_and_formal_pending_evidence(self):
+        with open(os.path.join(self.upload_dir, 'TEST_DELETE_FORMAL.jpg'), 'wb') as handle:
+            handle.write(b'current evidence')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET review_status='approved',evidence_qualification='qualified',
+                    plan_id=100,item_id=101,extra_json=? WHERE id=11""",
+                (json.dumps({'material_role': 'formal'}),))
+        current = self.client.get('/api/attachments/11/purge', headers=self.headers('admin-token'))
+        self.assertEqual(current.status_code, 200, current.json)
+        self.assertFalse(current.json['can_purge'])
+        self.assertIn('当前有效证据', current.json['block_reason'])
+
+        os.remove(os.path.join(self.upload_dir, 'TEST_DELETE_FORMAL.jpg'))
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET review_status='pending',evidence_qualification='review' WHERE id=11""")
+        pending = self.client.get('/api/attachments/11/purge', headers=self.headers('admin-token'))
+        self.assertEqual(pending.status_code, 200, pending.json)
+        self.assertFalse(pending.json['can_purge'])
+        self.assertIn('正式待审', pending.json['block_reason'])
+        denied = self.client.post('/api/attachments/11/purge',
+                                  headers=self.headers('admin-token'), json={'reason': '不应删除'})
+        self.assertEqual((denied.status_code, denied.json.get('code')),
+                         (409, 'ATTACHMENT_PURGE_BLOCKED'))
+
+    def test_missing_current_primary_file_moves_to_history_and_can_be_purged(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET review_status='approved',evidence_qualification='qualified',
+                    plan_id=100,item_id=101,extra_json=? WHERE id=11""",
+                (json.dumps({'material_role': 'formal'}),))
+            db.execute('UPDATE insp_plan_items SET photo_urls=?,actual_photos=1 WHERE id=101',
+                       (json.dumps(['/uploads/TEST_DELETE_FORMAL.jpg']),))
+
+        current = self.client.get('/api/attachments?current_archive=1',
+                                  headers=self.headers('admin-token'))
+        history = self.client.get('/api/attachments?history_archive=1',
+                                  headers=self.headers('admin-token'))
+        self.assertNotIn(11, {item['id'] for item in current.json['items']})
+        self.assertIn(11, {item['id'] for item in history.json['items']})
+
+        with mock.patch('builtins.open', side_effect=AssertionError('preview must not read bytes')):
+            preview = self.client.get('/api/attachments/11/purge',
+                                      headers=self.headers('admin-token'))
+        self.assertEqual(preview.status_code, 200, preview.json)
+        self.assertTrue(preview.json['can_purge'])
+        self.assertIn('主文件已缺失', preview.json['qualification_reason'])
+        self.assertEqual(preview.json['physical_file_count'], 0)
+
+        response = self.client.post('/api/attachments/11/purge',
+                                    headers=self.headers('admin-token'),
+                                    json={'reason': '清理已丢失主文件的历史记录'})
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            self.assertIsNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=11').fetchone())
+            summary = json.loads(db.execute("""SELECT remark FROM timeline_events
+                WHERE source_type='attachment_archive_purge' AND source_id=11""").fetchone()['remark'])
+            self.assertEqual(summary['original_record']['review_status'], 'approved')
+            self.assertEqual(summary['original_record']['stored_path'],
+                             '/uploads/TEST_DELETE_FORMAL.jpg')
+
+    def test_existing_current_primary_file_stays_current_and_is_blocked(self):
+        primary = os.path.join(self.upload_dir, 'TEST_DELETE_FORMAL.jpg')
+        with open(primary, 'wb') as handle:
+            handle.write(b'current evidence')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET review_status='approved',evidence_qualification='qualified',
+                    plan_id=100,item_id=101,extra_json=? WHERE id=11""",
+                (json.dumps({'material_role': 'formal'}),))
+
+        current = self.client.get('/api/attachments?current_archive=1',
+                                  headers=self.headers('admin-token'))
+        history = self.client.get('/api/attachments?history_archive=1',
+                                  headers=self.headers('admin-token'))
+        self.assertIn(11, {item['id'] for item in current.json['items']})
+        self.assertNotIn(11, {item['id'] for item in history.json['items']})
+        preview = self.client.get('/api/attachments/11/purge',
+                                  headers=self.headers('admin-token'))
+        self.assertFalse(preview.json['can_purge'])
+        self.assertIn('当前有效证据', preview.json['block_reason'])
+
+    def test_archive_purge_rechecks_active_admin_inside_write_transaction(self):
+        for attachment_id, mutate_admin in (
+                (240, lambda db: db.execute("UPDATE users SET status='inactive' WHERE id=1")),
+                (241, lambda db: (
+                    db.execute("DELETE FROM user_roles WHERE user_id=1"),
+                    db.execute("INSERT INTO user_roles(user_id,role) VALUES (1,'operator')"))),
+        ):
+            with self.subTest(attachment_id=attachment_id):
+                stored, thumb = self.add_rejected_attachment(attachment_id)
+                files = [os.path.join(self.upload_dir, value[len('/uploads/'):].replace('/', os.sep))
+                         for value in (stored, thumb)]
+                with app_module.get_db() as db:
+                    mutate_admin(db)
+                    attachment_before = dict(db.execute(
+                        'SELECT * FROM operation_attachments WHERE id=?', (attachment_id,)).fetchone())
+                    item_before = dict(db.execute(
+                        'SELECT * FROM insp_plan_items WHERE id=101').fetchone())
+                    event_count = db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0]
+                    log_count = db.execute('SELECT COUNT(*) FROM operation_logs').fetchone()[0]
+                    notification_count = db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0]
+
+                response = self.client.post(
+                    f'/api/attachments/{attachment_id}/purge',
+                    headers=self.headers('admin-token'), json={'reason': '权限变化后不得清理'})
+                self.assertEqual((response.status_code, response.json.get('code')),
+                                 (403, 'ATTACHMENT_PURGE_FORBIDDEN'))
+                self.assertTrue(all(os.path.isfile(path) for path in files))
+                with app_module.get_db() as db:
+                    self.assertEqual(dict(db.execute(
+                        'SELECT * FROM operation_attachments WHERE id=?',
+                        (attachment_id,)).fetchone()), attachment_before)
+                    self.assertEqual(dict(db.execute(
+                        'SELECT * FROM insp_plan_items WHERE id=101').fetchone()), item_before)
+                    self.assertEqual(db.execute(
+                        'SELECT COUNT(*) FROM timeline_events').fetchone()[0], event_count)
+                    self.assertEqual(db.execute(
+                        'SELECT COUNT(*) FROM operation_logs').fetchone()[0], log_count)
+                    self.assertEqual(db.execute(
+                        'SELECT COUNT(*) FROM notifications').fetchone()[0], notification_count)
+
+                with app_module.get_db() as db:
+                    db.execute("UPDATE users SET status='active' WHERE id=1")
+                    db.execute("DELETE FROM user_roles WHERE user_id=1")
+                    db.execute("INSERT INTO user_roles(user_id,role) VALUES (1,'admin')")
+
+    def test_archive_purge_terminal_states_preview_and_delete_with_audit_replay(self):
+        for index, status in enumerate(('rejected', 'voided', 'superseded')):
+            attachment_id = 220 + index
+            stored, _ = self.add_rejected_attachment(attachment_id, review_status=status)
+            with self.subTest(status=status):
+                preview = self.client.get(
+                    f'/api/attachments/{attachment_id}/purge', headers=self.headers('admin-token'))
+                self.assertEqual(preview.status_code, 200, preview.json)
+                self.assertTrue(preview.json['can_purge'])
+                self.assertTrue(preview.json['qualification_reason'])
+                response = self.client.post(
+                    f'/api/attachments/{attachment_id}/purge', headers=self.headers('admin-token'),
+                    json={'reason': f'清理{status}历史影像'})
+                self.assertEqual(response.status_code, 200, response.json)
+                self.assertFalse(response.json['already_deleted'])
+                with app_module.get_db() as db:
+                    self.assertIsNone(db.execute(
+                        'SELECT id FROM operation_attachments WHERE id=?', (attachment_id,)).fetchone())
+                    event = db.execute("""SELECT remark FROM timeline_events
+                        WHERE source_type='attachment_archive_purge' AND source_id=?""",
+                        (attachment_id,)).fetchone()
+                    summary = json.loads(event['remark'])
+                    self.assertEqual(summary['original_record']['review_status'], status)
+                    self.assertEqual(summary['operator_id'], 1)
+                    urls = app_module._attachment_purge_urls(db.execute(
+                        'SELECT photo_urls FROM insp_plan_items WHERE id=101').fetchone()['photo_urls'])
+                    self.assertNotIn(stored, urls)
+                replay = self.client.post(
+                    f'/api/attachments/{attachment_id}/purge', headers=self.headers('admin-token'),
+                    json={'reason': '网络重试'})
+                self.assertEqual(replay.status_code, 200, replay.json)
+                self.assertTrue(replay.json['already_deleted'])
+
+    def test_archive_purge_allows_soft_deleted_and_unlinked_missing_history(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE operation_attachments SET is_deleted=1 WHERE id=10")
+            db.execute("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification,extra_json)
+                VALUES (232,'missing.jpg','/uploads/missing.jpg','other',0,1,2,
+                        'approved','qualified','{}')""")
+        for attachment_id in (10, 232):
+            with self.subTest(attachment_id=attachment_id):
+                preview = self.client.get(
+                    f'/api/attachments/{attachment_id}/purge', headers=self.headers('admin-token'))
+                self.assertEqual(preview.status_code, 200, preview.json)
+                self.assertTrue(preview.json['can_purge'])
+                response = self.client.post(
+                    f'/api/attachments/{attachment_id}/purge', headers=self.headers('admin-token'),
+                    json={'reason': '清理无效历史记录'})
+                self.assertEqual(response.status_code, 200, response.json)
+
+    def test_archive_purge_keeps_shared_files_and_rolls_back_database_failures(self):
+        shared_path, _ = self.add_rejected_attachment(230, shared=True)
+        shared_file = os.path.join(
+            self.upload_dir, shared_path[len('/uploads/'):].replace('/', os.sep))
+        response = self.client.post('/api/attachments/230/purge',
+                                    headers=self.headers('admin-token'), json={'reason': '共享路径清理'})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['shared_file_retained'])
+        self.assertTrue(os.path.exists(shared_file))
+
+        stored, thumb = self.add_rejected_attachment(231)
+        files = [os.path.join(self.upload_dir, value[len('/uploads/'):].replace('/', os.sep))
+                 for value in (stored, thumb)]
+        with mock.patch.object(
+                app_module, '_archive_attachment_remove_compatibility_urls',
+                side_effect=sqlite3.IntegrityError('forced projection failure')):
+            failed = self.client.post('/api/attachments/231/purge',
+                                      headers=self.headers('admin-token'), json={'reason': '回滚验证'})
+        self.assertEqual((failed.status_code, failed.json.get('code')),
+                         (503, 'ATTACHMENT_PURGE_FAILED'))
+        self.assertTrue(all(os.path.exists(path) for path in files))
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=231').fetchone())
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
+                WHERE source_type='attachment_archive_purge' AND source_id=231""").fetchone()[0], 0)
+
+    def test_archive_batch_preview_and_atomic_success_are_idempotent_and_audited(self):
+        paths = [self.add_rejected_attachment(250), self.add_rejected_attachment(251)]
+        ids = [250, 251]
+        preview = self.client.post('/api/attachments/purge-batch/preview',
+                                   headers=self.headers('admin-token'),
+                                   json={'attachment_ids': ids})
+        self.assertEqual(preview.status_code, 200, preview.json)
+        self.assertEqual((preview.json['requested_count'], preview.json['purgeable_count'],
+                          preview.json['blocked_count']), (2, 2, 0))
+        response = self.client.post('/api/attachments/purge-batch',
+                                    headers=self.headers('admin-token'), json={
+                                        'attachment_ids': ids, 'reason': '批量清理无效历史影像',
+                                        'idempotency_key': 'batch-success-1',
+                                    })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['purged_count'], 2)
+        self.assertEqual(response.json['temporary_cleanup_pending'], 0)
+        self.assertTrue(all(not os.path.exists(os.path.join(
+            self.upload_dir, path[len('/uploads/'):].replace('/', os.sep)))
+            for pair in paths for path in pair))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments WHERE id IN (250,251)').fetchone()[0], 0)
+            summaries = [json.loads(row['remark']) for row in db.execute("""SELECT remark
+                FROM timeline_events WHERE source_type='attachment_archive_purge'
+                  AND source_id IN (250,251) ORDER BY source_id""").fetchall()]
+            self.assertEqual(len(summaries), 2)
+            self.assertEqual({item['batch_id'] for item in summaries}, {response.json['batch_id']})
+            self.assertEqual([item['original_record']['id'] for item in summaries], ids)
+        replay = self.client.post('/api/attachments/purge-batch',
+                                  headers=self.headers('admin-token'), json={
+                                      'attachment_ids': ids, 'reason': '批量清理无效历史影像',
+                                      'idempotency_key': 'batch-success-1',
+                                  })
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['idempotent_replay'])
+        self.assertEqual(replay.json['batch_id'], response.json['batch_id'])
+        conflict = self.client.post('/api/attachments/purge-batch',
+                                    headers=self.headers('admin-token'), json={
+                                        'attachment_ids': ids, 'reason': '不同原因不得复用同一键',
+                                        'idempotency_key': 'batch-success-1',
+                                    })
+        self.assertEqual((conflict.status_code, conflict.json.get('code')),
+                         (409, 'ATTACHMENT_PURGE_BATCH_KEY_CONFLICT'))
+
+    def test_archive_batch_rejects_non_admin_limit_and_mixed_blocked_selection(self):
+        self.add_rejected_attachment(252)
+        denied = self.client.post('/api/attachments/purge-batch/preview',
+                                  headers=self.headers('operator-token'),
+                                  json={'attachment_ids': [252]})
+        self.assertEqual(denied.status_code, 403)
+        limited = self.client.post('/api/attachments/purge-batch/preview',
+                                   headers=self.headers('admin-token'),
+                                   json={'attachment_ids': list(range(1, 52))})
+        self.assertEqual((limited.status_code, limited.json.get('code')),
+                         (400, 'ATTACHMENT_PURGE_BATCH_LIMIT_EXCEEDED'))
+
+        with open(os.path.join(self.upload_dir, 'TEST_DELETE_FORMAL.jpg'), 'wb') as handle:
+            handle.write(b'current evidence')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments SET review_status='approved',
+                evidence_qualification='qualified',plan_id=100,item_id=101,extra_json=? WHERE id=11""",
+                (json.dumps({'material_role': 'formal'}),))
+            before = dict(db.execute(
+                'SELECT * FROM operation_attachments WHERE id=252').fetchone())
+        preview = self.client.post('/api/attachments/purge-batch/preview',
+                                   headers=self.headers('admin-token'),
+                                   json={'attachment_ids': [252, 11]})
+        self.assertEqual((preview.json['can_purge'], preview.json['blocked_count']), (False, 1))
+        blocked = self.client.post('/api/attachments/purge-batch',
+                                   headers=self.headers('admin-token'), json={
+                                       'attachment_ids': [252, 11], 'reason': '不得部分成功',
+                                       'idempotency_key': 'batch-blocked-1',
+                                   })
+        self.assertEqual((blocked.status_code, blocked.json.get('code')),
+                         (409, 'ATTACHMENT_PURGE_BATCH_BLOCKED'))
+        with app_module.get_db() as db:
+            self.assertEqual(dict(db.execute(
+                'SELECT * FROM operation_attachments WHERE id=252').fetchone()), before)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM timeline_events WHERE source_type='attachment_archive_purge'"
+            ).fetchone()[0], 0)
+
+    def test_archive_batch_rechecks_role_and_state_in_write_transaction(self):
+        self.add_rejected_attachment(253)
+        with app_module.get_db() as db:
+            db.execute("DELETE FROM user_roles WHERE user_id=1")
+            db.execute("INSERT INTO user_roles(user_id,role) VALUES (1,'operator')")
+        denied = self.client.post('/api/attachments/purge-batch',
+                                  headers=self.headers('admin-token'), json={
+                                      'attachment_ids': [253], 'reason': '撤权后不得执行',
+                                      'idempotency_key': 'batch-revoked-1',
+                                  })
+        self.assertEqual((denied.status_code, denied.json.get('code')),
+                         (403, 'ATTACHMENT_PURGE_BATCH_FORBIDDEN'))
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=253').fetchone())
+            db.execute("DELETE FROM user_roles WHERE user_id=1")
+            db.execute("INSERT INTO user_roles(user_id,role) VALUES (1,'admin')")
+            db.execute("UPDATE operation_attachments SET review_status='pending',extra_json='{}' WHERE id=253")
+        conflicted = self.client.post('/api/attachments/purge-batch',
+                                      headers=self.headers('admin-token'), json={
+                                          'attachment_ids': [253], 'reason': '状态冲突不得执行',
+                                          'idempotency_key': 'batch-state-1',
+                                      })
+        self.assertEqual((conflicted.status_code, conflicted.json.get('code')),
+                         (409, 'ATTACHMENT_PURGE_BATCH_BLOCKED'))
+
+    def test_archive_batch_file_failure_restores_every_file_and_database_row(self):
+        stored_a, thumb_a = self.add_rejected_attachment(254)
+        stored_b, thumb_b = self.add_rejected_attachment(255)
+        files = [os.path.join(self.upload_dir, value[len('/uploads/'):].replace('/', os.sep))
+                 for value in (stored_a, thumb_a, stored_b, thumb_b)]
+        with app_module.get_db() as db:
+            item_before = dict(db.execute(
+                'SELECT * FROM insp_plan_items WHERE id=101').fetchone())
+        real_replace = os.replace
+        calls = {'count': 0}
+
+        def fail_second_move(source, target):
+            calls['count'] += 1
+            if calls['count'] == 2:
+                raise OSError('forced batch staging failure')
+            return real_replace(source, target)
+
+        with mock.patch.object(app_module.os, 'replace', side_effect=fail_second_move):
+            response = self.client.post('/api/attachments/purge-batch',
+                                        headers=self.headers('admin-token'), json={
+                                            'attachment_ids': [254, 255], 'reason': '文件失败回滚',
+                                            'idempotency_key': 'batch-file-failure-1',
+                                        })
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (503, 'ATTACHMENT_PURGE_BATCH_FILE_FAILED'))
+        self.assertTrue(all(os.path.isfile(path) for path in files))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments WHERE id IN (254,255)').fetchone()[0], 2)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM timeline_events WHERE source_type='attachment_archive_purge'"
+            ).fetchone()[0], 0)
+            self.assertEqual(dict(db.execute(
+                'SELECT * FROM insp_plan_items WHERE id=101').fetchone()), item_before)
+
+    def test_archive_batch_database_failure_restores_staged_files_and_all_rows(self):
+        stored, thumb = self.add_rejected_attachment(257)
+        files = [os.path.join(self.upload_dir, value[len('/uploads/'):].replace('/', os.sep))
+                 for value in (stored, thumb)]
+        with app_module.get_db() as db:
+            item_before = dict(db.execute(
+                'SELECT * FROM insp_plan_items WHERE id=101').fetchone())
+        with mock.patch.object(
+                app_module, '_archive_attachment_remove_compatibility_urls',
+                side_effect=sqlite3.IntegrityError('forced batch database failure')):
+            response = self.client.post('/api/attachments/purge-batch',
+                                        headers=self.headers('admin-token'), json={
+                                            'attachment_ids': [257], 'reason': '数据库失败回滚',
+                                            'idempotency_key': 'batch-db-failure-1',
+                                        })
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (503, 'ATTACHMENT_PURGE_BATCH_FAILED'))
+        self.assertTrue(all(os.path.isfile(path) for path in files))
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=257').fetchone())
+            self.assertEqual(dict(db.execute(
+                'SELECT * FROM insp_plan_items WHERE id=101').fetchone()), item_before)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM attachment_purge_batches').fetchone()[0], 0)
+
+    def test_archive_batch_retains_files_referenced_outside_the_selected_batch(self):
+        stored, _ = self.add_rejected_attachment(256, shared=True)
+        shared_file = os.path.join(
+            self.upload_dir, stored[len('/uploads/'):].replace('/', os.sep))
+        response = self.client.post('/api/attachments/purge-batch',
+                                    headers=self.headers('admin-token'), json={
+                                        'attachment_ids': [256], 'reason': '保留共享文件',
+                                        'idempotency_key': 'batch-shared-1',
+                                    })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['shared_file_retained_count'], 1)
+        self.assertTrue(os.path.isfile(shared_file))
 
 if __name__ == '__main__':
     unittest.main()

@@ -10,6 +10,7 @@ import {
   archivePrimaryTitle,
   archiveSecondaryMeta,
   archiveHistoryStatus,
+  archivePurgeEligibility,
   hasAdminRole,
   hasReviewerRole,
   isFormalAttachment,
@@ -59,6 +60,13 @@ test('archive presentation keeps failed image fallback bounded and item identity
   assert.deepEqual(attachmentResourceState(target, true), {
     failed: true, imageAlt: '', downloadDisabled: true, label: '文件不可用',
   });
+});
+
+test('archive title uses one business name without rebuilding site and time metadata', () => {
+  assert.equal(archivePrimaryTitle({ id: 8, item_name: '进水口', description: '进水口', category: '现场影像' }), '进水口');
+  assert.equal(archivePrimaryTitle({ id: 9, description: '校准前读数', category: '校准' }), '校准前读数');
+  assert.equal(archivePrimaryTitle({ id: 10, category: '水样留存' }), '水样留存');
+  assert.equal(archivePrimaryTitle({ id: 11, archive_name: '站点 · 时间 · 类型' }), '影像 #11');
 });
 
 test('archive status layout contains risk history without consuming the action column', () => {
@@ -115,17 +123,110 @@ test('rejected hard purge is admin-only, inspection-only, and linked without cli
   assert.equal(rejectedPurgeEligibility({ ...target, association_status: 'migration_issue' }, { role: 'admin' }).allowed, false);
 });
 
-test('rejected purge confirmation uses authoritative batch preview and keeps retry context', () => {
+test('archive purge action consumes the server eligibility decision', () => {
+  assert.equal(archivePurgeEligibility({ can_purge: true }, { roles: ['admin'] }).allowed, true);
+  assert.equal(archivePurgeEligibility({ can_purge: true }, { roles: ['reviewer'] }).allowed, false);
+  assert.deepEqual(archivePurgeEligibility({ can_purge: false, block_reason: '仍是当前有效证据' }, { role: 'admin' }), {
+    allowed: false, reason: '仍是当前有效证据',
+  });
+});
+
+test('archive purge confirmation uses authoritative preview, reason and retry context', () => {
   const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
   const modalStart = source.indexOf('<Modal open={purgeOpen}');
   const modalEnd = source.indexOf('</Modal>', modalStart);
   const modalSource = source.slice(modalStart, modalEnd);
-  assert.match(modalSource, /purgePreview\.count/);
-  assert.match(modalSource, /本次整改全部.*张已驳回照片/);
-  assert.match(modalSource, /不可恢复，仅保留文字删除摘要/);
-  assert.doesNotMatch(modalSource, /TextArea|purgeReason|请填写彻底删除原因/);
-  assert.match(source, /getStrict\(`\/attachments\/\$\{detail\.id\}\/purge-rejected-batch`\)/);
-  assert.match(source, /postStrict\(`\/attachments\/\$\{detail\.id\}\/purge-rejected-batch`, \{\}\)/);
+  assert.match(modalSource, /purgeReason/);
+  assert.match(modalSource, /不可恢复/);
+  assert.match(modalSource, /请填写清理原因/);
+  assert.match(source, /getStrict\(`\/attachments\/\$\{detail\.id\}\/purge`/);
+  assert.match(source, /postStrict\(`\/attachments\/\$\{detail\.id\}\/purge`, \{ reason/);
   assert.match(source, /catch \(requestError\) \{\s*setPurgeError/);
   assert.doesNotMatch(source.match(/catch \(requestError\)[\s\S]*?finally/)[0], /setPurgeOpen\(false\)|setDetail\(null\)/);
+});
+
+test('archive batch purge uses one server preview and one atomic submit for table and grid selection', () => {
+  const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
+  assert.match(source, /postStrict\('\/attachments\/purge-batch\/preview'/);
+  assert.match(source, /postStrict\('\/attachments\/purge-batch'/);
+  assert.match(source, /idempotency_key: batchKeyRef\.current/);
+  assert.match(source, /rowSelection=.*archiveMode === 'history'/s);
+  assert.match(source, /aria-label=\{`选择历史影像/);
+  assert.match(source, /有 \$\{batchPreview\.blocked_count\} 条不可清理/);
+  assert.match(source, /temporary_cleanup_pending > 0/);
+  assert.doesNotMatch(source, /selectedIds\.map[\s\S]*?\/attachments\/\$\{/);
+});
+
+test('uncertain batch purge keeps the original request available for idempotent confirmation', () => {
+  const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
+  const submitStart = source.indexOf('const submitBatchPurge = async () =>');
+  const submitEnd = source.indexOf('\n  useEffect(() => {', submitStart);
+  const submitSource = source.slice(submitStart, submitEnd);
+  const catchStart = submitSource.indexOf('} catch (requestError) {');
+  const catchEnd = submitSource.indexOf('} finally {', catchStart);
+  const catchSource = submitSource.slice(catchStart, catchEnd);
+  const uncertainStart = catchSource.indexOf('if (uncertainResult) {');
+  const definiteStart = catchSource.indexOf('} else {', uncertainStart);
+  const uncertainSource = catchSource.slice(uncertainStart, definiteStart);
+  const definiteSource = catchSource.slice(definiteStart);
+
+  assert.match(submitSource, /batchResultUnknown \? batchRequestRef\.current/);
+  assert.match(submitSource, /attachment_ids: \[\.\.\.selectedIds\]/);
+  assert.match(submitSource, /reason,\s*idempotency_key: batchKeyRef\.current/);
+  assert.match(submitSource, /postStrict\('\/attachments\/purge-batch', request\)/);
+  assert.match(catchSource, /\['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'INVALID_JSON_RESPONSE'\]/);
+  const uncertainCodes = catchSource.match(/\[('(?:NETWORK_ERROR|REQUEST_TIMEOUT|INVALID_JSON_RESPONSE)'(?:, )?)+\]/)[0]
+    .match(/[A-Z_]+/g);
+  assert.deepEqual(uncertainCodes, ['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'INVALID_JSON_RESPONSE']);
+  assert.equal(uncertainCodes.includes('IDEMPOTENCY_KEY_CONFLICT'), false, 'an explicit 409 remains a definite failure');
+  assert.match(uncertainSource, /setBatchResultUnknown\(true\)/);
+  assert.match(uncertainSource, /未能确认服务端处理结果。请使用原请求确认结果或重试/);
+  assert.doesNotMatch(uncertainSource, /loadBatchPreview/);
+  assert.match(definiteSource, /setBatchResultUnknown\(false\)/);
+  assert.match(definiteSource, /batchRequestRef\.current = null/);
+  assert.match(definiteSource, /批量清理未执行/);
+  assert.match(definiteSource, /loadBatchPreview\(selectedIds\)/);
+  assert.doesNotMatch(definiteSource, /setSelectedIds|setBatchReason|message\.(?:success|warning)|未能确认服务端处理结果/);
+});
+
+test('batch purge retry stays enabled and successful replay closes and refreshes normally', () => {
+  const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
+  const modalStart = source.indexOf('<Modal open={batchPurgeOpen}');
+  const modalEnd = source.indexOf('</Modal>', modalStart);
+  const modalSource = source.slice(modalStart, modalEnd);
+  const submitStart = source.indexOf('const submitBatchPurge = async () =>');
+  const submitEnd = source.indexOf('\n  useEffect(() => {', submitStart);
+  const submitSource = source.slice(submitStart, submitEnd);
+
+  assert.match(modalSource, /batchResultUnknown \? '确认结果 \/ 重试'/);
+  assert.match(modalSource, /disabled: batchResultUnknown\s*\? !batchRequestRef\.current/);
+  assert.match(modalSource, /batchPreview\?\.can_purge && <div style=\{\{ marginBottom: 24 \}\}>/);
+  assert.match(modalSource, /disabled=\{batchResultUnknown\}/);
+  assert.match(modalSource, /cancelButtonProps=\{\{ disabled: batchResultUnknown \}\}/);
+  assert.match(modalSource, /closable=\{!batchLoading && !batchResultUnknown\}/);
+  assert.match(modalSource, /maskClosable=\{!batchLoading && !batchResultUnknown\}/);
+  assert.match(modalSource, /keyboard=\{!batchLoading && !batchResultUnknown\}/);
+  assert.match(submitSource, /setBatchResultUnknown\(false\);\s*batchRequestRef\.current = null;\s*setBatchPurgeOpen\(false\);\s*setSelectedIds\(\[\]\);\s*await load\(\)/);
+  assert.doesNotMatch(submitSource, /idempotent_replay.*(?:error|失败)/);
+});
+
+test('batch purge modal separates blocked and purgeable presentation', () => {
+  const source = readFileSync(new URL('./ArchivePage.jsx', import.meta.url), 'utf8');
+  const modalStart = source.indexOf('<Modal open={batchPurgeOpen}');
+  const modalEnd = source.indexOf('</Modal>', modalStart);
+  const modalSource = source.slice(modalStart, modalEnd);
+
+  assert.match(source, /const batchPreviewBlocked = Boolean\(batchPreview && !batchPreview\.can_purge\)/);
+  assert.match(source, /const batchHasSubmitAction = batchResultUnknown \|\| Boolean\(batchPreview\?\.can_purge\)/);
+  assert.match(modalSource, /\{batchHasSubmitAction && <OkBtn \/>\}/);
+  assert.match(modalSource, /\{batchPreviewBlocked && <Alert/);
+  assert.match(modalSource, /\(batchPreview\.items \|\| \[\]\)[\s\S]*?\.filter\(item => !item\.can_purge\)/);
+  assert.match(source, /const currentAttachmentById = new Map\(items\.map\(item => \[item\.id, item\]\)\)/);
+  assert.match(modalSource, /attachment\s*\? displayTitle\(attachment\)\s*: `未找到对应照片（记录 #\$\{item\.attachment_id\}）`/);
+  assert.match(modalSource, /attachment\.site_name \|\| '未关联站点'/);
+  assert.match(modalSource, /attachment\.taken_at \|\| '-'/);
+  assert.match(modalSource, /阻断原因：\{item\.block_reason \|\| '服务端未提供具体原因'\}/);
+  assert.match(modalSource, /\{batchPreview\?\.can_purge && <Typography\.Paragraph>/);
+  assert.match(modalSource, /提交前服务端会再次核验全部记录，任一项状态变化时整批不执行/);
+  assert.match(modalSource, /batchError && !batchPreviewBlocked/);
 });

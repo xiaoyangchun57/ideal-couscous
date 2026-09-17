@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  App, Button, Card, DatePicker, Descriptions, Image, Input, Modal,
+  Alert, App, Button, Card, Checkbox, DatePicker, Descriptions, Image, Input, Modal,
   Pagination, Segmented, Select, Space, Spin, Tag, Typography,
 } from 'antd';
 import {
@@ -15,9 +15,12 @@ import WorkspacePage, {
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import {
-  archiveHistoryStatus, rejectedPurgeEligibility,
+  archiveHistoryStatus, archivePrimaryTitle, archivePurgeEligibility, hasAdminRole,
+  normalizeDeleteReason,
 } from './attachmentDeletion';
 import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
+import { archiveCaptureLabel, archiveSourceLabel, hasArchiveFilters } from './archivePresentation';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import './ArchivePage.css';
 
 const { Text } = Typography;
@@ -33,15 +36,6 @@ const BUSINESS_OPTIONS = [
   { value: 'test', label: '试验资料' },
   { value: 'other', label: '其他资料' },
 ];
-
-const SOURCE_LABELS = {
-  inspection: '巡检', workorder: '工单', site_photo: '现场影像', calibration: '校准',
-  reagent: '试剂作业', vehicle: '车辆记录', maintenance: '设备养护', test: '试验资料',
-};
-
-const CAPTURE_LABELS = {
-  camera: '小程序现场拍摄', watermark_album: '水印相册', web_upload: '网页补充',
-};
 
 const HISTORY_STATUS = {
   pending: { label: '待所属业务审核', color: 'processing' },
@@ -64,7 +58,7 @@ function filtersFromParams(params) {
 }
 
 function sourceLabel(item) {
-  return SOURCE_LABELS[item.source_type] || item.source_type || '未记录';
+  return archiveSourceLabel(item.source_type);
 }
 
 function itemLabel(item) {
@@ -72,7 +66,7 @@ function itemLabel(item) {
 }
 
 function displayTitle(item) {
-  return item.archive_name || item.description || item.original_filename || item.filename || `影像 #${item.id}`;
+  return archivePrimaryTitle(item);
 }
 
 function formatSize(bytes) {
@@ -93,6 +87,7 @@ export default function ArchivePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { page, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
   const applied = useMemo(() => filtersFromParams(new URLSearchParams(filterQuery)), [filterQuery]);
+  const hasAppliedFilters = useMemo(() => hasArchiveFilters(applied), [applied]);
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
   const [sites, setSites] = useState([]);
   const [items, setItems] = useState([]);
@@ -104,8 +99,19 @@ export default function ArchivePage() {
   const [purgePreview, setPurgePreview] = useState(null);
   const [purgePreviewLoading, setPurgePreviewLoading] = useState(false);
   const [purgeError, setPurgeError] = useState('');
+  const [purgeReason, setPurgeReason] = useState('');
   const [purgeLoading, setPurgeLoading] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [batchPurgeOpen, setBatchPurgeOpen] = useState(false);
+  const [batchPreview, setBatchPreview] = useState(null);
+  const [batchReason, setBatchReason] = useState('');
+  const [batchError, setBatchError] = useState('');
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchResultUnknown, setBatchResultUnknown] = useState(false);
+  const batchKeyRef = useRef('');
+  const batchRequestRef = useRef(null);
   const purgeRef = useRef(false);
+  const keywordTimerRef = useRef(null);
   const requestRef = useRef({ id: 0, controller: null });
   const gridRef = useRef(null);
   const mountedRef = useRef(true);
@@ -117,6 +123,7 @@ export default function ArchivePage() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      clearTimeout(keywordTimerRef.current);
       requestRef.current.id += 1;
       requestRef.current.controller?.abort();
     };
@@ -134,6 +141,10 @@ export default function ArchivePage() {
     setFilters(applied);
     setDetail(null);
   }, [applied, archiveMode]);
+
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [archiveMode, filterQuery, page, view]);
 
   const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1) => {
     const params = new URLSearchParams();
@@ -197,25 +208,58 @@ export default function ArchivePage() {
   }, [load]);
 
   const applyFilters = () => {
+    clearTimeout(keywordTimerRef.current);
     const next = { ...filters, keyword: filters.keyword.trim() };
     setFilters(next);
     writeUrl(next);
   };
 
+  const updateImmediateFilter = (patch) => {
+    clearTimeout(keywordTimerRef.current);
+    const next = { ...filters, ...patch };
+    setFilters(next);
+    writeUrl(next);
+  };
+
+  const updateKeyword = (value) => {
+    const next = { ...filters, keyword: value };
+    setFilters(next);
+    clearTimeout(keywordTimerRef.current);
+    if (!value) {
+      writeUrl(next);
+      return;
+    }
+    keywordTimerRef.current = setTimeout(() => {
+      const committed = { ...next, keyword: value.trim() };
+      setFilters(committed);
+      writeUrl(committed);
+    }, 400);
+  };
+
   const resetFilters = () => {
+    clearTimeout(keywordTimerRef.current);
     const next = { ...emptyFilters };
     setFilters(next);
     writeUrl(next);
   };
 
+  const changeView = (nextView) => {
+    clearTimeout(keywordTimerRef.current);
+    const committed = { ...filters, keyword: filters.keyword.trim() };
+    const keywordChanged = committed.keyword !== applied.keyword;
+    setFilters(committed);
+    writeUrl(committed, nextView, archiveMode, keywordChanged ? 1 : page);
+  };
+
   const submitRejectedPurge = async () => {
-    if (!rejectedPurgeEligibility(detail, user).allowed || !purgePreview?.count || purgeRef.current) return;
+    const reason = normalizeDeleteReason(purgeReason);
+    if (!archivePurgeEligibility(purgePreview, user).allowed || !reason || purgeRef.current) return;
     purgeRef.current = true;
     setPurgeError('');
     setPurgeLoading(true);
     try {
-      const result = await api.postStrict(`/attachments/${detail.id}/purge-rejected-batch`, {});
-      message.success(`已清理本次整改 ${result.count || purgePreview.count} 张已驳回照片`);
+      await api.postStrict(`/attachments/${detail.id}/purge`, { reason });
+      message.success('历史影像已彻底清理，删除摘要已保留');
       setPurgeOpen(false); setDetail(null);
       await load();
     } catch (requestError) {
@@ -227,17 +271,97 @@ export default function ArchivePage() {
   };
 
   const openRejectedPurge = async () => {
-    if (!rejectedPurgeEligibility(detail, user).allowed || purgePreviewLoading) return;
-    setPurgeOpen(true); setPurgePreview(null); setPurgeError(''); setPurgePreviewLoading(true);
+    if (!archivePurgeEligibility(purgePreview, user).allowed || purgePreviewLoading) return;
+    setPurgeReason(''); setPurgeError(''); setPurgeOpen(true);
+  };
+
+  const loadBatchPreview = async (attachmentIds = selectedIds) => {
+    const preview = await api.postStrict('/attachments/purge-batch/preview', {
+      attachment_ids: attachmentIds,
+    });
+    if (mountedRef.current) setBatchPreview(preview);
+    return preview;
+  };
+
+  const openBatchPurge = async () => {
+    if (!selectedIds.length || batchLoading) return;
+    setBatchPurgeOpen(true);
+    setBatchPreview(null);
+    setBatchReason('');
+    setBatchError('');
+    setBatchResultUnknown(false);
+    batchKeyRef.current = `archive-purge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    batchRequestRef.current = null;
+    setBatchLoading(true);
     try {
-      const preview = await api.getStrict(`/attachments/${detail.id}/purge-rejected-batch`);
-      setPurgePreview(preview);
+      await loadBatchPreview(selectedIds);
     } catch (requestError) {
-      setPurgeError(requestError?.message || '整改包范围读取失败，请重试');
+      setBatchError(requestError?.message || '批量清理资格读取失败，请重试');
     } finally {
-      if (mountedRef.current) setPurgePreviewLoading(false);
+      if (mountedRef.current) setBatchLoading(false);
     }
   };
+
+  const submitBatchPurge = async () => {
+    const reason = normalizeDeleteReason(batchReason);
+    const request = batchResultUnknown ? batchRequestRef.current : {
+      attachment_ids: [...selectedIds],
+      reason,
+      idempotency_key: batchKeyRef.current,
+    };
+    const canSubmit = batchResultUnknown
+      ? Boolean(request)
+      : Boolean(batchPreview?.can_purge && reason);
+    if (!canSubmit || batchLoading) return;
+    if (!batchResultUnknown) batchRequestRef.current = request;
+    setBatchLoading(true);
+    setBatchError('');
+    try {
+      const result = await api.postStrict('/attachments/purge-batch', request);
+      if (result.temporary_cleanup_pending > 0) {
+        message.warning(`已清理 ${result.purged_count} 条记录，但有 ${result.temporary_cleanup_pending} 个临时文件待管理员处理`);
+      } else {
+        message.success(`已彻底清理 ${result.purged_count} 条历史影像，删除摘要已保留`);
+      }
+      setBatchResultUnknown(false);
+      batchRequestRef.current = null;
+      setBatchPurgeOpen(false);
+      setSelectedIds([]);
+      await load();
+    } catch (requestError) {
+      const uncertainResult = ['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'INVALID_JSON_RESPONSE']
+        .includes(requestError?.code);
+      if (uncertainResult) {
+        setBatchResultUnknown(true);
+        setBatchError('未能确认服务端处理结果。请使用原请求确认结果或重试；期间不要重新选择或修改原因。');
+      } else {
+        setBatchResultUnknown(false);
+        batchRequestRef.current = null;
+        setBatchError(requestError?.message || '批量清理未执行，请根据提示处理后重试');
+        try { await loadBatchPreview(selectedIds); } catch { /* Preserve the submit error and selection. */ }
+      }
+    } finally {
+      if (mountedRef.current) setBatchLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setPurgePreview(null);
+    setPurgeError('');
+    if (!detail || archiveMode !== 'history' || !hasAdminRole(user)) return undefined;
+    const controller = new AbortController();
+    setPurgePreviewLoading(true);
+    api.getStrict(`/attachments/${detail.id}/purge`, { signal: controller.signal }).then(preview => {
+      if (!controller.signal.aborted) setPurgePreview(preview);
+    }).catch(requestError => {
+      if (!controller.signal.aborted && requestError?.code !== 'REQUEST_ABORTED') {
+        setPurgeError(requestError?.message || '清理资格读取失败，请重试');
+      }
+    }).finally(() => {
+      if (!controller.signal.aborted && mountedRef.current) setPurgePreviewLoading(false);
+    });
+    return () => controller.abort();
+  }, [archiveMode, detail, user]);
 
   const columns = useMemo(() => [
     {
@@ -261,7 +385,7 @@ export default function ArchivePage() {
     },
     {
       title: '来源', width: 150,
-      render: (_, item) => CAPTURE_LABELS[item.capture_source] || item.capture_source || '未记录',
+      render: (_, item) => archiveCaptureLabel(item.capture_source),
     },
     ...(archiveMode === 'history' ? [{
       title: '记录状态', width: 130,
@@ -275,53 +399,78 @@ export default function ArchivePage() {
   ], [archiveMode]);
 
   const emptyActions = <Space wrap>
+    {hasAppliedFilters && <Button type="primary" icon={<ReloadOutlined />} onClick={resetFilters}>重置筛选</Button>}
     <Button onClick={() => navigate('/audit?tab=inspection')}>前往巡检质控</Button>
     <Button onClick={() => navigate('/audit?tab=workorder')}>前往工单审核</Button>
   </Space>;
+  const currentPageIds = items.map(item => item.id);
+  const currentPageSelected = currentPageIds.length > 0
+    && currentPageIds.every(id => selectedIds.includes(id));
+  const currentAttachmentById = new Map(items.map(item => [item.id, item]));
+  const batchPreviewBlocked = Boolean(batchPreview && !batchPreview.can_purge);
+  const batchHasSubmitAction = batchResultUnknown || Boolean(batchPreview?.can_purge);
 
   return (
     <WorkspacePage title="影像档案" subtitle="集中查询巡检与工单等业务留存的影像记录">
       <WorkspaceToolbar className="archive-toolbar" actions={<>
+        {archiveMode === 'history' && hasAdminRole(user) && <Button
+          disabled={!currentPageIds.length}
+          onClick={() => setSelectedIds(currentPageSelected ? [] : currentPageIds)}>
+          {currentPageSelected ? '取消当前页' : '选择当前页'}
+        </Button>}
+        {archiveMode === 'history' && hasAdminRole(user) && <Button danger disabled={!selectedIds.length}
+          onClick={openBatchPurge}>批量清理 ({selectedIds.length})</Button>}
         <Segmented value={archiveMode} onChange={(nextMode) => {
-          setDetail(null); writeUrl(applied, view, nextMode);
+          clearTimeout(keywordTimerRef.current);
+          const committed = { ...filters, keyword: filters.keyword.trim() };
+          setFilters(committed); setDetail(null); writeUrl(committed, view, nextMode);
         }} options={[{ value: 'current', label: '当前档案' }, { value: 'history', label: '历史记录' }]} />
-        <Button type="primary" icon={<SearchOutlined />} onClick={applyFilters}>查询</Button>
         <Button icon={<ReloadOutlined />} onClick={resetFilters}>重置</Button>
-        <Segmented value={view} onChange={(next) => writeUrl(applied, next, archiveMode, page)}
+        <Segmented value={view} onChange={changeView}
           options={[{ value: 'table', icon: <FileTextOutlined />, label: '表格' },
             { value: 'grid', icon: <AppstoreOutlined />, label: '网格' }]} />
       </>}>
         <FilterField label="影像搜索"><Input aria-label="影像搜索" placeholder="搜索档案名称或描述" allowClear
           prefix={<SearchOutlined />} value={filters.keyword}
-          onChange={event => setFilters(current => ({ ...current, keyword: event.target.value }))}
+          onChange={event => updateKeyword(event.target.value)}
           onPressEnter={applyFilters} /></FilterField>
         <FilterField label="站点"><Select aria-label="站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label"
-          value={filters.site_id} options={sites.map(site => ({ value: site.id, label: site.name }))}
-          onChange={value => setFilters(current => ({ ...current, site_id: value }))} /></FilterField>
+          value={filters.site_id} options={listFilterOptions('全部站点', sites.map(site => ({ value: site.id, label: site.name })))}
+          onChange={value => updateImmediateFilter({ site_id: listFilterValue(value) })} /></FilterField>
         <FilterField label="业务来源"><Select aria-label="业务来源" placeholder="全部业务来源" allowClear
-          value={filters.business_type} options={BUSINESS_OPTIONS}
-          onChange={value => setFilters(current => ({ ...current, business_type: value }))} /></FilterField>
+          value={filters.business_type} options={listFilterOptions('全部业务来源', BUSINESS_OPTIONS)}
+          onChange={value => updateImmediateFilter({ business_type: listFilterValue(value) })} /></FilterField>
         <FilterField label="可信拍摄日期"><RangePicker aria-label="可信拍摄日期" value={filters.date_range}
           placeholder={['拍摄开始', '拍摄结束']}
-          onChange={value => setFilters(current => ({ ...current, date_range: value }))} /></FilterField>
+          onChange={value => updateImmediateFilter({ date_range: value })} /></FilterField>
       </WorkspaceToolbar>
 
       {error && <WorkspaceEmpty type="error" description={error} onRefresh={load} />}
       {!error && <div className="archive-results"><Spin spinning={loading}>
         {!loading && items.length === 0 ? <WorkspaceEmpty
-          type={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
-          description={archiveMode === 'current'
+          type={hasAppliedFilters ? 'filtered' : 'empty'}
+          description={hasAppliedFilters ? '没有符合当前筛选条件的记录' : archiveMode === 'current'
             ? '当前没有已完成业务审核且仍有效的影像；巡检照片在巡检质控审核，工单照片随工单审核。'
             : '当前没有驳回、作废、替换、待审或补充材料记录。'}
           onRefresh={load}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
-          loading={loading} fillHeight emptyType={Object.values(applied).some(Boolean) ? 'filtered' : 'empty'}
+          loading={loading} fillHeight emptyType={hasAppliedFilters ? 'filtered' : 'empty'}
           onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
+          rowSelection={archiveMode === 'history' && hasAdminRole(user) ? {
+            selectedRowKeys: selectedIds,
+            onChange: setSelectedIds,
+          } : undefined}
           pagination={total > ARCHIVE_PAGE_SIZE ? { current: page, pageSize: ARCHIVE_PAGE_SIZE, total, showSizeChanger: false, disabled: loading,
             showTotal: value => `共 ${value} 条`, onChange: (next) => writeUrl(applied, view, archiveMode, next) } : false} /> :
           <div className="archive-grid-view">
           <div className="archive-grid-scroll" ref={gridRef} role="region" aria-label="影像档案网格" tabIndex={0}>
           <div className="archive-grid-items">{items.map(item =>
-            <Card key={item.id} size="small" hoverable cover={<button type="button" onClick={() => setDetail(item)}
+            <Card key={item.id} size="small" hoverable
+              extra={archiveMode === 'history' && hasAdminRole(user) ? <Checkbox
+                aria-label={`选择历史影像 ${displayTitle(item)}`}
+                checked={selectedIds.includes(item.id)}
+                onChange={(event) => setSelectedIds(current => event.target.checked
+                  ? [...current, item.id] : current.filter(id => id !== item.id))} /> : null}
+              cover={<button type="button" onClick={() => setDetail(item)}
               style={{ width: '100%', height: 170, padding: 0, border: 0, overflow: 'hidden', cursor: 'pointer' }}>
               <img src={item.stored_path} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </button>} actions={[
@@ -344,8 +493,8 @@ export default function ArchivePage() {
 
       <Modal title={detail ? displayTitle(detail) : '影像详情'} open={Boolean(detail)}
         onCancel={() => setDetail(null)} width={760}
-        footer={<Space>{rejectedPurgeEligibility(detail, user, purgeLoading).allowed &&
-          <Button danger onClick={openRejectedPurge}>清理本次整改已驳回照片</Button>}
+        footer={<Space>{archivePurgeEligibility(purgePreview, user, purgeLoading).allowed &&
+          <Button danger onClick={openRejectedPurge}>彻底清理历史影像</Button>}
           <Button onClick={() => setDetail(null)}>关闭</Button>
           <Button type="primary" icon={<DownloadOutlined />} onClick={() => {
             if (!detail?.stored_path) return message.error('文件地址不可用');
@@ -357,7 +506,7 @@ export default function ArchivePage() {
           <Descriptions bordered size="small" column={2}>
             <Descriptions.Item label="拍摄时间">{detail.taken_at || '-'}</Descriptions.Item>
             <Descriptions.Item label="上传时间">{detail.created_at || '-'}</Descriptions.Item>
-            <Descriptions.Item label="采集来源">{CAPTURE_LABELS[detail.capture_source] || detail.capture_source || '未记录'}</Descriptions.Item>
+            <Descriptions.Item label="采集来源">{archiveCaptureLabel(detail.capture_source)}</Descriptions.Item>
             <Descriptions.Item label="站点">{detail.site_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="业务来源">{sourceLabel(detail)}</Descriptions.Item>
             <Descriptions.Item label="检查项">{itemLabel(detail)}</Descriptions.Item>
@@ -368,22 +517,78 @@ export default function ArchivePage() {
             {archiveMode === 'history' && <Descriptions.Item label="历史原因" span={2}>
               {historyStatus(detail).reason || '未记录具体原因'}
             </Descriptions.Item>}
+            {archiveMode === 'history' && hasAdminRole(user) && <Descriptions.Item label="清理资格" span={2}>
+              {purgePreviewLoading ? '正在核对服务端资格…' : purgeError || (purgePreview?.can_purge
+                ? `${purgePreview.qualification_reason || '服务端已确认可清理'}；${purgePreview.impact || '删除前仍会重新核验'}`
+                : purgePreview?.block_reason || '当前记录不可彻底清理')}
+            </Descriptions.Item>}
             <Descriptions.Item label="原始文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
           </Descriptions>
         </>}
       </Modal>
-      <Modal open={purgeOpen} title="清理本次整改已驳回照片"
-        okText={purgePreview?.count ? `清理全部 ${purgePreview.count} 张` : '确认清理'}
-        cancelText="返回" okButtonProps={{ danger: true, disabled: !purgePreview?.count || purgePreviewLoading }}
+      <Modal open={purgeOpen} title="彻底清理历史影像"
+        okText="确认彻底清理"
+        cancelText="返回" okButtonProps={{ danger: true, disabled: !normalizeDeleteReason(purgeReason) || purgePreviewLoading }}
         confirmLoading={purgeLoading || purgePreviewLoading}
         closable={!purgeLoading && !purgePreviewLoading} maskClosable={!purgeLoading && !purgePreviewLoading} destroyOnHidden
         onOk={submitRejectedPurge} onCancel={() => { if (!purgeLoading) setPurgeOpen(false); }}>
         <Typography.Paragraph type="danger">
-          {purgePreview?.count
-            ? `将清理本次整改全部 ${purgePreview.count} 张已驳回照片。此操作不可恢复，仅保留文字删除摘要。`
-            : '正在读取本次整改范围…'}
+          此操作不可恢复。服务端将再次核验记录状态、业务关联和文件引用，并保留不可改写的删除摘要。
         </Typography.Paragraph>
+        <Input.TextArea aria-label="清理原因" value={purgeReason} maxLength={200} showCount
+          placeholder="请填写清理原因" onChange={event => setPurgeReason(event.target.value)} />
         {purgeError && <Typography.Paragraph type="danger">{purgeError}</Typography.Paragraph>}
+      </Modal>
+      <Modal open={batchPurgeOpen} title="批量彻底清理历史影像"
+        okText={batchResultUnknown ? '确认结果 / 重试' : `确认清理 ${batchPreview?.purgeable_count || 0} 条`}
+        cancelText="返回"
+        okButtonProps={{ danger: true, disabled: batchResultUnknown
+          ? !batchRequestRef.current
+          : !batchPreview?.can_purge || !normalizeDeleteReason(batchReason) }}
+        cancelButtonProps={{ disabled: batchResultUnknown }}
+        confirmLoading={batchLoading}
+        closable={!batchLoading && !batchResultUnknown}
+        maskClosable={!batchLoading && !batchResultUnknown}
+        keyboard={!batchLoading && !batchResultUnknown}
+        destroyOnHidden
+        footer={(_, { CancelBtn, OkBtn }) => <Space>
+          <CancelBtn />
+          {batchHasSubmitAction && <OkBtn />}
+        </Space>}
+        onOk={submitBatchPurge}
+        onCancel={() => { if (!batchLoading && !batchResultUnknown) setBatchPurgeOpen(false); }}>
+        {batchLoading && !batchPreview ? <Spin /> : <>
+          {batchPreviewBlocked && <Alert type="warning" showIcon
+            message={batchPreview.blocked_count > 0
+              ? `有 ${batchPreview.blocked_count} 条不可清理，请返回移除后重试`
+              : '当前所选内容不可清理，请返回重新选择'}
+            description={<Space direction="vertical" size={2}>{(batchPreview.items || [])
+              .filter(item => !item.can_purge)
+              .map(item => {
+                const attachment = currentAttachmentById.get(item.attachment_id);
+                return <div key={item.attachment_id}>
+                  <Text strong>{attachment
+                    ? displayTitle(attachment)
+                    : `未找到对应照片（记录 #${item.attachment_id}）`}</Text>
+                  <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                    {attachment
+                      ? `${attachment.site_name || '未关联站点'} · ${attachment.taken_at || '-'} · 记录 #${item.attachment_id}`
+                      : '当前列表中没有这条记录，请返回刷新后重新选择'}
+                  </Text>
+                  <Text>阻断原因：{item.block_reason || '服务端未提供具体原因'}</Text>
+                </div>;
+              })}</Space>} />}
+          {batchPreview?.can_purge && <Typography.Paragraph>
+            将彻底清理 {batchPreview.purgeable_count} 条历史影像，此操作不可恢复。提交前服务端会再次核验全部记录，任一项状态变化时整批不执行；每条记录均保留审计快照，共享文件不会误删。
+          </Typography.Paragraph>}
+          {batchPreview?.can_purge && <div style={{ marginBottom: 24 }}>
+            <Input.TextArea aria-label="批量清理原因" value={batchReason} maxLength={200} showCount
+              disabled={batchResultUnknown}
+              placeholder="请填写本批共同清理原因"
+              onChange={event => setBatchReason(event.target.value)} />
+          </div>}
+          {batchError && !batchPreviewBlocked && <Typography.Paragraph type="danger">{batchError}</Typography.Paragraph>}
+        </>}
       </Modal>
     </WorkspacePage>
   );

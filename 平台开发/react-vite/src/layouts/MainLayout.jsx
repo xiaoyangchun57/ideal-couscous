@@ -59,8 +59,9 @@ export default function MainLayout() {
   const [notifView, setNotifView] = useState('current');
   const [markingAllRead, setMarkingAllRead] = useState(false);
 
-  const cockpitView = new URLSearchParams(location.search).get('view') === 'sites' ? 'sites' : 'operations';
-  const navItems = useMemo(() => getNavigation(user?.roles || [user?.role]), [user?.role, user?.roles]);
+  const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
+  const cockpitView = monitoringPublic && new URLSearchParams(location.search).get('view') === 'sites' ? 'sites' : 'operations';
+  const navItems = useMemo(() => getNavigation(user?.roles || [user?.role], user?.capabilities), [user?.role, user?.roles, user?.capabilities]);
   const { selectedKey, metaKey, meta: currentMeta } = mainLayoutLocation(
     location.pathname, routeMeta, navItems.flatMap((group) => group.children.map((item) => item.key)),
   );
@@ -72,7 +73,7 @@ export default function MainLayout() {
   }, [user?.role, user?.roles]);
 
   const changeCockpitView = (view) => {
-    navigate(view === 'sites' ? '/?view=sites' : '/', { replace: true });
+    navigate(monitoringPublic && view === 'sites' ? '/?view=sites' : '/', { replace: true });
   };
 
   const loadNotifs = useCallback(async () => {
@@ -314,7 +315,7 @@ export default function MainLayout() {
                 onChange={changeCockpitView}
                 options={[
                   { value: 'operations', label: '今日运维', icon: <TeamOutlined /> },
-                  { value: 'sites', label: '站点监测', icon: <EnvironmentOutlined /> },
+                  ...(monitoringPublic ? [{ value: 'sites', label: '站点监测', icon: <EnvironmentOutlined /> }] : []),
                 ]}
               />
             ) : (

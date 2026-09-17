@@ -10,6 +10,7 @@ test('monitoring routes use exact role keys and keep the access center admin-onl
 
   assert.match(app, /PageRoute path="\/sites\/data-access"/);
   assert.match(app, /PageRoute path="\/sites"[^]*SiteMonitoringPage/);
+  assert.match(app, /CapabilityRoute capability="station_monitoring_public"/);
   assert.match(navigation, /'\/sites': \['admin', 'reviewer', 'operator'\]/);
   assert.match(navigation, /'\/sites\/data-access': \['admin'\]/);
 });
@@ -49,6 +50,36 @@ test('monitoring pages cancel superseded requests and ignore stale responses', (
     source('./SiteMonitoringPage.jsx'),
     /String\(data\.site\?\.id\) === String\(siteId\)/,
   );
+});
+
+test('closed monitoring capability hides entries and makes the site ledger skip monitoring requests', () => {
+  const sites = source('./SitesPage.jsx');
+  const layout = source('../../layouts/MainLayout.jsx');
+  const cockpit = source('../cockpit/CockpitPage.jsx');
+  const navigation = source('../../config/navigation.jsx');
+  const search = source('../../components/GlobalSearch.jsx');
+
+  assert.match(sites, /if \(monitoringPublic\) requests\.push\(api\.stationMonitoringSites/);
+  assert.match(sites, /monitoringPublic && <Button[^]*?>监测<\/Button>/);
+  assert.match(sites, /isAdmin && monitoringPublic && <Button[^]*?>接入观察<\/Button>/);
+  assert.match(sites, /\.\.\.\(monitoringPublic \? \[\{[^]*?label: '数据接入状态'/);
+  assert.match(sites, /\{monitoringPublic && \([^]*?<ArchiveTrendPanel/);
+  assert.match(layout, /monitoringPublic && new URLSearchParams/);
+  assert.match(layout, /\.\.\.\(monitoringPublic \? \[\{ value: 'sites'/);
+  assert.match(cockpit, /monitoringPublic && requestedView === 'sites'/);
+  assert.match(navigation, /capabilities\.station_monitoring_public === true/);
+  assert.match(search, /getSearchablePages\([^,]+, user\?\.capabilities\)/);
+});
+
+test('single-site monitoring stays a data fact page without archive or device-health sections', async () => {
+  const detail = source('./SiteMonitoringPage.jsx');
+  assert.match(detail, /最后收到报文/);
+  assert.match(detail, /站点档案/);
+  assert.match(detail, /监测因子/);
+  for (const removed of ['所属区县', '地址', '仪器与因子', '近期告警、工单与巡检', '健康状态未知']) {
+    assert.doesNotMatch(detail, new RegExp(removed));
+  }
+  assert.deepEqual(Object.keys((await import('./stationMonitoring.js')).AXIS_META), ['communication', 'data']);
 });
 
 test('access observation does not consume sensitive endpoint identity fields', () => {

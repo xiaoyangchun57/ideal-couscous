@@ -29,6 +29,7 @@ import { countUniqueAuditSites, getAuditAllowedTabs, getAuditColumnProfile } fro
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import DataReviewTab from '../alerts/components/DataReviewTab';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -377,9 +378,9 @@ function BusinessAuditTab({ sourceTypes, title, statValue, allItems, loading, lo
               placeholder="全部类型"
               allowClear
               value={typeFilter}
-              onChange={setTypeFilter}
+              onChange={(value) => setTypeFilter(listFilterValue(value))}
               style={{ width: filterSmallSelectWidth }}
-              options={typeOptions}
+              options={listFilterOptions('全部审核类型', typeOptions)}
             />
           </FilterField>
         ) : null}
@@ -533,9 +534,9 @@ function PartsRequestAuditTab({ allItems, loading, loadError, onOpenReview, onRe
               allowClear
               showSearch
               value={sourceFilter}
-              onChange={setSourceFilter}
+              onChange={(value) => setSourceFilter(listFilterValue(value))}
               style={{ width: filterSelectWidth }}
-              options={sourceOptions}
+              options={listFilterOptions('全部来源计划', sourceOptions)}
               optionFilterProp="label"
             />
           </FilterField>

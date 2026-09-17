@@ -13,6 +13,7 @@ import { api } from '../../../services/api';
 import { metricMap } from '../../../services/constants';
 import EChart from '../../../components/EChart';
 import { StatusStrip, WorkspaceTable, WorkspaceToolbar } from '../../../components/WorkspacePage';
+import { listFilterOptions, listFilterValue } from '../../../utils/listFilterOptions';
 
 const { Text } = Typography;
 
@@ -321,16 +322,16 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
         </>}>
           <Select
             value={filters.level || undefined}
-            onChange={v => setFilters(f => ({ ...f, level: v || '', page: 1 }))}
-            options={LEVEL_OPTIONS}
+            onChange={v => setFilters(f => ({ ...f, level: listFilterValue(v) || '', page: 1 }))}
+            options={listFilterOptions('全部复核级别', LEVEL_OPTIONS)}
             style={{ width: 180 }}
             placeholder="全部"
             allowClear
           />
           <Select
             value={filters.status || undefined}
-            onChange={v => setFilters(f => ({ ...f, status: v || '', page: 1 }))}
-            options={Object.entries(STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label }))}
+            onChange={v => setFilters(f => ({ ...f, status: listFilterValue(v) || '', page: 1 }))}
+            options={listFilterOptions('全部复核状态', Object.entries(STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label })))}
             style={{ width: 150 }}
             placeholder="全部"
             allowClear

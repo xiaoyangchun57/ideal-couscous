@@ -1,5 +1,41 @@
 // 全部后端契约封装（已精确核对 app.py）
 const { request } = require('../utils/request.js');
+const { getToken } = require('../utils/auth.js');
+const CONFIG = require('../utils/config.js');
+
+function restoreSession() {
+  const token = getToken();
+  return new Promise((resolve, reject) => {
+    wx.request({
+      url: CONFIG.BASE_URL + '/api/auth/me',
+      method: 'GET',
+      timeout: 12000,
+      header: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + token,
+      },
+      success(res) {
+        if (res.statusCode === 200) {
+          resolve(res.data || {});
+          return;
+        }
+        const body = res.data && typeof res.data === 'object'
+          ? res.data : { error: '登录状态校验失败' };
+        reject(Object.assign({}, body, { status: res.statusCode }));
+      },
+      fail(error) {
+        reject(Object.assign({}, error || {}, {
+          status: 0,
+          network: true,
+          code: CONFIG.API_PROFILE === 'local' ? 'LOCAL_API_UNAVAILABLE' : -1,
+          error: CONFIG.API_PROFILE === 'local'
+            ? '本地服务未启动；请启动本地服务后重试'
+            : '网络异常，请检查网络后重试',
+        }));
+      },
+    });
+  });
+}
 
 function vehicleListQuery(options) {
   if (!options) return '';
@@ -15,6 +51,7 @@ const api = {
   // 登录（工号密码复用网页端）
   login: (username, password) =>
     request('/api/auth/login', 'POST', { username, password }, { retry: 1, queue: false }),
+  restoreSession,
   logout: () => request('/api/auth/logout', 'POST', {}, { retry: 0, queue: false }),
   changePassword: (currentPassword, newPassword) =>
     request('/api/auth/change-password', 'POST', {
@@ -42,6 +79,16 @@ const api = {
     return request('/api/station-monitoring/sites' + (pairs.length ? '?' + pairs.join('&') : ''), 'GET', {}, { queue: false });
   },
   stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
+  responsibleSites: (options) => {
+    const query = options || {};
+    const pairs = [];
+    if (query.scope) pairs.push('scope=' + encodeURIComponent(query.scope));
+    if (query.keyword !== undefined && query.keyword !== null && String(query.keyword).trim()) {
+      pairs.push('keyword=' + encodeURIComponent(String(query.keyword).trim()));
+    }
+    return request('/api/mobile/responsible-sites' + (pairs.length ? '?' + pairs.join('&') : ''), 'GET', {}, { queue: false });
+  },
+  siteProfile: (siteId) => request('/api/mobile/site-profile/' + encodeURIComponent(siteId), 'GET', {}, { queue: false }),
   anomalyCodes: () => request('/api/anomaly-codes', 'GET'),
   // 失败必须由上报页保留草稿并显式重试，不能在未知网络结果下悄悄排队二次写入。
   submitManualReport: (payload) => request('/api/manual-reports', 'POST', payload, { queue: false }),

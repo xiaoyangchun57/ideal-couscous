@@ -243,13 +243,14 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
             db.execute("""CREATE TABLE plan_schedules (
                 id INTEGER PRIMARY KEY,user_id INTEGER,status TEXT,version INTEGER,
                 plan_data TEXT,vehicle_days TEXT,schedule_type TEXT,period_start TEXT,period_end TEXT,
-                vehicle_id INTEGER,vehicle_exception_reason TEXT,coverage_exception_reason TEXT,
+                vehicle_id INTEGER,no_vehicle_required INTEGER DEFAULT 0,
+                vehicle_exception_reason TEXT,coverage_exception_reason TEXT,
                 reject_reason TEXT,validation_snapshot TEXT,submitted_at TEXT,change_reason TEXT,
                 approver_id INTEGER
             )""")
             db.execute("""INSERT INTO plan_schedules VALUES
                 (50,2,'draft',1,'{"2026-09-06":{"sites":[10]}}','{}','weekly',
-                 '2026-09-06','2026-09-12',NULL,'','','',NULL,NULL,NULL,NULL)""")
+                 '2026-09-06','2026-09-12',NULL,1,'无需用车','','',NULL,NULL,NULL,NULL)""")
             db.commit()
         validation = {'ok': True, 'errors': [], 'warnings': []}
         patches = (
@@ -278,7 +279,7 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
             with app_module.get_db() as db:
                 db.execute("""INSERT INTO plan_schedules VALUES
                     (51,2,'modifying',1,'{\"2026-09-06\":{\"sites\":[10]}}','{}','weekly',
-                     '2026-09-06','2026-09-12',NULL,'','','',NULL,NULL,'路线调整',NULL)""")
+                     '2026-09-06','2026-09-12',NULL,1,'无需用车','','',NULL,NULL,'路线调整',NULL)""")
                 db.commit()
             change_submitted = self.client.post('/api/plan-schedules/51/submit',
                                                  headers=self.headers('operator'), json={'version': 1})

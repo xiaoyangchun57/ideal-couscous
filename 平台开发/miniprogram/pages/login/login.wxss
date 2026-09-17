@@ -50,6 +50,61 @@ page {
   box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.05);
 }
 
+.recovery-card {
+  background: var(--bg-card);
+  border-radius: 28rpx;
+  padding: 48rpx 32rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.05);
+}
+
+.recovery-spinner {
+  width: 48rpx;
+  height: 48rpx;
+  border: 6rpx solid var(--separator);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: recovery-spin 0.8s linear infinite;
+  margin-bottom: 24rpx;
+}
+
+.recovery-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.recovery-sub {
+  margin-top: 12rpx;
+  font-size: 27rpx;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.recovery-action {
+  margin-top: 36rpx;
+}
+
+.recovery-secondary {
+  margin-top: 20rpx;
+  padding: 16rpx 24rpx;
+  background: transparent;
+  color: var(--primary);
+  font-size: 28rpx;
+  line-height: 1.4;
+}
+
+.recovery-secondary::after {
+  border: none;
+}
+
+@keyframes recovery-spin {
+  to { transform: rotate(360deg); }
+}
+
 .form-field {
   height: 104rpx;
   display: flex;

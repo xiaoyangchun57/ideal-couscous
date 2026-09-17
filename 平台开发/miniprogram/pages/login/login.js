@@ -1,5 +1,5 @@
 const api = require('../../services/api.js');
-const { setAuth } = require('../../utils/auth.js');
+const { setAuth, getToken, clear } = require('../../utils/auth.js');
 const { completeLoginSession } = require('../../utils/loginCompletion.js');
 
 const app = getApp();
@@ -8,6 +8,70 @@ Page({
   data: {
     username: '', password: '', passwordFocused: false, showPassword: false, loading: false, error: '',
     mustChangePassword: false, newPassword: '', confirmPassword: '', showNewPassword: false, showConfirmPassword: false, pendingSites: [],
+    restoring: true, recoveryFailed: false,
+  },
+
+  onLoad() {
+    this._unloaded = false;
+    if (getToken()) this.recoverSession();
+    else this.setData({ restoring: false, recoveryFailed: false });
+  },
+
+  onUnload() {
+    this._unloaded = true;
+    this._restoreRequestId = (this._restoreRequestId || 0) + 1;
+  },
+
+  recoverSession() {
+    if (this._restorePromise) return this._restorePromise;
+    const token = getToken();
+    if (!token) {
+      this.setData({ restoring: false, recoveryFailed: false });
+      return Promise.resolve();
+    }
+    const requestId = (this._restoreRequestId || 0) + 1;
+    this._restoreRequestId = requestId;
+    this.setData({ restoring: true, recoveryFailed: false, error: '' });
+    this._restorePromise = api.restoreSession()
+      .then(res => {
+        if (this._unloaded || this._restoreRequestId !== requestId) return;
+        if (!res || !res.user) throw { status: 502, error: '登录状态返回异常，请重试' };
+        const user = Object.assign({}, res.user, {
+          site_ids: Array.isArray(res.site_ids) ? res.site_ids : [],
+        });
+        setAuth(token, user, Array.isArray(res.sites) ? res.sites : []);
+        wx.reLaunch({ url: '/pages/index/index' });
+      })
+      .catch(error => {
+        if (this._unloaded || this._restoreRequestId !== requestId) return;
+        if (error && error.status === 401) {
+          clear();
+          this.setData({
+            restoring: false,
+            recoveryFailed: false,
+            error: '登录已失效，请重新登录',
+          });
+          return;
+        }
+        this.setData({
+          restoring: false,
+          recoveryFailed: true,
+          error: (error && error.error) || '暂时无法恢复登录，请检查网络后重试',
+        });
+      })
+      .finally(() => {
+        if (this._restoreRequestId === requestId) this._restorePromise = null;
+      });
+    return this._restorePromise;
+  },
+
+  onRetryRecovery() { return this.recoverSession(); },
+
+  onUseAnotherAccount() {
+    this._restoreRequestId = (this._restoreRequestId || 0) + 1;
+    this._restorePromise = null;
+    clear();
+    this.setData({ restoring: false, recoveryFailed: false, error: '' });
   },
 
   onUser(e) { this.setData({ username: e.detail.value, error: '' }); },

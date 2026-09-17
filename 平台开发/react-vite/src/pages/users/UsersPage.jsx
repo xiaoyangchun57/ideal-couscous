@@ -18,6 +18,7 @@ import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import { finishWechatBindingUnbind } from './wechatBindingActions';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Text } = Typography;
 
@@ -507,21 +508,21 @@ export default function UsersPage() {
             aria-label="按角色筛选"
             allowClear
             value={roleFilter}
-            onChange={(value) => updateFilters({ role: value })}
+            onChange={(value) => updateFilters({ role: listFilterValue(value) })}
             style={{ width: filterSelectWidth }}
-            options={roleOptions}
+            options={listFilterOptions('全部角色', roleOptions)}
           />
           <Select
             placeholder="状态"
             aria-label="按账号状态筛选"
             allowClear
             value={statusFilter}
-            onChange={(value) => updateFilters({ status: value })}
+            onChange={(value) => updateFilters({ status: listFilterValue(value) })}
             style={{ width: filterSmallSelectWidth }}
-            options={[
+            options={listFilterOptions('全部状态', [
               { value: 'active', label: '启用' },
               { value: 'inactive', label: '停用' },
-            ]}
+            ])}
           />
           {(search || roleFilter || statusFilter) && <Text type="secondary">共 {visibleUsers.length} 条</Text>}
         </FilterBar>

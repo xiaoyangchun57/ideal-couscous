@@ -19,15 +19,15 @@ function overview(status = 'interval_unconfigured', id = 7) {
       ...row, id, name: id === 7 ? row.name : '隔离测试站乙',
       monitoring_status: status, monitoring_status_label: MONITORING_STATUS_META[status].label,
       monitoring_reason: `服务端主原因:${status}`,
-      last_communication_at: '2026-09-15T08:00:00+08:00',
+      last_received_at: '2026-09-15T08:00:00+08:00',
       last_valid_observation_at: '2026-09-10T07:00:00+08:00',
     },
     monitoring: {
       latest_values: ['normal', 'attention', 'interval_unconfigured'].includes(status)
         ? [{ business_metric: '酸碱度', standard_value: 7.25, standard_unit: 'pH', observed_at: '2026-09-10T07:00:00+08:00' }] : [],
-      instruments: [{ business_metric: '酸碱度', instrument_asset_code: '仪器甲', status: 'has_valid_observation' }],
-      recent_items: [], axes: { data: { state: status }, rtu: { state: 'unknown' } },
-      capabilities: { latest: true, trend: false },
+      factors: [{ business_metric: '酸碱度', standard_unit: 'pH' }],
+      axes: { communication: { state: 'fresh' }, data: { state: status } },
+      capabilities: { latest: true, trend: false, factors: true },
     },
   };
 }
@@ -112,9 +112,9 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       }
       state = 'interval_unconfigured';
       await page.getByRole('button', { name: '刷新', exact: true }).click();
-      await visible(page.getByText('周期未配置', { exact: true }));
+      await visible(page.getByText('数据周期未配置', { exact: true }));
       await visible(page.getByText('7.25 pH', { exact: true }));
-      await visible(page.getByText('最后通信', { exact: true }));
+      await visible(page.getByText('最后收到报文', { exact: true }));
       await visible(page.getByText('最后有效观测', { exact: true }));
       await visible(page.getByText('暂无服务端聚合事实，趋势暂不可用', { exact: true }));
       await absent(page, '设备健康');
@@ -206,9 +206,8 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     payload.monitoring.capabilities.trend = true;
     payload.monitoring.latest_values[0].business_metric = null;
     payload.monitoring.latest_values[0].protocol_factor = 'PROTOCOL-SECRET-TEST';
-    payload.monitoring.instruments[0].business_metric = null;
-    payload.monitoring.instruments[0].protocol_code = 'PROTOCOL-SECRET-TEST';
-    payload.monitoring.recent_items = [{ title: '隔离近期事项', created_at: 'FAKE-BUSINESS-TIME' }];
+    payload.monitoring.factors[0].business_metric = null;
+    payload.monitoring.factors[0].protocol_code = 'PROTOCOL-SECRET-TEST';
     const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
       if (!url.pathname.endsWith('/7/overview')) return false;
       await route.fulfill({ json: payload });
@@ -288,15 +287,15 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       mode = 'success';
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       const tableRow = page.getByRole('row').filter({ hasText: row.name });
-      await visible(tableRow.getByText('周期未配置', { exact: true }));
+      await visible(tableRow.getByText('数据周期未配置', { exact: true }));
       mode = 'failure';
       await page.getByRole('button', { name: /刷新/ }).click();
       await visible(page.getByText('监测状态刷新失败，当前保留上次成功结果', { exact: true }));
-      await visible(tableRow.getByText('周期未配置', { exact: true }));
+      await visible(tableRow.getByText('数据周期未配置', { exact: true }));
       mode = 'missing';
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       await visible(tableRow.getByText('监测状态待确认', { exact: true }));
-      assert.equal(await tableRow.getByText('周期未配置', { exact: true }).count(), 0);
+      assert.equal(await tableRow.getByText('数据周期未配置', { exact: true }).count(), 0);
       await snapshot(page, 'directory-desktop');
     } finally { await close(); }
   });
@@ -393,10 +392,10 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     } finally { release(); await close(); }
   });
 
-  await t.test('four axes honor server status labels and Chinese factor names hide metric identifiers', async () => {
+  await t.test('data fact axes honor server labels and Chinese factor names hide metric identifiers', async () => {
     let axes;
     const payload = overview();
-    for (const item of [...payload.monitoring.latest_values, ...payload.monitoring.instruments]) {
+    for (const item of [...payload.monitoring.latest_values, ...payload.monitoring.factors]) {
       item.factor_name_cn = '服务端中文因子名'; item.business_metric = 'internal_metric_identifier';
     }
     payload.monitoring.capabilities.trend = true;
@@ -408,22 +407,22 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     });
     try {
       for (const [status, badge] of [['normal', 'success'], ['attention', 'warning'], ['missing', 'default'], ['unavailable', 'error']]) {
-        axes = Object.fromEntries(['communication', 'data', 'rtu', 'instrument'].map((key) => [key, { status, state: 'unknown', status_label: `中文分轴:${key}:${status}` }]));
+        axes = Object.fromEntries(['communication', 'data'].map((key) => [key, { status, state: 'unknown', status_label: `中文分轴:${key}:${status}` }]));
         await page.goto(`${baseURL}/sites/7`);
-        for (const [key, label] of [['communication', '通信'], ['data', '数据'], ['rtu', 'RTU'], ['instrument', '仪器']]) {
+        for (const [key, label] of [['communication', '数据接收'], ['data', '观测数据']]) {
           const group = page.getByRole('group', { name: label, exact: true });
           await visible(group.getByText(`中文分轴:${key}:${status}`, { exact: true }));
           assert.match(await group.locator('.ant-badge-status-dot').getAttribute('class'), new RegExp(`ant-badge-status-${badge}`));
         }
       }
-      for (const title of ['最新有效值', '趋势', '仪器与因子']) {
+      for (const title of ['最新有效值', '趋势', '监测因子']) {
         const card = page.locator('.ant-card').filter({ has: page.locator('.ant-card-head-title').getByText(title, { exact: true }) });
         assert.match(await card.innerText(), /服务端中文因子名/);
         assert.doesNotMatch(await card.innerText(), /internal_metric_identifier/);
       }
-      axes = { communication: { status: 'fresh' }, data: { status: 'stale' }, rtu: { status: 'has_valid_observation' }, instrument: { status: 'no_valid_observation' } };
+      axes = { communication: { status: 'fresh' }, data: { status: 'stale' } };
       await page.getByRole('button', { name: '刷新', exact: true }).click();
-      for (const text of ['在配置周期内', '超出配置周期', '已有有效观测', '暂无有效观测']) await visible(page.getByText(text, { exact: true }));
+      for (const text of ['在配置周期内', '超出配置周期']) await visible(page.getByText(text, { exact: true }));
       await snapshot(page, 'server-axes-factor-names');
     } finally { await close(); }
   });
@@ -434,10 +433,71 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.goto(`${baseURL}/sites/data-access`);
       await visible(page.locator('.page-location').getByText('接入观察', { exact: true }));
       await visible(page.locator('.app-sidebar .ant-menu-item-selected').getByText('站点全景', { exact: true }));
+      await visible(page.getByText('2026/9/15 08:00:00', { exact: true }));
+      assert.equal(await page.getByText(summary.updated_at, { exact: true }).count(), 0);
       await page.goto(`${baseURL}/sites/7`);
       await visible(page.locator('.page-location').getByText('站点全景', { exact: true }));
       await page.goto(`${baseURL}/unknown`);
       await visible(page.locator('.page-location').getByText('页面不存在', { exact: true }));
+    } finally { await close(); }
+  });
+
+  await t.test('desktop site table keeps core columns and actions reachable without toolbar growth', async () => {
+    const rows = Array.from({ length: 37 }, (_, index) => ({
+      ...row,
+      id: index + 1,
+      name: `隔离测试站${String(index + 1).padStart(2, '0')}`,
+      code: `WEB-${String(index + 1).padStart(3, '0')}`,
+      address: `测试地址${index + 1}号`,
+    }));
+    const monitoringItems = rows.map((item) => ({ ...overview(indexToStatus(item.id), item.id).site, ...item }));
+    function indexToStatus(id) { return id % 2 ? 'normal' : 'attention'; }
+    const { page, close } = await session(['admin'], { width: 1280, height: 720 }, async (route, url) => {
+      if (url.pathname === '/api/sites') { await route.fulfill({ json: rows }); return true; }
+      if (url.pathname === '/api/station-monitoring/sites') {
+        await route.fulfill({ json: { scope: 'all', available_scopes: ['all', 'mine'], items: monitoringItems, summary: { normal: 19, attention: 18 } } });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      await visible(page.getByRole('columnheader', { name: '站点身份', exact: true }));
+      for (const heading of ['监测状态', '关键时间', '负责人', '操作']) {
+        await visible(page.getByRole('columnheader', { name: heading, exact: true }));
+      }
+      const action = page.getByRole('button', { name: /查看 隔离测试站01 的站点档案/ });
+      const actionBox = await action.boundingBox();
+      assert.ok(actionBox && actionBox.x + actionBox.width <= 1280, 'fixed action stays in the viewport');
+      const tableBody = page.locator('.workspace-table .ant-table-body');
+      const tableSizes = await tableBody.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+      assert.ok(tableSizes.scrollHeight > tableSizes.clientHeight, JSON.stringify(tableSizes));
+      const toolbar = page.locator('.workspace-toolbar');
+      const before = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+      await page.getByRole('textbox', { name: '站点搜索' }).fill('WEB-030');
+      await visible(page.getByText('已筛选 1 条', { exact: true }));
+      assert.equal(await page.getByText('当前结果', { exact: true }).count(), 0);
+      const after = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
+      assert.ok(after <= before + 1, `toolbar height changed from ${before} to ${after}`);
+      await snapshot(page, 'sites-desktop-table-filter');
+    } finally { await close(); }
+  });
+
+  await t.test('short desktop monitoring body scroll reaches the final section', async () => {
+    const { page, close } = await session(['admin'], { width: 1280, height: 600 });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      const region = page.getByRole('region', { name: '站点监测正文' });
+      await visible(region);
+      const sizes = await region.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+      assert.ok(sizes.scrollHeight > sizes.clientHeight, JSON.stringify(sizes));
+      await region.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      const finalHeading = page.getByText('监测因子', { exact: true });
+      await visible(finalHeading);
+      const finalBox = await finalHeading.boundingBox();
+      const regionBox = await region.boundingBox();
+      assert.ok(finalBox && regionBox && finalBox.y >= regionBox.y && finalBox.y + finalBox.height <= regionBox.y + regionBox.height + 1);
+      await snapshot(page, 'monitoring-short-desktop-bottom');
     } finally { await close(); }
   });
 

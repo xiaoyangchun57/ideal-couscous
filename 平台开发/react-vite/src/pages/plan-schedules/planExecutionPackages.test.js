@@ -104,9 +104,10 @@ test('legacy and taskless plans never expose internal active as field work in pr
   assert.equal(planExecutionPresentation({}).key, 'pending');
 });
 
-test('completed and archived plans hide pre-execution risks while actionable plans keep them', () => {
+test('completed, archived and cancelled plans hide pre-execution risks while actionable plans keep them', () => {
   assert.equal(shouldShowPreExecutionRisks({ status: 'approved', execution_status: 'completed' }), false);
   assert.equal(shouldShowPreExecutionRisks({ status: 'archived', execution_status: 'pending' }), false);
+  assert.equal(shouldShowPreExecutionRisks({ status: 'cancelled', execution_status: 'cancelled' }), false);
   assert.equal(shouldShowPreExecutionRisks({ status: 'approved', execution_status: 'pending' }), true);
   assert.equal(shouldShowPreExecutionRisks({ status: 'submitted' }), true);
 });

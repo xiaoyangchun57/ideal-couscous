@@ -3,19 +3,17 @@ export const MONITORING_STATUS_META = {
   awaiting_first_frame: { label: '等待首帧', color: 'blue' },
   raw_received_config_pending: { label: '原文已收/档案待批准', color: 'gold' },
   waiting_first_valid: { label: '等待首个有效观测', color: 'blue' },
-  interval_unconfigured: { label: '周期未配置', color: 'default' },
-  normal: { label: '正常', color: 'green' },
-  attention: { label: '需关注', color: 'orange' },
+  interval_unconfigured: { label: '数据周期未配置', color: 'default' },
+  normal: { label: '数据正常', color: 'green' },
+  attention: { label: '数据需关注', color: 'orange' },
   data_unavailable: { label: '数据暂不可用', color: 'red' },
 };
 
 export const MONITORING_STATUS_ORDER = Object.keys(MONITORING_STATUS_META);
 
 export const AXIS_META = {
-  communication: '通信',
-  data: '数据',
-  rtu: 'RTU',
-  instrument: '仪器',
+  communication: '数据接收',
+  data: '观测数据',
 };
 
 const MONITORING_FIELDS = [
@@ -24,6 +22,7 @@ const MONITORING_FIELDS = [
   'monitoring_reason',
   'monitoring_reason_code',
   'reason_code',
+  'last_received_at',
   'last_communication_at',
   'last_valid_observation_at',
   'published_factor_count',

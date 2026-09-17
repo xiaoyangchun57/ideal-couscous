@@ -12,6 +12,7 @@ import { filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, {
   FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
 } from '../../components/WorkspacePage';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Text } = Typography;
 
@@ -201,12 +202,12 @@ export default function ReportsPage() {
       statusItems={statusSummary.map((item) => ({ key: item.status, label: item.label, value: item.count }))}
       toolbar={<WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
         <FilterField label="状态">
-          <Select aria-label="按异常闭环状态筛选" value={filterStatus || undefined} onChange={(value) => updateQuery({ status: value || '' })} placeholder="全部状态" allowClear style={{ width: filterSelectWidth }}
-            options={Object.entries(reportStatusMap).map(([key, value]) => ({ value: key, label: value.label }))} />
+          <Select aria-label="按异常闭环状态筛选" value={filterStatus || undefined} onChange={(value) => updateQuery({ status: listFilterValue(value) || '' })} placeholder="全部状态" allowClear style={{ width: filterSelectWidth }}
+            options={listFilterOptions('全部状态', Object.entries(reportStatusMap).map(([key, value]) => ({ value: key, label: value.label })))} />
         </FilterField>
         <FilterField label="异常类型">
-          <Select aria-label="按异常类型筛选" value={filterType || undefined} onChange={(value) => updateQuery({ type: value || '' })} placeholder="全部类型" allowClear style={{ width: filterSelectWidth }}
-            options={Object.entries(REPORT_TYPE).map(([key, value]) => ({ value: key, label: value }))} />
+          <Select aria-label="按异常类型筛选" value={filterType || undefined} onChange={(value) => updateQuery({ type: listFilterValue(value) || '' })} placeholder="全部类型" allowClear style={{ width: filterSelectWidth }}
+            options={listFilterOptions('全部类型', Object.entries(REPORT_TYPE).map(([key, value]) => ({ value: key, label: value })))} />
         </FilterField>
         {hasFilters && <ToolbarMeta label="当前结果">已筛选 {list.length} 条</ToolbarMeta>}
       </WorkspaceToolbar>}

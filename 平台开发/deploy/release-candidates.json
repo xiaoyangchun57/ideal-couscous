@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_line": "cross-module-freeze",
   "candidate_tags": [
-    "release-20260914-cross-module-freeze-r18"
+    "release-20260917-cross-module-freeze-r19"
   ],
   "historical_tags": [
     "release-20260810-cross-module-freeze",
@@ -21,6 +21,7 @@
     "release-20260910-cross-module-freeze-r14",
     "release-20260911-cross-module-freeze-r15",
     "release-20260912-cross-module-freeze-r16",
-    "release-20260913-cross-module-freeze-r17"
+    "release-20260913-cross-module-freeze-r17",
+    "release-20260914-cross-module-freeze-r18"
   ]
 }

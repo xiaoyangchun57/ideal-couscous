@@ -33,7 +33,7 @@ test('local API failure is actionable, never retries against production, and nev
     error => error.code === 'LOCAL_API_UNAVAILABLE'
       && /\u542f\u52a8\u672c\u5730\u670d\u52a1/.test(error.error),
   );
-  assert.deepEqual(urls, ['http://192.168.2.105:5000/api/mobile/my-today']);
+  assert.deepEqual(urls, ['http://192.168.2.107:5000/api/mobile/my-today']);
   await assert.rejects(
     request('/api/mobile/check-in', 'POST', { site_id: 1 }, { retry: 0 }),
     error => error.code === 'LOCAL_API_UNAVAILABLE' && error.queued === false,

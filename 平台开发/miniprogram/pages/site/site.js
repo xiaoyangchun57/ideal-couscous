@@ -15,7 +15,7 @@ const PARTS_FULFILLMENT_OPTIONS = [
 
 Page({
   data: {
-    siteId: null, site: null, readOnlySource: false, monitoringSource: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
+    siteId: null, site: null, readOnlySource: false, monitoringSource: false, monitoringPublic: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
@@ -31,9 +31,12 @@ Page({
     this._inactive = false;
     this._hasShown = false;
     const id = options.site_id || app.globalData.selSiteId;
-    const monitoringSource = options.source === 'responsible_sites_monitoring';
-    const readOnlySource = options.source === 'inspection_readonly' || monitoringSource;
-    this.setData({ siteId: id, readOnlySource, monitoringSource });
+    const monitoringPublic = getUser()?.capabilities?.station_monitoring_public === true;
+    const requestedMonitoring = options.source === 'responsible_sites_monitoring';
+    const readOnlySource = options.source === 'inspection_readonly'
+      || options.source === 'responsible_sites_profile' || requestedMonitoring;
+    const monitoringSource = monitoringPublic && requestedMonitoring;
+    this.setData({ siteId: id, readOnlySource, monitoringSource, monitoringPublic });
     if (id) this.loadSite(id);
   },
 
@@ -77,7 +80,9 @@ Page({
     const requestId = (this._siteRequestId || 0) + 1;
     this._siteRequestId = requestId;
     if (this.data.readOnlySource) this.setData({ monitoringLoading: true, monitoringError: '' });
-    const request = this.data.readOnlySource ? api.stationMonitoringOverview(id) : api.siteTasks(id);
+    const request = this.data.monitoringSource
+      ? api.stationMonitoringOverview(id)
+      : (this.data.readOnlySource ? api.siteProfile(id) : api.siteTasks(id));
     request.then(res => {
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
         const source = this.data.readOnlySource ? (res.site || {}) : (res.site || {});
@@ -86,7 +91,7 @@ Page({
       })
       .catch(() => {
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
-        if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: '监测信息加载失败，请重试' });
+        if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: this.data.monitoringSource ? '监测信息加载失败，请重试' : '站点资料加载失败，请重试' });
         wx.showToast({ title: '加载失败', icon: 'none' });
       });
     if (!this.data.readOnlySource) this.loadPartsInventory();

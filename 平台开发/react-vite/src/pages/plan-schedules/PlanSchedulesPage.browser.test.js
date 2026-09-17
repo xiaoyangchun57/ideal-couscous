@@ -130,6 +130,9 @@ test('plan cancellation and purge audit Web behavior with isolated contract fixt
       await page.getByText('路线临时调整', { exact: true }).waitFor();
       await page.getByText('2026-09-16 08:30:00', { exact: true }).waitFor();
       assert.equal(await page.getByText('计划备注不能作为取消原因', { exact: true }).count(), 1);
+      for (const staleRisk of ['该排程尚未安排站点，无法生成现场执行任务。请补充站点后重新提交。', '风险预警', '请选择计划车辆', '本周未覆盖']) {
+        assert.equal(await page.getByText(staleRisk, { exact: false }).count(), 0, `cancelled detail hides: ${staleRisk}`);
+      }
     } finally { await close('plan-audit-admin'); }
   });
 

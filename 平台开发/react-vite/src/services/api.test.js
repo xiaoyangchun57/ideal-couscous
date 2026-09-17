@@ -61,12 +61,32 @@ test('getStrict exposes backend error metadata', async () => {
   });
 });
 
-test('getStrict handles a non-JSON server error as retryable', async () => {
-  globalThis.fetch = async () => response('service unavailable', { status: 503, contentType: 'text/plain' });
+test('getStrict hides non-JSON server bodies while preserving diagnostic metadata', async () => {
+  const html = '<!doctype html><title>405 Method Not Allowed</title><pre>C:\\internal\\server.py</pre>';
+  globalThis.fetch = async () => response(html, {
+    status: 405,
+    contentType: 'text/html; charset=utf-8',
+    headers: { 'x-request-id': 'preview-405-request' },
+  });
   await assert.rejects(api.getStrict('/example'), (error) => {
-    assert.equal(error.message, 'service unavailable');
-    assert.equal(error.status, 503);
-    assert.equal(error.retryable, true);
+    assert.equal(error.message, '服务接口暂不可用，请刷新页面后重试（HTTP 405）');
+    assert.doesNotMatch(error.message, /doctype|internal|server\.py|Method Not Allowed/i);
+    assert.equal(error.status, 405);
+    assert.equal(error.requestId, 'preview-405-request');
+    assert.equal(error.retryable, false);
+    return true;
+  });
+});
+
+test('getStrict keeps a JSON business block reason unchanged', async () => {
+  globalThis.fetch = async () => response(
+    { error: '所选影像中有当前有效证据，不可彻底清理', code: 'BATCH_PURGE_BLOCKED' },
+    { status: 409 },
+  );
+  await assert.rejects(api.postStrict('/attachments/purge-batch/preview', { attachment_ids: [7] }), (error) => {
+    assert.equal(error.message, '所选影像中有当前有效证据，不可彻底清理');
+    assert.equal(error.code, 'BATCH_PURGE_BLOCKED');
+    assert.equal(error.status, 409);
     return true;
   });
 });

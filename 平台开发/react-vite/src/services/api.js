@@ -111,14 +111,15 @@ async function strictRequest(url, options = {}) {
         invalidJson = true;
       }
     } else {
-      const text = await res.text();
-      payload = text ? { error: text.substring(0, 200) } : null;
+      await res.text();
+      payload = null;
     }
 
     if (res.status === 401) handle401(payload?.code);
 
     if (!res.ok) {
-      const message = payload?.error || payload?.message || `请求失败（HTTP ${res.status}）`;
+      const message = payload?.error || payload?.message
+        || `服务接口暂不可用，请刷新页面后重试（HTTP ${res.status}）`;
       throw new ApiError(message, {
         status: res.status,
         code: payload?.code || '',

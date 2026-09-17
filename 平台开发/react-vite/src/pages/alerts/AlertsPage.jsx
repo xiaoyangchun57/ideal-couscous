@@ -33,7 +33,9 @@ import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
-import { StatusStrip, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
 
@@ -70,39 +72,6 @@ const resolveReasonOptions = [
 // ---------------------------------------------------------------------------
 // Date-range presets
 // ---------------------------------------------------------------------------
-const dateRangeOptions = [
-  { label: '今日', value: 'today' },
-  { label: '本周', value: 'week' },
-  { label: '本月', value: 'month' },
-];
-
-// ---------------------------------------------------------------------------
-// Helper: check if a date string falls within a named range
-// ---------------------------------------------------------------------------
-function isInDateRange(dateStr, range) {
-  if (!dateStr || !range) return true;
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return true;
-  const now = new Date();
-
-  if (range === 'today') {
-    return (
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate()
-    );
-  }
-  if (range === 'week') {
-    const weekAgo = new Date(now);
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    return d >= weekAgo;
-  }
-  if (range === 'month') {
-    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
-  }
-  return true;
-}
-
 // ---------------------------------------------------------------------------
 // Component: Alert Rule Engine Tab
 // ---------------------------------------------------------------------------
@@ -699,7 +668,7 @@ export default function AlertsPage() {
   const statusFilter = searchParams.get('status') || null;
   const levelFilter = searchParams.get('level') || null;
   const requestedRange = searchParams.get('range') || 'today';
-  const dateRange = dateRangeOptions.some((option) => option.value === requestedRange) ? requestedRange : 'today';
+  const dateRange = ALERT_DATE_RANGE_OPTIONS.some((option) => option.value === requestedRange) ? requestedRange : 'today';
 
   const updateQuery = useCallback((patch) => {
     const next = new URLSearchParams(searchParams);
@@ -816,7 +785,7 @@ export default function AlertsPage() {
 
     // Date range filter
     if (dateRange) {
-      list = list.filter((a) => isInDateRange(a.created_at, dateRange));
+      list = list.filter((a) => isAlertInDateRange(a.created_at, dateRange));
     }
 
     // Search text filter (site_name, site_code, message)
@@ -832,6 +801,10 @@ export default function AlertsPage() {
 
     return list;
   }, [allAlerts, statusFilter, levelFilter, dateRange, searchText]);
+  const listCoverage = useMemo(
+    () => alertListCoverage(allAlerts.length, counts.total),
+    [allAlerts.length, counts.total],
+  );
 
   // 管理视角先看事件簇，明细表仍保留用于逐条追溯和处置。
   const incidentGroups = useMemo(() => {
@@ -1231,7 +1204,9 @@ export default function AlertsPage() {
       <div className="workspace-embedded-page" style={{ overflow: 'hidden' }}>
         {activeTab === 'alerts' ? (
           <>
-            <StatusStrip items={statCards.map((item) => ({ key: item.title, label: item.title, value: item.value, color: item.color }))} />
+            <div style={{ flexShrink: 0 }}>
+              <StatusStrip items={statCards.map((item) => ({ key: item.title, label: item.title, value: item.value, color: item.color }))} />
+            </div>
 
             {/* Filter Bar */}
             <WorkspaceToolbar
@@ -1260,41 +1235,39 @@ export default function AlertsPage() {
                 placeholder="告警状态"
                 allowClear
                 value={statusFilter}
-                onChange={(val) => updateQuery({ status: val || '' })}
+                onChange={(val) => updateQuery({ status: listFilterValue(val) || '' })}
                 style={{ width: filterSelectWidth }}
                 aria-label="按告警状态筛选"
-                      options={Object.entries(alertStatusMap).map(([value, label]) => ({
+                      options={listFilterOptions('全部告警状态', Object.entries(alertStatusMap).map(([value, label]) => ({
                         value,
                         label,
-                      }))}
+                      })))}
                     />
               <Select
                 placeholder="告警等级"
                 allowClear
                 value={levelFilter}
-                onChange={(val) => updateQuery({ level: val || '' })}
+                onChange={(val) => updateQuery({ level: listFilterValue(val) || '' })}
                 style={{ width: filterSelectWidth }}
                 aria-label="按告警等级筛选"
-                      options={[
+                      options={listFilterOptions('全部告警等级', [
                         { value: 'red', label: 'I级 紧急告警' },
                         { value: 'orange', label: 'II级 较重告警' },
                         { value: 'yellow', label: 'III级 一般告警' },
                         { value: 'blue', label: 'IV级 一般关注' },
-                      ]}
+                      ])}
                     />
               <Select
                 value={dateRange}
                 onChange={(value) => updateQuery({ range: value === 'today' ? '' : value })}
                 style={{ width: filterSmallSelectWidth }}
                 aria-label="按告警时间范围筛选"
-                      options={dateRangeOptions}
+                      options={ALERT_DATE_RANGE_OPTIONS}
                     />
-                    {(statusFilter || levelFilter || dateRange || searchText) && (
-                      <ToolbarMeta label={statusFilter || levelFilter || searchText || dateRange !== 'today' ? '筛选结果' : '当前范围'}>
-                        {filteredAlerts.length} 条
-                      </ToolbarMeta>
-                    )}
             </WorkspaceToolbar>
+            {listCoverage.truncated && (
+              <Alert type="warning" showIcon message="告警列表未完整加载" description={listCoverage.truncationText} />
+            )}
 
             {/* Batch Operations Bar */}
             {selectedRowKeys.length > 0 && (
@@ -1409,7 +1382,11 @@ export default function AlertsPage() {
 
               {/* Table (also handles loading + empty states natively) */}
               {(!error || allAlerts.length > 0) && !loading && filteredAlerts.length === 0 && (
-                <WorkspaceEmpty type={searchText || statusFilter || levelFilter ? 'filtered' : 'empty'} onRefresh={fetchAlerts} />
+                <WorkspaceEmpty
+                  type={searchText || statusFilter || levelFilter || dateRange !== 'all' ? 'filtered' : 'empty'}
+                  description={dateRange !== 'all' ? '当前所选列表范围没有告警记录，可切换“已加载历史”查看当前已加载记录。' : undefined}
+                  onRefresh={fetchAlerts}
+                />
               )}
               {(!error || allAlerts.length > 0) && (loading || filteredAlerts.length > 0) && (
                 <div ref={alertsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>

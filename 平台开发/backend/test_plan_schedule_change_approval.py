@@ -54,7 +54,9 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
                     version INTEGER, change_reason TEXT, previous_plan_data TEXT,
                     period_start TEXT, period_end TEXT, coverage_exception_reason TEXT,
                     vehicle_exception_reason TEXT, vehicle_id INTEGER,
+                    no_vehicle_required INTEGER DEFAULT 0,
                     previous_vehicle_days TEXT, previous_vehicle_id INTEGER,
+                    previous_no_vehicle_required INTEGER,
                     previous_spare_parts TEXT,
                     previous_work_order_ids TEXT, previous_remarks TEXT,
                     previous_period_start TEXT, previous_period_end TEXT,
@@ -72,8 +74,9 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             db.execute('INSERT INTO user_sites VALUES (9, 1)')
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,status,plan_data,vehicle_days,spare_parts,work_order_ids,remarks,version,
-                 period_start,period_end,coverage_exception_reason,vehicle_exception_reason,vehicle_id)
-                VALUES (5,9,'approved',?,?,?,?,?,1,?,?,?,?,?)''', (
+                 period_start,period_end,coverage_exception_reason,vehicle_exception_reason,
+                 vehicle_id,no_vehicle_required)
+                VALUES (5,9,'approved',?,?,?,?,?,1,?,?,?,?,?,0)''', (
                     json.dumps({'2026-07-25': {'sites': [1], 'notes': '原路线'}}),
                     json.dumps({'2026-07-25': 3}), json.dumps([{'part_id': 8, 'quantity': 2}]),
                     json.dumps([101]), '原备注', '2026-07-21', '2026-07-27',
@@ -99,7 +102,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             db.execute("""UPDATE plan_schedules SET status='change_submitted',
                 period_start='2026-07-22', period_end='2026-07-28',
                 coverage_exception_reason='变更覆盖说明', vehicle_exception_reason='变更无车说明',
-                vehicle_id=4, plan_data=?, vehicle_days=?, spare_parts=?, work_order_ids=?,
+                vehicle_id=4, no_vehicle_required=0, plan_data=?, vehicle_days=?, spare_parts=?, work_order_ids=?,
                 remarks=?, version=version+1 WHERE id=5""", (
                 json.dumps({'2026-07-25': {'sites': [2]}}), json.dumps({'2026-07-25': 4}),
                 json.dumps([{'part_id': 9, 'quantity': 1}]), json.dumps([202]), '变更备注'))
@@ -130,6 +133,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             self.assertIsNone(row['previous_spare_parts'])
             for column in (
                 'previous_plan_data', 'previous_vehicle_days', 'previous_vehicle_id',
+                'previous_no_vehicle_required',
                 'previous_spare_parts', 'previous_work_order_ids', 'previous_remarks',
                 'previous_period_start', 'previous_period_end',
                 'previous_coverage_exception_reason', 'previous_vehicle_exception_reason',
@@ -143,8 +147,9 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
         with app_module.get_db() as db:
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,status,plan_data,vehicle_days,spare_parts,work_order_ids,remarks,version,
-                 period_start,period_end,coverage_exception_reason,vehicle_exception_reason,vehicle_id)
-                VALUES (6,9,'approved',?,'{}','[]','[]','',4,'2026-07-21','2026-07-27','','步行巡检',NULL)''',
+                 period_start,period_end,coverage_exception_reason,vehicle_exception_reason,
+                 vehicle_id,no_vehicle_required)
+                VALUES (6,9,'approved',?,'{}','[]','[]','',4,'2026-07-21','2026-07-27','','步行巡检',NULL,1)''',
                        (json.dumps({'2026-07-25': {'sites': [1]}}),))
         started = self.client.post('/api/plan-schedules/6/request-change',
                                    headers={'Authorization': 'Bearer operator-token'},
@@ -152,7 +157,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
         self.assertEqual(started.status_code, 200, started.json)
         with app_module.get_db() as db:
             db.execute("""UPDATE plan_schedules SET status='change_submitted', vehicle_id=4,
-                vehicle_days=?, vehicle_exception_reason='' WHERE id=6""",
+                vehicle_days=?, vehicle_exception_reason='', no_vehicle_required=0 WHERE id=6""",
                        (json.dumps({'2026-07-25': 4}),))
         rejected = self.client.post('/api/plan-schedules/6/reject',
                                     headers={'Authorization': 'Bearer manager-token'},
@@ -163,6 +168,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
         self.assertIsNone(row['vehicle_id'])
         self.assertEqual(json.loads(row['vehicle_days']), {})
         self.assertEqual(row['vehicle_exception_reason'], '步行巡检')
+        self.assertEqual(row['no_vehicle_required'], 1)
         self.assertEqual(row['version'], 4)
 
     def test_rejected_historical_multi_vehicle_change_keeps_daily_facts_without_inventing_vehicle(self):
@@ -171,12 +177,12 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             db.execute('''INSERT INTO plan_schedules
                 (id,user_id,status,plan_data,vehicle_days,vehicle_id,spare_parts,work_order_ids,
                  remarks,version,period_start,period_end,coverage_exception_reason,
-                 vehicle_exception_reason,previous_plan_data,previous_vehicle_days,
-                 previous_vehicle_id,previous_spare_parts,previous_work_order_ids,
+                 vehicle_exception_reason,no_vehicle_required,previous_plan_data,previous_vehicle_days,
+                 previous_vehicle_id,previous_no_vehicle_required,previous_spare_parts,previous_work_order_ids,
                  previous_remarks,previous_period_start,previous_period_end,
                  previous_coverage_exception_reason,previous_vehicle_exception_reason)
                 VALUES (7,9,'change_submitted',?, ?,5,'[]','[]','变更中',9,
-                        '2026-07-22','2026-07-28','','',?, ?,NULL,'[]','[]','历史计划',
+                        '2026-07-22','2026-07-28','','',0,?, ?,NULL,0,'[]','[]','历史计划',
                         '2026-07-21','2026-07-27','历史覆盖','')''', (
                     json.dumps({'2026-07-25': {'sites': [2]}}),
                     json.dumps({'2026-07-25': 5}),
@@ -191,6 +197,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
             row = db.execute('SELECT * FROM plan_schedules WHERE id=7').fetchone()
         self.assertEqual(json.loads(row['vehicle_days']), previous_days)
         self.assertIsNone(row['vehicle_id'])
+        self.assertEqual(row['no_vehicle_required'], 0)
         self.assertEqual((row['period_start'], row['period_end']), ('2026-07-21', '2026-07-27'))
         self.assertEqual(row['coverage_exception_reason'], '历史覆盖')
         self.assertEqual(row['version'], 9)

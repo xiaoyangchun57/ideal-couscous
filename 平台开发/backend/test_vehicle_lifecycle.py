@@ -1112,13 +1112,20 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             without_exception = app_module._ps_validate(
                 db, 2, 'weekly', '2026-08-10', '2026-08-16',
                 {'2026-08-10': {'sites': [1]}}, {}, vehicle_exception_reason='')
-            with_exception = app_module._ps_validate(
+            reason_only = app_module._ps_validate(
                 db, 2, 'weekly', '2026-08-10', '2026-08-16',
                 {'2026-08-10': {'sites': [1]}}, {},
                 vehicle_exception_reason='室内测试站步行可达，不使用车辆')
+            explicit_no_vehicle = app_module._ps_validate(
+                db, 2, 'weekly', '2026-08-10', '2026-08-16',
+                {'2026-08-10': {'sites': [1]}}, {},
+                vehicle_exception_reason='室内测试站步行可达，不使用车辆',
+                no_vehicle_required=True)
         self.assertFalse(without_exception['ok'])
-        self.assertTrue(any('未安排车辆' in error for error in without_exception['errors']))
-        self.assertTrue(with_exception['ok'])
+        self.assertTrue(any('选择计划车辆' in error for error in without_exception['errors']))
+        self.assertFalse(reason_only['ok'])
+        self.assertTrue(any('选择计划车辆' in error for error in reason_only['errors']))
+        self.assertTrue(explicit_no_vehicle['ok'])
 
     def test_workorder_vehicle_request_requires_vehicle_or_explicit_exception(self):
         missing = self.client.post('/api/vehicle/applications', headers=self.headers('operator-token'), json={

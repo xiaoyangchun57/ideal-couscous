@@ -69,7 +69,7 @@ export default function GlobalSearch({ open, onClose }) {
   }, [open, query, searchVersion]);
 
   const results = useMemo(() => {
-    const pages = getSearchablePages(user?.roles || [user?.role]).map((item) => ({ ...item, icon: <SearchOutlined /> }));
+    const pages = getSearchablePages(user?.roles || [user?.role], user?.capabilities).map((item) => ({ ...item, icon: <SearchOutlined /> }));
     const source = [...pages, ...records.map((item) => ({ ...item, icon: resultIcons[item.type] || <SearchOutlined /> }))];
     const keyword = query.trim().toLowerCase();
     if (!keyword) return pages.slice(0, 10);

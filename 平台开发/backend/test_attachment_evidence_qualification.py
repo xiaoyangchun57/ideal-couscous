@@ -169,7 +169,7 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM attachment_evidence_evaluations').fetchone()[0], 0)
 
-    def test_archive_name_never_uses_upload_time_as_capture_time(self):
+    def test_archive_name_keeps_one_business_name_and_times_remain_separate(self):
         with app_module.get_db() as db:
             presentation = app_module._attachment_presentation(db, {
                 'id': 99, 'filename': 'missing-time.jpg', 'stored_path': '/uploads/missing-time.jpg',
@@ -177,7 +177,8 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 'item_name': '浊度仪检查', 'site_id': 1, 'site_name': '资格测试站',
                 'category': '现场照片', 'taken_at': None, 'created_at': '2026-08-12 10:10:00',
             })
-        self.assertIn('拍摄时间待确认', presentation['archive_name'])
+        self.assertEqual(presentation['archive_name'], '浊度仪检查')
+        self.assertNotIn('拍摄时间待确认', presentation['archive_name'])
         self.assertNotIn('2026-08-12 10:10:00', presentation['archive_name'])
 
     def test_time_window_session_location_duplicate_and_delay_rules(self):
@@ -245,6 +246,8 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                          {'evaluated': 0, 'remediations': 0})
 
     def test_current_archive_only_returns_approved_qualified_formal_rows(self):
+        with open(os.path.join(self.upload_dir, 'valid.jpg'), 'wb') as handle:
+            handle.write(b'valid current evidence')
         with app_module.get_db() as db:
             db.executemany("""INSERT INTO operation_attachments
                 (id,filename,stored_path,source_type,source_id,site_id,uploader_id,review_status,
@@ -311,6 +314,8 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
         self.assertEqual(stats.json['evidence_issues'], 1)
 
     def test_workorder_current_archive_requires_real_same_site_order(self):
+        with open(os.path.join(self.upload_dir, 'workorder.jpg'), 'wb') as handle:
+            handle.write(b'valid work order evidence')
         with app_module.get_db() as db:
             db.executemany("""INSERT INTO operation_attachments
                 (id,filename,stored_path,source_type,source_id,site_id,uploader_id,review_status,
@@ -333,6 +338,8 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
         self.assertEqual(stats.json['total'], current.json['total'])
 
     def test_business_history_keeps_rows_hidden_from_current_archive(self):
+        with open(os.path.join(self.upload_dir, 'current.jpg'), 'wb') as handle:
+            handle.write(b'valid current evidence')
         with app_module.get_db() as db:
             db.executemany("""INSERT INTO operation_attachments
                 (id,filename,stored_path,source_type,source_id,item_id,item_name,site_id,uploader_id,

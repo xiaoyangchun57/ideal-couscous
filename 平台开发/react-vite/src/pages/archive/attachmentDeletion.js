@@ -26,7 +26,10 @@ export function hasPositiveBusinessId(value) {
 }
 
 export function archivePrimaryTitle(target) {
-  return target?.item_name || '检查项待确认';
+  const values = [target?.item_name, target?.description, target?.category]
+    .map((value) => String(value || '').trim())
+    .filter((value) => value && !['检查项待确认', '未关联检查项'].includes(value));
+  return values[0] || `影像 #${target?.id || '待确认'}`;
 }
 
 export function archiveSecondaryMeta(target) {
@@ -123,4 +126,14 @@ export function rejectedPurgeEligibility(target, user, submitting = false) {
     return { allowed: false, reason: '影像关联不完整，不能彻底删除' };
   }
   return { allowed: true, reason: '' };
+}
+
+export function archivePurgeEligibility(preview, user, submitting = false) {
+  if (submitting) return { allowed: false, reason: '正在提交彻底清理请求' };
+  if (!hasAdminRole(user)) return { allowed: false, reason: '仅管理员可彻底清理历史影像' };
+  if (!preview) return { allowed: false, reason: '正在读取服务端清理资格' };
+  return {
+    allowed: preview.can_purge === true,
+    reason: preview.block_reason || '',
+  };
 }

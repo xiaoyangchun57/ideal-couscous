@@ -106,19 +106,23 @@ class EightExperienceContractTest(unittest.TestCase):
                 ('P-OLD', '退役泵', 'submersible_pump', 1, 'offline', 'retired'),
             ])
 
-        for frequency, item_id in (
-                ('weekly', 601), ('monthly', 602),
-                ('quarterly', 603), ('yearly', 604), ('annual', 604)):
+        for frequency, item_ids, template_frequencies in (
+                ('weekly', [601, 602, 603], ['weekly', 'monthly', 'quarterly']),
+                ('monthly', [602], ['monthly']),
+                ('quarterly', [603], ['quarterly']),
+                ('yearly', [604], ['yearly']),
+                ('annual', [604], ['yearly'])):
             matched = self.client.get(
                 f'/api/inspection-v2/configs/match?site_id=1&schedule_type={frequency}',
                 headers=self.headers('operator-token'))
             self.assertEqual(matched.status_code, 200, matched.json)
-            self.assertEqual([item['id'] for item in matched.json['items']], [item_id])
+            self.assertEqual([item['id'] for item in matched.json['items']], item_ids)
             self.assertEqual(matched.json['device_types'], [])
             self.assertEqual(matched.json['schedule_type'],
                              'yearly' if frequency == 'annual' else frequency)
-            self.assertEqual(matched.json['matched_templates'][0]['frequency'],
-                             'yearly' if frequency == 'annual' else frequency)
+            self.assertEqual(
+                [template['frequency'] for template in matched.json['matched_templates']],
+                template_frequencies)
 
         with app_module.get_db() as db:
             db.execute('DELETE FROM device_shadows')
@@ -226,26 +230,41 @@ class EightExperienceContractTest(unittest.TestCase):
         self.assertEqual(detail.json['template_context'], expected_context)
         self.assertEqual(suggestions.json['template_context'], expected_context)
 
-        invalid_selections = (
-            ('weekly', 622),
-            ('monthly', 623),
-        )
-        for schedule_type, item_id in invalid_selections:
-            response = self.client.post('/api/plan-schedules',
-                                        headers=self.headers('operator-token'), json={
-                'schedule_type': schedule_type,
+        valid_monthly_in_weekly = self.client.post(
+            '/api/plan-schedules', headers=self.headers('operator-token'), json={
+                'schedule_type': 'weekly',
                 'period_start': '2026-08-21',
                 'period_end': '2026-08-21',
                 'plan_data': {'2026-08-21': {
-                    'sites': [1], 'inspection_items': {'1': [item_id]},
+                    'sites': [1], 'inspection_items': {'1': [622]},
                 }},
+                'no_vehicle_required': True,
                 'vehicle_exception_reason': '本计划无需用车',
             })
-            self.assertEqual(response.status_code, 400, response.json)
-            self.assertEqual(response.json['code'], 'PLAN_INSPECTION_ITEM_SELECTION_INVALID')
+        self.assertEqual(valid_monthly_in_weekly.status_code, 201,
+                         valid_monthly_in_weekly.json)
+        with app_module.get_db() as db:
+            count_after_valid_selection = db.execute(
+                'SELECT COUNT(*) FROM plan_schedules').fetchone()[0]
+        self.assertEqual(count_after_valid_selection, schedule_count + 1)
+
+        inactive_selection = self.client.post(
+            '/api/plan-schedules', headers=self.headers('operator-token'), json={
+                'schedule_type': 'weekly',
+                'period_start': '2026-08-21',
+                'period_end': '2026-08-21',
+                'plan_data': {'2026-08-21': {
+                    'sites': [1], 'inspection_items': {'1': [623]},
+                }},
+                'no_vehicle_required': True,
+                'vehicle_exception_reason': '本计划无需用车',
+            })
+        self.assertEqual(inactive_selection.status_code, 400, inactive_selection.json)
+        self.assertEqual(inactive_selection.json['code'],
+                         'PLAN_INSPECTION_ITEM_SELECTION_INVALID')
         with app_module.get_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM plan_schedules').fetchone()[0],
-                             schedule_count)
+                             count_after_valid_selection)
             history_after = tuple(db.execute(
                 'SELECT template_id,item_name,result FROM insp_plan_items WHERE id=899').fetchone())
         self.assertEqual(history_after, history_before)
@@ -276,6 +295,7 @@ class EightExperienceContractTest(unittest.TestCase):
             'period_start': '2026-08-18',
             'period_end': '2026-08-24',
             'plan_data': {},
+            'no_vehicle_required': True,
             'vehicle_exception_reason': '本计划无需用车',
         }
         with app_module.get_db() as db:

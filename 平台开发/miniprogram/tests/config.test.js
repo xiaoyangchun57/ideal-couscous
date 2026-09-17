@@ -38,7 +38,7 @@ function loadConfig(platform, envVersion, override) {
 test('develop packages use the fixed development API on simulator and real devices', () => {
   for (const platform of ['devtools', 'ios', 'android', 'windows', 'mac']) {
     const { config } = loadConfig(platform, 'develop');
-    assert.equal(config.BASE_URL, 'http://192.168.2.105:5000');
+    assert.equal(config.BASE_URL, 'http://192.168.2.107:5000');
     assert.equal(config.API_PROFILE, 'local');
   }
 });
@@ -60,7 +60,7 @@ test('legacy, expired, and malformed overrides do not affect the API profile', (
     { url: 'https://ops.hhyc-tec.cn', expires_at: Date.now() + 60_000 },
   ]) {
     const develop = loadConfig('devtools', 'develop', override);
-    assert.equal(develop.config.BASE_URL, 'http://192.168.2.105:5000');
+    assert.equal(develop.config.BASE_URL, 'http://192.168.2.107:5000');
     assert.equal(develop.config.API_PROFILE, 'local');
     assert.deepEqual(develop.storage.api_base_url_override, override);
 

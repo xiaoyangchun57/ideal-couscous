@@ -16,6 +16,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
 import {
   DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
@@ -1148,12 +1149,12 @@ export default function PlanSchedulesPage() {
           <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>
         </Space>}>
           <FilterField label="计划状态">
-            <Select allowClear placeholder="全部状态" style={{ width: filterSmallSelectWidth }} value={statusFilter} onChange={(value) => updateFilter('status', value)}
-              options={Object.entries(SCHEDULE_STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label }))} />
+            <Select allowClear placeholder="全部状态" style={{ width: filterSmallSelectWidth }} value={statusFilter} onChange={(value) => updateFilter('status', listFilterValue(value))}
+              options={listFilterOptions('全部状态', Object.entries(SCHEDULE_STATUS_MAP).map(([k, v]) => ({ value: k, label: v.label })))} />
           </FilterField>
           <FilterField label="计划类型">
-            <Select allowClear placeholder="全部类型" style={{ width: filterSelectWidth }} value={typeFilter} onChange={(value) => updateFilter('type', value)}
-              options={Object.entries(TYPE_MAP).map(([k, v]) => ({ value: k, label: v }))} />
+            <Select allowClear placeholder="全部类型" style={{ width: filterSelectWidth }} value={typeFilter} onChange={(value) => updateFilter('type', listFilterValue(value))}
+              options={listFilterOptions('全部类型', Object.entries(TYPE_MAP).map(([k, v]) => ({ value: k, label: v })))} />
           </FilterField>
           {attentionFilter && <ToolbarMeta label="关注条件"><Tag closable onClose={() => updateFilter('attention', undefined)}>{ATTENTION_MAP[attentionFilter]}</Tag></ToolbarMeta>}
         </WorkspaceToolbar>
@@ -1202,9 +1203,9 @@ export default function PlanSchedulesPage() {
         {detailLoading && <div style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!detailLoading && detail && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {!hasScheduledSites ? (
+            {showPreExecutionRisks && !hasScheduledSites ? (
               <Alert type="warning" showIcon message="该排程尚未安排站点，无法生成现场执行任务。请补充站点后重新提交。" />
-            ) : shouldWarnMissingExecution && generatedPlanCount === 0 ? (
+            ) : showPreExecutionRisks && shouldWarnMissingExecution && generatedPlanCount === 0 ? (
               <Alert type="error" showIcon message={`该排程已安排 ${detail.site_count} 个站点，但尚未生成现场执行任务。请联系管理员核对审批流转。`} />
             ) : null}
             {/* 基本信息 */}

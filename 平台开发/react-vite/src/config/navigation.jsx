@@ -63,7 +63,7 @@ export const pageRoles = {
   '/reagents': ['admin'],
 };
 
-export function getNavigation(roles) {
+export function getNavigation(roles, capabilities = {}) {
   const groups = [
     {
       key: 'workspace',
@@ -96,7 +96,8 @@ export function getNavigation(roles) {
   return groups
     .filter((group) => allowed(group.roles, roles))
     .map((group) => {
-      const children = group.children.filter((path) => allowed(pageRoles[path], roles));
+      const children = group.children.filter((path) => allowed(pageRoles[path], roles)
+        && (path !== '/sites/data-access' || capabilities.station_monitoring_public === true));
       return {
         type: 'group',
         key: group.key,
@@ -111,10 +112,11 @@ export function getNavigation(roles) {
     .filter((group) => group.children.length > 0);
 }
 
-export function getSearchablePages(roles) {
+export function getSearchablePages(roles, capabilities = {}) {
   return Object.entries(routeMeta)
     .filter(([path]) => {
-      return allowed(pageRoles[path], roles);
+      return allowed(pageRoles[path], roles)
+        && (path !== '/sites/data-access' || capabilities.station_monitoring_public === true);
     })
     .map(([path, meta]) => ({ type: '页面', title: meta.title, subtitle: meta.group, path }));
 }

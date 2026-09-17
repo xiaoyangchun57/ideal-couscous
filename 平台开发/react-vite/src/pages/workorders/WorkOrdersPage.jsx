@@ -21,6 +21,7 @@ import {
 import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Text } = Typography;
 
@@ -692,8 +693,8 @@ export default function WorkOrdersPage() {
         <WorkspaceToolbar actions={<><Button icon={<SearchOutlined />} onClick={() => handleSearch(search)}>查询</Button><Button icon={<ReloadOutlined />} onClick={handleReset}>重置</Button></>}>
           <FilterField label="工单搜索"><Input aria-label="工单搜索" placeholder="搜索工单号、标题、站点..." prefix={<SearchOutlined />} allowClear value={search}
             onChange={(e) => setSearch(e.target.value)} onPressEnter={(e) => handleSearch(e.target.value)} style={{ width: filterInputWidth }} /></FilterField>
-          <FilterField label="级别"><Select aria-label="级别" placeholder="级别" allowClear value={levelFilter} onChange={handleLevelChange} style={{ width: filterSmallSelectWidth }} options={levelOptions} /></FilterField>
-          <FilterField label="状态"><Select aria-label="状态" placeholder="状态" allowClear value={statusFilter} onChange={handleStatusChange} style={{ width: filterSelectWidth }} options={statusOptions} /></FilterField>
+          <FilterField label="级别"><Select aria-label="级别" placeholder="全部级别" allowClear value={levelFilter} onChange={(value) => handleLevelChange(listFilterValue(value))} style={{ width: filterSmallSelectWidth }} options={listFilterOptions('全部级别', levelOptions)} /></FilterField>
+          <FilterField label="状态"><Select aria-label="状态" placeholder="全部状态" allowClear value={statusFilter} onChange={(value) => handleStatusChange(listFilterValue(value))} style={{ width: filterSelectWidth }} options={listFilterOptions('全部状态', statusOptions)} /></FilterField>
           {assigneeFilter && <ToolbarMeta label="负责人"><Tag closable onClose={handleAssigneeClear}>{assigneeFilter}</Tag></ToolbarMeta>}
           {(search || assigneeFilter || levelFilter || statusFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredOrders.length} 条</ToolbarMeta>}
         </WorkspaceToolbar>

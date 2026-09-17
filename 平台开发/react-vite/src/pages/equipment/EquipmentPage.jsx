@@ -21,6 +21,7 @@ import { deviceTypeMap } from '../../services/constants';
 import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { StatusStrip, TableLongText, ToolbarMeta, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Title, Text } = Typography;
 
@@ -473,11 +474,11 @@ function DeviceLedgerTab() {
           onChange={(e) => updateFilter('q', e.target.value)}
           style={{ width: filterInputWidth, borderRadius: 8 }}
         />
-        <Select aria-label="设备类型" placeholder="设备类型" allowClear value={typeFilter} onChange={(value) => updateFilter('type', value)}
-          style={{ width: filterSelectWidth }} options={typeOptions} showSearch
+        <Select aria-label="设备类型" placeholder="全部设备类型" allowClear value={typeFilter} onChange={(value) => updateFilter('type', listFilterValue(value))}
+          style={{ width: filterSelectWidth }} options={listFilterOptions('全部设备类型', typeOptions)} showSearch
           filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
-        <Select aria-label="所属站点" placeholder="所属站点" allowClear value={siteFilter} onChange={(value) => updateFilter('site', value)}
-          style={{ width: filterSelectWidth }} options={siteOptions} showSearch
+        <Select aria-label="所属站点" placeholder="全部站点" allowClear value={siteFilter} onChange={(value) => updateFilter('site', listFilterValue(value))}
+          style={{ width: filterSelectWidth }} options={listFilterOptions('全部站点', siteOptions)} showSearch
           filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
         {(search || typeFilter || siteFilter) && <ToolbarMeta label="当前结果">已筛选 {devices.length} 条</ToolbarMeta>}
       </WorkspaceToolbar>

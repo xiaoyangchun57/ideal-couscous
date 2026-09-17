@@ -165,6 +165,23 @@ def _resolve_runtime_profile(raw_value):
 APP_RUNTIME_PROFILE = _resolve_runtime_profile(os.environ.get('APP_RUNTIME_PROFILE'))
 
 
+def _resolve_public_capability(raw_value):
+    normalized = str(raw_value or '').strip().lower()
+    if normalized in ('1', 'true', 'yes', 'on'):
+        return True
+    if normalized in ('0', 'false', 'no', 'off'):
+        return False
+    return False
+
+
+STATION_MONITORING_PUBLIC = _resolve_public_capability(
+    os.environ.get('STATION_MONITORING_PUBLIC'))
+
+
+def _public_capabilities():
+    return {'station_monitoring_public': STATION_MONITORING_PUBLIC}
+
+
 def _resolve_miniprogram_state(raw_value):
     normalized = str(raw_value or '').strip().lower()
     if normalized in ('developer', 'trial', 'formal'):
@@ -1895,6 +1912,17 @@ def init_db():
                 reason TEXT NOT NULL,
                 deleted_at TEXT NOT NULL,
                 delete_before_state TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS attachment_purge_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL UNIQUE,
+                operator_id INTEGER NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                UNIQUE(operator_id, idempotency_key)
             );
 
             -- 正式证据准入：附件保存当前快照，评估流水只追加不改写。
@@ -4607,7 +4635,7 @@ def create_alert_internal(db, site_id, metric, value, level, message):
 _tokens = {}
 # 站点范围缓存：token -> [site_id,...]，避免每个/api/请求都查 user_sites（消除并发读时的锁等待卡顿）
 _site_ids_cache = {}
-AUTH_SESSION_HOURS = max(1, int(os.environ.get('AUTH_SESSION_HOURS', '12')))
+AUTH_SESSION_HOURS = max(1, int(os.environ.get('AUTH_SESSION_HOURS', str(30 * 24))))
 LOGIN_FAILURE_LIMIT = max(3, int(os.environ.get('LOGIN_FAILURE_LIMIT', '5')))
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(os.environ.get('LOGIN_ATTEMPT_WINDOW_SECONDS', '900')))
 LOGIN_LOCK_BASE_SECONDS = max(10, int(os.environ.get('LOGIN_LOCK_BASE_SECONDS', '60')))
@@ -4729,6 +4757,7 @@ def _build_session_user(db, user_row):
         'real_name': user.get('real_name') or '',
         'phone': user.get('phone') or '',
         'must_change_password': bool(user.get('must_change_password') or 0),
+        'capabilities': _public_capabilities(),
     }
 
 
@@ -5049,6 +5078,20 @@ def global_api_auth():
 
 
 @app.before_request
+def gate_public_station_monitoring():
+    if request.method == 'OPTIONS':
+        return None
+    if (request.path == '/api/station-monitoring' or
+            request.path.startswith('/api/station-monitoring/')):
+        if not STATION_MONITORING_PUBLIC:
+            return jsonify({
+                'error': '站点监测公开能力尚未启用',
+                'code': 'STATION_MONITORING_PUBLIC_DISABLED',
+            }), 403
+    return None
+
+
+@app.before_request
 def retire_legacy_inspection_plan_writes():
     """旧 inspection-v2 仅保留历史读取/审核兼容，禁止继续生成第二条计划主链。"""
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and request.path.startswith('/api/inspection-v2/plans'):
@@ -5358,9 +5401,9 @@ def get_sites_simple():
                           'manager': rd.get('manager') or '',
                           'is_pilot': bool(rd.get('is_pilot')),
                           'operation_frequency': rd.get('operation_frequency') or ''})
-        # 批量补齐每个站点最新监测值（驾驶舱卡片展示阈值色阶用）
+        # 公开能力关闭时不得查询或返回尚未验收的监测值。
         site_ids = [d['id'] for d in result]
-        if site_ids:
+        if STATION_MONITORING_PUBLIC and site_ids:
             placeholders = ','.join('?' * len(site_ids))
             latest_rows = db.execute(f"""
                 SELECT s.site_id, s.metric AS latest_metric, s.value AS latest_value,
@@ -5493,22 +5536,23 @@ def get_site_archive(site_id):
             site_dict = dict(site)
             site_type = site_dict.get('type', '')
 
-            # 档案页不得用前端模拟曲线冒充采集结果。真实时序由数据接入后再展示。
-            sensor_rows = db.execute(
-                """SELECT metric, value, recorded_at FROM sensor_data
-                   WHERE site_id=? AND recorded_at >= datetime('now', '-24 hours')
-                   ORDER BY recorded_at ASC""",
-                (site_id,),
-            ).fetchall()
-            trend_data = {}
-            for row in sensor_rows:
-                item = dict(row)
-                trend_data.setdefault(item['metric'], []).append({
-                    'hour': (item['recorded_at'] or '')[11:16] or item['recorded_at'],
-                    'value': item['value'],
-                })
-            site_dict['has_sensor_data'] = bool(sensor_rows)
-            site_dict['trend_data'] = trend_data
+            if STATION_MONITORING_PUBLIC:
+                # 档案页不得用前端模拟曲线冒充采集结果。真实时序由数据接入后再展示。
+                sensor_rows = db.execute(
+                    """SELECT metric, value, recorded_at FROM sensor_data
+                       WHERE site_id=? AND recorded_at >= datetime('now', '-24 hours')
+                       ORDER BY recorded_at ASC""",
+                    (site_id,),
+                ).fetchall()
+                trend_data = {}
+                for row in sensor_rows:
+                    item = dict(row)
+                    trend_data.setdefault(item['metric'], []).append({
+                        'hour': (item['recorded_at'] or '')[11:16] or item['recorded_at'],
+                        'value': item['value'],
+                    })
+                site_dict['has_sensor_data'] = bool(sensor_rows)
+                site_dict['trend_data'] = trend_data
     
             # 设备列表（从 device_shadows 取，与 device 表同步）
             devices = db.execute("SELECT * FROM device_shadows WHERE site_id=?", (site_id,)).fetchall()
@@ -9165,7 +9209,9 @@ def _attachment_presentation(db, attachment):
     record_time = attachment.get('taken_at') or '拍摄时间待确认'
     result = {
         'original_filename': attachment.get('filename') or '',
-        'archive_name': f'{site_name} · {item_name} · {image_type} · {record_time}',
+        'archive_name': (item_name if item_name != '检查项待确认' else
+                         (attachment.get('description') or '').strip() or image_type or
+                         f'影像 #{attachment.get("id")}'),
         'item_id': stored_item_id if linked else None,
         'item_name': item_name,
         'plan_id': stored_plan_id if linked else None,
@@ -9215,7 +9261,7 @@ def _actionable_evidence_issue_sql(alias='oa'):
     )
 
 
-def _current_attachment_archive_sql(db, alias='oa'):
+def _current_attachment_archive_sql(db, alias='oa', require_primary_file=False):
     """Return the authoritative predicate for current business evidence."""
     source = f'{alias}.source_type'
     source_id = f'{alias}.source_id'
@@ -9270,6 +9316,10 @@ def _current_attachment_archive_sql(db, alias='oa'):
         )
 
     association_sql = ' OR '.join(associations) if associations else '0'
+    primary_file_sql = (
+        f' AND archive_primary_file_exists({alias}.stored_path)=1'
+        if require_primary_file else ''
+    )
     return f"""(
         COALESCE({alias}.is_deleted,0)=0
         AND COALESCE({alias}.review_status,'pending')='approved'
@@ -9277,6 +9327,7 @@ def _current_attachment_archive_sql(db, alias='oa'):
         AND COALESCE(json_extract(CASE WHEN json_valid({alias}.extra_json)
             THEN {alias}.extra_json ELSE '{{}}' END, '$.material_role'),'formal')!='supplement'
         AND ({association_sql})
+        {primary_file_sql}
     )"""
 
 
@@ -9365,7 +9416,9 @@ def list_attachments():
     offset = (page - 1) * limit
 
     with get_db() as db:
-        current_archive_sql = _current_attachment_archive_sql(db, 'oa')
+        db.create_function('archive_primary_file_exists', 1, _attachment_primary_file_exists)
+        current_archive_sql = _current_attachment_archive_sql(
+            db, 'oa', require_primary_file=True)
         # History is the exact complement of the current archive, including
         # soft-deleted records. Other attachment queries keep hiding deletions.
         where = [] if history_archive else ["COALESCE(oa.is_deleted,0)=0"]
@@ -9409,10 +9462,16 @@ def list_attachments():
         if evidence_issue:
             where.append(_actionable_evidence_issue_sql('oa'))
         if keyword:
-            where.append("(oa.description LIKE ? OR oa.filename LIKE ?)")
-            params.extend([f'%{keyword}%', f'%{keyword}%'])
-            non_date_where.append("(oa.description LIKE ? OR oa.filename LIKE ?)")
-            non_date_params.extend([f'%{keyword}%', f'%{keyword}%'])
+            keyword_columns = ['description', 'filename']
+            for optional_column in ('item_name', 'archive_name', 'category'):
+                if _table_has_column(db, 'operation_attachments', optional_column):
+                    keyword_columns.append(optional_column)
+            keyword_sql = '(' + ' OR '.join(f'oa.{column} LIKE ?' for column in keyword_columns) + ')'
+            keyword_params = [f'%{keyword}%'] * len(keyword_columns)
+            where.append(keyword_sql)
+            params.extend(keyword_params)
+            non_date_where.append(keyword_sql)
+            non_date_params.extend(keyword_params)
         if archived in ('0', '1'):
             where.append("oa.archived=?")
             params.append(int(archived))
@@ -9883,16 +9942,43 @@ def _attachment_purge_urls(raw_value):
     return values if isinstance(values, list) else []
 
 
-def _attachment_purge_physical_backups(db, attachment, aid, excluded_ids=None):
+def _attachment_upload_target(stored_path):
+    path = str(stored_path or '')
+    if not path.startswith('/uploads/'):
+        raise OSError('attachment path is outside upload namespace')
+    root = os.path.realpath(os.path.abspath(UPLOAD_DIR))
+    target = os.path.realpath(os.path.abspath(os.path.join(
+        UPLOAD_DIR, path[len('/uploads/'):].replace('/', os.sep))))
+    try:
+        inside_root = os.path.normcase(os.path.commonpath((root, target))) == os.path.normcase(root)
+    except ValueError:
+        inside_root = False
+    if not inside_root:
+        raise OSError('attachment path escapes upload root')
+    return target
+
+
+def _attachment_primary_file_exists(stored_path):
+    try:
+        target = _attachment_upload_target(stored_path)
+    except OSError:
+        return 0
+    return int(os.path.isfile(target))
+
+
+def _attachment_purge_physical_plan(db, attachment, aid, excluded_ids=None):
     columns = _ps_purge_table_columns(db, 'operation_attachments')
-    paths = []
+    targets = []
+    paths = set()
     shared = False
     for column in ('stored_path', 'thumbnail_path'):
         if column not in columns:
             continue
         path = str(attachment.get(column) or '')
-        if not path.startswith('/uploads/') or path in paths:
+        if not path or path in paths:
             continue
+        target = _attachment_upload_target(path)
+        paths.add(path)
         reference_columns = [name for name in ('stored_path', 'thumbnail_path') if name in columns]
         reference_sql = ' OR '.join(f'{name}=?' for name in reference_columns)
         excluded = sorted({_positive_business_id(value) for value in (excluded_ids or [aid])}
@@ -9905,21 +9991,505 @@ def _attachment_purge_physical_backups(db, attachment, aid, excluded_ids=None):
         if referenced:
             shared = True
             continue
-        paths.append(path)
-    backups = []
-    root = os.path.abspath(UPLOAD_DIR)
-    for path in sorted(paths):
-        target = os.path.abspath(os.path.join(
-            UPLOAD_DIR, path[len('/uploads/'):].replace('/', os.sep)))
-        if os.path.commonpath((root, target)) != root:
-            raise OSError('attachment path escapes upload root')
         if not os.path.exists(target):
             continue
         if not os.path.isfile(target):
             raise OSError('attachment target is not a regular file')
+        targets.append(target)
+    return sorted(targets), shared
+
+
+def _attachment_purge_physical_backups(db, attachment, aid, excluded_ids=None):
+    targets, shared = _attachment_purge_physical_plan(db, attachment, aid, excluded_ids)
+    backups = []
+    for target in targets:
         with open(target, 'rb') as handle:
             backups.append((target, handle.read()))
     return backups, shared
+
+
+ATTACHMENT_PURGE_BATCH_LIMIT = 50
+
+
+def _attachment_purge_batch_ids(payload):
+    raw_ids = payload.get('attachment_ids')
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, ('请选择至少一条历史影像', 'ATTACHMENT_PURGE_BATCH_EMPTY', 400)
+    normalized = []
+    for raw_id in raw_ids:
+        aid = _positive_business_id(raw_id)
+        if aid is None:
+            return None, ('影像编号无效，请刷新后重试', 'ATTACHMENT_PURGE_BATCH_ID_INVALID', 400)
+        if aid not in normalized:
+            normalized.append(aid)
+    if len(normalized) > ATTACHMENT_PURGE_BATCH_LIMIT:
+        return None, (
+            f'单次最多清理 {ATTACHMENT_PURGE_BATCH_LIMIT} 条，请减少选择后重试',
+            'ATTACHMENT_PURGE_BATCH_LIMIT_EXCEEDED', 400)
+    return sorted(normalized), None
+
+
+def _attachment_purge_batch_preview(db, attachment_ids):
+    rows = db.execute(
+        f"SELECT * FROM operation_attachments WHERE id IN ({','.join('?' for _ in attachment_ids)})",
+        attachment_ids,
+    ).fetchall()
+    by_id = {int(row['id']): dict(row) for row in rows}
+    items = []
+    for aid in attachment_ids:
+        attachment = by_id.get(aid)
+        if not attachment:
+            items.append({
+                'attachment_id': aid, 'can_purge': False,
+                'block_reason': '影像不存在或已被清理', 'shared_file_retained': False,
+            })
+            continue
+        decision = _archive_attachment_purge_decision(db, attachment)
+        shared_file = False
+        if decision['can_purge']:
+            try:
+                _, shared_file = _attachment_purge_physical_plan(
+                    db, attachment, aid, excluded_ids=attachment_ids)
+            except OSError:
+                decision = {
+                    'can_purge': False,
+                    'block_reason': '物理文件不在允许的上传目录内，不能自动清理',
+                    'impact': '记录和物理文件均未改变。',
+                }
+        items.append({
+            'attachment_id': aid,
+            'can_purge': bool(decision['can_purge']),
+            'block_reason': decision.get('block_reason') or '',
+            'qualification_reason': decision.get('qualification_reason') or '',
+            'shared_file_retained': shared_file,
+        })
+    purgeable_count = sum(1 for item in items if item['can_purge'])
+    return {
+        'requested_count': len(attachment_ids),
+        'purgeable_count': purgeable_count,
+        'blocked_count': len(attachment_ids) - purgeable_count,
+        'can_purge': purgeable_count == len(attachment_ids),
+        'batch_limit': ATTACHMENT_PURGE_BATCH_LIMIT,
+        'items': items,
+    }, by_id
+
+
+def _attachment_purge_stage_files(targets, batch_id):
+    staged = []
+    try:
+        for index, target in enumerate(sorted(set(targets))):
+            temporary = f'{target}.purge-{batch_id}-{index}.tmp'
+            if os.path.exists(temporary):
+                raise OSError('attachment purge staging target already exists')
+            os.replace(target, temporary)
+            staged.append((target, temporary))
+        return staged
+    except OSError:
+        for target, temporary in reversed(staged):
+            if os.path.exists(temporary):
+                os.replace(temporary, target)
+        raise
+
+
+def _attachment_purge_restore_staged(staged):
+    for target, temporary in reversed(staged):
+        if os.path.exists(temporary):
+            os.replace(temporary, target)
+
+
+def _attachment_purge_discard_staged(staged):
+    for _, temporary in staged:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _archive_attachment_purge_decision(db, attachment):
+    """Authorize irreversible archive cleanup from current server facts only."""
+    aid = int(attachment.get('id') or 0)
+    decorated = _decorate_attachment(db, attachment)
+    current_sql = _current_attachment_archive_sql(db, 'oa')
+    is_current_record = bool(db.execute(
+        f'SELECT 1 FROM operation_attachments oa WHERE oa.id=? AND {current_sql}', (aid,)
+    ).fetchone())
+    primary_file_exists = bool(_attachment_primary_file_exists(decorated.get('stored_path')))
+    status = str(decorated.get('review_status') or 'pending').strip().lower()
+    try:
+        metadata = json.loads(decorated.get('extra_json') or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        metadata = {}
+    material_role = str(metadata.get('material_role') or 'formal').strip().lower()
+
+    if (status == 'pending' and material_role not in {'supplement'}
+            and int(decorated.get('is_deleted') or 0) != 1):
+        return {
+            'can_purge': False,
+            'block_reason': '正式待审证据尚未裁决，不能彻底清理',
+            'impact': '记录和物理文件均未改变。请先完成所属业务审核。',
+        }
+    if is_current_record and primary_file_exists:
+        return {
+            'can_purge': False,
+            'block_reason': '当前有效证据仍被业务使用，不能彻底清理',
+            'impact': '记录和物理文件均未改变。请先按所属业务完成作废或替换。',
+        }
+
+    invalid_history = (
+        int(decorated.get('is_deleted') or 0) == 1
+        or status in {'rejected', 'voided', 'superseded'}
+        or decorated.get('association_status') != 'linked'
+        or str(decorated.get('evidence_qualification') or 'review').lower() != 'qualified'
+        or material_role == 'supplement'
+        or (is_current_record and not primary_file_exists)
+    )
+    if not invalid_history:
+        return {
+            'can_purge': False,
+            'block_reason': '该记录尚未被服务端确认成可清理的无效历史影像',
+            'impact': '记录和物理文件均未改变。',
+        }
+    if int(decorated.get('is_deleted') or 0) == 1:
+        qualification_reason = '记录已移出正常档案，可清理残留记录和无人引用的文件'
+    elif status in {'rejected', 'voided', 'superseded'}:
+        qualification_reason = {
+            'rejected': '内容审核已驳回，不再计入有效证据',
+            'voided': '证据已作废，不再计入当前业务',
+            'superseded': '证据已被替换，不再计入当前业务',
+        }[status]
+    elif decorated.get('association_status') != 'linked':
+        qualification_reason = '来源或正式业务关联无效'
+    elif str(decorated.get('evidence_qualification') or 'review').lower() != 'qualified':
+        qualification_reason = '来源资格未通过，不计入有效证据'
+    elif not primary_file_exists:
+        qualification_reason = '主文件已缺失，不能继续作为当前有效证据'
+    else:
+        qualification_reason = '补充材料不进入正式证据审核'
+    return {
+        'can_purge': True,
+        'block_reason': '',
+        'qualification_reason': qualification_reason,
+        'impact': '将删除影像记录；无其他记录引用时，同时删除上传目录内的物理文件。业务记录不会级联删除。',
+    }
+
+
+def _archive_attachment_remove_compatibility_urls(db, attachment):
+    """Remove purged paths from compatibility projections without deleting business rows."""
+    target_path = _attachment_storage_path(attachment.get('stored_path'))
+    if not target_path:
+        return
+    inspection_items, workorder_links = _attachment_delete_related_rows(db, attachment)
+    for item in inspection_items:
+        urls = _attachment_purge_urls(item.get('photo_urls'))
+        remaining = [value for value in urls if _attachment_storage_path(value) != target_path]
+        if remaining == urls:
+            continue
+        columns = _ps_purge_table_columns(db, 'insp_plan_items')
+        updates, params = [], []
+        if 'photo_urls' in columns:
+            updates.append('photo_urls=?'); params.append(json.dumps(remaining, ensure_ascii=False))
+        if 'actual_photos' in columns:
+            updates.append('actual_photos=?')
+            params.append(_qualified_evidence_count(
+                db, 'inspection', item.get('id'), stored_paths=remaining))
+        if updates:
+            params.append(item.get('id'))
+            if db.execute(
+                    f"UPDATE insp_plan_items SET {','.join(updates)} WHERE id=?", params
+            ).rowcount != 1:
+                raise sqlite3.IntegrityError('inspection attachment projection changed during purge')
+    for order in workorder_links:
+        raw_images = order.get('images')
+        images = _attachment_purge_urls(raw_images)
+        if not images:
+            continue
+        remaining = [value for value in images if _attachment_storage_path(value) != target_path]
+        if remaining != images and db.execute(
+                'UPDATE work_orders SET images=? WHERE id=?',
+                (json.dumps(remaining, ensure_ascii=False), order.get('id'))
+        ).rowcount != 1:
+            raise sqlite3.IntegrityError('work order attachment projection changed during purge')
+
+
+@app.route('/api/attachments/<int:aid>/purge', methods=['GET', 'POST'])
+@login_required
+def purge_archive_attachment(aid):
+    """Preview or irreversibly purge one server-confirmed invalid historical attachment."""
+    denied = require_admin()
+    if denied:
+        return denied
+    is_preview = request.method == 'GET'
+    payload = request.get_json(silent=True) or {}
+    reason = str(payload.get('reason') or '').strip()
+    if not is_preview:
+        if not reason:
+            return jsonify({'error': '清理原因不能为空', 'code': 'PURGE_REASON_REQUIRED'}), 400
+        if len(reason) > 200:
+            return jsonify({'error': '清理原因不能超过200字', 'code': 'PURGE_REASON_TOO_LONG'}), 400
+
+    backups = []
+    with get_db() as db:
+        try:
+            if not is_preview:
+                db.execute('BEGIN IMMEDIATE')
+                user_id = int(g.current_user.get('id') or 0)
+                if 'admin' not in _attachment_purge_active_roles(db, user_id):
+                    db.rollback()
+                    return jsonify({
+                        'error': '当前账号已不具备有效管理员权限，未执行清理',
+                        'code': 'ATTACHMENT_PURGE_FORBIDDEN',
+                    }), 403
+            row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (aid,)).fetchone()
+            if not row:
+                prior = db.execute("""SELECT remark FROM timeline_events
+                    WHERE source_type='attachment_archive_purge' AND source_id=?
+                      AND event_type='purged' ORDER BY id DESC LIMIT 1""", (aid,)).fetchone() \
+                    if _table_exists(db, 'timeline_events') else None
+                if prior and not is_preview:
+                    db.rollback()
+                    return jsonify({'success': True, 'attachment_id': aid, 'already_deleted': True})
+                if not is_preview:
+                    db.rollback()
+                return jsonify({'error': '影像不存在', 'code': 'ATTACHMENT_NOT_FOUND'}), 404
+
+            attachment = dict(row)
+            decision = _archive_attachment_purge_decision(db, attachment)
+            if not decision['can_purge']:
+                if not is_preview:
+                    db.rollback()
+                    return jsonify({'error': decision['block_reason'], 'code': 'ATTACHMENT_PURGE_BLOCKED',
+                                    'impact': decision['impact']}), 409
+                return jsonify(dict(decision, attachment_id=aid))
+
+            try:
+                if is_preview:
+                    physical_targets, shared_file = _attachment_purge_physical_plan(
+                        db, attachment, aid)
+                else:
+                    backups, shared_file = _attachment_purge_physical_backups(
+                        db, attachment, aid)
+            except OSError:
+                if not is_preview:
+                    db.rollback()
+                return jsonify({
+                    'can_purge': False,
+                    'attachment_id': aid,
+                    'block_reason': '物理文件不在允许的上传目录内，不能自动清理',
+                    'impact': '记录和物理文件均未改变。',
+                    'code': 'ATTACHMENT_PURGE_PATH_BLOCKED',
+                }), 409
+            if is_preview:
+                return jsonify(dict(
+                    decision,
+                    attachment_id=aid,
+                    physical_file_count=len(physical_targets),
+                    shared_file_retained=shared_file,
+                    reason_required=True,
+                ))
+
+            for target, _ in backups:
+                os.remove(target)
+            _archive_attachment_remove_compatibility_urls(db, attachment)
+            before_state = dict(attachment)
+            summary = {
+                'attachment_id': aid,
+                'operator_id': g.current_user.get('id'),
+                'operator_name': _current_actor_name(),
+                'reason': reason,
+                'deleted_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                'shared_file_retained': shared_file,
+                'original_record': before_state,
+            }
+            if _table_exists(db, 'timeline_events'):
+                db.execute("""INSERT INTO timeline_events
+                    (source_type,source_id,event_type,operator,remark)
+                    VALUES ('attachment_archive_purge',?,'purged',?,?)""",
+                    (aid, summary['operator_name'], json.dumps(
+                        summary, ensure_ascii=False, sort_keys=True, separators=(',', ':'))))
+            if _table_exists(db, 'operation_logs'):
+                db.execute("""INSERT INTO operation_logs
+                    (module,action,target_type,target_id,operator,operator_id,details)
+                    VALUES ('attachment','hard_purge','attachment',?,?,?,?)""",
+                    (aid, summary['operator_name'], summary['operator_id'], json.dumps(
+                        summary, ensure_ascii=False, sort_keys=True)))
+            if _table_exists(db, 'notifications'):
+                db.execute("""DELETE FROM notifications
+                    WHERE source_type IN ('attachment_review','photo_review','attachment_void',
+                                          'replacement_review') AND source_id=?""", (aid,))
+            if db.execute('DELETE FROM operation_attachments WHERE id=?', (aid,)).rowcount != 1:
+                raise sqlite3.IntegrityError('attachment changed during purge')
+            db.commit()
+            return jsonify({
+                'success': True,
+                'attachment_id': aid,
+                'already_deleted': False,
+                'shared_file_retained': shared_file,
+            })
+        except OSError:
+            db.rollback(); _ps_restore_purge_files(backups)
+            return jsonify({'error': '影像文件删除失败，数据未发生变化，请重试',
+                            'code': 'ATTACHMENT_PURGE_FILE_FAILED'}), 503
+        except sqlite3.DatabaseError:
+            db.rollback(); _ps_restore_purge_files(backups)
+            return jsonify({'error': '彻底清理未完成，数据未发生变化，请重试',
+                            'code': 'ATTACHMENT_PURGE_FAILED'}), 503
+
+
+@app.route('/api/attachments/purge-batch/preview', methods=['POST'])
+@login_required
+def preview_archive_attachment_batch_purge():
+    denied = require_admin()
+    if denied:
+        return denied
+    attachment_ids, error = _attachment_purge_batch_ids(request.get_json(silent=True) or {})
+    if error:
+        message, code, status = error
+        return jsonify({'error': message, 'code': code}), status
+    with get_db() as db:
+        preview, _ = _attachment_purge_batch_preview(db, attachment_ids)
+        return jsonify(preview)
+
+
+@app.route('/api/attachments/purge-batch', methods=['POST'])
+@login_required
+def purge_archive_attachment_batch():
+    denied = require_admin()
+    if denied:
+        return denied
+    payload = request.get_json(silent=True) or {}
+    attachment_ids, error = _attachment_purge_batch_ids(payload)
+    if error:
+        message, code, status = error
+        return jsonify({'error': message, 'code': code}), status
+    reason = str(payload.get('reason') or '').strip()
+    idempotency_key = str(payload.get('idempotency_key') or '').strip()
+    if not reason:
+        return jsonify({'error': '清理原因不能为空',
+                        'code': 'ATTACHMENT_PURGE_BATCH_REASON_REQUIRED'}), 400
+    if len(reason) > 200:
+        return jsonify({'error': '清理原因不能超过200字',
+                        'code': 'ATTACHMENT_PURGE_BATCH_REASON_TOO_LONG'}), 400
+    if not idempotency_key or len(idempotency_key) > 160:
+        return jsonify({'error': '批量请求标识无效，请重新确认后提交',
+                        'code': 'ATTACHMENT_PURGE_BATCH_KEY_REQUIRED'}), 400
+    request_hash = hashlib.sha256(json.dumps({
+        'attachment_ids': attachment_ids, 'reason': reason,
+    }, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+    staged = []
+    with get_db() as db:
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            user_id = int(g.current_user.get('id') or 0)
+            if 'admin' not in _attachment_purge_active_roles(db, user_id):
+                db.rollback()
+                return jsonify({
+                    'error': '当前账号已不具备有效管理员权限，未执行清理',
+                    'code': 'ATTACHMENT_PURGE_BATCH_FORBIDDEN',
+                }), 403
+            replay = db.execute("""SELECT request_hash,response_json FROM attachment_purge_batches
+                WHERE operator_id=? AND idempotency_key=?""", (user_id, idempotency_key)).fetchone()
+            if replay:
+                db.rollback()
+                if replay['request_hash'] != request_hash:
+                    return jsonify({
+                        'error': '该批量请求标识已用于其他清理内容，请重新确认',
+                        'code': 'ATTACHMENT_PURGE_BATCH_KEY_CONFLICT',
+                    }), 409
+                response = json.loads(replay['response_json'])
+                response['idempotent_replay'] = True
+                return jsonify(response)
+
+            preview, attachments = _attachment_purge_batch_preview(db, attachment_ids)
+            if not preview['can_purge']:
+                db.rollback()
+                return jsonify({
+                    'error': '所选影像包含不可清理项，未执行任何清理',
+                    'code': 'ATTACHMENT_PURGE_BATCH_BLOCKED',
+                    **preview,
+                }), 409
+
+            physical_targets = []
+            shared_by_id = {}
+            for aid in attachment_ids:
+                targets, shared_file = _attachment_purge_physical_plan(
+                    db, attachments[aid], aid, excluded_ids=attachment_ids)
+                physical_targets.extend(targets)
+                shared_by_id[aid] = shared_file
+            batch_id = f'APB-{datetime.now().strftime("%Y%m%d%H%M%S")}-{secrets.token_hex(4)}'
+            staged = _attachment_purge_stage_files(physical_targets, batch_id)
+            deleted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            operator_name = _current_actor_name()
+            for aid in attachment_ids:
+                attachment = attachments[aid]
+                _archive_attachment_remove_compatibility_urls(db, attachment)
+                summary = {
+                    'attachment_id': aid,
+                    'batch_id': batch_id,
+                    'operator_id': user_id,
+                    'operator_name': operator_name,
+                    'reason': reason,
+                    'deleted_at': deleted_at,
+                    'shared_file_retained': shared_by_id[aid],
+                    'original_record': dict(attachment),
+                }
+                if _table_exists(db, 'timeline_events'):
+                    db.execute("""INSERT INTO timeline_events
+                        (source_type,source_id,event_type,operator,remark)
+                        VALUES ('attachment_archive_purge',?,'purged',?,?)""",
+                        (aid, operator_name, json.dumps(
+                            summary, ensure_ascii=False, sort_keys=True, separators=(',', ':'))))
+                if _table_exists(db, 'operation_logs'):
+                    db.execute("""INSERT INTO operation_logs
+                        (module,action,target_type,target_id,operator,operator_id,details)
+                        VALUES ('attachment','hard_purge_batch','attachment',?,?,?,?)""",
+                        (aid, operator_name, user_id, json.dumps(
+                            summary, ensure_ascii=False, sort_keys=True)))
+                if _table_exists(db, 'notifications'):
+                    db.execute("""DELETE FROM notifications
+                        WHERE source_type IN ('attachment_review','photo_review','attachment_void',
+                                              'replacement_review') AND source_id=?""", (aid,))
+                if db.execute('DELETE FROM operation_attachments WHERE id=?', (aid,)).rowcount != 1:
+                    raise sqlite3.IntegrityError('attachment changed during batch purge')
+
+            response = {
+                'success': True,
+                'batch_id': batch_id,
+                'purged_count': len(attachment_ids),
+                'attachment_ids': attachment_ids,
+                'shared_file_retained_count': sum(1 for value in shared_by_id.values() if value),
+                'idempotent_replay': False,
+            }
+            db.execute("""INSERT INTO attachment_purge_batches
+                (batch_id,operator_id,idempotency_key,request_hash,response_json)
+                VALUES (?,?,?,?,?)""", (
+                    batch_id, user_id, idempotency_key, request_hash,
+                    json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+                ))
+            db.commit()
+            cleanup_pending = 0
+            for _, temporary in staged:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    cleanup_pending += 1
+            response['temporary_cleanup_pending'] = cleanup_pending
+            return jsonify(response)
+        except OSError:
+            db.rollback()
+            _attachment_purge_restore_staged(staged)
+            return jsonify({
+                'error': '批量影像文件处理失败，数据未发生变化，请重试',
+                'code': 'ATTACHMENT_PURGE_BATCH_FILE_FAILED',
+            }), 503
+        except sqlite3.DatabaseError:
+            db.rollback()
+            _attachment_purge_restore_staged(staged)
+            return jsonify({
+                'error': '批量清理未完成，数据与文件均未发生变化，请刷新后重试',
+                'code': 'ATTACHMENT_PURGE_BATCH_FAILED',
+            }), 503
 
 
 def _rejected_attachment_batch_context(db, aid, user_id, roles):
@@ -18273,10 +18843,17 @@ def api_login():
 @app.route('/api/auth/me')
 @login_required
 def api_me():
+    with get_db() as db:
+        site_rows = db.execute(
+            "SELECT s.id, s.name, s.code, s.type FROM sites s "
+            "JOIN user_sites us ON s.id=us.site_id WHERE us.user_id=? ORDER BY s.id",
+            (g.current_user['id'],),
+        ).fetchall()
     return jsonify({
         'success': True,
         'user': g.current_user,
         'site_ids': g.user_site_ids,
+        'sites': [dict(row) for row in site_rows],
     })
 
 
@@ -32448,7 +33025,8 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
         'river': site['river'] or '', 'basin': site['basin'] or '', 'lat': site['lat'], 'lng': site['lng'],
         'manager': site['manager'] or '',
         'monitoring_status_label': '未接入', 'reason_code': 'not_connected', 'monitoring_reason': '未配置启用的监测身份',
-        'last_communication_at': None, 'last_valid_observation_at': None, 'published_factor_count': 0,
+        'last_received_at': None, 'last_communication_at': None,
+        'last_valid_observation_at': None, 'published_factor_count': 0,
         'monitoring_status': 'not_connected',
     }
     if not profile:
@@ -32462,6 +33040,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
     configs = [item for item in configs if item.get('endpoint_id') == profile['endpoint_id']]
     values = values if values is not None else monitoring_latest_values(db, site_id)
     values = [item for item in values if item.get('endpoint_id') == profile['endpoint_id']]
+    base['last_received_at'] = last_communication
     base['last_communication_at'] = last_communication
     base['last_valid_observation_at'] = max((item.get('observed_at') for item in values if item.get('observed_at')), default=None)
     base['published_factor_count'] = len(configs)
@@ -32498,14 +33077,14 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
             config.get('expected_interval_seconds'), config.get('tolerance_seconds'),
         ))
     if not profile_data.get('expected_interval_seconds') or any(not item.get('expected_interval_seconds') for item in configs):
-        return {'status': 'interval_unconfigured', 'status_label': '周期未配置', 'reason_code': 'interval_unconfigured', 'reason': '已接入但采集周期尚未配置'}
+        return {'status': 'interval_unconfigured', 'status_label': '数据周期未配置', 'reason_code': 'interval_unconfigured', 'reason': '已接收数据，但采集周期尚未配置'}
     if communication['state'] == 'stale':
-        return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'stale_communication', 'reason': '最近通信已超出端点配置周期'}
+        return {'status': 'attention', 'status_label': '数据需关注', 'reason_code': 'stale_communication', 'reason': '最后收到报文时间已超出配置周期'}
     if any(item['reason_code'] == 'no_observation' for item in factor_freshness):
-        return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'missing_observation', 'reason': '当前配置因子存在缺测'}
+        return {'status': 'attention', 'status_label': '数据需关注', 'reason_code': 'missing_observation', 'reason': '当前配置因子存在缺测'}
     if factor_freshness and all(item['state'] == 'fresh' for item in factor_freshness):
-        return {'status': 'normal', 'status_label': '正常', 'reason_code': None, 'reason': '最近有效观测在配置周期内'}
-    return {'status': 'attention', 'status_label': '需关注', 'reason_code': 'stale_observation', 'reason': '最近有效观测超出配置周期或存在缺口'}
+        return {'status': 'normal', 'status_label': '数据正常', 'reason_code': None, 'reason': '最近有效观测在配置周期内'}
+    return {'status': 'attention', 'status_label': '数据需关注', 'reason_code': 'stale_observation', 'reason': '最近有效观测超出配置周期或存在缺口'}
 
 
 def _site_can_calibrate(db, site_id, user=None):
@@ -32536,6 +33115,94 @@ _STATION_MONITORING_SITE_TYPE_LABELS = {
 }
 
 
+def _mobile_static_site_payload(site, *, can_calibrate=False, is_responsible=False):
+    row = dict(site)
+    return {
+        'id': row['id'], 'site_id': row['id'], 'name': row.get('name') or '',
+        'code': row.get('code') or '', 'type': row.get('type') or '',
+        'type_cn': _STATION_MONITORING_SITE_TYPE_LABELS.get(row.get('type'), '其他站点'),
+        'district': row.get('district') or '', 'address': row.get('address') or '',
+        'river': row.get('river') or '', 'basin': row.get('basin') or '',
+        'lat': row.get('lat'), 'lng': row.get('lng'),
+        'manager': row.get('manager') or '', 'phone': row.get('phone') or '',
+        'is_responsible': bool(is_responsible), 'can_calibrate': bool(can_calibrate),
+    }
+
+
+def _mobile_responsible_site_rows(db, scope, keyword, responsible_ids):
+    where = []
+    params = []
+    if scope == 'mine':
+        if not responsible_ids:
+            return []
+        where.append('id IN (' + ','.join('?' * len(responsible_ids)) + ')')
+        params.extend(responsible_ids)
+    if keyword:
+        escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        where.append("(name LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')")
+        params.extend((f'%{escaped}%', f'%{escaped}%'))
+    order = 'name, id'
+    if scope == 'all' and responsible_ids:
+        marks = ','.join('?' * len(responsible_ids))
+        order = f'CASE WHEN id IN ({marks}) THEN 0 ELSE 1 END, name, id'
+        params.extend(responsible_ids)
+    clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+    return db.execute(
+        'SELECT id, code, name, type, district, address, river, basin, '
+        'gps_lat AS lat, gps_lng AS lng, manager, phone FROM sites' +
+        clause + ' ORDER BY ' + order, params).fetchall()
+
+
+@app.route('/api/mobile/responsible-sites')
+@login_required
+def mobile_responsible_sites():
+    scope = (request.args.get('scope') or 'mine').strip().lower()
+    if scope not in {'mine', 'all'}:
+        return jsonify({'error': '站点范围参数无效', 'code': 'INVALID_SITE_SCOPE'}), 400
+    is_admin = _has_any_role(g.current_user, 'admin')
+    if scope == 'all' and not is_admin:
+        return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_SITE_SCOPE'}), 403
+    keyword = (request.args.get('keyword') or '').strip()
+    with get_db() as db:
+        responsible_ids = [row['site_id'] for row in db.execute(
+            'SELECT site_id FROM user_sites WHERE user_id=? ORDER BY site_id',
+            (g.current_user['id'],)).fetchall()]
+        rows = _mobile_responsible_site_rows(db, scope, keyword, responsible_ids)
+        responsible_set = set(responsible_ids)
+        items = [_mobile_static_site_payload(
+            row, is_responsible=row['id'] in responsible_set) for row in rows]
+        return jsonify({
+            'scope': scope,
+            'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
+            'scope_counts': {
+                'mine': len(responsible_ids),
+                'all': db.execute('SELECT COUNT(*) FROM sites').fetchone()[0] if is_admin else None,
+            },
+            'items': items,
+        })
+
+
+@app.route('/api/mobile/site-profile/<int:site_id>')
+@login_required
+def mobile_site_profile(site_id):
+    denied = _site_access_denied(site_id, '读取站点档案')
+    if denied:
+        return denied
+    with get_db() as db:
+        site = db.execute(
+            'SELECT id, code, name, type, district, address, river, basin, '
+            'gps_lat AS lat, gps_lng AS lng, manager, phone FROM sites WHERE id=?',
+            (site_id,)).fetchone()
+        if not site:
+            return jsonify({'error': '站点不存在', 'code': 'SITE_NOT_FOUND'}), 404
+        responsible = bool(db.execute(
+            'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=? LIMIT 1',
+            (g.current_user['id'], site_id)).fetchone())
+        return jsonify({'site': _mobile_static_site_payload(
+            site, can_calibrate=_site_can_calibrate(db, site_id, g.current_user),
+            is_responsible=responsible)})
+
+
 def _station_monitoring_overview(db, site_id):
     projection = _station_monitoring_projection(db, site_id)
     if projection is None:
@@ -32553,45 +33220,40 @@ def _station_monitoring_overview(db, site_id):
     communication_state = communication_freshness['state'] if projection['last_communication_at'] else 'not_configured'
     communication_label = ('未接入' if not projection['last_communication_at'] and status == 'not_connected'
         else '等待首帧' if not projection['last_communication_at']
-        else '通信正常' if communication_state == 'fresh'
-        else '通信已过期' if communication_state == 'stale'
-        else '通信周期未配置')
+        else '数据已接收' if communication_state == 'fresh'
+        else '最近未收到报文' if communication_state == 'stale'
+        else '接收周期未配置')
     data_labels = {
         'not_connected': '未接入', 'awaiting_first_frame': '等待首帧',
         'raw_received_config_pending': '档案待批准', 'waiting_first_valid': '等待有效观测',
-        'interval_unconfigured': '周期未配置', 'normal': '观测正常', 'attention': '需关注',
+        'interval_unconfigured': '数据周期未配置', 'normal': '数据正常', 'attention': '数据需关注',
     }
     data_style = 'normal' if status == 'normal' else ('attention' if status == 'attention' else 'pending')
-    instrument_state = 'has_valid_observation' if values else ('no_valid_observation' if configs else 'not_configured')
-    instrument_label = '有有效观测' if values else ('暂无有效观测' if configs else '尚未配置')
-    confirmed_rtu = db.execute(
-        """SELECT event.received_at FROM monitoring_status_events event
-           JOIN observation_batches batch ON batch.id=event.observation_batch_id AND batch.is_current=1
-           WHERE event.business_site_id=? AND event.endpoint_id=? AND event.event_axis='rtu'
-             AND event.source='confirmed_protocol' ORDER BY event.received_at DESC, event.id DESC LIMIT 1""",
-        (site_id, profile['endpoint_id']),
-    ).fetchone() if profile else None
     axes = {
-        'communication': _station_monitoring_axis('通信', communication_state, communication_label,
+        'communication': _station_monitoring_axis('数据接收', communication_state, communication_label,
             status='normal' if communication_state == 'fresh' else ('attention' if communication_state == 'stale' else 'pending'),
-            reason='最近通信已超出端点配置周期' if communication_state == 'stale' else ('端点通信周期尚未配置' if projection['last_communication_at'] and communication_state == 'unknown' else None),
+            reason='最后收到报文时间已超出配置周期' if communication_state == 'stale' else ('数据接收周期尚未配置' if projection['last_communication_at'] and communication_state == 'unknown' else None),
             last_received_at=projection['last_communication_at']),
-        'data': _station_monitoring_axis('数据', status, data_labels.get(status, '状态未知'),
+        'data': _station_monitoring_axis('观测数据', status, data_labels.get(status, '数据状态未知'),
             status=data_style, reason=projection['monitoring_reason']),
-        'rtu': _station_monitoring_axis('RTU', 'reported' if confirmed_rtu else 'unknown',
-            '已确认上报' if confirmed_rtu else '状态未知', status='info' if confirmed_rtu else 'pending',
-            reason=None if confirmed_rtu else '暂无经确认的 RTU 状态',
-            last_confirmed_at=confirmed_rtu['received_at'] if confirmed_rtu else None),
-        'instrument': _station_monitoring_axis('仪器', instrument_state, instrument_label, status='info',
-            reason=None if configs else '暂无已批准因子'),
     }
-    instruments = [dict(item, status='has_valid_observation' if any(v.get('instrument_asset_code') == item.get('instrument_asset_code') for v in values) else 'health_unknown') for item in configs]
+    factors = [{
+        'business_metric': item.get('business_metric'),
+        'factor_name_cn': _STATION_MONITORING_FACTOR_LABELS.get(
+            item.get('business_metric'), f'监测因子{index + 1}'),
+        'standard_unit': item.get('standard_unit') or '',
+    } for index, item in enumerate(configs)]
     has_trend_facts = any(item.get('aggregation_source') == 'server_aggregated' for item in values)
-    monitoring = {'latest_values': latest, 'axes': axes, 'instruments': instruments, 'recent_items': [], 'capabilities': {'latest': bool(latest), 'trend': has_trend_facts, 'instruments': bool(configs)}}
+    monitoring = {'latest_values': latest, 'axes': axes, 'factors': factors,
+                  'capabilities': {'latest': bool(latest), 'trend': has_trend_facts, 'factors': bool(factors)}}
     projection['can_calibrate'] = _site_can_calibrate(db, site_id)
     projection['type_cn'] = _STATION_MONITORING_SITE_TYPE_LABELS.get(projection.get('type'), '其他站点')
-    return {'site': projection, 'monitoring': monitoring, 'axes': axes, 'instruments': instruments, 'recent_items': [], 'capabilities': monitoring['capabilities'],
-            'section_status': {'latest_values': 'ready' if latest else 'not_configured', 'trend': 'ready' if has_trend_facts else 'not_configured', 'instruments': 'ready' if instruments else 'not_configured'}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    return {'site': projection, 'monitoring': monitoring, 'axes': axes, 'factors': factors,
+            'capabilities': monitoring['capabilities'],
+            'section_status': {'latest_values': 'ready' if latest else 'not_configured',
+                               'trend': 'ready' if has_trend_facts else 'not_configured',
+                               'factors': 'ready' if factors else 'not_configured'},
+            'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
 
 
 def _station_monitoring_batch_projections(db, site_rows):
@@ -32799,26 +33461,15 @@ def station_monitoring_summary(site_id):
             if any(item['freshness']['reason_code'] == 'no_observation' for item in configured_data) else
             {'state': 'stale', 'reason_code': 'stale_observation'}
         )
-        confirmed_rtu = db.execute(
-            """SELECT event.event_value, event.received_at FROM monitoring_status_events event
-               JOIN observation_batches batch ON batch.id=event.observation_batch_id AND batch.is_current=1
-               WHERE event.business_site_id=? AND event.endpoint_id=? AND event.event_axis='rtu'
-                 AND event.source='confirmed_protocol' ORDER BY event.received_at DESC, event.id DESC LIMIT 1""",
-            (site_id, profile['endpoint_id']),
-        ).fetchone()
         axes = {
             'communication': communication,
             'data': dict(data_state, factors=factor_states),
-            'rtu': {'state': 'reported' if confirmed_rtu else 'unknown',
-                    'reason_code': None if confirmed_rtu else 'unconfirmed_protocol',
-                    'last_confirmed_at': confirmed_rtu['received_at'] if confirmed_rtu else None},
-            'instrument': {'state': 'unknown', 'reason_code': 'unconfirmed'},
         }
         attention = 'normal' if communication['state'] == 'fresh' and data_state['state'] == 'fresh' else 'attention'
         reason = communication['reason_code'] or data_state['reason_code']
         return jsonify({
             'site_id': site_id, 'attention_level': attention, 'reason_code': reason,
-            'last_communication_at': last_communication['received_at'] if last_communication else None,
+            'last_received_at': last_communication['received_at'] if last_communication else None,
             'last_valid_observation_at': max((item['observed_at'] for item in values), default=None),
             'updated_at': datetime.now().astimezone().replace(microsecond=0).isoformat(), 'axes': axes,
         })
@@ -32934,14 +33585,13 @@ def station_monitoring_instruments(site_id):
         if error:
             return error
         rows = [item for item in monitoring_factor_configurations(db, site_id) if item['endpoint_id'] == profile['endpoint_id']]
-        latest = {(item['instrument_asset_code'], item['business_metric']): item for item in monitoring_latest_values(db, site_id)}
-        items = []
-        for row in rows:
-            item = dict(row)
-            item['last_valid'] = latest.get((row['instrument_asset_code'], row['business_metric']))
-            item['status'] = 'available' if item['last_valid'] else 'unknown'
-            item['reason_code'] = None if item['last_valid'] else 'no_valid_observation'
-            items.append(item)
+        items = [{
+            'business_metric': row.get('business_metric'),
+            'protocol_code': row.get('protocol_code'),
+            'factor_name_cn': _STATION_MONITORING_FACTOR_LABELS.get(row.get('business_metric'), '监测因子'),
+            'standard_unit': row.get('standard_unit') or '',
+            'expected_interval_seconds': row.get('expected_interval_seconds'),
+        } for row in rows]
         return jsonify({'site_id': site_id, 'status': 'ok' if items else 'no_instruments', 'items': items})
 
 

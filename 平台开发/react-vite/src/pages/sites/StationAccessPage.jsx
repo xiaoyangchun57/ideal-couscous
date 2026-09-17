@@ -4,7 +4,7 @@ import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
-import { hasAdminRole } from './stationMonitoring';
+import { formatMonitoringTime, hasAdminRole } from './stationMonitoring';
 
 const { Title, Text } = Typography;
 
@@ -127,7 +127,7 @@ export default function StationAccessPage() {
           ]}
         />
         <Card size="small">
-          <Descriptions column={1} items={[{ key: 'updated', label: '摘要更新时间', children: data.updated_at || '服务端未提供' }]} />
+          <Descriptions column={1} items={[{ key: 'updated', label: '摘要更新时间', children: data.updated_at ? formatMonitoringTime(data.updated_at) : '服务端未提供' }]} />
         </Card>
       </Space>
     </div>

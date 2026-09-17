@@ -10,7 +10,7 @@
   </view>
   <view wx:if="{{monitoringError}}" class="sync-bar"><text>{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
   <!-- 监测信息区（只读监测入口） -->
-  <view wx:if="{{readOnlySource}}">
+  <view wx:if="{{monitoringPublic && monitoringSource}}">
     <!-- 监测状态卡片 -->
     <view class="mon-hero-card">
       <view class="mon-hero-chip-wrap">
@@ -24,8 +24,8 @@
         <view class="mon-time-item">
           <image class="mon-time-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
           <view class="mon-time-copy">
-            <text class="mon-time-label">最后通信</text>
-            <text class="mon-time-value">{{site.last_communication_at || '暂无记录'}}</text>
+            <text class="mon-time-label">最后收到报文</text>
+            <text class="mon-time-value">{{site.last_received_at || site.last_communication_at || '暂无记录'}}</text>
           </view>
         </view>
         <view class="mon-time-divider"></view>
@@ -64,35 +64,21 @@
     <!-- 分轴状态 -->
     <view class="mon-section">
       <view class="mon-section-head">
-        <text class="mon-section-title">分轴状态</text>
+        <text class="mon-section-title">数据事实</text>
       </view>
-      <view class="card mon-axes-card" wx:if="{{site.monitoring.axes && (site.monitoring.axes.communication || site.monitoring.axes.data || site.monitoring.axes.rtu || site.monitoring.axes.instrument)}}">
+      <view class="card mon-axes-card" wx:if="{{site.monitoring.axes && (site.monitoring.axes.communication || site.monitoring.axes.data)}}">
         <view class="mon-axis-row" wx:if="{{site.monitoring.axes.communication}}">
           <image class="mon-axis-ico" src="/images/station-monitoring/icon-communication.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.communication.name || '通信轴'}}</text>
+          <text class="mon-axis-name">{{site.monitoring.axes.communication.name || '数据接收'}}</text>
           <view class="mon-status-chip mon-status-{{site.monitoring.axes.communication.status || 'unknown'}}">
             <text class="mon-status-tx">{{site.monitoring.axes.communication.status_label || '未知'}}</text>
           </view>
         </view>
         <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.data}}">
           <image class="mon-axis-ico" src="/images/station-monitoring/icon-data.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.data.name || '数据轴'}}</text>
+          <text class="mon-axis-name">{{site.monitoring.axes.data.name || '观测数据'}}</text>
           <view class="mon-status-chip mon-status-{{site.monitoring.axes.data.status || 'unknown'}}">
             <text class="mon-status-tx">{{site.monitoring.axes.data.status_label || '未知'}}</text>
-          </view>
-        </view>
-        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.rtu}}">
-          <image class="mon-axis-ico" src="/images/station-monitoring/icon-rtu.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.rtu.name || 'RTU'}}</text>
-          <view class="mon-status-chip mon-status-{{site.monitoring.axes.rtu.status || 'unknown'}}">
-            <text class="mon-status-tx">{{site.monitoring.axes.rtu.status_label || '未知'}}</text>
-          </view>
-        </view>
-        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.instrument}}">
-          <image class="mon-axis-ico" src="/images/station-monitoring/icon-instrument.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.instrument.name || '仪器'}}</text>
-          <view class="mon-status-chip mon-status-{{site.monitoring.axes.instrument.status || 'unknown'}}">
-            <text class="mon-status-tx">{{site.monitoring.axes.instrument.status_label || '未知'}}</text>
           </view>
         </view>
       </view>
@@ -131,7 +117,7 @@
     <view class="info-row"><text class="info-k">纬度</text><text class="info-v">{{site.lat || '—'}}</text></view>
     <view class="hairline"></view>
     <view class="info-row"><text class="info-k">类型</text><text class="info-v">{{site.type_cn}}</text></view>
-    <block wx:if="{{site.can_calibrate && (!readOnlySource || monitoringSource)}}">
+    <block wx:if="{{site.can_calibrate}}">
       <view class="hairline"></view>
       <view class="info-row info-row--action" bindtap="onCalibrate" hover-class="info-row--hover">
         <text class="info-k">位置校准</text>

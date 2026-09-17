@@ -38,6 +38,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Path(self.temp_dir.name) / "isolated-monitoring.db"
         self.previous_database = web_app.DB_PATH
+        self.previous_monitoring_public = web_app.STATION_MONITORING_PUBLIC
+        web_app.STATION_MONITORING_PUBLIC = True
         web_app.DB_PATH = str(self.database)
         web_app.init_db()
         apply_migration(self.database, Path(self.temp_dir.name) / "backups")
@@ -76,6 +78,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.storage = IngestionStorage(self.database, pepper)
 
     def tearDown(self):
+        web_app.STATION_MONITORING_PUBLIC = self.previous_monitoring_public
         web_app.DB_PATH = self.previous_database
         self.temp_dir.cleanup()
 
@@ -347,11 +350,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(body['axes']['communication']['state'], 'fresh')
         self.assertEqual(body['axes']['data']['state'], 'no_observation')
-        self.assertEqual(body['axes']['rtu']['state'], 'unknown')
-        self.assertEqual(body['axes']['instrument']['state'], 'unknown')
+        self.assertEqual(set(body['axes']), {'communication', 'data'})
         self.assertEqual(len(body['axes']['data']['factors']), 4)
         self.assertEqual(body['attention_level'], 'attention')
-        self.assertEqual(body['last_communication_at'], received_at)
+        self.assertEqual(body['last_received_at'], received_at)
 
     def test_endpoint_timezone_is_resolved_before_utc_profile_validity_and_communication_uses_received_at(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -491,7 +493,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertGreaterEqual(page.get_json()['total'], 3)
         self.assertEqual(client.get('/api/station-monitoring/quality-issues?page_size=101', headers=admin).status_code, 400)
 
-    def test_instruments_only_exposes_current_mapping_and_binds_last_value_by_instrument(self):
+    def test_instrument_route_exposes_factor_configuration_without_health_projection(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 """INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,business_metric,instrument_asset_code,
@@ -508,9 +510,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         items = response.get_json()['items']
         water = next(item for item in items if item['business_metric'] == 'water_temp')
-        self.assertEqual(water['instrument_asset_code'], 'INST-A')
-        self.assertEqual(water['last_valid']['instrument_asset_code'], 'INST-A')
-        self.assertNotIn('RETIRED-INST', {item['instrument_asset_code'] for item in items})
+        self.assertEqual(water['factor_name_cn'], '水温')
+        self.assertNotIn('instrument_asset_code', water)
+        self.assertNotIn('last_valid', water)
+        self.assertNotIn('status', water)
 
     def test_station_monitoring_overview_uses_independent_monitoring_fields(self):
         response = web_app.app.test_client().get(
@@ -525,7 +528,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('reason', body['site'])
         self.assertTrue(body['site']['can_calibrate'])
         self.assertEqual(body['site']['type_cn'], '其他站点')
-        for axis in ('communication', 'data', 'rtu', 'instrument'):
+        self.assertEqual(set(body['axes']), {'communication', 'data'})
+        self.assertNotIn('instruments', body)
+        self.assertNotIn('recent_items', body)
+        for axis in ('communication', 'data'):
             self.assertIn('name', body['axes'][axis])
             self.assertIn('status', body['axes'][axis])
             self.assertIn('status_label', body['axes'][axis])
@@ -603,7 +609,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         latest = response.get_json()['monitoring']['latest_values']
         self.assertEqual(latest[0]['factor_name_cn'], '水温')
         self.assertEqual(response.get_json()['axes']['communication']['state'], 'stale')
-        self.assertEqual(response.get_json()['axes']['communication']['status_label'], '通信已过期')
+        self.assertEqual(response.get_json()['axes']['communication']['status_label'], '最近未收到报文')
 
     def test_station_monitoring_normal_requires_every_configured_factor_fresh(self):
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()

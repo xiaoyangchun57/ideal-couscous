@@ -7,17 +7,18 @@ function flush() {
 }
 
 const app = { globalData: { selSiteId: null } };
+let cachedUser = null;
 let definition;
 global.getApp = () => app;
 global.Page = page => { definition = page; };
 global.wx = {
   getNetworkType: ({ success }) => success({ networkType: 'wifi' }),
-  getStorageSync: () => null,
+  getStorageSync: key => key === 'user' ? cachedUser : null,
   showToast: () => {}, showLoading: () => {}, hideLoading: () => {},
 };
 
 const api = require('../services/api.js');
-const originals = { siteTasks: api.siteTasks, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory };
+const originals = { siteTasks: api.siteTasks, siteProfile: api.siteProfile, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory };
 require('../pages/site/site.js');
 
 function createPage() {
@@ -31,7 +32,8 @@ function createPage() {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/site/site.wxml'), 'utf8');
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="task-status/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-primary checkin-btn/);
-    assert.match(wxml, /wx:if="\{\{site\.can_calibrate && \(!readOnlySource \|\| monitoringSource\)\}\}"/);
+    assert.match(wxml, /wx:if="\{\{site\.can_calibrate\}\}"/);
+    assert.match(wxml, /wx:if="\{\{monitoringPublic && monitoringSource\}\}"/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
     assert.match(wxml, /!site && monitoringError/);
@@ -40,19 +42,24 @@ function createPage() {
     assert.doesNotMatch(wxml, /item\.factor_name\s*\|\||item\.standard_factor/);
     assert.match(wxml, /site\.monitoring\.axes\.communication\.status_label/);
     assert.match(wxml, /site\.monitoring\.axes\.data\.status_label/);
-    assert.match(wxml, /site\.monitoring\.axes\.rtu\.status_label/);
-    assert.match(wxml, /site\.monitoring\.axes\.instrument\.status_label/);
+    assert.doesNotMatch(wxml, /site\.monitoring\.axes\.(?:rtu|instrument)/);
+    assert.match(wxml, /最后收到报文/);
     const responsibleWxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(responsibleWxml, /!sites\.length && error/);
     assert.match(responsibleWxml, /sites\.length && error/);
     assert.match(responsibleWxml, /bindtap="onRetry"/);
 
     let siteTaskCalls = 0;
+    let profileCalls = 0;
     let monitoringCalls = 0;
     let inventoryCalls = 0;
     api.siteTasks = id => {
       siteTaskCalls += 1;
       return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } });
+    };
+    api.siteProfile = id => {
+      profileCalls += 1;
+      return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', can_calibrate: true } });
     };
     api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true }, monitoring: { latest_values: [], axes: {} } }); };
     api.partsInventory = () => {
@@ -67,9 +74,18 @@ function createPage() {
     assert.equal(readonlyPage.data.monitoringSource, false);
     assert.equal(readonlyPage.data.site.id, 20);
     assert.equal(siteTaskCalls, 0);
-    assert.equal(monitoringCalls, 1);
+    assert.equal(profileCalls, 1);
+    assert.equal(monitoringCalls, 0, 'inspection source must not request monitoring');
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
 
+    const staleSourcePage = createPage();
+    staleSourcePage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    await flush();
+    assert.equal(staleSourcePage.data.monitoringSource, false);
+    assert.equal(profileCalls, 2);
+    assert.equal(monitoringCalls, 0, 'old source without an enabled capability cannot bypass the gate');
+
+    cachedUser = { capabilities: { station_monitoring_public: true } };
     const monitoringPage = createPage();
     monitoringPage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
     await flush();
@@ -97,11 +113,13 @@ function createPage() {
     await flush();
     assert.equal(hiddenPage.data.site, null, 'a response arriving after page hide is ignored');
 
-    api.stationMonitoringOverview = () => Promise.reject(new Error('network'));
+    cachedUser = null;
+    api.siteProfile = () => Promise.reject(new Error('network'));
     readonlyPage.loadSite(20);
     await flush();
     assert.equal(readonlyPage.data.site.id, 20, 'refresh failure keeps the last successful detail');
     assert.match(readonlyPage.data.monitoringError, /重试/);
+    api.siteProfile = id => { profileCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } }); };
     api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入' }, monitoring: { latest_values: [] } }); };
 
     const standardPage = createPage();

@@ -1,5 +1,6 @@
 const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
+const { getUser } = require('../../utils/auth.js');
 
 const app = getApp();
 
@@ -7,6 +8,7 @@ Page({
   data: {
     sites: [], loading: false, error: '', scope: 'mine', keyword: '', keywordInput: '',
     availableScopes: ['mine'], canViewAll: false, scopeCounts: { mine: 0, all: null },
+    monitoringPublic: false,
     emptyTitle: '暂未分配负责站点', emptyDescription: '当前账号下暂无监测站点，如有疑问请联系管理员'
   },
 
@@ -14,6 +16,7 @@ Page({
 
   onShow() {
     this._inactive = false;
+    this.setData({ monitoringPublic: getUser()?.capabilities?.station_monitoring_public === true });
     this.loadSites(this.data.scope || 'mine', this.data.keyword || '');
   },
 
@@ -24,7 +27,8 @@ Page({
     const requestId = (this._sitesRequestId || 0) + 1;
     this._sitesRequestId = requestId;
     this.setData({ loading: true, error: '' });
-    api.stationMonitoringSites({ scope: requestedScope, keyword: requestedKeyword }).then(res => {
+    const request = this.data.monitoringPublic ? api.stationMonitoringSites : api.responsibleSites;
+    request({ scope: requestedScope, keyword: requestedKeyword }).then(res => {
       if (this._unloaded || this._inactive || this._sitesRequestId !== requestId) return;
       const availableScopes = Array.isArray(res.available_scopes) ? res.available_scopes : ['mine'];
       const resolvedScope = res.scope === 'all' ? 'all' : 'mine';
@@ -35,11 +39,11 @@ Page({
         keywordInput: resolvedKeyword, availableScopes,
         canViewAll: availableScopes.includes('all'), scopeCounts: res.scope_counts || { mine: 0, all: null },
         emptyTitle: resolvedScope === 'all' && resolvedKeyword ? '未找到匹配站点' : (resolvedScope === 'all' ? '暂无站点' : '暂未分配负责站点'),
-        emptyDescription: resolvedScope === 'all' && resolvedKeyword ? '请更换站点名称或编号后重试' : (resolvedScope === 'all' ? '当前暂无可查看站点' : '当前账号下暂无监测站点，如有疑问请联系管理员')
+        emptyDescription: resolvedScope === 'all' && resolvedKeyword ? '请更换站点名称或编号后重试' : (resolvedScope === 'all' ? '当前暂无可查看站点' : '当前账号下暂无负责站点，如有疑问请联系管理员')
       });
     }).catch(() => {
       if (this._unloaded || this._inactive || this._sitesRequestId !== requestId) return;
-      this.setData({ loading: false, error: '站点监测信息加载失败，请重试' });
+      this.setData({ loading: false, error: this.data.monitoringPublic ? '站点监测信息加载失败，请重试' : '站点目录加载失败，请重试' });
     });
   },
 
@@ -75,6 +79,7 @@ Page({
     const siteId = Number(e.currentTarget.dataset.id);
     if (!siteId) return;
     app.globalData.selSiteId = siteId;
-    wx.navigateTo({ url: '/pages/site/site?site_id=' + siteId + '&source=responsible_sites_monitoring' });
+    const source = this.data.monitoringPublic ? 'responsible_sites_monitoring' : 'responsible_sites_profile';
+    wx.navigateTo({ url: '/pages/site/site?site_id=' + siteId + '&source=' + source });
   }
 });

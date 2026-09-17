@@ -104,7 +104,7 @@ export function planDetailItineraryRows(planData = {}, generatedTasks = []) {
 }
 
 export function shouldShowPreExecutionRisks(plan = {}) {
-  if (['archived', 'completed'].includes(plan.status)) return false;
+  if (['archived', 'completed', 'cancelled'].includes(plan.status)) return false;
   return planExecutionPresentation(plan).key !== 'completed';
 }
 

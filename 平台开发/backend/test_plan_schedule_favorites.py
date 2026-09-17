@@ -61,6 +61,7 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                     period_start TEXT, period_end TEXT, plan_data TEXT, vehicle_days TEXT,
                     spare_parts TEXT, work_order_ids TEXT, status TEXT, remarks TEXT,
                     tasks_generated INTEGER DEFAULT 0, vehicle_id INTEGER,
+                    no_vehicle_required INTEGER DEFAULT 0,
                     vehicle_exception_reason TEXT DEFAULT ''
                 );
                 CREATE TABLE inspection_configs (
@@ -151,6 +152,7 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
         self.assertEqual(schedule['plan_data']['2026-08-04']['inspection_items'], {'10': [101]})
         self.assertEqual(schedule['plan_data']['2026-08-06']['inspection_items'], {'11': []})
         self.assertEqual(schedule['vehicle_id'], 7)
+        self.assertFalse(schedule['no_vehicle_required'])
         self.assertEqual(schedule['vehicle_days'], {'2026-08-04': 7, '2026-08-06': 7})
         self.assertEqual(schedule['spare_parts'][0]['part_id'], 8)
         self.assertEqual(schedule['work_order_ids'], [])

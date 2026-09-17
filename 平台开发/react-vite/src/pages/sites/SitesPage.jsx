@@ -17,12 +17,13 @@ import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, { FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems } from './stationMonitoring';
+import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
 const { Text } = Typography;
 
@@ -69,8 +70,9 @@ export default function SitesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const isAdmin = hasAdminRole(user);
+  const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
   const monitoringScope = isAdmin ? 'all' : 'mine';
-  const monitoringRequestKey = `${user?.id ?? user?.username ?? ''}:${monitoringScope}`;
+  const monitoringRequestKey = `${user?.id ?? user?.username ?? ''}:${monitoringScope}:${monitoringPublic}`;
 
   // ---- data state ----
   const [siteSnapshot, setSiteSnapshot] = useState({ key: null, rows: [] });
@@ -141,15 +143,14 @@ export default function SitesPage() {
       setMonitoringScopeFacts(null);
     }
     try {
-      const [siteResult, monitoringResult] = await Promise.allSettled([
-        api.getStrict('/sites', { signal: controller.signal }),
-        api.stationMonitoringSites({ scope: monitoringScope, signal: controller.signal }),
-      ]);
+      const requests = [api.getStrict('/sites', { signal: controller.signal })];
+      if (monitoringPublic) requests.push(api.stationMonitoringSites({ scope: monitoringScope, signal: controller.signal }));
+      const [siteResult, monitoringResult] = await Promise.allSettled(requests);
       if (fetchRequestRef.current.id !== requestId) return;
       if (siteResult.status === 'rejected') throw siteResult.reason;
       const data = siteResult.value;
-      if (monitoringResult.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
-      else {
+      if (monitoringPublic && monitoringResult?.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
+      else if (monitoringPublic && monitoringResult?.status === 'fulfilled') {
         setMonitoringSummary(monitoringResult.value?.summary || {});
         setMonitoringScopeFacts({
           scope: monitoringResult.value?.scope ?? null,
@@ -162,7 +163,9 @@ export default function SitesPage() {
         return;
       }
       const previousRows = sitesRef.current.key === monitoringRequestKey ? sitesRef.current.rows : [];
-      const merged = mergeMonitoringSites(rows, monitoringResult.status === 'fulfilled' ? monitoringResult.value : null, previousRows);
+      const merged = monitoringPublic
+        ? mergeMonitoringSites(rows, monitoringResult?.status === 'fulfilled' ? monitoringResult.value : null, previousRows)
+        : rows;
       sitesRef.current = { key: monitoringRequestKey, rows: merged };
       setSiteSnapshot({ key: monitoringRequestKey, rows: merged });
     } catch (err) {
@@ -171,7 +174,7 @@ export default function SitesPage() {
     } finally {
       if (fetchRequestRef.current.id === requestId) setLoading(false);
     }
-  }, [monitoringRequestKey, monitoringScope]);
+  }, [monitoringPublic, monitoringRequestKey, monitoringScope]);
 
   useEffect(() => {
     fetchSites();
@@ -519,32 +522,26 @@ export default function SitesPage() {
   const columns = useMemo(
     () => [
       {
-        title: '站点名称',
-        dataIndex: 'name',
-        key: 'name',
-        width: 180,
+        title: '站点身份',
+        key: 'identity',
+        width: 230,
         ellipsis: true,
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
-        render: (text, record) => (
-          <Space size={6}>
-            <Text strong>{text}</Text>
-            {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}
-          </Space>
+        render: (_, record) => (
+          <div>
+            <Space size={6}><Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
+              {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}</Space>
+            <Space size={6} style={{ display: 'flex', marginTop: 2 }}>
+              <Text type="secondary" copyable={{ text: record.code || '' }}>{record.code || '未提供编码'}</Text>
+              <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
+            </Space>
+          </div>
         ),
-      },
-      {
-        title: '站点编码',
-        dataIndex: 'code',
-        key: 'code',
-        width: 140,
-        ellipsis: true,
-        sorter: (a, b) => (a.code || '').localeCompare(b.code || ''),
-        render: (text) => text || '-',
       },
       {
         title: '区县/地址',
         key: 'location',
-        width: 240,
+        width: 180,
         ellipsis: true,
         render: (_, record) => {
           if (!record.district && !record.address) {
@@ -559,59 +556,44 @@ export default function SitesPage() {
           );
         },
       },
-      {
-        title: '站点类型',
-        dataIndex: 'type',
-        key: 'type',
-        width: 120,
-        render: (type) => {
-          const label = stationTypeMap[type] || type;
-          const color = typeColorMap[type] || 'default';
-          return <Tag color={color} style={tagStyle}>{label}</Tag>;
-        },
-      },
-      {
+      ...(monitoringPublic ? [{
         title: '监测状态',
         dataIndex: 'monitoring_status',
         key: 'status',
-        width: 180,
+        width: 170,
         render: (_, record) => {
           const view = monitoringStatusView(record);
           return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
         },
-      },
-      {
-        title: '最后通信',
-        dataIndex: 'last_communication_at',
-        key: 'last_communication_at',
-        width: 170,
-        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
-      },
-      {
-        title: '最后有效观测',
-        dataIndex: 'last_valid_observation_at',
-        key: 'last_valid_observation_at',
-        width: 170,
-        render: (value) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : <Text type="secondary">暂无记录</Text>,
-      },
+      }, {
+        title: '关键时间',
+        key: 'monitoring_times',
+        width: 235,
+        render: (_, record) => (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>最后收到报文：{record.last_received_at || record.last_communication_at ? dayjs(record.last_received_at || record.last_communication_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>观测：{record.last_valid_observation_at ? dayjs(record.last_valid_observation_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
+          </Space>
+        ),
+      }] : []),
       {
         title: '负责人',
         dataIndex: 'manager',
         key: 'manager',
-        width: 110,
+        width: 100,
         ellipsis: true,
       },
       {
         title: '操作',
         key: 'actions',
-        width: 100,
+        width: 110,
         fixed: 'right',
         render: (_, record) => (
-          <Space size={0}><Button type="link" size="small" onClick={() => navigate(`/sites/${record.id}`)}>监测</Button><Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
+          <Space size={0}>{monitoringPublic && <Button type="link" size="small" onClick={() => navigate(`/sites/${record.id}`)}>监测</Button>}<Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
         ),
       },
     ],
-    [navigate, openArchive],
+    [monitoringPublic, navigate, openArchive],
   );
 
   // ========================================================================
@@ -651,7 +633,7 @@ export default function SitesPage() {
 
     const {
       name, code, type, district, address, manager, status, is_pilot, operation_frequency,
-      gps_lat, gps_lng, build_date, elevation, equipment, basin, has_sensor_data,
+      gps_lat, gps_lng, build_date, elevation, equipment, basin,
       fault_records, replacement_records, inspection_records, calibration_reports,
     } = archiveData;
 
@@ -671,13 +653,13 @@ export default function SitesPage() {
           return <Badge color={cfg.color} text={cfg.text} />;
         })(),
       },
-      {
+      ...(monitoringPublic ? [{
         key: 'data_access',
         label: '数据接入状态',
-        children: has_sensor_data
+        children: archiveData.has_sensor_data
           ? <Tag color="green">已接入真实采集</Tag>
           : <Tag>未接入真实采集</Tag>,
-      },
+      }] : []),
       { key: 'district', label: '所属区县', children: extractDistrict(district) || <Text type="secondary">未录入</Text> },
       { key: 'address', label: '详细地址', children: address || <Text type="secondary">未录入</Text>, span: 2 },
       { key: 'basin', label: '所属流域', children: basin || <Text type="secondary">未录入</Text> },
@@ -713,17 +695,21 @@ export default function SitesPage() {
                 完善基础档案
               </Button>
             )}
-            <Divider style={{ margin: '20px 0 16px' }} />
-            <ArchiveTrendPanel
-              hasSensorData={archiveData.has_sensor_data}
-              trendData={archiveData.trend_data}
-              selectedKey={selectedTrendParam}
-              onSelectedKeyChange={setSelectedTrendParam}
-              tokens={tokens}
-              thresholds={thresholds}
-              classifyMetric={classifyMetric}
-              tagStyle={tagStyle}
-            />
+            {monitoringPublic && (
+              <>
+                <Divider style={{ margin: '20px 0 16px' }} />
+                <ArchiveTrendPanel
+                  hasSensorData={archiveData.has_sensor_data}
+                  trendData={archiveData.trend_data}
+                  selectedKey={selectedTrendParam}
+                  onSelectedKeyChange={setSelectedTrendParam}
+                  tokens={tokens}
+                  thresholds={thresholds}
+                  classifyMetric={classifyMetric}
+                  tagStyle={tagStyle}
+                />
+              </>
+            )}
           </div>
         ),
       },
@@ -1169,10 +1155,10 @@ export default function SitesPage() {
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
-      statusItems={monitoringSummaryItems(siteSnapshot.key === monitoringRequestKey ? monitoringSummary : {})}
+      statusItems={monitoringPublic ? monitoringSummaryItems(siteSnapshot.key === monitoringRequestKey ? monitoringSummary : {}) : []}
       primaryAction={<Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
-        {isAdmin && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
+        {isAdmin && monitoringPublic && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
         <Button
           icon={<CloudServerOutlined />}
           onClick={() => { setImportModalOpen(true); setImportResult(null); fetchDataSources(); }}
@@ -1217,8 +1203,8 @@ export default function SitesPage() {
             placeholder="站点类型"
             allowClear
             value={typeFilter}
-            onChange={(value) => updateFilter('type', value)}
-            options={typeOptions}
+            onChange={(value) => updateFilter('type', listFilterValue(value))}
+            options={listFilterOptions('全部站点类型', typeOptions)}
             style={{ width: filterSelectWidth }}
           /></FilterField>
         ) : null}
@@ -1231,8 +1217,8 @@ export default function SitesPage() {
             showSearch
             optionFilterProp="label"
             value={districtFilter}
-            onChange={(value) => updateFilter('district', value)}
-            options={districtOptions}
+            onChange={(value) => updateFilter('district', listFilterValue(value))}
+            options={listFilterOptions('全部区县', districtOptions)}
             style={{ width: filterSelectWidth }}
           /></FilterField>
         ) : null}
@@ -1244,11 +1230,15 @@ export default function SitesPage() {
           showSearch
           optionFilterProp="label"
           value={managerFilter}
-          onChange={(value) => updateFilter('manager', value)}
-          options={managerOptions}
+          onChange={(value) => updateFilter('manager', listFilterValue(value))}
+          options={listFilterOptions('全部负责人', managerOptions)}
           style={{ width: filterSelectWidth }}
         /></FilterField>
-        {(searchText || typeFilter || districtFilter || managerFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredSites.length} 条</ToolbarMeta>}
+        {(searchText || typeFilter || districtFilter || managerFilter) && (
+          <Text type="secondary" className="sites-filter-summary" style={{ minHeight: 32, display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}>
+            已筛选 {filteredSites.length} 条
+          </Text>
+        )}
       </WorkspaceToolbar>
 
       {fetchError && sites.length > 0 ? (
@@ -1261,7 +1251,7 @@ export default function SitesPage() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
-      {monitoringError && sites.length > 0 ? (
+      {monitoringPublic && monitoringError && sites.length > 0 ? (
         <Alert
           type="warning"
           showIcon
@@ -1271,10 +1261,10 @@ export default function SitesPage() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
-      {siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
+      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
         监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}
       </Text>}
-      {siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
+      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
         <Alert type="warning" showIcon message="监测范围尚未确认"
           description="服务端未确认本次请求范围，监测结果仅按实际返回的站点投影展示。"
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>} />
@@ -1283,7 +1273,8 @@ export default function SitesPage() {
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
-          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight />
+          emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
+          scroll={{ x: 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
       )}
 
       <Modal

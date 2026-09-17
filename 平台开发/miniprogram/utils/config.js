@@ -1,5 +1,5 @@
 const ONLINE_API_BASE_URL = 'https://ops.hhyc-tec.cn';
-const LOCAL_API_BASE_URL = 'http://192.168.2.105:5000';
+const LOCAL_API_BASE_URL = 'http://192.168.2.107:5000';
 
 function runtimeEnvVersion() {
   try {

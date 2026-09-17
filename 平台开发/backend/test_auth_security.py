@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -143,6 +144,26 @@ class AuthSecurityTest(unittest.TestCase):
         response = self.client.get('/api/auth/me', headers=self.headers(token))
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json['code'], 'SESSION_REVOKED')
+
+    def test_session_defaults_to_thirty_days_and_me_refreshes_authoritative_scope(self):
+        token = self.login('operator', 'OperatorPass123')
+        with self.temporary_db() as db:
+            session = db.execute(
+                'SELECT issued_at,expires_at FROM auth_sessions WHERE token_hash=?',
+                (app_module._hash_token(token),),
+            ).fetchone()
+        issued_at = datetime.strptime(session['issued_at'], '%Y-%m-%d %H:%M:%S')
+        expires_at = datetime.strptime(session['expires_at'], '%Y-%m-%d %H:%M:%S')
+        self.assertEqual(expires_at - issued_at, timedelta(days=30))
+
+        response = self.client.get('/api/auth/me', headers=self.headers(token))
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['site_ids'], [1])
+        self.assertEqual(response.json['sites'], [
+            {'id': 1, 'name': '站点一', 'code': 'S1', 'type': 'water_quality'},
+        ])
+        self.assertEqual(response.json['user']['roles'], ['operator'])
+        self.assertIn('station_monitoring_public', response.json['user']['capabilities'])
 
     def test_global_search_and_workorder_list_follow_page_roles(self):
         admin = self.login('admin', 'AdminPass123')
