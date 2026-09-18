@@ -158,6 +158,26 @@ test('monitoring services propagate scope denial and missing sites without a fal
   }
 });
 
+test('monitoring trend encodes the opaque metric and preserves caller cancellation', async () => {
+  const controller = new AbortController();
+  let requested;
+  globalThis.fetch = (url, { signal }) => {
+    requested = url;
+    return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+      const error = new Error('cancelled');
+      error.name = 'AbortError';
+      reject(error);
+    }));
+  };
+  const pending = api.stationMonitoringTrend(7, 'ph & injected=other', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, (error) => error.code === 'REQUEST_ABORTED');
+  const url = new URL(requested, 'http://web-test.invalid');
+  assert.equal(url.pathname, '/api/station-monitoring/sites/7/trend');
+  assert.equal(url.searchParams.get('metric'), 'ph & injected=other');
+  assert.equal(url.searchParams.has('injected'), false);
+});
+
 test('getStrict distinguishes caller cancellation from timeout', async () => {
   globalThis.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => {

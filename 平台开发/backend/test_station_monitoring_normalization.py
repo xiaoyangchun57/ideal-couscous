@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,7 +14,7 @@ from sl651_parser import (FrameError, UP_FLOW_CONTROL, crc16_modbus, encode_bcd_
                           encode_bcd_time, encode_station_code, parse_frame, parse_water_quality_payload,
                           parse_water_quality_report)
 from sl651_server import IngestionStorage, credential_hmac
-from station_monitoring import normalize_raw_frame
+from station_monitoring import _project_business_observation, expected_business_slots, normalize_raw_frame
 
 
 def bcd_number(value, digits, precision=0):
@@ -38,8 +38,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Path(self.temp_dir.name) / "isolated-monitoring.db"
         self.previous_database = web_app.DB_PATH
-        self.previous_monitoring_public = web_app.STATION_MONITORING_PUBLIC
-        web_app.STATION_MONITORING_PUBLIC = True
+        self.previous_monitoring_access_mode = web_app.STATION_MONITORING_ACCESS_MODE
+        web_app.STATION_MONITORING_ACCESS_MODE = 'public'
         web_app.DB_PATH = str(self.database)
         web_app.init_db()
         apply_migration(self.database, Path(self.temp_dir.name) / "backups")
@@ -74,11 +74,18 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                  (self.endpoint_id, '4A11', 'codmn', 'INST-A', 60, 15, '2020-01-01T00:00:00+00:00'),
                  (self.endpoint_id, '4B19', None, 'INST-A', None, None, '2020-01-01T00:00:00+00:00')),
             )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',600,'2020-01-01T00:00:00+00:00')""",
+                (self.endpoint_id,),
+            )
             connection.commit()
         self.storage = IngestionStorage(self.database, pepper)
 
     def tearDown(self):
-        web_app.STATION_MONITORING_PUBLIC = self.previous_monitoring_public
+        web_app.STATION_MONITORING_ACCESS_MODE = self.previous_monitoring_access_mode
         web_app.DB_PATH = self.previous_database
         self.temp_dir.cleanup()
 
@@ -121,7 +128,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             + bytes.fromhex('4B19') + bcd_number(200.0, 5, 1)
             + bytes.fromhex('4520') + b'\x00\x00\x00\x01'
         )
-        raw_id = self._persist(payload)
+        raw_id = self._persist(
+            payload, sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0))
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'already_normalized')
         self.assertEqual(normalize_raw_frame(self.database, raw_id, normalization_version='reparse-v2'), 'accepted')
@@ -138,6 +146,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             )}
             self.assertEqual(values, {'water_temp': 12.3, 'ammonia': 0.0, 'codmn': 5.4})
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM monitoring_status_events WHERE event_axis='rtu'").fetchone()[0], 2)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM monitoring_business_observations WHERE is_current=1 AND slot_state='selected'"
+            ).fetchone()[0], 3)
         client = web_app.app.test_client()
         operator = self._headers('monitor-operator')
         latest = client.get(f'/api/station-monitoring/sites/{self.site_id}/latest', headers=operator)
@@ -145,11 +156,12 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual({item['business_metric'] for item in latest.get_json()['items']}, {'water_temp', 'ammonia', 'codmn'})
         self.assertEqual(next(item['standard_value'] for item in latest.get_json()['items'] if item['business_metric'] == 'ammonia'), 0.0)
         trend = client.get(
-            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=ammonia&start=2020-06-11T18:00:00%2B00:00&end=2020-06-12T17:59:00%2B00:00',
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=ammonia&start=2020-06-11T16:00:00%2B00:00&end=2020-06-12T15:59:59%2B00:00',
             headers=operator,
         )
         self.assertEqual(trend.status_code, 200, trend.get_json())
         self.assertEqual(trend.get_json()['points'][0]['value'], 0.0)
+        self.assertEqual(trend.get_json()['standard_unit'], 'mg/L')
 
     def test_partial_unmapped_evidence_and_read_permission_boundaries(self):
         raw_id = self._persist(bytes.fromhex('0311') + bcd_number(10.0, 3, 1) + bytes.fromhex('FEED'), serial=8)
@@ -349,7 +361,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
         self.assertEqual(body['axes']['communication']['state'], 'fresh')
-        self.assertEqual(body['axes']['data']['state'], 'no_observation')
+        self.assertEqual(body['axes']['data']['state'], 'no_valid_observation')
         self.assertEqual(set(body['axes']), {'communication', 'data'})
         self.assertEqual(len(body['axes']['data']['factors']), 4)
         self.assertEqual(body['attention_level'], 'attention')
@@ -401,7 +413,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                 (self.endpoint_id,),
             )
             connection.commit()
-        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(6.6, 3, 1), serial=37)
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(6.6, 3, 1), serial=37,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0))
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         client = web_app.app.test_client()
         headers = self._headers('monitor-admin')
@@ -410,65 +424,206 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         water = next(item for item in latest.get_json()['items'] if item['business_metric'] == 'water_temp')
         self.assertEqual(water['instrument_asset_code'], 'INST-A')
         trend = client.get(
-            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T18:00:00%2B00:00&end=2020-06-11T18:10:00%2B00:00',
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T20:00:00%2B00:00&end=2020-06-11T20:10:00%2B00:00',
             headers=headers,
         )
         self.assertEqual(trend.status_code, 200, trend.get_json())
         self.assertEqual(trend.get_json()['points'][0]['value'], 6.6)
 
-    def test_trend_counts_window_end_gap_and_coverage_when_only_one_of_eleven_points_arrives(self):
-        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=38)
+    def test_trend_counts_business_schedule_gaps_across_day_boundary(self):
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=38,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         response = web_app.app.test_client().get(
-            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T18:00:00%2B00:00&end=2020-06-11T18:10:00%2B00:00',
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T16:00:00%2B00:00&end=2020-06-12T15:59:59%2B00:00',
             headers=self._headers('monitor-admin'),
         )
         self.assertEqual(response.status_code, 200, response.get_json())
         coverage = response.get_json()['coverage']
-        self.assertEqual(coverage['expected_points'], 11)
+        self.assertEqual(coverage['expected_points'], 6)
         self.assertEqual(coverage['valid_points'], 1)
-        self.assertEqual(coverage['missing_points'], 10)
-        self.assertEqual(coverage['gap_count'], 1)
-        self.assertAlmostEqual(coverage['coverage_rate'], 1 / 11)
+        self.assertEqual(coverage['missing_points'], 5)
+        self.assertEqual(coverage['gap_count'], 2)
+        self.assertAlmostEqual(coverage['coverage_rate'], 1 / 6)
 
     def test_trend_coverage_uses_window_slots_and_separates_suspect_from_valid(self):
-        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=39)
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=39,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         with closing(sqlite3.connect(self.database)) as connection:
-            connection.execute("UPDATE observation_values SET quality='suspect' WHERE observation_batch_id=(SELECT id FROM observation_batches WHERE raw_frame_id=?)", (raw_id,))
+            connection.execute("UPDATE monitoring_business_observations SET quality='suspect' WHERE observation_batch_id=(SELECT id FROM observation_batches WHERE raw_frame_id=?)", (raw_id,))
             connection.commit()
         response = web_app.app.test_client().get(
-            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T18:00:00%2B00:00&end=2020-06-11T18:10:30%2B00:00',
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T16:00:00%2B00:00&end=2020-06-12T15:59:59%2B00:00',
             headers=self._headers('monitor-admin'),
         )
         self.assertEqual(response.status_code, 200, response.get_json())
         coverage = response.get_json()['coverage']
-        self.assertEqual(coverage['expected_points'], 11)
+        self.assertEqual(coverage['expected_points'], 6)
         self.assertEqual(coverage['valid_points'], 0)
         self.assertEqual(coverage['displayed_points'], 1)
-        self.assertEqual(coverage['missing_points'], 10)
+        self.assertEqual(coverage['missing_points'], 6)
         self.assertEqual(coverage['gap_count'], 1)
-        self.assertAlmostEqual(coverage['coverage_rate'], 1 / 11)
+        self.assertEqual(coverage['coverage_rate'], 0)
+        self.assertEqual(coverage['suspect_points'], 1)
+        latest = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest',
+            headers=self._headers('monitor-admin'),
+        ).get_json()
+        self.assertNotIn('water_temp', {item['business_metric'] for item in latest['items']})
 
-    def test_trend_coverage_deduplicates_multiple_reports_in_one_time_slot(self):
-        first = self._persist(bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=52)
+    def test_valid_observation_supersedes_suspect_candidate_in_same_slot(self):
+        suspect = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=40,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, suspect), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE monitoring_business_observations SET quality='suspect' "
+                "WHERE observation_batch_id=(SELECT id FROM observation_batches WHERE raw_frame_id=?)",
+                (suspect,),
+            )
+            connection.commit()
+        valid = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.6, 3, 1), serial=41,
+            sent_at=datetime(2020, 6, 12, 4, 1), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:01+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, valid), 'accepted')
+        response = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+            '&start=2020-06-11T20:00:00%2B00:00&end=2020-06-11T20:10:00%2B00:00',
+            headers=self._headers('monitor-admin'),
+        ).get_json()
+        self.assertEqual([(point['quality'], point['value']) for point in response['points']], [('valid', 5.6)])
+        self.assertEqual(response['coverage']['valid_points'], 1)
+        self.assertEqual(response['coverage']['coverage_rate'], 1)
+        self.assertEqual(response['coverage']['conflict_slots'], 0)
+        self.assertEqual(response['coverage']['suspect_points'], 1)
+
+    def test_same_slot_same_value_is_duplicate_but_different_value_is_conflict(self):
+        first = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=52,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
         second = self._persist(
-            bytes.fromhex('0311') + bcd_number(5.6, 3, 1), serial=53,
-            sent_at=datetime(2020, 6, 12, 2, 1, 0), observed_at=datetime(2020, 6, 12, 2, 0, 0),
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=53,
+            sent_at=datetime(2020, 6, 12, 4, 1), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:01+00:00',
         )
         self.assertEqual(normalize_raw_frame(self.database, first), 'accepted')
         self.assertEqual(normalize_raw_frame(self.database, second), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                [row[0] for row in connection.execute(
+                    "SELECT slot_state FROM monitoring_business_observations WHERE is_current=1 ORDER BY id")],
+                ['selected', 'duplicate'],
+            )
+        self.assertEqual(normalize_raw_frame(
+            self.database, first, normalization_version='reproject-selected-v3'), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                [row[0] for row in connection.execute(
+                    "SELECT slot_state FROM monitoring_business_observations WHERE is_current=1 ORDER BY id")],
+                ['selected', 'duplicate'],
+            )
         response = web_app.app.test_client().get(
-            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T18:00:00%2B00:00&end=2020-06-11T18:10:00%2B00:00',
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T20:00:00%2B00:00&end=2020-06-11T20:10:00%2B00:00',
             headers=self._headers('monitor-admin'),
         )
         self.assertEqual(response.status_code, 200, response.get_json())
         coverage = response.get_json()['coverage']
-        self.assertEqual(len(response.get_json()['points']), 2)
+        self.assertEqual(len(response.get_json()['points']), 1)
         self.assertEqual(coverage['valid_points'], 1)
         self.assertEqual(coverage['displayed_points'], 1)
-        self.assertEqual(coverage['missing_points'], 10)
-        self.assertLessEqual(coverage['coverage_rate'], 1)
+        self.assertEqual(coverage['duplicate_records'], 1)
+        self.assertEqual(coverage['conflict_slots'], 0)
+        conflicting = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.6, 3, 1), serial=54,
+            sent_at=datetime(2020, 6, 12, 4, 2), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:02+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, conflicting), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            states = [row[0] for row in connection.execute(
+                'SELECT slot_state FROM monitoring_business_observations WHERE is_current=1 ORDER BY id')]
+        self.assertEqual(states, ['conflict', 'conflict', 'conflict'])
+        conflicted = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T20:00:00%2B00:00&end=2020-06-11T20:10:00%2B00:00',
+            headers=self._headers('monitor-admin'),
+        ).get_json()
+        self.assertEqual(conflicted['points'], [])
+        self.assertEqual(conflicted['coverage']['missing_points'], 1)
+        self.assertEqual(conflicted['coverage']['conflict_slots'], 1)
+
+    def test_exact_slot_nearby_minute_and_receipt_tolerance_remain_distinct(self):
+        exact = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.0, 3, 1), serial=55,
+            sent_at=datetime(2020, 6, 12, 8, 0), observed_at=datetime(2020, 6, 12, 8, 0),
+            received_at='2020-06-12T00:10:00+00:00')
+        nearby = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.1, 3, 1), serial=56,
+            sent_at=datetime(2020, 6, 12, 8, 1), observed_at=datetime(2020, 6, 12, 8, 1),
+            received_at='2020-06-12T00:01:00+00:00')
+        late = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.2, 3, 1), serial=57,
+            sent_at=datetime(2020, 6, 12, 12, 0), observed_at=datetime(2020, 6, 12, 12, 0),
+            received_at='2020-06-12T04:10:01+00:00')
+        for raw_id in (exact, nearby, late):
+            self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            rows = connection.execute(
+                "SELECT observed_at,timeliness,slot_state FROM monitoring_business_observations ORDER BY observed_at"
+            ).fetchall()
+        self.assertEqual(rows, [
+            ('2020-06-12T00:00:00+00:00', 'on_time', 'selected'),
+            ('2020-06-12T04:00:00+00:00', 'late', 'selected'),
+        ])
+        trend = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-12T00:00:00%2B00:00&end=2020-06-12T04:00:01%2B00:00',
+            headers=self._headers('monitor-admin'),
+        ).get_json()
+        self.assertEqual(trend['coverage']['late_points'], 1)
+        self.assertEqual(trend['coverage']['valid_points'], 2)
+        self.assertEqual(trend['coverage']['coverage_rate'], 1)
+
+    def test_factor_schedule_override_effective_period_changes_expected_slots(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,effective_from,effective_to)
+                   VALUES (?,'0311','Asia/Shanghai',3600,'00:00:00',600,
+                           '2020-06-12T00:00:00+00:00','2020-06-12T04:00:00+00:00')""",
+                (self.endpoint_id,),
+            )
+            connection.row_factory = sqlite3.Row
+            configuration = next(item for item in web_app.monitoring_factor_configurations(
+                connection, self.site_id, at_time='2020-06-12T01:00:00+00:00')
+                if item['protocol_code'] == '0311')
+            slots = expected_business_slots(
+                connection, configuration, '2020-06-11T20:00:00+00:00', '2020-06-12T08:00:00+00:00')
+        self.assertEqual([item['scheduled_at'] for item in slots], [
+            '2020-06-11T20:00:00+00:00', '2020-06-12T00:00:00+00:00',
+            '2020-06-12T01:00:00+00:00', '2020-06-12T02:00:00+00:00',
+            '2020-06-12T03:00:00+00:00', '2020-06-12T04:00:00+00:00',
+        ])
+
+    def test_formal_projection_survives_new_database_connection(self):
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(6.2, 3, 1), serial=58,
+            sent_at=datetime(2020, 6, 12, 8, 0), observed_at=datetime(2020, 6, 12, 8, 0),
+            received_at='2020-06-12T00:05:00+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            items = web_app.monitoring_latest_values(connection, self.site_id)
+        water = next(item for item in items if item['business_metric'] == 'water_temp')
+        self.assertEqual(water['standard_value'], 6.2)
+        self.assertEqual(water['scheduled_at'], '2020-06-12T00:00:00+00:00')
 
     def test_trend_window_and_quality_pagination_are_bounded(self):
         client = web_app.app.test_client()
@@ -492,6 +647,71 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(len(page.get_json()['items']), 2)
         self.assertGreaterEqual(page.get_json()['total'], 3)
         self.assertEqual(client.get('/api/station-monitoring/quality-issues?page_size=101', headers=admin).status_code, 400)
+
+    def test_860_minute_facts_project_only_exact_four_hour_business_slots(self):
+        start = datetime(2020, 6, 11, 16, tzinfo=timezone.utc)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            for index in range(860):
+                observed_at = (start + timedelta(minutes=index)).replace(microsecond=0).isoformat()
+                raw = connection.execute(
+                    """INSERT INTO ingest_raw_frames(
+                           endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                           crc_status,authentication_status,disposition,persistence_state)
+                       VALUES (?,?,?,?,?,?,'valid','authenticated','accepted','persisted')""",
+                    (self.endpoint_id, '0012345678', observed_at, f'trend-860-{index}', b'isolated', 8),
+                )
+                batch = connection.execute(
+                    """INSERT INTO observation_batches(
+                           raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                           reported_at,observed_at,received_at,granularity,aggregation_source,
+                           idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,'device_reported',?,?,'accepted','completed',?)""",
+                    (raw.lastrowid, self.endpoint_id, self.site_id, 2011, index, observed_at,
+                     observed_at, observed_at, 'realtime', f'trend-860-{index}',
+                     'station-monitoring-normalizer-v2', observed_at),
+                )
+                value = connection.execute(
+                    """INSERT INTO observation_values(
+                           observation_batch_id,protocol_code,business_metric,raw_value,raw_unit,
+                           standard_value,standard_unit,quality,instrument_asset_code,parser_version)
+                       VALUES (?, '4612', 'ph', ?, 'pH', ?, 'pH', 'valid', 'INST-A', 'isolated')""",
+                    (batch.lastrowid, 7 + index / 10000, 7 + index / 10000),
+                )
+                _project_business_observation(
+                    connection, value_id=value.lastrowid, batch_id=batch.lastrowid,
+                    endpoint_id=self.endpoint_id, site_id=self.site_id, protocol_code='4612',
+                    business_metric='ph', instrument_asset_code='INST-A', observed_at=observed_at,
+                    received_at=observed_at, standard_value=7 + index / 10000,
+                    standard_unit='pH', quality='valid')
+            connection.commit()
+        end = start + timedelta(minutes=859)
+        start_query = start.isoformat().replace('+', '%2B')
+        end_query = end.isoformat().replace('+', '%2B')
+        response = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=ph'
+            f'&start={start_query}&end={end_query}',
+            headers=self._headers('monitor-admin'),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(len(body['points']), 4)
+        self.assertEqual(body['standard_unit'], 'pH')
+        self.assertEqual(body['coverage']['displayed_points'], 4)
+        self.assertEqual(body['coverage']['expected_points'], 4)
+        self.assertEqual(body['coverage']['coverage_rate'], 1)
+        self.assertEqual(body['coverage']['gap_count'], 0)
+
+    def test_exact_24_hour_window_is_half_open_with_six_expected_slots(self):
+        response = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+            '&start=2020-06-11T16:00:00%2B00:00&end=2020-06-12T16:00:00%2B00:00',
+            headers=self._headers('monitor-admin'),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['coverage']['expected_points'], 6)
+        self.assertNotIn('2020-06-12T16:00:00+00:00', [
+            point['scheduled_at'] for point in response.get_json()['points']])
 
     def test_instrument_route_exposes_factor_configuration_without_health_projection(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -601,15 +821,23 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(outside.get_json()['scope_counts']['mine'], 1)
 
     def test_station_monitoring_overview_projects_chinese_factor_name(self):
-        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=62)
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=62,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0))
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         response = web_app.app.test_client().get(
             f'/api/station-monitoring/sites/{self.site_id}/overview', headers=self._headers('monitor-admin'))
         self.assertEqual(response.status_code, 200, response.get_json())
-        latest = response.get_json()['monitoring']['latest_values']
+        body = response.get_json()
+        latest = body['monitoring']['latest_values']
         self.assertEqual(latest[0]['factor_name_cn'], '水温')
-        self.assertEqual(response.get_json()['axes']['communication']['state'], 'stale')
-        self.assertEqual(response.get_json()['axes']['communication']['status_label'], '最近未收到报文')
+        self.assertEqual(body['axes']['communication']['state'], 'stale')
+        self.assertEqual(body['axes']['communication']['status_label'], '最近未收到报文')
+        self.assertEqual(body['axes']['communication']['reason'], '最后收到报文时间已超出配置周期')
+        self.assertEqual(body['axes']['data']['state'], 'no_valid_observation')
+        self.assertEqual(body['axes']['data']['reason'], '当前配置因子中仍有因子尚未形成正式业务观测')
+        self.assertNotEqual(body['axes']['data']['reason'], body['axes']['communication']['reason'])
+        self.assertTrue(all(item['standard_unit'] for item in body['monitoring']['factors']))
 
     def test_station_monitoring_normal_requires_every_configured_factor_fresh(self):
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -633,6 +861,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             None, self.site_id, profile, [config], [dict(config, observed_at=now)], '2020-01-01T00:00:00+00:00')
         self.assertEqual(result['status'], 'attention')
         self.assertEqual(result['reason_code'], 'stale_communication')
+        data_axis = web_app._station_monitoring_data_axis([config], [dict(config, observed_at=now)])
+        self.assertEqual(data_axis['state'], 'fresh')
+        self.assertEqual(data_axis['reason'], '最近正式业务观测仍在应到周期内')
 
     def test_all_published_monitoring_factors_have_distinct_chinese_names(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -660,6 +891,39 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(body['identity']['received_raw_sites'], 0)
         self.assertEqual(client.get('/api/station-monitoring/access-summary', headers=self._headers('monitor-operator')).status_code, 403)
 
+    def test_access_summary_counts_only_selected_valid_business_sites(self):
+        suspect = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.5, 3, 1), serial=65,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, suspect), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE monitoring_business_observations SET quality='suspect' "
+                "WHERE observation_batch_id=(SELECT id FROM observation_batches WHERE raw_frame_id=?)",
+                (suspect,),
+            )
+            connection.commit()
+        client = web_app.app.test_client()
+        headers = self._headers('monitor-admin')
+        suspect_only = client.get('/api/station-monitoring/access-summary', headers=headers).get_json()
+        self.assertEqual(suspect_only['observation']['valid_sites'], 0)
+
+        late_valid = self._persist(
+            bytes.fromhex('0311') + bcd_number(5.6, 3, 1), serial=66,
+            sent_at=datetime(2020, 6, 12, 4, 1), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:10:01+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, late_valid), 'accepted')
+        valid = client.get('/api/station-monitoring/access-summary', headers=headers).get_json()
+        self.assertEqual(valid['observation']['valid_sites'], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            selected = connection.execute(
+                """SELECT quality,timeliness FROM monitoring_business_observations
+                   WHERE business_site_id=? AND slot_state='selected' AND is_current=1""",
+                (self.site_id,),
+            ).fetchall()
+        self.assertIn(('valid', 'late'), selected)
+
     def test_bound_identity_without_profile_is_not_reported_as_not_connected(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute('UPDATE monitoring_endpoint_profiles SET enabled=0 WHERE endpoint_id=?', (self.endpoint_id,))
@@ -682,8 +946,53 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
         self.assertEqual(detail.get_json()['site']['monitoring_status'], item['monitoring_status'])
 
+    def test_list_and_detail_share_formal_observation_projection(self):
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=63,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        headers = self._headers('monitor-admin')
+        listed = web_app.app.test_client().get(
+            '/api/station-monitoring/sites?scope=all', headers=headers).get_json()
+        detail = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers).get_json()
+        item = next(row for row in listed['items'] if row['site_id'] == self.site_id)
+        self.assertEqual(item['last_valid_observation_at'], '2020-06-11T20:00:00+00:00')
+        self.assertEqual(item['last_valid_observation_at'], detail['site']['last_valid_observation_at'])
+        self.assertEqual(item['monitoring_status'], detail['site']['monitoring_status'])
+        self.assertEqual(item['reason_code'], detail['site']['reason_code'])
+
+    def test_unknown_schedule_and_minute_value_stay_unconfigured_in_list_and_detail(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('DELETE FROM monitoring_business_schedules')
+            connection.commit()
+        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=64)
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        headers = self._headers('monitor-admin')
+        listed = web_app.app.test_client().get(
+            '/api/station-monitoring/sites?scope=all', headers=headers).get_json()
+        detail = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers).get_json()
+        item = next(row for row in listed['items'] if row['site_id'] == self.site_id)
+        self.assertEqual(item['monitoring_status'], 'interval_unconfigured')
+        self.assertEqual(detail['site']['monitoring_status'], 'interval_unconfigured')
+        self.assertIsNone(item['last_valid_observation_at'])
+        self.assertEqual(detail['monitoring']['latest_values'], [])
+        trend = web_app.app.test_client().get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+            '&start=2020-06-11T16:00:00%2B00:00&end=2020-06-12T16:00:00%2B00:00',
+            headers=headers,
+        ).get_json()
+        self.assertEqual(trend['points'], [])
+        self.assertEqual(trend['coverage']['state'], 'unconfigured')
+        self.assertEqual(trend['coverage']['expected_points'], 0)
+
     def test_rebound_endpoint_does_not_leak_identity_or_configuration_to_old_site(self):
-        raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=61)
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=61,
+            sent_at=datetime(2020, 6, 12, 4, 0), observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2020-06-11T20:05:00+00:00')
         self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
         before = web_app.app.test_client().get('/api/station-monitoring/access-summary', headers=self._headers('monitor-admin')).get_json()
         self.assertEqual(before['observation']['valid_sites'], 1)

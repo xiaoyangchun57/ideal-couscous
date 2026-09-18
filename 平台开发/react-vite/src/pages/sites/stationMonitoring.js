@@ -118,7 +118,8 @@ export function axisView(key, axis = {}) {
     stateLabel: axis?.status_label || labels[state] || MONITORING_STATUS_META[state]?.label || (state ? '服务端未提供状态名称' : '暂无分轴事实'),
     badgeStatus: badgeStatuses[state] || 'default',
     reason: axis?.reason || '',
-    lastReceivedAt: axis?.last_received_at || null,
+    lastRecordAt: axis?.last_received_at || axis?.last_valid_observation_at || null,
+    nextExpectedAt: axis?.next_expected_at || null,
   };
 }
 
@@ -136,15 +137,60 @@ export function capabilityLabel(enabled) {
   return enabled ? '可用' : '暂无服务端事实';
 }
 
-export function monitoringTrendView(capabilities = {}, monitoring = {}) {
-  const items = Array.isArray(monitoring.trend) ? monitoring.trend : [];
-  const available = capabilities.trend === true && items.length > 0;
+export function monitoringDefaultTrendMetric(factors = [], latestValues = []) {
+  const available = new Set(factors.map((item) => item.business_metric).filter(Boolean));
+  const latest = latestValues.find((item) => available.has(item.business_metric));
+  return latest?.business_metric || factors.find((item) => item.business_metric)?.business_metric || '';
+}
+
+export function monitoringTrendView(payload, { loading = false, error = '' } = {}) {
+  const items = Array.isArray(payload?.points) ? payload.points : [];
+  const coverage = payload?.coverage || {};
+  const available = items.length > 0;
   return {
     available,
     items: available ? items : [],
-    emptyReason: capabilities.trend === true
-      ? '服务端已声明趋势能力，但当前未返回聚合事实，趋势暂不可用'
-      : '暂无服务端聚合事实，趋势暂不可用',
+    loading,
+    error,
+    unit: payload?.standard_unit || items.find((item) => item.unit)?.unit || '',
+    factorName: payload?.factor_name_cn || '',
+    windowStart: coverage.window_start || null,
+    windowEnd: coverage.window_end || null,
+    coverageRate: Number.isFinite(coverage.coverage_rate) ? coverage.coverage_rate : null,
+    validPoints: Number.isFinite(coverage.valid_points) ? coverage.valid_points : null,
+    displayedPoints: Number.isFinite(coverage.displayed_points) ? coverage.displayed_points : items.length,
+    expectedPoints: Number.isFinite(coverage.expected_points) ? coverage.expected_points : null,
+    gapCount: Number.isFinite(coverage.gap_count) ? coverage.gap_count : null,
+    missingPoints: Number.isFinite(coverage.missing_points) ? coverage.missing_points : null,
+    latePoints: Number.isFinite(coverage.late_points) ? coverage.late_points : 0,
+    suspectPoints: Number.isFinite(coverage.suspect_points) ? coverage.suspect_points : 0,
+    duplicateRecords: Number.isFinite(coverage.duplicate_records) ? coverage.duplicate_records : 0,
+    conflictSlots: Number.isFinite(coverage.conflict_slots) ? coverage.conflict_slots : 0,
+    emptyReason: '当前因子在最近24小时内暂无有效观测',
+  };
+}
+
+export function monitoringCoverageLabel(trend) {
+  if (trend.coverageRate == null || trend.validPoints == null || trend.expectedPoints == null) {
+    return '周期未配置';
+  }
+  return `${(trend.coverageRate * 100).toFixed(1)}% (${trend.validPoints}/${trend.expectedPoints})`;
+}
+
+export function monitoringTrendChartOption(trend) {
+  return {
+    animation: false,
+    grid: { left: 56, right: 20, top: 24, bottom: 48 },
+    tooltip: { trigger: 'axis', valueFormatter: (value) => `${value}${trend.unit ? ` ${trend.unit}` : ''}` },
+    xAxis: {
+      type: 'time', name: '正式业务时点', nameLocation: 'middle', nameGap: 32,
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: { type: 'value', name: trend.unit || '数值', scale: true },
+    series: [{
+      type: 'line', name: trend.factorName || '有效观测', showSymbol: trend.items.length < 80,
+      connectNulls: false, data: trend.items.map((item) => [item.scheduled_at || item.observed_at, item.value]),
+    }],
   };
 }
 

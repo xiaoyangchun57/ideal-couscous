@@ -8,6 +8,9 @@ import {
   mergeMonitoringSites,
   monitoringStatusView,
   monitoringSummaryItems,
+  monitoringDefaultTrendMetric,
+  monitoringCoverageLabel,
+  monitoringTrendChartOption,
   monitoringTrendView,
   monitoringFactorName,
   formatMonitoringTime,
@@ -88,12 +91,55 @@ test('scope removal never restores previous rows on refresh failure', () => {
   assert.deepEqual(mergeMonitoringSites([{ id: 7 }], null, previous).map((item) => item.id), [7]);
 });
 
-test('trend availability requires both server capability and returned aggregate facts', () => {
-  assert.equal(monitoringTrendView({ trend: true }, {}).available, false);
-  assert.equal(monitoringTrendView({ trend: false }, { trend: [{ value: 3 }] }).available, false);
-  const available = monitoringTrendView({ trend: true }, { trend: [{ value: 0 }] });
+test('trend view preserves the server window, unit, coverage and zero values', () => {
+  assert.equal(monitoringTrendView(null).available, false);
+  const available = monitoringTrendView({
+    factor_name_cn: '酸碱度', standard_unit: 'pH',
+    points: [{ scheduled_at: '2026-09-18T00:00:00+00:00', observed_at: '2026-09-18T00:00:00+00:00', value: 0 }],
+    coverage: {
+      window_start: '2026-09-18T00:00:00+00:00', window_end: '2026-09-18T01:00:00+00:00',
+      coverage_rate: 1, valid_points: 6, displayed_points: 6, expected_points: 6, gap_count: 0, missing_points: 0,
+      late_points: 1, suspect_points: 4, duplicate_records: 2, conflict_slots: 3,
+    },
+  });
   assert.equal(available.available, true);
   assert.equal(available.items[0].value, 0);
+  assert.equal(available.unit, 'pH');
+  assert.equal(available.coverageRate, 1);
+  assert.equal(available.validPoints, 6);
+  assert.equal(available.gapCount, 0);
+  assert.equal(available.latePoints, 1);
+  assert.equal(available.suspectPoints, 4);
+  assert.equal(available.duplicateRecords, 2);
+  assert.equal(available.conflictSlots, 3);
+  assert.deepEqual(monitoringTrendChartOption(available).series[0].data, [
+    ['2026-09-18T00:00:00+00:00', 0],
+  ]);
+  const suspectOnly = monitoringTrendView({
+    points: [{ scheduled_at: '2026-09-18T00:00:00+00:00', value: 7.1, quality: 'suspect' }],
+    coverage: {
+      coverage_rate: 0, valid_points: 0, displayed_points: 1, expected_points: 6,
+      suspect_points: 1,
+    },
+  });
+  assert.equal(monitoringCoverageLabel(suspectOnly), '0.0% (0/6)');
+  assert.equal(suspectOnly.suspectPoints, 1);
+});
+
+test('observation axis exposes the next authoritative business slot', () => {
+  const view = axisView('data', {
+    state: 'fresh', last_valid_observation_at: '2026-09-18T00:00:00+00:00',
+    next_expected_at: '2026-09-18T04:00:00+00:00',
+  });
+  assert.equal(view.lastRecordAt, '2026-09-18T00:00:00+00:00');
+  assert.equal(view.nextExpectedAt, '2026-09-18T04:00:00+00:00');
+});
+
+test('trend defaults to a configured factor with a latest valid value', () => {
+  const factors = [{ business_metric: 'ph' }, { business_metric: 'ammonia' }];
+  assert.equal(monitoringDefaultTrendMetric(factors, [{ business_metric: 'ammonia' }]), 'ammonia');
+  assert.equal(monitoringDefaultTrendMetric(factors, []), 'ph');
+  assert.equal(monitoringDefaultTrendMetric([], [{ business_metric: 'ph' }]), '');
 });
 
 test('data reception and observation axes preserve server labels and status visual semantics', () => {

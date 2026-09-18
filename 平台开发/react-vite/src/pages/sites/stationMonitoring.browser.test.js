@@ -32,6 +32,29 @@ function overview(status = 'interval_unconfigured', id = 7) {
   };
 }
 
+function trend(metric = '酸碱度') {
+  const unit = metric === 'ammonia' ? 'mg/L' : 'pH';
+  return {
+    site_id: 7,
+    metric,
+    factor_name_cn: metric === 'ammonia' ? '氨氮' : '酸碱度',
+    standard_unit: unit,
+    points: [
+      ...[0, 4, 8, 12, 16, 20].map((hour, index) => ({
+        scheduled_at: `2026-09-15T${String(hour).padStart(2, '0')}:00:00+08:00`,
+        observed_at: `2026-09-15T${String(hour).padStart(2, '0')}:00:00+08:00`,
+        value: 7.1 + index * 0.03, unit, quality: 'valid',
+      })),
+    ],
+    coverage: {
+      window_start: '2026-09-15T00:00:00+08:00', window_end: '2026-09-15T23:59:59+08:00',
+      coverage_rate: 1, valid_points: 6, displayed_points: 6, expected_points: 6, gap_count: 0, missing_points: 0,
+      late_points: 0, suspect_points: 0, duplicate_records: 0, conflict_slots: 0,
+    },
+    gaps: [],
+  };
+}
+
 const summary = {
   runtime: { enabled_endpoints: 11 }, identity: { bound_sites: 7, received_raw_sites: 5 },
   configuration: { configured_sites: 3 }, observation: { valid_sites: 2 },
@@ -65,13 +88,22 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       }
       if (handler && await handler(route, url)) return;
       let body = {};
-      if (url.pathname === '/api/auth/me') body = { user: { id: 991020, username: 'web-test', role: roles[0], roles }, site_ids: [7, 8] };
+      if (url.pathname === '/api/auth/me') body = {
+        user: {
+          id: 991020, username: 'web-test', role: roles[0], roles,
+          capabilities: { station_monitoring_public: true },
+        },
+        site_ids: [7, 8],
+      };
       else if (url.pathname === '/api/sites') body = roles.includes('admin') ? [row, { ...row, id: 8, name: '隔离测试站乙', code: 'WEB-TEST-8' }] : [row];
       else if (url.pathname === '/api/station-monitoring/sites') body = {
         scope: roles.includes('admin') ? 'all' : 'mine', available_scopes: roles.includes('admin') ? ['all', 'mine'] : ['mine'],
         items: roles.includes('admin') ? [overview().site, overview('normal', 8).site] : [overview().site], summary: { interval_unconfigured: 1, normal: roles.includes('admin') ? 1 : 0 },
       };
       else if (/\/station-monitoring\/sites\/\d+\/overview$/.test(url.pathname)) body = overview('interval_unconfigured', Number(url.pathname.split('/').at(-2)));
+      else if (/\/station-monitoring\/sites\/\d+\/trend$/.test(url.pathname)) body = {
+        ...trend(url.searchParams.get('metric')), site_id: Number(url.pathname.split('/').at(-2)),
+      };
       else if (url.pathname === '/api/station-monitoring/access-summary') body = summary;
       else if (url.pathname === '/api/sites/7/archive') body = { ...row, has_sensor_data: false, equipment: [] };
       else if (url.pathname === '/api/reagent-inventory/7') body = [];
@@ -116,7 +148,10 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await visible(page.getByText('7.25 pH', { exact: true }));
       await visible(page.getByText('最后收到报文', { exact: true }));
       await visible(page.getByText('最后有效观测', { exact: true }));
-      await visible(page.getByText('暂无服务端聚合事实，趋势暂不可用', { exact: true }));
+      await visible(page.getByText('最近24小时趋势', { exact: true }));
+      await visible(page.getByText('100.0% (6/6)', { exact: true }));
+      await visible(page.getByText('0 段，缺 0 点', { exact: true }));
+      await visible(page.getByText('pH', { exact: true }));
       await absent(page, '设备健康');
       await snapshot(page, 'detail-desktop');
     } finally { await close(); }
@@ -201,7 +236,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     } finally { release(); await close(); }
   });
 
-  await t.test('a capability flag without aggregates stays unavailable and protocol fields are not displayed', async () => {
+  await t.test('an empty trend response stays explicit and protocol fields are not displayed', async () => {
     const payload = overview();
     payload.monitoring.capabilities.trend = true;
     payload.monitoring.latest_values[0].business_metric = null;
@@ -209,17 +244,55 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     payload.monitoring.factors[0].business_metric = null;
     payload.monitoring.factors[0].protocol_code = 'PROTOCOL-SECRET-TEST';
     const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
-      if (!url.pathname.endsWith('/7/overview')) return false;
-      await route.fulfill({ json: payload });
-      return true;
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: payload });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        await route.fulfill({ json: { ...trend(url.searchParams.get('metric')), points: [] } });
+        return true;
+      }
+      return false;
     });
     try {
       await page.goto(`${baseURL}/sites/7`);
-      await visible(page.getByText('服务端已声明趋势能力，但当前未返回聚合事实，趋势暂不可用', { exact: true }));
-      const trendCard = page.locator('.ant-card').filter({ has: page.locator('.ant-card-head-title').getByText('趋势', { exact: true }) });
-      assert.equal(await trendCard.getByText('可用', { exact: true }).count(), 0);
+      await visible(page.getByText('当前因子在最近24小时内暂无有效观测', { exact: true }));
       await absent(page, 'PROTOCOL-SECRET-TEST');
       await absent(page, 'FAKE-BUSINESS-TIME');
+    } finally { await close(); }
+  });
+
+  await t.test('trend failure is retryable and factor switching uses the selected server metric', async () => {
+    const payload = overview();
+    payload.monitoring.factors.push({ business_metric: 'ammonia', factor_name_cn: '氨氮', standard_unit: 'mg/L' });
+    payload.factors = payload.monitoring.factors;
+    let fail = true;
+    const metrics = [];
+    const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: payload });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        metrics.push(url.searchParams.get('metric'));
+        await route.fulfill(fail
+          ? { status: 503, json: { error: '趋势服务暂不可用' } }
+          : { json: trend(url.searchParams.get('metric')) });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      await visible(page.getByText('趋势加载失败', { exact: true }));
+      await visible(page.getByText('趋势服务暂不可用', { exact: true }));
+      fail = false;
+      await page.getByRole('button', { name: /重试/ }).click();
+      await visible(page.getByText('100.0% (6/6)', { exact: true }));
+      await page.locator('.ant-select').filter({ has: page.getByRole('combobox', { name: '趋势因子' }) }).click();
+      await page.getByText('氨氮 (mg/L)', { exact: true }).click();
+      await visible(page.getByText('mg/L', { exact: true }));
+      assert.deepEqual(metrics.slice(-2), ['酸碱度', 'ammonia']);
     } finally { await close(); }
   });
 
@@ -349,7 +422,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
         assert.ok(scopes.every((scope) => scope === expected));
         if (expected === 'all') {
           const other = page.getByRole('row').filter({ hasText: '隔离测试站乙' });
-          await visible(other.getByText('正常', { exact: true }));
+          await visible(other.getByText('数据正常', { exact: true }));
         }
         await visible(page.getByText(`监测范围：${expected === 'all' ? '全部有权站点' : '本人负责站点'}`, { exact: true }));
       } finally { await close(); }
@@ -401,9 +474,18 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     payload.monitoring.capabilities.trend = true;
     payload.monitoring.trend = [{ factor_name_cn: '服务端中文因子名', business_metric: 'internal_metric_identifier', value: 0 }];
     const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
-      if (!url.pathname.endsWith('/7/overview')) return false;
-      await route.fulfill({ json: { ...payload, axes } });
-      return true;
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: { ...payload, axes } });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        await route.fulfill({ json: {
+          ...trend('internal_metric_identifier'), metric: 'internal_metric_identifier',
+          factor_name_cn: '服务端中文因子名',
+        } });
+        return true;
+      }
+      return false;
     });
     try {
       for (const [status, badge] of [['normal', 'success'], ['attention', 'warning'], ['missing', 'default'], ['unavailable', 'error']]) {
@@ -415,7 +497,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
           assert.match(await group.locator('.ant-badge-status-dot').getAttribute('class'), new RegExp(`ant-badge-status-${badge}`));
         }
       }
-      for (const title of ['最新有效值', '趋势', '监测因子']) {
+      for (const title of ['最新有效值', '最近24小时趋势', '监测因子']) {
         const card = page.locator('.ant-card').filter({ has: page.locator('.ant-card-head-title').getByText(title, { exact: true }) });
         assert.match(await card.innerText(), /服务端中文因子名/);
         assert.doesNotMatch(await card.innerText(), /internal_metric_identifier/);

@@ -131,8 +131,12 @@ def validate_submission_photos(result, required_photos, photo_urls):
     if isinstance(photos, list) and len([photo for photo in photos if photo]) > 6:
         return '单项最多上传 6 张现场照片'
     return _validate_submission_photos(result, required_photos, photo_urls)
-from station_monitoring import (current_factor_configurations as monitoring_factor_configurations,
-                                latest_values as monitoring_latest_values, trend as monitoring_trend)
+from station_monitoring import (business_slot_diagnostics as monitoring_business_slot_diagnostics,
+                                current_factor_configurations as monitoring_factor_configurations,
+                                expected_business_slots as monitoring_expected_business_slots,
+                                latest_values as monitoring_latest_values,
+                                next_business_slot as monitoring_next_business_slot,
+                                trend as monitoring_trend)
 import os, uuid, urllib.request, urllib.error, urllib.parse, json as _json
 try:
     from openpyxl import Workbook, load_workbook
@@ -174,12 +178,32 @@ def _resolve_public_capability(raw_value):
     return False
 
 
-STATION_MONITORING_PUBLIC = _resolve_public_capability(
+def _resolve_station_monitoring_access_mode(raw_value, legacy_public=None):
+    if raw_value is None:
+        return 'public' if _resolve_public_capability(legacy_public) else 'disabled'
+    normalized = str(raw_value).strip().lower()
+    return normalized if normalized in ('disabled', 'admin', 'public') else 'disabled'
+
+
+STATION_MONITORING_ACCESS_MODE = _resolve_station_monitoring_access_mode(
+    os.environ.get('STATION_MONITORING_ACCESS_MODE'),
     os.environ.get('STATION_MONITORING_PUBLIC'))
+# Compatibility for external imports; authorization uses the three-state mode below.
+STATION_MONITORING_PUBLIC = STATION_MONITORING_ACCESS_MODE == 'public'
 
 
-def _public_capabilities():
-    return {'station_monitoring_public': STATION_MONITORING_PUBLIC}
+def _station_monitoring_access_mode():
+    normalized = str(STATION_MONITORING_ACCESS_MODE or '').strip().lower()
+    return normalized if normalized in ('disabled', 'admin', 'public') else 'disabled'
+
+
+def _station_monitoring_access_allowed(user):
+    mode = _station_monitoring_access_mode()
+    return mode == 'public' or (mode == 'admin' and _has_any_role(user, 'admin'))
+
+
+def _public_capabilities(user=None):
+    return {'station_monitoring_public': _station_monitoring_access_allowed(user)}
 
 
 def _resolve_miniprogram_state(raw_value):
@@ -4748,7 +4772,7 @@ def _evict_user_tokens(uid):
 def _build_session_user(db, user_row):
     user = dict(user_row)
     roles = _roles_for_user(db, user['id'], user.get('role') or 'operator')
-    return {
+    session_user = {
         'id': user['id'],
         'username': user.get('username') or '',
         'role': _primary_role(roles),
@@ -4757,8 +4781,9 @@ def _build_session_user(db, user_row):
         'real_name': user.get('real_name') or '',
         'phone': user.get('phone') or '',
         'must_change_password': bool(user.get('must_change_password') or 0),
-        'capabilities': _public_capabilities(),
     }
+    session_user['capabilities'] = _public_capabilities(session_user)
+    return session_user
 
 
 def _issue_session(db, user_row):
@@ -5083,10 +5108,13 @@ def gate_public_station_monitoring():
         return None
     if (request.path == '/api/station-monitoring' or
             request.path.startswith('/api/station-monitoring/')):
-        if not STATION_MONITORING_PUBLIC:
+        if not _station_monitoring_access_allowed(getattr(g, 'current_user', None)):
+            mode = _station_monitoring_access_mode()
             return jsonify({
-                'error': '站点监测公开能力尚未启用',
-                'code': 'STATION_MONITORING_PUBLIC_DISABLED',
+                'error': ('站点监测管理员预览仅管理员可用' if mode == 'admin'
+                          else '站点监测能力尚未启用'),
+                'code': ('STATION_MONITORING_ADMIN_ONLY' if mode == 'admin'
+                         else 'STATION_MONITORING_PUBLIC_DISABLED'),
             }), 403
     return None
 
@@ -5401,9 +5429,9 @@ def get_sites_simple():
                           'manager': rd.get('manager') or '',
                           'is_pilot': bool(rd.get('is_pilot')),
                           'operation_frequency': rd.get('operation_frequency') or ''})
-        # 公开能力关闭时不得查询或返回尚未验收的监测值。
+        # 当前请求用户无监测权限时，不查询或返回尚未验收的监测值。
         site_ids = [d['id'] for d in result]
-        if STATION_MONITORING_PUBLIC and site_ids:
+        if _station_monitoring_access_allowed(g.current_user) and site_ids:
             placeholders = ','.join('?' * len(site_ids))
             latest_rows = db.execute(f"""
                 SELECT s.site_id, s.metric AS latest_metric, s.value AS latest_value,
@@ -5536,7 +5564,7 @@ def get_site_archive(site_id):
             site_dict = dict(site)
             site_type = site_dict.get('type', '')
 
-            if STATION_MONITORING_PUBLIC:
+            if _station_monitoring_access_allowed(g.current_user):
                 # 档案页不得用前端模拟曲线冒充采集结果。真实时序由数据接入后再展示。
                 sensor_rows = db.execute(
                     """SELECT metric, value, recorded_at FROM sensor_data
@@ -33048,6 +33076,8 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
         base.update(monitoring_status='awaiting_first_frame', monitoring_status_label='等待首帧', reason_code='no_authenticated_frame', monitoring_reason='身份已接入，尚未收到认证原文')
     elif not configs:
         base.update(monitoring_status='raw_received_config_pending', monitoring_status_label='档案待批准', reason_code='monitoring_config_pending', monitoring_reason='已收到认证原文，监测档案或因子尚未批准')
+    elif any(not item.get('expected_interval_seconds') for item in configs):
+        base.update(monitoring_status='interval_unconfigured', monitoring_status_label='业务时点未配置', reason_code='interval_unconfigured', monitoring_reason='监测因子已批准，但正式业务观测时点尚未配置')
     elif not values:
         base.update(monitoring_status='waiting_first_valid', monitoring_status_label='等待首个有效观测', reason_code='no_valid_observation', monitoring_reason='监测档案已生效，尚未形成有效观测')
     else:
@@ -33065,12 +33095,12 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
     profile_data = dict(profile)
     communication = _monitoring_freshness(last_communication, profile_data.get('expected_interval_seconds'))
     value_by_config = {
-        (item.get('endpoint_id'), item.get('protocol_code'), item.get('business_metric'), item.get('instrument_asset_code')): item
+        (item.get('endpoint_id'), item.get('business_metric'), item.get('instrument_asset_code')): item
         for item in values
     }
     factor_freshness = []
     for config in configs:
-        key = (config.get('endpoint_id'), config.get('protocol_code'), config.get('business_metric'), config.get('instrument_asset_code'))
+        key = (config.get('endpoint_id'), config.get('business_metric'), config.get('instrument_asset_code'))
         value = value_by_config.get(key)
         factor_freshness.append(_monitoring_freshness(
             value.get('observed_at') if value else None,
@@ -33099,6 +33129,65 @@ def _site_can_calibrate(db, site_id, user=None):
 
 def _station_monitoring_axis(name, state, label, *, status='info', reason=None, **extra):
     return dict({'name': name, 'state': state, 'status': status, 'status_label': label, 'reason': reason}, **extra)
+
+
+def _station_monitoring_data_axis(configs, values, db=None):
+    """Project observation availability without borrowing communication facts."""
+    if not configs:
+        return _station_monitoring_axis(
+            '观测数据', 'not_configured', '监测因子未配置', status='pending',
+            reason='尚未配置已批准的监测因子', reason_code='not_configured',
+            last_valid_observation_at=None)
+    value_by_config = {
+        (item.get('endpoint_id'), item.get('business_metric'), item.get('instrument_asset_code')): item
+        for item in values
+    }
+    freshness = []
+    next_expected = []
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    for config in configs:
+        key = (config.get('endpoint_id'), config.get('business_metric'), config.get('instrument_asset_code'))
+        value = value_by_config.get(key)
+        if value:
+            scheduled_at = value.get('scheduled_at') or value.get('observed_at')
+            next_at = (monitoring_next_business_slot(db, config, scheduled_at) if db else
+                       (datetime.fromisoformat(scheduled_at) + timedelta(
+                           seconds=int(config.get('expected_interval_seconds') or 0))).isoformat())
+            next_expected.append(next_at)
+            deadline = (datetime.fromisoformat(next_at) + timedelta(
+                seconds=int(config.get('tolerance_seconds') or 0))) if next_at else None
+            freshness.append({'state': 'fresh' if deadline and now <= deadline else 'stale', 'reason_code': None})
+        else:
+            next_at = config.get('next_expected_at')
+            if next_at:
+                next_expected.append(next_at)
+            freshness.append({'state': 'unknown', 'reason_code': 'no_observation'})
+    last_valid = max((item.get('observed_at') for item in values if item.get('observed_at')), default=None)
+    next_expected_at = min((item for item in next_expected if item), default=None)
+    if any(not item.get('expected_interval_seconds') for item in configs):
+        return _station_monitoring_axis(
+            '观测数据', 'interval_unconfigured', '业务时点未配置', status='pending',
+            reason='正式业务观测时点尚未配置', reason_code='interval_unconfigured',
+            last_valid_observation_at=last_valid, next_expected_at=next_expected_at)
+    if not last_valid:
+        return _station_monitoring_axis(
+            '观测数据', 'no_valid_observation', '暂无有效观测', status='pending',
+            reason='已配置监测因子，但尚未形成正式业务观测', last_valid_observation_at=None,
+            next_expected_at=next_expected_at, reason_code='no_observation')
+    if any(item['reason_code'] == 'no_observation' for item in freshness):
+        return _station_monitoring_axis(
+            '观测数据', 'no_valid_observation', '有效观测不完整', status='attention',
+            reason='当前配置因子中仍有因子尚未形成正式业务观测', last_valid_observation_at=last_valid,
+            next_expected_at=next_expected_at, reason_code='missing_observation')
+    if all(item['state'] == 'fresh' for item in freshness):
+        return _station_monitoring_axis(
+            '观测数据', 'fresh', '在配置周期内', status='normal',
+            reason='最近正式业务观测仍在应到周期内', last_valid_observation_at=last_valid,
+            next_expected_at=next_expected_at, reason_code=None)
+    return _station_monitoring_axis(
+        '观测数据', 'stale', '超出配置周期', status='attention',
+        reason='最近正式业务观测已超过下一应到时点', last_valid_observation_at=last_valid,
+        next_expected_at=next_expected_at, reason_code='stale_observation')
 
 
 _STATION_MONITORING_FACTOR_LABELS = {
@@ -33223,19 +33312,13 @@ def _station_monitoring_overview(db, site_id):
         else '数据已接收' if communication_state == 'fresh'
         else '最近未收到报文' if communication_state == 'stale'
         else '接收周期未配置')
-    data_labels = {
-        'not_connected': '未接入', 'awaiting_first_frame': '等待首帧',
-        'raw_received_config_pending': '档案待批准', 'waiting_first_valid': '等待有效观测',
-        'interval_unconfigured': '数据周期未配置', 'normal': '数据正常', 'attention': '数据需关注',
-    }
-    data_style = 'normal' if status == 'normal' else ('attention' if status == 'attention' else 'pending')
+    data_axis = _station_monitoring_data_axis(configs, values, db)
     axes = {
         'communication': _station_monitoring_axis('数据接收', communication_state, communication_label,
             status='normal' if communication_state == 'fresh' else ('attention' if communication_state == 'stale' else 'pending'),
             reason='最后收到报文时间已超出配置周期' if communication_state == 'stale' else ('数据接收周期尚未配置' if projection['last_communication_at'] and communication_state == 'unknown' else None),
             last_received_at=projection['last_communication_at']),
-        'data': _station_monitoring_axis('观测数据', status, data_labels.get(status, '数据状态未知'),
-            status=data_style, reason=projection['monitoring_reason']),
+        'data': data_axis,
     }
     factors = [{
         'business_metric': item.get('business_metric'),
@@ -33243,7 +33326,7 @@ def _station_monitoring_overview(db, site_id):
             item.get('business_metric'), f'监测因子{index + 1}'),
         'standard_unit': item.get('standard_unit') or '',
     } for index, item in enumerate(configs)]
-    has_trend_facts = any(item.get('aggregation_source') == 'server_aggregated' for item in values)
+    has_trend_facts = bool(factors)
     monitoring = {'latest_values': latest, 'axes': axes, 'factors': factors,
                   'capabilities': {'latest': bool(latest), 'trend': has_trend_facts, 'factors': bool(factors)}}
     projection['can_calibrate'] = _site_can_calibrate(db, site_id)
@@ -33278,42 +33361,12 @@ def _station_monitoring_batch_projections(db, site_rows):
     endpoint_by_site = {}
     for row in endpoints:
         endpoint_by_site.setdefault(row['business_site_id'], {'endpoint_id': row['id']})
-    configs_by_site = {sid: [] for sid in site_ids}
-    config_rows = db.execute(f"""SELECT profile.business_site_id, profile.endpoint_id, mapping.protocol_code,
-                  COALESCE(mapping.business_metric, definition.business_metric) AS business_metric,
-                  COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code) AS instrument_asset_code,
-                  mapping.expected_interval_seconds, mapping.tolerance_seconds,
-                  profile.effective_from AS profile_effective_from, profile.effective_to AS profile_effective_to,
-                  mapping.effective_from AS mapping_effective_from, mapping.effective_to AS mapping_effective_to
-           FROM monitoring_endpoint_profiles profile
-           JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
-             AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id=profile.business_site_id
-           JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id
-           JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
-           WHERE profile.business_site_id IN ({marks}) AND profile.endpoint_id IN ({epmarks}) AND profile.enabled=1
-             AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
-             AND mapping.enabled=1 AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
-             AND definition.is_published=1 AND COALESCE(mapping.business_metric, definition.business_metric) IS NOT NULL""",
-        [*site_ids, *endpoint_ids, now, now, now, now]).fetchall()
-    for row in config_rows:
-        configs_by_site[row['business_site_id']].append(dict(row))
-    values_by_site = {sid: [] for sid in site_ids}
-    value_rows = db.execute(f"""SELECT b.business_site_id, v.business_metric, v.protocol_code, v.standard_value, v.standard_unit, v.quality,
-                  v.instrument_asset_code, b.endpoint_id, b.observed_at, b.received_at, b.granularity, b.aggregation_source, b.normalization_version
-           FROM observation_values v JOIN observation_batches b ON b.id=v.observation_batch_id
-           WHERE b.business_site_id IN ({marks}) AND b.is_current=1 AND v.is_current=1 AND v.is_published=1
-             AND v.quality IN ('valid','suspect') ORDER BY b.observed_at DESC, v.id DESC""", site_ids).fetchall()
-    seen = set()
-    for row in value_rows:
-        key = (row['business_site_id'], row['endpoint_id'], row['protocol_code'], row['business_metric'], row['instrument_asset_code'])
-        if key not in seen:
-            values_by_site[row['business_site_id']].append(dict(row)); seen.add(key)
     raw_by_ep = {row['endpoint_id']: row for row in raw_rows}
     result = []
     for site in site_rows:
         sid = site['id']; profile = profile_by_site.get(sid) or endpoint_by_site.get(sid)
         raw = raw_by_ep.get(profile['endpoint_id']) if profile else None
-        result.append(_station_monitoring_projection(db, sid, site=site, profile=profile, raw=raw, configs=configs_by_site[sid], values=values_by_site[sid]))
+        result.append(_station_monitoring_projection(db, sid, site=site, profile=profile, raw=raw))
     return result
 
 
@@ -33401,24 +33454,25 @@ def station_monitoring_access_summary():
             JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id AND mapping.enabled=1 AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
             JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code AND definition.is_published=1
             WHERE profile.enabled=1 AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)""", (now, now, now, now)).fetchone()[0]
-        valid_sites = db.execute("""SELECT COUNT(DISTINCT batch.business_site_id)
-            FROM observation_batches batch
-            JOIN trusted_endpoints endpoint ON endpoint.id=batch.endpoint_id
+        valid_sites = db.execute("""SELECT COUNT(DISTINCT business.business_site_id)
+            FROM monitoring_business_observations business
+            JOIN trusted_endpoints endpoint ON endpoint.id=business.endpoint_id
               AND endpoint.enabled=1 AND endpoint.endpoint_state='bound'
-              AND endpoint.business_site_id IS NOT NULL AND endpoint.business_site_id=batch.business_site_id
-            JOIN monitoring_endpoint_profiles profile ON profile.endpoint_id=batch.endpoint_id
-              AND profile.business_site_id=batch.business_site_id AND profile.enabled=1
+              AND endpoint.business_site_id IS NOT NULL
+              AND endpoint.business_site_id=business.business_site_id
+            JOIN monitoring_endpoint_profiles profile ON profile.endpoint_id=business.endpoint_id
+              AND profile.business_site_id=business.business_site_id AND profile.enabled=1
               AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
-            JOIN observation_values value ON value.observation_batch_id=batch.id
-              AND value.is_current=1 AND value.is_published=1 AND value.quality IN ('valid','suspect')
-            JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=batch.endpoint_id
-              AND mapping.protocol_code=value.protocol_code AND mapping.enabled=1
+            JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=business.endpoint_id
+              AND mapping.protocol_code=business.protocol_code AND mapping.enabled=1
               AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
-              AND COALESCE(mapping.business_metric, value.business_metric)=value.business_metric
-              AND COALESCE(mapping.instrument_asset_code, value.instrument_asset_code) IS value.instrument_asset_code
+              AND COALESCE(mapping.business_metric, business.business_metric)=business.business_metric
+              AND COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code)
+                  IS business.instrument_asset_code
             JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
               AND definition.is_published=1
-            WHERE batch.is_current=1""", (now, now, now, now)).fetchone()[0]
+            WHERE business.is_current=1 AND business.slot_state='selected'
+              AND business.quality='valid'""", (now, now, now, now)).fetchone()[0]
         quality_count = db.execute("SELECT COUNT(*) FROM monitoring_quality_issues WHERE status='open'").fetchone()[0]
         return jsonify({'runtime': {'enabled_endpoints': endpoint_count}, 'identity': {'bound_sites': site_count, 'received_raw_sites': raw_sites}, 'configuration': {'configured_sites': configured_sites}, 'observation': {'valid_sites': valid_sites}, 'quality': {'open_items': quality_count}, 'storage': {'raw_frames': db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 'observation_batches': db.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0]}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
 
@@ -33453,20 +33507,13 @@ def station_monitoring_summary(site_id):
                 configuration['expected_interval_seconds'], configuration['tolerance_seconds'],
             )
             factor_states.append(dict(configuration, last_valid=value, freshness=state))
-        configured_data = [item for item in factor_states if item['expected_interval_seconds']]
-        data_state = (
-            {'state': 'unknown', 'reason_code': 'unconfigured'} if not configured_data else
-            {'state': 'fresh', 'reason_code': None} if all(item['freshness']['state'] == 'fresh' for item in configured_data) else
-            {'state': 'no_observation', 'reason_code': 'missing_observation'}
-            if any(item['freshness']['reason_code'] == 'no_observation' for item in configured_data) else
-            {'state': 'stale', 'reason_code': 'stale_observation'}
-        )
+        data_state = _station_monitoring_data_axis(configurations, values, db)
         axes = {
             'communication': communication,
             'data': dict(data_state, factors=factor_states),
         }
         attention = 'normal' if communication['state'] == 'fresh' and data_state['state'] == 'fresh' else 'attention'
-        reason = communication['reason_code'] or data_state['reason_code']
+        reason = communication['reason_code'] or data_state.get('reason_code')
         return jsonify({
             'site_id': site_id, 'attention_level': attention, 'reason_code': reason,
             'last_received_at': last_communication['received_at'] if last_communication else None,
@@ -33518,33 +33565,28 @@ def station_monitoring_trend(site_id):
             return jsonify({'error': '业务因子未发布或不存在', 'code': 'MONITORING_METRIC_NOT_PUBLISHED'}), 404
         point_limit = 1000
         points = monitoring_trend(db, site_id, metric, start, end, point_limit + 1)
+        diagnostics = monitoring_business_slot_diagnostics(db, site_id, metric, start, end)
         if len(points) > point_limit:
             return jsonify({'error': '趋势点数超过上限', 'code': 'MONITORING_TREND_POINT_LIMIT'}), 422
-        interval = configurations[0]['expected_interval_seconds'] if len(configurations) == 1 else None
-        tolerance = configurations[0]['tolerance_seconds'] if len(configurations) == 1 else None
+        intervals = {int(item['expected_interval_seconds']) for item in configurations if item.get('expected_interval_seconds')}
+        interval = next(iter(intervals)) if len(intervals) == 1 else None
         gaps = []
-        expected_points = None
+        expected_slots = sorted({
+            slot['scheduled_at']
+            for configuration in configurations
+            for slot in monitoring_expected_business_slots(db, configuration, start, end)
+        })
+        expected_points = len(expected_slots)
         valid_points = 0
         displayed_points = 0
-        missing_points = 0
-        if interval:
-            interval = int(interval)
-            tolerance = int(tolerance or 0)
-            expected_points = int((end_time - start_time).total_seconds() // interval) + 1
-            displayed_slots = set()
-            valid_slots = set()
-            for point in points:
-                offset = (datetime.fromisoformat(point['observed_at']) - start_time).total_seconds()
-                slot = int(offset // interval + 0.5)
-                if not 0 <= slot < expected_points or abs(offset - slot * interval) > tolerance:
-                    continue
-                displayed_slots.add(slot)
-                if point['quality'] == 'valid':
-                    valid_slots.add(slot)
-            valid_points = len(valid_slots)
-            displayed_points = len(displayed_slots)
-            missing_slots = [slot for slot in range(expected_points) if slot not in displayed_slots]
-            missing_points = len(missing_slots)
+        displayed_slots = {point['scheduled_at'] for point in points if point['scheduled_at'] in expected_slots}
+        valid_slots = {point['scheduled_at'] for point in points
+                       if point['scheduled_at'] in expected_slots and point['quality'] == 'valid'}
+        valid_points = len(valid_slots)
+        displayed_points = len(displayed_slots)
+        missing_slots = [index for index, slot in enumerate(expected_slots) if slot not in valid_slots]
+        missing_points = len(missing_slots)
+        if expected_slots:
             gap_start = None
             previous_slot = None
             for slot in missing_slots:
@@ -33552,8 +33594,8 @@ def station_monitoring_trend(site_id):
                     gap_start = slot
                 elif slot != previous_slot + 1:
                     gap_end = previous_slot
-                    gap_from = start_time + timedelta(seconds=gap_start * interval)
-                    gap_to = start_time + timedelta(seconds=gap_end * interval)
+                    gap_from = datetime.fromisoformat(expected_slots[gap_start])
+                    gap_to = datetime.fromisoformat(expected_slots[gap_end])
                     gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
                                  'seconds': (gap_to - gap_from).total_seconds(),
                                  'missing_points': gap_end - gap_start + 1})
@@ -33561,17 +33603,22 @@ def station_monitoring_trend(site_id):
                 previous_slot = slot
             if gap_start is not None:
                 gap_end = previous_slot
-                gap_from = start_time + timedelta(seconds=gap_start * interval)
-                gap_to = start_time + timedelta(seconds=gap_end * interval)
+                gap_from = datetime.fromisoformat(expected_slots[gap_start])
+                gap_to = datetime.fromisoformat(expected_slots[gap_end])
                 gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
                              'seconds': (gap_to - gap_from).total_seconds(),
                              'missing_points': gap_end - gap_start + 1})
         return jsonify({
-            'site_id': site_id, 'metric': metric, 'points': points, 'coverage': {
-                'state': 'configured' if interval else 'unconfigured', 'expected_interval_seconds': interval,
+            'site_id': site_id, 'metric': metric,
+            'factor_name_cn': _STATION_MONITORING_FACTOR_LABELS.get(metric, '监测因子'),
+            'standard_unit': configurations[0].get('standard_unit') or '',
+            'points': points, 'coverage': {
+                'state': 'configured' if expected_slots or all(item.get('schedule_id') for item in configurations) else 'unconfigured',
+                'expected_interval_seconds': interval,
                 'valid_points': valid_points, 'displayed_points': displayed_points, 'expected_points': expected_points,
-                'coverage_rate': displayed_points / expected_points if expected_points else None,
+                'coverage_rate': valid_points / expected_points if expected_points else None,
                 'gap_count': len(gaps), 'missing_points': missing_points,
+                **diagnostics,
                 'window_start': start, 'window_end': end, 'point_limit': point_limit,
             }, 'gaps': gaps, 'normalization_version': points[-1]['normalization_version'] if points else None,
         })

@@ -244,5 +244,9 @@ export const api = {
     return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
   },
   stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
+  stationMonitoringTrend: (siteId, metric, options = {}) => {
+    const params = new URLSearchParams({ metric });
+    return strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/trend?${params}`, options);
+  },
   stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),
 };

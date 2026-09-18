@@ -11,10 +11,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hj212_parser import HJ212_PARSER_VERSION, build_hj212_9011_response, hj212_crc, parse_hj212_frame
 from ingestion_framing import extract_ingestion_frames
-from migrate_station_ingestion import apply_migration
+from migrate_station_ingestion import HJ212_LEGACY_005_MIGRATION_VERSION, apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code
 from sl651_server import IngestionStorage, StationIngestServer, credential_hmac
-from station_monitoring import normalize_raw_frame
+from station_monitoring import (HISTORICAL_REPROJECTION_VERSION, NORMALIZATION_VERSION,
+                                current_factor_configurations, normalize_raw_frame,
+                                reproject_historical_business_observations)
 
 
 def make_hj212(*, station="TEST-HJ212-01", password="testpw", command="2011", qn="20260911164900001",
@@ -145,13 +147,20 @@ class HJ212IngestionContractTest(unittest.TestCase):
             )
             for code in (
                 "HJ212:w01001", "HJ212:w01010", "HJ212:w01019-Rtd", "HJ212:w21001", "HJ212:w21003",
-                "HJ212:w21011", "HJ212:022", "HJ212:027", "HJ212:029", "HJ212:030",
+                "HJ212:w21011", "HJ212:005", "HJ212:022", "HJ212:027", "HJ212:029", "HJ212:030",
             ):
                 connection.execute(
                     """INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
                        effective_from,enabled) VALUES (?,?,?,?,?,1)""",
                     (endpoint_id, code, 60, 0, "2020-01-01T00:00:00+00:00"),
                 )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',600,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
             connection.commit()
         self.storage = IngestionStorage(self.database, self.pepper)
         self.server = StationIngestServer(self.storage, host="127.0.0.1", port=0)
@@ -164,11 +173,11 @@ class HJ212IngestionContractTest(unittest.TestCase):
             return [row[0] for row in connection.execute("SELECT id FROM ingest_raw_frames ORDER BY id")]
 
     def test_authenticated_2011_is_retained_normalized_and_duplicate_safe(self):
-        raw = make_hj212(factors=";".join((
+        raw = make_hj212(data_time="20260911160000", factors=";".join((
             "w01001-Rtd=0,Flag=N", "w01010-Rtd=20.5,Flag=N", "w01019-Rtd=1.2,Flag=F", "005-Rtd=3,Flag=N",
         )))
-        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:49:05+00:00"))
-        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:49:06+00:00"))
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:09:05+00:00"))
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:09:06+00:00"))
         first, second = self._raw_ids()
         self.assertEqual(normalize_raw_frame(self.database, first), "partial")
         self.assertEqual(normalize_raw_frame(self.database, second), "not_projectable")
@@ -181,18 +190,26 @@ class HJ212IngestionContractTest(unittest.TestCase):
                 "SELECT protocol_code,business_metric,standard_unit,quality,is_published,standard_value FROM observation_values ORDER BY protocol_code"
             ).fetchall()
             issues = {row[0] for row in connection.execute("SELECT issue_type FROM monitoring_quality_issues")}
+            business = connection.execute(
+                "SELECT protocol_code,timeliness,slot_state FROM monitoring_business_observations ORDER BY protocol_code"
+            ).fetchall()
         self.assertEqual(protocol, ("hj212", HJ212_PARSER_VERSION))
         self.assertEqual(attempt, (HJ212_PARSER_VERSION, "parsed_header"))
         self.assertEqual(raws, [("authenticated", "accepted"), ("authenticated", "duplicate")])
         self.assertEqual(batch[:2], (2011, 0))
-        self.assertEqual(batch[2], "2026-09-11T08:49:00+00:00")
+        self.assertEqual(batch[2], "2026-09-11T08:00:00+00:00")
         self.assertEqual(values, [
+            ("HJ212:005", "dissolved_oxygen", "mg/L", "valid", 1, 3.0),
             ("HJ212:w01001", "ph", "pH", "valid", 1, 0.0),
             ("HJ212:w01010", "water_temp", "degC", "valid", 1, 20.5),
         ])
         self.assertIn("hj212_flag_fault", issues)
-        self.assertIn("unmapped_factor", issues)
-        self.assertNotIn("dissolved_oxygen", {row[1] for row in values})
+        self.assertNotIn("unmapped_factor", issues)
+        self.assertEqual(business, [
+            ("HJ212:005", "on_time", "selected"),
+            ("HJ212:w01001", "on_time", "selected"),
+            ("HJ212:w01010", "on_time", "selected"),
+        ])
 
     def test_real_cp_shape_only_projects_n_and_leaves_d_f_as_quality_evidence(self):
         raw = make_real_shape_hj212(cp=";".join((
@@ -204,8 +221,10 @@ class HJ212IngestionContractTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             values = connection.execute("SELECT protocol_code,quality FROM observation_values ORDER BY protocol_code").fetchall()
             issues = {row[0] for row in connection.execute("SELECT issue_type FROM monitoring_quality_issues")}
+            business_count = connection.execute("SELECT COUNT(*) FROM monitoring_business_observations").fetchone()[0]
         self.assertEqual(values, [("HJ212:w01001", "valid")])
         self.assertIn("hj212_flag_fault", issues)
+        self.assertEqual(business_count, 0)
 
     def test_only_permanganate_realtime_value_can_be_mapped_or_projected(self):
         raw = make_hj212(factors=";".join((
@@ -234,7 +253,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
                 )
         self.assertEqual(definitions, [("HJ212:w01019-Rtd",)])
         self.assertEqual(mappings, [
-            ("HJ212:022",), ("HJ212:027",), ("HJ212:029",), ("HJ212:030",),
+            ("HJ212:005",), ("HJ212:022",), ("HJ212:027",), ("HJ212:029",), ("HJ212:030",),
             ("HJ212:w01001",), ("HJ212:w01010",), ("HJ212:w01019-Rtd",),
             ("HJ212:w21001",), ("HJ212:w21003",), ("HJ212:w21011",),
         ])
@@ -255,12 +274,171 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ).fetchall()
             issues = {row[0] for row in connection.execute("SELECT issue_type FROM monitoring_quality_issues")}
         self.assertEqual(values, [
+            ("HJ212:005", "dissolved_oxygen", "mg/L", "valid", 1),
             ("HJ212:w21001", "total_nitrogen", "mg/L", "valid", 1),
             ("HJ212:w21003", "ammonia", "mg/L", "valid", 1),
             ("HJ212:w21011", "total_phosphorus", "mg/L", "valid", 1),
         ])
         self.assertIn("hj212_flag_fault", issues)
-        self.assertIn("unmapped_factor", issues)
+        self.assertNotIn("unmapped_factor", issues)
+
+    def test_legacy_005_fault_is_not_published(self):
+        raw = make_hj212(data_time="20260911160000", factors="005-Rtd=7.25,Flag=F")
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:53:00+00:00"))
+        self.assertEqual(normalize_raw_frame(self.database, self._raw_ids()[0]), "partial")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM observation_values WHERE protocol_code='HJ212:005'"
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT issue_type FROM monitoring_quality_issues WHERE raw_frame_id=?",
+                (self._raw_ids()[0],),
+            ).fetchone()[0], "hj212_flag_fault")
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM monitoring_business_observations"
+            ).fetchone()[0], 0)
+
+    def test_legacy_005_historical_replay_adds_dissolved_oxygen_once(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_id = connection.execute(
+                "SELECT id FROM trusted_endpoints WHERE station_code=?", (self.station,)
+            ).fetchone()[0]
+            connection.execute(
+                "DELETE FROM monitoring_factor_mappings WHERE endpoint_id=? AND protocol_code='HJ212:005'",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,effective_from,enabled)
+                   VALUES (?, 'HJ212:w01009', 60, 0, '2020-01-01T00:00:00+00:00', 1)""",
+                (endpoint_id,),
+            )
+            connection.execute("DELETE FROM monitoring_factor_definitions WHERE protocol_code='HJ212:005'")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE version=?", (HJ212_LEGACY_005_MIGRATION_VERSION,)
+            )
+            connection.commit()
+        raw = make_hj212(data_time="20260911160000", factors="005-Rtd=7.25,Flag=N")
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:54:00+00:00"))
+        raw_id = self._raw_ids()[0]
+        self.assertEqual(normalize_raw_frame(
+            self.database, raw_id, normalization_version=NORMALIZATION_VERSION
+        ), "partial")
+        applied, _ = apply_migration(self.database, self.root / "replay-backups")
+        self.assertTrue(applied)
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), "already_normalized")
+        first_replay = reproject_historical_business_observations(self.database)
+        second_replay = reproject_historical_business_observations(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            current = connection.execute(
+                "SELECT COUNT(*) FROM observation_batches WHERE raw_frame_id=? AND is_current=1", (raw_id,)
+            ).fetchone()[0]
+            values = connection.execute(
+                """SELECT protocol_code,business_metric,standard_unit,standard_value
+                   FROM observation_values WHERE is_current=1"""
+            ).fetchall()
+            issue = connection.execute(
+                """SELECT status FROM monitoring_quality_issues
+                   WHERE raw_frame_id=? AND issue_type='unmapped_factor'""", (raw_id,)
+            ).fetchone()
+            business = connection.execute(
+                """SELECT protocol_code,business_metric,standard_unit,standard_value,slot_state,is_current
+                   FROM monitoring_business_observations"""
+            ).fetchall()
+        self.assertEqual(current, 1)
+        self.assertEqual(values, [("HJ212:005", "dissolved_oxygen", "mg/L", 7.25)])
+        self.assertEqual(issue, ("resolved",))
+        self.assertEqual(business, [("HJ212:005", "dissolved_oxygen", "mg/L", 7.25, "selected", 1)])
+        self.assertEqual(first_replay, {
+            'eligible': 1, 'reprojected': 1, 'already_reprojected': 0, 'deferred': 0,
+            'business_projected': 0, 'business_deferred': 0,
+        })
+        self.assertEqual(second_replay, {
+            'eligible': 1, 'reprojected': 0, 'already_reprojected': 1, 'deferred': 0,
+            'business_projected': 0, 'business_deferred': 0,
+        })
+        self.assertEqual(HISTORICAL_REPROJECTION_VERSION, 'station-monitoring-historical-business-v1')
+
+    def test_historical_reprojection_resumes_after_business_period_is_configured(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('DELETE FROM monitoring_business_schedules')
+            connection.commit()
+        raw = make_hj212(data_time="20260911160000", factors="005-Rtd=7.25,Flag=N")
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:05:00+00:00"))
+        raw_id = self._raw_ids()[0]
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        first = reproject_historical_business_observations(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM monitoring_business_observations').fetchone()[0], 0)
+            config = next(item for item in current_factor_configurations(connection, 1)
+                          if item['business_metric'] == 'dissolved_oxygen')
+            endpoint_id = connection.execute('SELECT id FROM trusted_endpoints').fetchone()[0]
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,effective_from)
+                   VALUES (?,'HJ212:005','Asia/Shanghai',14400,'00:00:00',600,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+        self.assertIsNone(config['expected_interval_seconds'])
+        self.assertIsNone(config['schedule_id'])
+        second = reproject_historical_business_observations(self.database)
+        third = reproject_historical_business_observations(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM monitoring_business_observations').fetchone()[0], 1)
+        self.assertEqual(first, {
+            'eligible': 1, 'reprojected': 1, 'already_reprojected': 0, 'deferred': 0,
+            'business_projected': 0, 'business_deferred': 0,
+        })
+        self.assertEqual(second, {
+            'eligible': 1, 'reprojected': 0, 'already_reprojected': 1, 'deferred': 0,
+            'business_projected': 1, 'business_deferred': 0,
+        })
+        self.assertEqual(third, {
+            'eligible': 1, 'reprojected': 0, 'already_reprojected': 1, 'deferred': 0,
+            'business_projected': 0, 'business_deferred': 0,
+        })
+
+    def test_dissolved_oxygen_aliases_share_one_business_factor_and_conflict_safely(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_id = connection.execute('SELECT id FROM trusted_endpoints').fetchone()[0]
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,effective_from,enabled)
+                   VALUES (?,'HJ212:w01009',60,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.commit()
+        same = make_hj212(
+            qn='20260911160000001', data_time='20260911160000',
+            factors='005-Rtd=7.25,Flag=N;w01009-Rtd=7.25,Flag=N')
+        conflict = make_hj212(
+            qn='20260911200000001', data_time='20260911200000',
+            factors='005-Rtd=7.25,Flag=N;w01009-Rtd=7.35,Flag=N')
+        self.assertIsNone(self.server._process_raw(same, '2026-09-11T08:05:00+00:00'))
+        self.assertIsNone(self.server._process_raw(conflict, '2026-09-11T12:05:00+00:00'))
+        for raw_id in self._raw_ids():
+            self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            configs = [item for item in current_factor_configurations(connection, 1)
+                       if item['business_metric'] == 'dissolved_oxygen']
+            rows = connection.execute(
+                """SELECT scheduled_at,protocol_code,slot_state FROM monitoring_business_observations
+                   WHERE business_metric='dissolved_oxygen' ORDER BY scheduled_at,protocol_code""").fetchall()
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]['protocol_codes'], ['HJ212:w01009', 'HJ212:005'])
+        self.assertEqual([tuple(row) for row in rows], [
+            ('2026-09-11T08:00:00+00:00', 'HJ212:005', 'duplicate'),
+            ('2026-09-11T08:00:00+00:00', 'HJ212:w01009', 'selected'),
+            ('2026-09-11T12:00:00+00:00', 'HJ212:005', 'conflict'),
+            ('2026-09-11T12:00:00+00:00', 'HJ212:w01009', 'conflict'),
+        ])
 
     def test_3020_response_requires_authenticated_durable_receipt(self):
         raw = make_hj212(command="3020", factors="")

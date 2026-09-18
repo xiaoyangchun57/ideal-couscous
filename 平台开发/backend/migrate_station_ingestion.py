@@ -21,11 +21,13 @@ MIGRATIONS = (
     ("20260911_003_hj212_protocol", Path(__file__).with_name("migrations") / "20260911_003_hj212_protocol.sql"),
     ("20260912_004_monitoring_retention", Path(__file__).with_name("migrations") / "20260912_004_monitoring_retention.sql"),
     ("20260912_005_retention_recovery", Path(__file__).with_name("migrations") / "20260912_005_retention_recovery.sql"),
+    ("20260918_006_hj212_legacy_005_dissolved_oxygen", Path(__file__).with_name("migrations") / "20260918_006_hj212_legacy_005_dissolved_oxygen.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
 RETENTION_MIGRATION_VERSION = "20260912_004_monitoring_retention"
 RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
+HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_oxygen"
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
 STATION_INGESTION_TABLES = frozenset({
     "schema_migrations",
@@ -49,6 +51,8 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_raw_archive_part_frames",
     "monitoring_hourly_value_series",
     "monitoring_storage_health",
+    "monitoring_business_schedules",
+    "monitoring_business_observations",
 })
 
 
@@ -199,6 +203,7 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
         "monitoring_endpoint_profiles", "monitoring_factor_definitions", "monitoring_factor_mappings",
         "observation_batches", "observation_values", "monitoring_status_events", "monitoring_quality_issues",
         "monitoring_normalization_retries",
+        "monitoring_business_schedules", "monitoring_business_observations",
     }
     existing = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     missing = required - existing
@@ -224,9 +229,15 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not recovery or recovery[0] != migration_checksum(RETENTION_RECOVERY_MIGRATION_VERSION):
         raise MigrationError("monitoring retention recovery migration is missing or incompatible")
+    legacy_005 = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (HJ212_LEGACY_005_MIGRATION_VERSION,)
+    ).fetchone()
+    if not legacy_005 or legacy_005[0] != migration_checksum(HJ212_LEGACY_005_MIGRATION_VERSION):
+        raise MigrationError("HJ212 legacy dissolved oxygen migration is missing or incompatible")
     _require_unique_columns(connection, "observation_batches", ("raw_frame_id", "normalization_version"))
     _require_unique_columns(connection, "observation_batches", ("endpoint_id", "idempotency_key", "normalization_version"))
     _require_unique_columns(connection, "monitoring_normalization_retries", ("raw_frame_id", "normalization_version"))
+    _require_unique_columns(connection, "monitoring_business_observations", ("source_observation_value_id",))
     current_index = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_observation_current_raw'"
     ).fetchone()
@@ -236,6 +247,8 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     required_triggers = {
         "reject_overlapping_monitoring_factor_mapping_insert": "BEFOREINSERTONMONITORING_FACTOR_MAPPINGS",
         "reject_overlapping_monitoring_factor_mapping_update": "BEFOREUPDATEOFENDPOINT_ID,PROTOCOL_CODE,EFFECTIVE_FROM,EFFECTIVE_TO,ENABLEDONMONITORING_FACTOR_MAPPINGS",
+        "reject_overlapping_business_schedule_insert": "BEFOREINSERTONMONITORING_BUSINESS_SCHEDULES",
+        "reject_overlapping_business_schedule_update": "BEFOREUPDATEOFENDPOINT_ID,PROTOCOL_CODE,EFFECTIVE_FROM,EFFECTIVE_TO,ENABLEDONMONITORING_BUSINESS_SCHEDULES",
     }
     triggers = {
         row[0]: "".join(str(row[1]).upper().split())
@@ -245,7 +258,9 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     if missing_triggers:
         raise MigrationError(f"missing required monitoring triggers: {', '.join(sorted(missing_triggers))}")
     for trigger, operation in required_triggers.items():
-        if operation not in triggers[trigger] or "RAISE(ABORT,'OVERLAPPINGFACTORMAPPING')" not in triggers[trigger]:
+        expected_error = ("RAISE(ABORT,'OVERLAPPINGBUSINESSSCHEDULE')"
+                          if "business_schedule" in trigger else "RAISE(ABORT,'OVERLAPPINGFACTORMAPPING')")
+        if operation not in triggers[trigger] or expected_error not in triggers[trigger]:
             raise MigrationError(f"invalid required monitoring trigger: {trigger}")
 
 
@@ -376,7 +391,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--backup-dir", required=True, type=Path)
-    parser.add_argument("--check", action="store_true")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--check", action="store_true")
+    action.add_argument("--reproject-business-history", action="store_true")
     parser.add_argument("--isolated-test", action="store_true", help="allow only a temporary isolated empty SQLite database")
     arguments = parser.parse_args()
     if arguments.check:
@@ -389,6 +406,19 @@ def main() -> int:
         arguments.backup_dir,
         isolated_test=arguments.isolated_test,
     )
+    if arguments.reproject_business_history:
+        try:
+            from .station_monitoring import reproject_historical_business_observations
+        except ImportError:  # pragma: no cover - direct script execution
+            from station_monitoring import reproject_historical_business_observations
+        result = reproject_historical_business_observations(arguments.database)
+        print(
+            f"business-history eligible={result['eligible']} reprojected={result['reprojected']} "
+            f"already={result['already_reprojected']} deferred={result['deferred']} "
+            f"business_projected={result['business_projected']} "
+            f"business_deferred={result['business_deferred']}"
+        )
+        return 2 if result['deferred'] or result['business_deferred'] else 0
     print("already-applied" if not applied else f"applied backup={backup.name}")
     return 0
 

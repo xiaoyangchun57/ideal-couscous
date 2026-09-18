@@ -37,6 +37,18 @@ class StationIngestionMigrationTest(unittest.TestCase):
             migration.verify_station_ingestion_schema(connection)
             migration.verify_station_monitoring_schema(connection)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
+            legacy = connection.execute(
+                """SELECT business_metric,standard_unit,is_published
+                   FROM monitoring_factor_definitions WHERE protocol_code='HJ212:005'"""
+            ).fetchone()
+            self.assertEqual(legacy, ('dissolved_oxygen', 'mg/L', 1))
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version=?",
+                    (migration.HJ212_LEGACY_005_MIGRATION_VERSION,),
+                ).fetchone()[0],
+                1,
+            )
         self.assertEqual(self._run_check(self.database), 0)
         second_applied, second_backup = migration.apply_migration(self.database, self.backups)
         self.assertFalse(second_applied)
@@ -63,6 +75,8 @@ class StationIngestionMigrationTest(unittest.TestCase):
         for trigger in (
             "reject_overlapping_monitoring_factor_mapping_insert",
             "reject_overlapping_monitoring_factor_mapping_update",
+            "reject_overlapping_business_schedule_insert",
+            "reject_overlapping_business_schedule_update",
         ):
             with self.subTest(trigger=trigger):
                 database = self.root / f"{trigger}.db"
@@ -81,6 +95,41 @@ class StationIngestionMigrationTest(unittest.TestCase):
             connection.commit()
             with self.assertRaisesRegex(migration.MigrationError, "current raw frame"):
                 migration.verify_station_monitoring_schema(connection)
+
+    def test_business_schedule_migration_only_seeds_confirmed_factor_periods(self):
+        migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('DROP TABLE monitoring_business_observations')
+            connection.execute('DROP TABLE monitoring_business_schedules')
+            connection.execute(
+                'DELETE FROM schema_migrations WHERE version=?',
+                (migration.HJ212_LEGACY_005_MIGRATION_VERSION,),
+            )
+            endpoint = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('SCHEDULE-TEST','isolated',1,'bound')""")
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,effective_from)
+                   VALUES (?,1,'Asia/Shanghai','2020-01-01T00:00:00+00:00')""",
+                (endpoint.lastrowid,),
+            )
+            connection.executemany(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,effective_from)
+                   VALUES (?,?,?,'2020-01-01T00:00:00+00:00')""",
+                ((endpoint.lastrowid, 'HJ212:w01001', 60),
+                 (endpoint.lastrowid, 'HJ212:w01010', 3600)),
+            )
+            connection.commit()
+        applied, _ = migration.apply_migration(self.database, self.root / 'confirmed-backups')
+        self.assertTrue(applied)
+        with closing(sqlite3.connect(self.database)) as connection:
+            schedules = connection.execute(
+                """SELECT protocol_code,interval_seconds FROM monitoring_business_schedules
+                   ORDER BY protocol_code""").fetchall()
+        self.assertEqual(schedules, [('HJ212:w01010', 3600)])
 
     def test_missing_target_path_is_rejected_without_creating_sqlite_file(self):
         missing = self.root / "not-created" / "water.db"
