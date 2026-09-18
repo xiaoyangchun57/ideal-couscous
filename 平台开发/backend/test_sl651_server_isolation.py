@@ -23,7 +23,7 @@ import app as web_app
 import migrate_station_ingestion as migration
 from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_observation_time, encode_bcd_time, encode_station_code, parse_frame
-from hj212_parser import build_hj212_9011_response, parse_hj212_frame
+from hj212_parser import build_hj212_9011_response, hj212_crc, parse_hj212_frame
 import sl651_server as ingest_server
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, _listener_healthcheck, credential_hmac
 
@@ -44,7 +44,7 @@ def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=No
 def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001"):
     cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
     body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
-    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
 class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):

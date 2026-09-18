@@ -9,7 +9,7 @@ from unittest import mock
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from hj212_parser import HJ212_PARSER_VERSION, build_hj212_9011_response, parse_hj212_frame
+from hj212_parser import HJ212_PARSER_VERSION, build_hj212_9011_response, hj212_crc, parse_hj212_frame
 from ingestion_framing import extract_ingestion_frames
 from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code
@@ -23,13 +23,13 @@ def make_hj212(*, station="TEST-HJ212-01", password="testpw", command="2011", qn
         f"QN={qn};ST=91;CN={command};PW={password};MN={station};Flag=5;DataTime={data_time};"
         f"CP=&&{factors}&&"
     ).encode("ascii")
-    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
 def make_real_shape_hj212(*, station="TEST-HJ212-01", password="testpw", command="2011", qn="20260911164900001",
                          cp="DataTime=20260911164900;w01001-Rtd=0;w01001-Flag=N"):
     body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};Flag=5;CP=&&{cp}&&".encode("ascii")
-    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
 def make_binary_frame(station="0012345678", password=b"\x12\x34"):
@@ -40,6 +40,10 @@ def make_binary_frame(station="0012345678", password=b"\x12\x34"):
 
 
 class HJ212ParserTest(unittest.TestCase):
+    def test_appendix_a_crc_vector_and_old_modbus_crc_are_distinct(self):
+        self.assertEqual(hj212_crc(b"123456789"), "2F80")
+        self.assertNotEqual(hj212_crc(b"123456789"), f"{crc16_modbus(b'123456789'):04X}")
+
     def test_real_cp_data_time_and_factor_qualified_flags_are_structurally_compatible(self):
         frame = parse_hj212_frame(make_real_shape_hj212(cp=";".join((
             "DataTime=20260911164900", "w01001-Rtd=0", "w01001-Flag=N",
@@ -82,7 +86,7 @@ class HJ212ParserTest(unittest.TestCase):
         length = int(response[2:6])
         body = response[6:6 + length]
         self.assertEqual(body, b"ST=91;CN=9011;CP=&&QnRtn=1&&")
-        self.assertEqual(response[6 + length:10 + length], f"{crc16_modbus(body):04X}".encode("ascii"))
+        self.assertEqual(response[6 + length:10 + length], hj212_crc(body).encode("ascii"))
         self.assertEqual(response[10 + length:], b"\r\n")
 
     def test_framing_recovers_after_noise_and_keeps_binary_and_text_frames(self):
@@ -105,6 +109,14 @@ class HJ212ParserTest(unittest.TestCase):
         broken_crc[-3] = ord("0") if broken_crc[-3] != ord("0") else ord("1")
         with self.assertRaisesRegex(Exception, "CRC"):
             parse_hj212_frame(bytes(broken_crc))
+
+    def test_old_modbus_crc_frame_is_rejected(self):
+        valid = make_hj212()
+        body_length = int(valid[2:6])
+        body = valid[6:6 + body_length]
+        old_crc_frame = valid[:6 + body_length] + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+        with self.assertRaisesRegex(Exception, "CRC"):
+            parse_hj212_frame(old_crc_frame)
 
 
 class HJ212IngestionContractTest(unittest.TestCase):

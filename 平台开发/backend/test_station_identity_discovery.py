@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from migrate_station_ingestion import apply_migration
-from sl651_parser import crc16_modbus
+from hj212_parser import hj212_crc
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, credential_hmac
 import station_ingest_discovery as discovery
 import station_ingest_provision as provision
@@ -38,7 +38,7 @@ def write_workbook(path: Path, rows):
 def make_hj212(*, station="IDENTITY-MN", password="synthetic-password", qn="20260911164900001"):
     cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N;005-Rtd=3.0;005-Flag=N"
     body = f"QN={qn};ST=91;CN=2011;PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
-    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
 class StationIdentityAndDiscoveryTest(unittest.IsolatedAsyncioTestCase):

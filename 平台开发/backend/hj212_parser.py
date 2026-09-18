@@ -6,13 +6,13 @@ from datetime import datetime
 import re
 
 try:
-    from .sl651_parser import FrameError, MAX_FRAME_BYTES, crc16_modbus
+    from .sl651_parser import FrameError, MAX_FRAME_BYTES
 except ImportError:  # pragma: no cover - direct module execution
-    from sl651_parser import FrameError, MAX_FRAME_BYTES, crc16_modbus
+    from sl651_parser import FrameError, MAX_FRAME_BYTES
 
 
 HJ212_HEAD = b"##"
-HJ212_PARSER_VERSION = "hj212-text-v1"
+HJ212_PARSER_VERSION = "hj212-text-v2"
 _LENGTH_BYTES = 4
 _TRAILER_BYTES = 6  # Four ASCII CRC digits followed by CRLF.
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -69,6 +69,16 @@ def _decode_ascii(value: bytes, code: str) -> str:
         return value.decode("ascii")
     except UnicodeDecodeError as exc:
         raise FrameError(code, "HJ212 text is not ASCII") from exc
+
+
+def hj212_crc(data: bytes) -> str:
+    """Return the HJ212-2017 Appendix A CRC as four uppercase hex digits."""
+    crc = 0xFFFF
+    for value in data:
+        crc = (crc >> 8) ^ value
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return f"{crc & 0xFFFF:04X}"
 
 
 def _parse_pairs(text: str, *, error_code: str) -> dict[str, str]:
@@ -157,7 +167,7 @@ def build_hj212_9011_response(frame: ParsedHJ212Frame) -> bytes:
     """Build only the application response confirmed for authenticated CN=3020."""
     del frame  # The evidence does not establish that request fields must be echoed.
     body = b"ST=91;CN=9011;CP=&&QnRtn=1&&"
-    return b"##" + f"{len(body):04d}".encode("ascii") + body + f"{crc16_modbus(body):04X}".encode("ascii") + b"\r\n"
+    return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
 def parse_hj212_frame(raw: bytes) -> ParsedHJ212Frame:
@@ -171,7 +181,7 @@ def parse_hj212_frame(raw: bytes) -> ParsedHJ212Frame:
         raise FrameError("hj212_missing_terminator", "HJ212 frame terminator is invalid")
     if not re.fullmatch(r"[0-9A-F]{4}", supplied):
         raise FrameError("hj212_invalid_crc", "HJ212 CRC is not hexadecimal")
-    if f"{crc16_modbus(body):04X}" != supplied:
+    if hj212_crc(body) != supplied:
         raise FrameError("hj212_crc_mismatch", "HJ212 CRC check failed")
     text = _decode_ascii(body, "hj212_non_ascii")
     if ";CP=&&" not in text or not text.endswith("&&"):
