@@ -2,7 +2,8 @@
 
 > 本文件不是产品台账副本，不记录历史、状态矩阵或产品结论。
 
-- 唯一权威产品台账：`E:\杂七杂八\水质运维\平台开发\docs\PRODUCT_WORK_LEDGER.md`
-- 当前开发树执行交接：`E:\杂七杂八\水质运维-开发线\平台开发\docs\WEB_SITE_IDENTITY_PLAN_SEED_MOBILE_HOME_OVERVIEW_DEVELOPMENT_HANDOFF_20260921.md`
-- 当前执行状态和写入权只以产品树台账及上述开发交接为准；本指针本身不授予代码、生产、端口或发布权限。
+- 唯一权威产品台账由产品主任务维护，不随开发分支复制。
+- 远程协作总入口：`平台开发/docs/workstreams/README.md`。
+- 当前任务分别读取同目录下的 `A_CURRENT.md`、`B_CURRENT.md`、`C_CURRENT.md`、`MAIN_CURRENT.md` 或 `DESIGN_CURRENT.md`；不得依赖其他人的本机路径拼接上下文。
+- 当前执行状态和写入权以协作总入口及本人 `CURRENT` 文件为准；本指针不授予生产、端口、发布或跨任务写入权限。
 - 本文件只由产品主任务随开发交接切换更新；开发任务不得在此维护第二份台账。
