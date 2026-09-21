@@ -23,7 +23,10 @@ require('../pages/site/site.js');
 
 function createPage() {
   const page = Object.assign({}, definition, { data: JSON.parse(JSON.stringify(definition.data)) });
-  page.setData = patch => Object.assign(page.data, patch);
+  page.setData = (patch, done) => {
+    Object.assign(page.data, patch);
+    if (done) done();
+  };
   return page;
 }
 
@@ -55,7 +58,7 @@ function createPage() {
     let inventoryCalls = 0;
     api.siteTasks = id => {
       siteTaskCalls += 1;
-      return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } });
+      return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', can_calibrate: true } });
     };
     api.siteProfile = id => {
       profileCalls += 1;
@@ -77,6 +80,14 @@ function createPage() {
     assert.equal(profileCalls, 1);
     assert.equal(monitoringCalls, 0, 'inspection source must not request monitoring');
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
+
+    const calibrationPage = createPage();
+    let calibrationCalls = 0;
+    calibrationPage.onCalibrate = () => { calibrationCalls += 1; };
+    calibrationPage.onLoad({ site_id: '20', source: 'inspection_calibration', action: 'calibrate' });
+    await flush();
+    assert.equal(calibrationPage.data.readOnlySource, false);
+    assert.equal(calibrationCalls, 1, 'check-in calibration route opens the existing calibration action once');
 
     const staleSourcePage = createPage();
     staleSourcePage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
@@ -127,8 +138,8 @@ function createPage() {
     await flush();
     assert.equal(standardPage.data.readOnlySource, false);
     assert.equal(standardPage.data.site.id, 20);
-    assert.equal(siteTaskCalls, 1);
-    assert.equal(inventoryCalls, 1, 'existing site entry preserves parts-application loading');
+    assert.equal(siteTaskCalls, 2);
+    assert.equal(inventoryCalls, 2, 'calibration and existing site entries preserve normal site loading');
 
     const standardPending = [];
     api.siteTasks = () => new Promise(resolve => standardPending.push(resolve));

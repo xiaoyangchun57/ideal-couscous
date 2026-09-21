@@ -116,6 +116,118 @@
       <view class="link-btn" bindtap="goPlan">查看全部计划 ›</view>
     </view>
 
+    <view class="section-header">
+      <text class="section-title">运维概览</text>
+    </view>
+    <view class="ov-group card">
+      <!-- 站点数据 -->
+      <view class="ov-row" bindtap="goResponsibleSites">
+        <view class="ov-row-left">
+          <image class="ov-icon" src="/images/overview/icon-site.svg" mode="aspectFit" />
+          <text class="ov-title">站点数据</text>
+        </view>
+        <view class="ov-row-right">
+          <block wx:if="{{stationsState === 'initial_loading'}}">
+            <text class="ov-loading">加载中…</text>
+          </block>
+          <block wx:elif="{{stationSummary}}">
+            <text class="ov-value">{{stationSummary.total}} 个站点</text>
+          </block>
+          <block wx:elif="{{stationsState === 'not_enabled'}}">
+            <text class="ov-value ov-value--muted">监测未启用</text>
+          </block>
+          <block wx:else>
+            <view class="ov-fail">
+              <text class="ov-fail-tx">加载失败</text>
+              <text class="ov-fail-retry" catchtap="onRetryStations">重试</text>
+            </view>
+          </block>
+          <text class="ov-chevron">›</text>
+        </view>
+      </view>
+      <!-- 站点数据：分布副信息 -->
+      <view class="ov-sub" wx:if="{{stationSummary}}">
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--success"></text>
+          正常 {{stationSummary.normal}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--warning"></text>
+          需关注 {{stationSummary.attention}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--gray"></text>
+          暂无有效数据 {{stationSummary.unavailable}}
+        </text>
+      </view>
+      <!-- 站点数据：未启用中性提示 -->
+      <view class="ov-sub ov-sub--muted" wx:if="{{stationsState === 'not_enabled'}}">
+        <text class="ov-sub-muted-tx">站点档案正常可用，监测数据待开通</text>
+      </view>
+      <view class="ov-refresh-fail" wx:if="{{stationsState === 'refresh_error' && stationSummary}}" catchtap="onRetryStations">
+        <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+      </view>
+
+      <!-- 分隔线 -->
+      <view class="ov-divider" wx:if="{{stationSummary || stationsState !== 'initial_loading'}}"></view>
+
+      <!-- 试剂情况 -->
+      <view class="ov-row" bindtap="goResponsibleSitesReagent">
+        <view class="ov-row-left">
+          <image class="ov-icon" src="/images/overview/icon-reagent.svg" mode="aspectFit" />
+          <text class="ov-title">试剂情况</text>
+        </view>
+        <view class="ov-row-right">
+          <block wx:if="{{reagentsState === 'initial_loading'}}">
+            <text class="ov-loading">加载中…</text>
+          </block>
+          <block wx:elif="{{reagentSummary}}">
+            <block wx:if="{{reagentSummary.concernCount > 0}}">
+              <text class="ov-value ov-value--warning">{{reagentSummary.concernCount}} 项关注</text>
+            </block>
+            <block wx:else>
+              <text class="ov-value ov-value--success">全部正常</text>
+            </block>
+          </block>
+          <block wx:elif="{{reagentsState === 'not_enabled'}}">
+            <text class="ov-value ov-value--muted">未启用</text>
+          </block>
+          <block wx:else>
+            <view class="ov-fail">
+              <text class="ov-fail-tx">加载失败</text>
+              <text class="ov-fail-retry" catchtap="onRetryReagents">重试</text>
+            </view>
+          </block>
+          <text class="ov-chevron">›</text>
+        </view>
+      </view>
+      <!-- 试剂情况：分类分布副信息（已过期/临期/低余量，不循环明细） -->
+      <view class="ov-sub" wx:if="{{reagentSummary && reagentSummary.concernCount > 0}}">
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--error"></text>
+          已过期 {{reagentSummary.expiredCount || 0}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--warning"></text>
+          临期 {{reagentSummary.expiringCount || 0}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--yellow"></text>
+          低余量 {{reagentSummary.lowVolumeCount || 0}}
+        </text>
+      </view>
+      <view class="ov-sub ov-sub--success" wx:if="{{reagentSummary && reagentSummary.concernCount === 0}}">
+        <text class="ov-sub-success-tx">✓ 有权站点试剂状态正常</text>
+      </view>
+      <!-- 试剂情况：未启用中性提示 -->
+      <view class="ov-sub ov-sub--muted" wx:if="{{reagentsState === 'not_enabled'}}">
+        <text class="ov-sub-muted-tx">试剂模块待开通</text>
+      </view>
+      <view class="ov-refresh-fail" wx:if="{{reagentsState === 'refresh_error' && reagentSummary}}" catchtap="onRetryReagents">
+        <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+      </view>
+    </view>
+
     <!-- ===== 全部工单（低强调导航行） ===== -->
     <view class="workorder-entry" bindtap="goWorkorder">
       <view class="wo-entry-icon">

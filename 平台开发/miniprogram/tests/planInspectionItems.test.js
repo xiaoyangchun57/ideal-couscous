@@ -674,7 +674,7 @@ test('change submit retries the same saved payload without another PUT after res
     submitCount += 1;
     return submitShouldFail
       ? Promise.reject({ error: '提交响应丢失，请重试' })
-      : Promise.resolve({ status: 'change_submitted', already_submitted: true });
+      : Promise.resolve({ status: 'approved', direct_applied: true, already_submitted: true });
   };
   delete require.cache[pagePath];
   require(pagePath);
@@ -718,7 +718,7 @@ test('change submit retries the same saved payload without another PUT after res
   assert.equal(page.data.version, 8);
   assert.equal(submitCount, 2);
   assert.equal(navigations, 1);
-  assert.equal(toasts.some(item => item.title === '已提交审批'), true);
+  assert.equal(toasts.some(item => item.title === '计划变更已生效'), true);
 
   api.validatePlanSchedule = originals.validate;
   api.updatePlanSchedule = originals.update;
@@ -753,7 +753,7 @@ test('change submit runs PUT again when the user edits payload after a failed PO
     submitCount += 1;
     return submitCount === 1
       ? Promise.reject({ error: '提交响应丢失' })
-      : Promise.resolve({ status: 'change_submitted' });
+      : Promise.resolve({ status: 'approved', direct_applied: true });
   };
   delete require.cache[pagePath];
   require(pagePath);

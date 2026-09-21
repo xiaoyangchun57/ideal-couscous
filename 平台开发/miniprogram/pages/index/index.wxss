@@ -1,4 +1,4 @@
-/* pages/index/index.wxss */
+﻿/* pages/index/index.wxss */
 
 /* ===== 导航栏 ===== */
 .nav-home-left {
@@ -405,6 +405,169 @@
 
 .plan-empty-card .link-btn {
   margin-top: 8rpx;
+}
+
+/* ===== 运维概览（list-group） ===== */
+.ov-group {
+  margin: 0 32rpx 20rpx;
+  padding: 0 28rpx;
+  overflow: hidden;
+}
+
+.ov-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 0;
+  transition: opacity 0.15s ease;
+}
+
+.ov-row:active {
+  opacity: 0.85;
+}
+
+.ov-row-left {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  min-width: 0;
+}
+
+.ov-icon {
+  width: 36rpx;
+  height: 36rpx;
+  flex-shrink: 0;
+}
+
+.ov-title {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  flex-shrink: 0;
+}
+
+.ov-row-right {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  flex-shrink: 0;
+  max-width: 60%;
+}
+
+.ov-value {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}
+
+.ov-value--warning {
+  color: var(--color-warning);
+}
+
+.ov-value--success {
+  color: var(--color-success);
+}
+
+.ov-value--muted {
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.ov-loading {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+}
+
+.ov-fail {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.ov-fail-tx {
+  font-size: 24rpx;
+  color: var(--color-error);
+}
+
+.ov-fail-retry {
+  font-size: 24rpx;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.ov-chevron {
+  font-size: 32rpx;
+  color: var(--color-text-disabled);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.ov-sub {
+  padding: 0 0 20rpx;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8rpx 24rpx;
+  padding-left: 52rpx;
+}
+
+.ov-sub-item {
+  font-size: 22rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  gap: 6rpx;
+}
+
+.ov-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ov-dot--success { background: var(--color-success); }
+.ov-dot--warning { background: var(--color-warning); }
+.ov-dot--error { background: var(--color-error); }
+.ov-dot--gray { background: var(--color-text-disabled); }
+.ov-dot--yellow { background: #ffcc00; }
+
+.ov-sub--success {
+  padding-left: 52rpx;
+}
+
+.ov-sub-success-tx {
+  font-size: 22rpx;
+  color: var(--color-success);
+  line-height: 1.5;
+}
+
+.ov-sub--muted {
+  padding-left: 52rpx;
+}
+
+.ov-sub-muted-tx {
+  font-size: 22rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.ov-refresh-fail {
+  padding: 0 0 20rpx;
+  padding-left: 52rpx;
+}
+
+.ov-refresh-fail-tx {
+  font-size: 22rpx;
+  color: var(--color-error);
+  line-height: 1.4;
+}
+
+.ov-divider {
+  height: 1rpx;
+  background: var(--color-divider);
+  margin-left: 52rpx;
 }
 
 /* ===== 全部工单入口（低强调导航行） ===== */

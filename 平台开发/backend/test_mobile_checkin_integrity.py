@@ -157,6 +157,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, status TEXT
                 );
                 CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vehicle_id INTEGER, document_type TEXT, valid_until TEXT
                 );
                 CREATE TABLE vehicle_applications (
@@ -185,6 +186,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
             'site_id': 1, 'lat': 30.0, 'lng': 116.0,
         })
         self.assertEqual(remote.status_code, 400, remote.json)
+        self.assertEqual(remote.json['code'], 'SITE_GEOFENCE_EXCEEDED')
 
         outside_package = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
             'site_id': 3, 'lat': 28.7000, 'lng': 115.7500,

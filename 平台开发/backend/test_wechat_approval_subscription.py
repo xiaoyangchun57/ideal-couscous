@@ -276,14 +276,6 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
             replay = self.client.post('/api/plan-schedules/50/submit',
                                       headers=self.headers('operator'), json={'version': 1})
             self.assertTrue(replay.json['already_submitted'])
-            with app_module.get_db() as db:
-                db.execute("""INSERT INTO plan_schedules VALUES
-                    (51,2,'modifying',1,'{\"2026-09-06\":{\"sites\":[10]}}','{}','weekly',
-                     '2026-09-06','2026-09-12',NULL,1,'无需用车','','',NULL,NULL,'路线调整',NULL)""")
-                db.commit()
-            change_submitted = self.client.post('/api/plan-schedules/51/submit',
-                                                 headers=self.headers('operator'), json={'version': 1})
-            self.assertEqual(change_submitted.status_code, 200, change_submitted.json)
             self.assertEqual(sender.call_count, 0)
         with app_module.get_db() as db:
             rows = db.execute("""SELECT purpose,business_id,cycle_key,page,recipient_user_id
@@ -294,9 +286,9 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
         pending = [row for row in rows if row['purpose'] == 'approval_pending']
         results = [row for row in rows if row['purpose'] == 'approval_result']
         pending_50 = [row for row in pending if row['business_id'] == '50']
-        self.assertEqual(len(pending), 3)
+        self.assertEqual(len(pending), 2)
         self.assertEqual(len(pending_50), 2)
-        self.assertEqual(len({row['cycle_key'] for row in pending}), 3)
+        self.assertEqual(len({row['cycle_key'] for row in pending}), 2)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['page'], '/pages/plan-detail/plan-detail?id=50&notification_id=2')
         self.assertNotIn('/pages/review/view', results[0]['page'])
@@ -305,7 +297,7 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
         with app_module.get_db() as db:
             change_pending = db.execute("""SELECT payload_json FROM wx_subscription_outbox
                 WHERE business_type='plan_schedule' AND business_id='51' AND purpose='approval_pending'""").fetchone()
-        self.assertEqual(json.loads(change_pending['payload_json'])['thing9']['value'], '巡检计划变更')
+        self.assertIsNone(change_pending)
         self.assertTrue(all('cycle_key=event%3A' in row['page'] for row in pending))
         with app_module.get_db() as db:
             pending_ids = [row['id'] for row in db.execute("""SELECT id FROM wx_subscription_outbox

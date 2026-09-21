@@ -22,12 +22,21 @@ MIGRATIONS = (
     ("20260912_004_monitoring_retention", Path(__file__).with_name("migrations") / "20260912_004_monitoring_retention.sql"),
     ("20260912_005_retention_recovery", Path(__file__).with_name("migrations") / "20260912_005_retention_recovery.sql"),
     ("20260918_006_hj212_legacy_005_dissolved_oxygen", Path(__file__).with_name("migrations") / "20260918_006_hj212_legacy_005_dissolved_oxygen.sql"),
+    ("20260921_007_monitoring_result_window", Path(__file__).with_name("migrations") / "20260921_007_monitoring_result_window.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
 RETENTION_MIGRATION_VERSION = "20260912_004_monitoring_retention"
 RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
 HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_oxygen"
+MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_window"
+CONTROLLED_EXISTING_SCHEMA_CHANGES = {
+    MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
+        "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
+            ADD COLUMN result_delay_seconds INTEGER NOT NULL DEFAULT 0
+            CHECK (result_delay_seconds BETWEEN 0 AND interval_seconds)""",
+    },
+}
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
 STATION_INGESTION_TABLES = frozenset({
     "schema_migrations",
@@ -146,6 +155,43 @@ def _require_existing_business_database(database: Path, *, isolated_test: bool) 
         )
 
 
+def _expected_controlled_schema_sql(before_sql: str, object_name: str, ddl: str) -> str:
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute(before_sql)
+        connection.execute(ddl)
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (object_name,)
+        ).fetchone()
+    if row is None:
+        raise MigrationError("controlled migration schema validation failed")
+    return str(row[0])
+
+
+def _verify_existing_schema_changes(
+    before_schema: dict[str, str], after_schema: dict[str, str], pending_versions: tuple[str, ...],
+) -> None:
+    changed_existing = {
+        name for name, sql in before_schema.items()
+        if name in after_schema and after_schema[name] != sql
+    }
+    expected_changes: dict[str, str] = {}
+    for version in pending_versions:
+        for object_name, ddl in CONTROLLED_EXISTING_SCHEMA_CHANGES.get(version, {}).items():
+            before_sql = before_schema.get(object_name)
+            if before_sql is None:
+                continue
+            expected_changes[object_name] = _expected_controlled_schema_sql(
+                before_sql, object_name, ddl,
+            )
+    if changed_existing != set(expected_changes):
+        raise MigrationError("migration modified pre-existing schema objects")
+    if any(
+        "".join(after_schema[name].split()) != "".join(expected_sql.split())
+        for name, expected_sql in expected_changes.items()
+    ):
+        raise MigrationError("migration modified pre-existing schema objects")
+
+
 def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
     """Verify the lightweight first-stage objects required before ingestion can start."""
     required_tables = {
@@ -234,6 +280,23 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not legacy_005 or legacy_005[0] != migration_checksum(HJ212_LEGACY_005_MIGRATION_VERSION):
         raise MigrationError("HJ212 legacy dissolved oxygen migration is missing or incompatible")
+    result_window = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (MONITORING_RESULT_WINDOW_MIGRATION_VERSION,)
+    ).fetchone()
+    if not result_window or result_window[0] != migration_checksum(MONITORING_RESULT_WINDOW_MIGRATION_VERSION):
+        raise MigrationError("monitoring result-window migration is missing or incompatible")
+    schedule_columns = {
+        row[1]: row for row in connection.execute("PRAGMA table_info(monitoring_business_schedules)")
+    }
+    delay_column = schedule_columns.get("result_delay_seconds")
+    if delay_column is None or not delay_column[3] or str(delay_column[4]) != "0":
+        raise MigrationError("monitoring result delay column is missing or incompatible")
+    schedule_sql_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitoring_business_schedules'"
+    ).fetchone()
+    schedule_sql = "".join(str(schedule_sql_row[0]).upper().split()) if schedule_sql_row else ""
+    if "CHECK(RESULT_DELAY_SECONDSBETWEEN0ANDINTERVAL_SECONDS)" not in schedule_sql:
+        raise MigrationError("monitoring result delay constraint is missing or incompatible")
     _require_unique_columns(connection, "observation_batches", ("raw_frame_id", "normalization_version"))
     _require_unique_columns(connection, "observation_batches", ("endpoint_id", "idempotency_key", "normalization_version"))
     _require_unique_columns(connection, "monitoring_normalization_retries", ("raw_frame_id", "normalization_version"))
@@ -329,13 +392,9 @@ def apply_migration(
             )
         verify_station_monitoring_schema(connection)
         after_schema = _schema_snapshot(connection)
-        changed_existing = {
-            name
-            for name, sql in before_schema.items()
-            if name in after_schema and after_schema[name] != sql
-        }
-        if changed_existing:
-            raise MigrationError("migration modified pre-existing schema objects")
+        _verify_existing_schema_changes(
+            before_schema, after_schema, tuple(version for version, _ in pending),
+        )
         after_foreign_rows = _foreign_key_violations(connection)
         if after_foreign_rows != before_foreign_rows:
             raise MigrationError("migration changed foreign key violations")

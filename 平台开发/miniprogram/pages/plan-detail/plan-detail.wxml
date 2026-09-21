@@ -48,6 +48,15 @@
     </view>
   </view>
 
+  <view class="reject-banner" wx:if="{{loaded && detail && vehicleAdjustmentRequired}}">
+    <view class="reject-icon">!</view>
+    <view class="reject-content">
+      <text class="reject-title">车辆需调整</text>
+      <text class="reject-text">当前车辆安排与前序延期占用冲突，请更换车辆并确认变更。</text>
+      <button class="btn-secondary-outline" bindtap="onChangeRequest" wx:if="{{canChange}}">调整车辆</button>
+    </view>
+  </view>
+
   <!-- ===== 卡片1：作业路线 ===== -->
   <view class="info-card" wx:if="{{loaded && detail.cancellation}}">
     <view class="card-header">取消记录</view>

@@ -1,119 +1,497 @@
-<view class="page">
-  <!-- 范围切换 + 搜索（管理员时显示） -->
-  <view class="mon-toolbar" wx:if="{{canViewAll}}">
-    <!-- 分段控件：我负责 / 全部站点 -->
-    <view class="mon-seg-wrap">
-      <view class="mon-seg">
-        <view class="mon-seg-item {{scope === 'mine' ? 'mon-seg-active' : ''}}" data-scope="mine" bindtap="onScopeMine">
-          <text class="mon-seg-tx">我负责</text>
-          <text class="mon-seg-count" wx:if="{{scopeCounts.mine !== null}}">{{scopeCounts.mine}}</text>
+﻿<view class="stab-page">
+
+  <!-- 主模式分段：站点 / 试剂 -->
+  <view class="stab-seg">
+    <view class="stab-seg-inner">
+      <view class="stab-seg-item {{activeTab === 'stations' ? 'stab-seg-on' : ''}}" data-tab="stations" bindtap="onTabSites">
+        <text class="stab-seg-tx">站点</text>
+      </view>
+      <view class="stab-seg-item {{activeTab === 'reagents' ? 'stab-seg-on' : ''}}" data-tab="reagents" bindtap="onTabReagent">
+        <text class="stab-seg-tx">试剂</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- ========== 站点模式 ========== -->
+  <block wx:if="{{activeTab === 'stations'}}">
+
+    <!-- 范围切换 + 搜索（管理员时显示） -->
+    <view class="mon-toolbar" wx:if="{{canViewAll}}">
+      <!-- 分段控件：我负责 / 全部站点 -->
+      <view class="mon-seg-wrap">
+        <view class="mon-seg">
+          <view class="mon-seg-item {{scope === 'mine' ? 'mon-seg-active' : ''}}" data-scope="mine" bindtap="onScopeMine">
+            <text class="mon-seg-tx">我负责</text>
+            <text class="mon-seg-count" wx:if="{{scopeCounts.mine !== null}}">{{scopeCounts.mine}}</text>
+          </view>
+          <view class="mon-seg-item {{scope === 'all' ? 'mon-seg-active' : ''}}" data-scope="all" bindtap="onScopeAll">
+            <text class="mon-seg-tx">全部站点</text>
+            <text class="mon-seg-count" wx:if="{{scopeCounts.all !== null}}">{{scopeCounts.all}}</text>
+          </view>
         </view>
-        <view class="mon-seg-item {{scope === 'all' ? 'mon-seg-active' : ''}}" data-scope="all" bindtap="onScopeAll">
-          <text class="mon-seg-tx">全部站点</text>
-          <text class="mon-seg-count" wx:if="{{scopeCounts.all !== null}}">{{scopeCounts.all}}</text>
+      </view>
+
+      <!-- 搜索栏（仅全部站点时显示） -->
+      <view class="mon-search-wrap" wx:if="{{scope === 'all'}}">
+        <view class="mon-search-bar">
+          <image class="mon-search-ico" src="/images/station-monitoring/icon-search.svg" mode="aspectFit"/>
+          <input
+            class="mon-search-input"
+            value="{{keywordInput}}"
+            bindinput="onKeywordInput"
+            confirm-type="search"
+            bindconfirm="onSearch"
+            placeholder="搜索站点名称或编号"
+            placeholder-class="mon-search-placeholder"
+          />
+          <view class="mon-search-clear" wx:if="{{keywordInput}}" bindtap="onClearSearch">
+            <view class="mon-search-clear-ico"></view>
+          </view>
         </view>
+        <text class="mon-search-cancel" bindtap="onSearch">搜索</text>
       </view>
     </view>
 
-    <!-- 搜索栏（仅全部站点时显示） -->
-    <view class="mon-search-wrap" wx:if="{{scope === 'all'}}">
-      <view class="mon-search-bar">
-        <image class="mon-search-ico" src="/images/station-monitoring/icon-search.svg" mode="aspectFit"/>
-        <input
-          class="mon-search-input"
-          value="{{keywordInput}}"
-          bindinput="onKeywordInput"
-          confirm-type="search"
-          bindconfirm="onSearch"
-          placeholder="搜索站点名称或编号"
-          placeholder-class="mon-search-placeholder"
-        />
-        <view class="mon-search-clear" wx:if="{{keywordInput}}" bindtap="onClearSearch">
-          <view class="mon-search-clear-ico"></view>
+    <!-- 首次失败 -->
+    <view wx:if="{{!sites.length && error}}" class="mon-empty">
+      <image class="mon-empty-ico" src="/images/station-monitoring/empty-unavailable.svg" mode="aspectFit"/>
+      <text class="mon-empty-tx">站点信息加载失败</text>
+      <text class="mon-empty-sub">{{error}}</text>
+      <button class="btn-ghost btn-md" bindtap="onRetry">重试</button>
+    </view>
+
+    <!-- 加载中 -->
+    <view wx:elif="{{!sites.length && loading}}" class="mon-empty">
+      <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+      <text class="mon-empty-tx">加载中…</text>
+    </view>
+
+    <!-- 搜索无结果 -->
+    <view wx:elif="{{!sites.length && !loading && scope === 'all' && keyword}}" class="mon-empty">
+      <image class="mon-empty-ico" src="/images/station-monitoring/empty-search.svg" mode="aspectFit"/>
+      <text class="mon-empty-tx">未找到匹配站点</text>
+      <text class="mon-empty-sub">请更换站点名称或编号后重试</text>
+    </view>
+
+    <!-- 全部站点空态（无搜索词） -->
+    <view wx:elif="{{!sites.length && !loading && scope === 'all'}}" class="mon-empty">
+      <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+      <text class="mon-empty-tx">暂无站点</text>
+      <text class="mon-empty-sub">当前暂无可查看站点</text>
+    </view>
+
+    <!-- 我负责空态 -->
+    <view wx:elif="{{!sites.length && !loading}}" class="mon-empty">
+      <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+      <text class="mon-empty-tx">暂未分配负责站点</text>
+      <text class="mon-empty-sub">当前账号下暂无负责站点，如有疑问请联系管理员</text>
+    </view>
+
+    <!-- 站点列表 -->
+    <block wx:else>
+      <!-- 监测能力未启用（中性提示，不阻断站点目录） -->
+      <view class="mon-neutral-bar" wx:if="{{!monitoringEnabled}}">
+        <image class="mon-neutral-ico" src="/images/station-monitoring/empty-offline.svg" mode="aspectFit"/>
+        <view class="mon-neutral-content">
+          <text class="mon-neutral-title">监测数据尚未启用</text>
+          <text class="mon-neutral-sub">站点档案与位置校准正常可用，监测数据请联系管理员开通</text>
         </view>
       </view>
-      <text class="mon-search-cancel" bindtap="onSearch">搜索</text>
-    </view>
-  </view>
 
-  <!-- 首次失败 -->
-  <view wx:if="{{!sites.length && error}}" class="mon-empty">
-    <image class="mon-empty-ico" src="/images/station-monitoring/empty-unavailable.svg" mode="aspectFit"/>
-    <text class="mon-empty-tx">站点信息加载失败</text>
-    <text class="mon-empty-sub">{{error}}</text>
-    <button class="btn-ghost btn-md" bindtap="onRetry">重试</button>
-  </view>
-
-  <!-- 加载中 -->
-  <view wx:elif="{{!sites.length && loading}}" class="mon-empty">
-    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
-    <text class="mon-empty-tx">加载中…</text>
-  </view>
-
-  <!-- 搜索无结果 -->
-  <view wx:elif="{{!sites.length && !loading && scope === 'all' && keyword}}" class="mon-empty">
-    <image class="mon-empty-ico" src="/images/station-monitoring/empty-search.svg" mode="aspectFit"/>
-    <text class="mon-empty-tx">未找到匹配站点</text>
-    <text class="mon-empty-sub">请更换站点名称或编号后重试</text>
-  </view>
-
-  <!-- 全部站点空态（无搜索词） -->
-  <view wx:elif="{{!sites.length && !loading && scope === 'all'}}" class="mon-empty">
-    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
-    <text class="mon-empty-tx">暂无站点</text>
-    <text class="mon-empty-sub">当前暂无可查看站点</text>
-  </view>
-
-  <!-- 我负责空态 -->
-  <view wx:elif="{{!sites.length && !loading}}" class="mon-empty">
-    <image class="mon-empty-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
-    <text class="mon-empty-tx">暂未分配负责站点</text>
-    <text class="mon-empty-sub">当前账号下暂无负责站点，如有疑问请联系管理员</text>
-  </view>
-
-  <!-- 站点列表 -->
-  <block wx:else>
-    <view class="mon-list">
-      <view class="mon-site-card" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}" hover-class="mon-site-card-active">
-        <view class="mon-site-top">
-          <text class="mon-site-name">{{item.name}}</text>
-          <view class="mon-site-tags">
-            <view class="mon-tag mon-tag-info" wx:if="{{scope === 'all' && item.is_responsible}}">
-              <text class="mon-tag-tx">我负责</text>
+      <view class="mon-list">
+        <view class="mon-site-card" wx:for="{{sites}}" wx:key="id" bindtap="openSite" data-id="{{item.id}}" hover-class="mon-site-card-active">
+          <view class="mon-site-top">
+            <text class="mon-site-name">{{item.name}}</text>
+            <view class="mon-site-tags">
+              <view class="mon-tag mon-tag-info" wx:if="{{scope === 'all' && item.is_responsible}}">
+                <text class="mon-tag-tx">我负责</text>
+              </view>
+              <view class="mon-status-chip mon-status-{{item.monitoring_status || 'unknown'}}" wx:if="{{monitoringPublic}}">
+                <text class="mon-status-tx">{{item.monitoring_status_label || '状态未知'}}</text>
+              </view>
             </view>
-            <view class="mon-status-chip mon-status-{{item.monitoring_status || 'unknown'}}" wx:if="{{monitoringPublic}}">
-              <text class="mon-status-tx">{{item.monitoring_status_label || '状态未知'}}</text>
+          </view>
+          <text class="mon-site-code">站点编号 {{item.code || '未录入'}}</text>
+          <text class="mon-site-reason" wx:if="{{monitoringPublic && item.monitoring_reason}}">{{item.monitoring_reason}}</text>
+          <view class="mon-site-meta" wx:if="{{monitoringPublic}}">
+            <view class="mon-meta-item" wx:if="{{item.last_received_at || item.last_communication_at}}">
+              <image class="mon-meta-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
+              <text class="mon-meta-tx">最后收到报文 {{item.last_received_at || item.last_communication_at}}</text>
+            </view>
+            <view class="mon-meta-item" wx:if="{{item.last_valid_observation_at}}">
+              <image class="mon-meta-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
+              <text class="mon-meta-tx">有效观测 {{item.last_valid_observation_at}}</text>
             </view>
           </view>
-        </view>
-        <text class="mon-site-code">站点编号 {{item.code || '未录入'}}</text>
-        <text class="mon-site-reason" wx:if="{{monitoringPublic && item.monitoring_reason}}">{{item.monitoring_reason}}</text>
-        <view class="mon-site-meta" wx:if="{{monitoringPublic}}">
-          <view class="mon-meta-item" wx:if="{{item.last_received_at || item.last_communication_at}}">
-            <image class="mon-meta-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
-            <text class="mon-meta-tx">最后收到报文 {{item.last_received_at || item.last_communication_at}}</text>
+          <view class="mon-site-bottom" wx:if="{{monitoringPublic && item.published_factor_count > 0}}">
+            <text class="mon-factor-count">{{item.published_factor_count}} 个监测因子</text>
+            <text class="mon-site-chevron">›</text>
           </view>
-          <view class="mon-meta-item" wx:if="{{item.last_valid_observation_at}}">
-            <image class="mon-meta-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
-            <text class="mon-meta-tx">有效观测 {{item.last_valid_observation_at}}</text>
+          <view class="mon-site-bottom" wx:else>
+            <text class="mon-factor-count mon-factor-count--muted" wx:if="{{monitoringPublic}}">暂无已发布因子</text>
+            <text class="mon-site-chevron">›</text>
           </view>
         </view>
-        <view class="mon-site-bottom" wx:if="{{monitoringPublic && item.published_factor_count > 0}}">
-          <text class="mon-factor-count">{{item.published_factor_count}} 个监测因子</text>
-          <text class="mon-site-chevron">›</text>
+      </view>
+
+      <!-- 刷新失败提示 -->
+      <view wx:if="{{error}}" class="mon-stale-bar">
+        <view class="mon-stale-dot"></view>
+        <text class="mon-stale-tx">{{error}}</text>
+        <button class="btn-ghost btn-sm" bindtap="onRetry">重试</button>
+      </view>
+    </block>
+  </block>
+
+  <!-- ========== 试剂模式 ========== -->
+  <block wx:if="{{activeTab === 'reagents'}}">
+
+    <!-- 筛选 chip 组（sticky） -->
+    <view class="ro-filter-bar">
+      <scroll-view scroll-x class="ro-filter-scroll" enhanced show-scrollbar="{{false}}">
+        <view class="ro-filter-chips">
+          <view class="ro-chip {{activeFilter === '' ? 'ro-chip--active' : ''}}" data-filter="" bindtap="onReagentFilterTap">
+            <text class="ro-chip-tx">全部</text>
+          </view>
+          <view class="ro-chip {{activeFilter === 'expired' ? 'ro-chip--active' : ''}}" data-filter="expired" bindtap="onReagentFilterTap">
+            <text class="ro-chip-tx">已过期</text>
+          </view>
+          <view class="ro-chip {{activeFilter === 'expiring' ? 'ro-chip--active' : ''}}" data-filter="expiring" bindtap="onReagentFilterTap">
+            <text class="ro-chip-tx">临期</text>
+          </view>
+          <view class="ro-chip {{activeFilter === 'low_volume' ? 'ro-chip--active' : ''}}" data-filter="low_volume" bindtap="onReagentFilterTap">
+            <text class="ro-chip-tx">低余量</text>
+          </view>
         </view>
-        <view class="mon-site-bottom" wx:else>
-          <text class="mon-factor-count mon-factor-count--muted" wx:if="{{monitoringPublic}}">暂无已发布因子</text>
-          <text class="mon-site-chevron">›</text>
-        </view>
+      </scroll-view>
+    </view>
+
+    <!-- 试剂能力未启用（中性态） -->
+    <view class="ro-empty" wx:if="{{!reagentEnabled && !reagentLoading && !reagentError}}">
+      <image class="ro-empty-icon" src="/images/reagent/empty-ok.svg" mode="aspectFit" />
+      <text class="ro-empty-title">试剂模块尚未启用</text>
+      <text class="ro-empty-sub">如需查看和维护试剂，请联系管理员开通</text>
+    </view>
+
+    <!-- 加载中 -->
+    <view class="ro-skeleton" wx:if="{{reagentLoading && reagentEnabled}}">
+      <view class="ro-sk-card"></view>
+      <view class="ro-sk-card"></view>
+      <view class="ro-sk-card"></view>
+    </view>
+
+    <!-- 加载失败 -->
+    <view class="ro-empty" wx:if="{{reagentError && !reagentLoading && reagentEnabled}}">
+      <image class="ro-empty-icon" src="/images/reagent/empty-error.svg" mode="aspectFit" />
+      <text class="ro-empty-title">加载失败</text>
+      <text class="ro-empty-sub">{{reagentError || '请检查网络后重试'}}</text>
+      <view class="ro-empty-btn" bindtap="onReagentRetry">
+        <text class="ro-empty-btn-tx">点击重试</text>
       </view>
     </view>
 
-    <!-- 刷新失败提示 -->
-    <view wx:if="{{error}}" class="mon-stale-bar">
-      <view class="mon-stale-dot"></view>
-      <text class="mon-stale-tx">{{error}}</text>
-      <button class="btn-ghost btn-sm" bindtap="onRetry">重试</button>
+    <!-- 无查看权限（整页阻断） -->
+    <view class="ro-empty" wx:if="{{reagentNoViewPermission && !reagentLoading && reagentEnabled}}">
+      <image class="ro-empty-icon" src="/images/reagent/empty-lock.svg" mode="aspectFit" />
+      <text class="ro-empty-title">暂无试剂查看权限</text>
+      <text class="ro-empty-sub">请联系管理员开通试剂查看权限</text>
+    </view>
+
+    <!-- 空态：无关注项（默认筛选） -->
+    <view class="ro-empty" wx:if="{{!reagentLoading && !reagentError && !reagentNoViewPermission && reagentItems.length === 0 && activeFilter === '' && reagentEnabled}}">
+      <image class="ro-empty-icon" src="/images/reagent/empty-ok.svg" mode="aspectFit" />
+      <text class="ro-empty-title">暂无试剂关注项</text>
+      <text class="ro-empty-sub">有权站点试剂状态全部正常</text>
+    </view>
+
+    <!-- 筛选无结果 -->
+    <view class="ro-empty" wx:if="{{!reagentLoading && !reagentError && !reagentNoViewPermission && reagentItems.length === 0 && activeFilter !== '' && reagentEnabled}}">
+      <image class="ro-empty-icon" src="/images/reagent/empty-search.svg" mode="aspectFit" />
+      <text class="ro-empty-title">没有符合条件的试剂</text>
+      <text class="ro-empty-sub">换个筛选条件试试</text>
+    </view>
+
+    <!-- 试剂列表 -->
+    <view class="ro-list" wx:if="{{reagentItems.length > 0 && !reagentLoading && reagentEnabled}}">
+      <view class="ro-card card" wx:for="{{reagentItems}}" wx:key="key">
+        <text class="ro-site-name">{{item.site_name}}</text>
+        <view class="ro-reagent-head">
+          <text class="ro-reagent-name">{{item.reagent_name}}</text>
+        </view>
+        <!-- 多原因标签：已过期/临期/低余量/待标定/标定失败 可同时存在 -->
+        <view class="ro-reason-tags" wx:if="{{item.attention_reasons && item.attention_reasons.length > 0}}">
+          <view class="ro-reason-tag ro-reason--{{reason.type}}" wx:for="{{item.attention_reasons}}" wx:for-item="reason" wx:key="type">
+            <text class="ro-reason-tx">{{reason.label}}</text>
+          </view>
+        </view>
+        <view class="ro-reagent-meta">
+          <text class="ro-meta-item">余量 {{item.volume}} {{item.unit}}</text>
+          <text class="ro-meta-dot">·</text>
+          <text class="ro-meta-item">{{item.expiryText}}</text>
+        </view>
+        <view class="ro-actions" wx:if="{{item.canReplace || item.canCalibrate}}">
+          <view class="ro-btn ro-btn--secondary" wx:if="{{item.canReplace}}" data-id="{{item.id}}" catchtap="onOpenReplaceSheet">
+            <text class="ro-btn-tx">登记更换</text>
+          </view>
+          <view class="ro-btn ro-btn--primary" wx:if="{{item.canCalibrate}}" data-id="{{item.id}}" catchtap="onOpenCalibrateSheet">
+            <text class="ro-btn-tx">完成标定</text>
+          </view>
+        </view>
+      </view>
     </view>
   </block>
+
+  <!-- 底部安全区占位 -->
+  <view class="stab-bottom-spacer"></view>
+
+  <!-- ========== 登记更换 Sheet ========== -->
+  <view class="sheet-mask {{replaceSheet.submitting ? 'sheet-mask--submitting' : '}}" wx:if="{{replaceSheetVisible}}" catchtap="{{replaceSheet.submitting ? 'noop' : 'onCloseReplaceSheet'}}">
+    <view class="sheet-container" catchtap="noop">
+      <view class="sheet-handle"></view>
+      <view class="sheet-header">
+        <text class="sheet-title">登记更换</text>
+        <view class="sheet-close {{replaceSheet.submitting ? 'sheet-close--disabled' : '}}" bindtap="onCloseReplaceSheet">
+          <view class="sheet-close-ico"></view>
+        </view>
+      </view>
+
+      <scroll-view scroll-y class="sheet-body" enhanced show-scrollbar="{{false}}">
+        <!-- 服务端失败提示 -->
+        <view class="sheet-server-error" wx:if="{{replaceSheet.serverError}}">
+          <text class="sheet-server-error-tx">{{replaceSheet.serverError}}</text>
+          <text class="sheet-server-error-retry" bindtap="onSubmitReplace">点击重试</text>
+        </view>
+
+        <!-- 只读信息 -->
+        <view class="sheet-section">
+          <text class="sheet-section-title">试剂信息</text>
+          <view class="sheet-info-row">
+            <text class="sheet-info-label">站点</text>
+            <text class="sheet-info-value">{{replaceSheet.siteName}}</text>
+          </view>
+          <view class="sheet-info-row">
+            <text class="sheet-info-label">试剂</text>
+            <text class="sheet-info-value">{{replaceSheet.reagentName}}</text>
+          </view>
+          <view class="sheet-info-row">
+            <text class="sheet-info-label">当前余量</text>
+            <text class="sheet-info-value">{{replaceSheet.currentVolume}} {{replaceSheet.unit}}</text>
+          </view>
+        </view>
+
+        <!-- 必填输入 -->
+        <view class="sheet-section">
+          <text class="sheet-section-title">更换信息</text>
+
+          <view class="sheet-field {{replaceSheet.errors.newVolume ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">新余量 <text class="sheet-required">*</text></text>
+            <view class="sheet-input-wrap">
+              <input class="sheet-input" type="digit" value="{{replaceSheet.newVolume}}" placeholder="请输入更换后余量" bindinput="onReplaceVolumeInput" />
+              <text class="sheet-input-suffix">{{replaceSheet.unit}}</text>
+            </view>
+            <text class="sheet-field-error" wx:if="{{replaceSheet.errors.newVolume}}">
+              <text class="sheet-error-icon">!</text>{{replaceSheet.errors.newVolume}}
+            </text>
+          </view>
+
+          <view class="sheet-field {{replaceSheet.errors.replaceTime ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">更换时间 <text class="sheet-required">*</text></text>
+            <view class="sheet-input-wrap">
+              <picker mode="date" value="{{replaceSheet.replaceTime}}" bindchange="onReplaceTimeChange">
+                <view class="sheet-picker">
+                  <text class="{{replaceSheet.replaceTime ? '' : 'sheet-picker-placeholder'}}">{{replaceSheet.replaceTime || '请选择更换日期'}}</text>
+                  <text class="sheet-picker-arrow">›</text>
+                </view>
+              </picker>
+            </view>
+            <text class="sheet-field-error" wx:if="{{replaceSheet.errors.replaceTime}}">
+              <text class="sheet-error-icon">!</text>{{replaceSheet.errors.replaceTime}}
+            </text>
+          </view>
+
+          <view class="sheet-field {{replaceSheet.errors.estDays ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">预计可用天数 <text class="sheet-required">*</text></text>
+            <view class="sheet-input-wrap">
+              <input class="sheet-input" type="number" value="{{replaceSheet.estDays}}" placeholder="例如：30" bindinput="onReplaceEstDaysInput" />
+              <text class="sheet-input-suffix">天</text>
+            </view>
+            <text class="sheet-field-error" wx:if="{{replaceSheet.errors.estDays}}">
+              <text class="sheet-error-icon">!</text>{{replaceSheet.errors.estDays}}
+            </text>
+          </view>
+        </view>
+
+        <!-- 可选输入 -->
+        <view class="sheet-section">
+          <text class="sheet-section-title">更多信息（可选）</text>
+
+          <view class="sheet-field">
+            <text class="sheet-field-label">新批次号</text>
+            <view class="sheet-input-wrap">
+              <input class="sheet-input" value="{{replaceSheet.batchNo}}" placeholder="如有请填写" bindinput="onReplaceBatchNoInput" />
+            </view>
+          </view>
+
+          <view class="sheet-field">
+            <text class="sheet-field-label">备注</text>
+            <view class="sheet-textarea-wrap">
+              <textarea class="sheet-textarea" value="{{replaceSheet.remark}}" placeholder="可填写更换原因或其他说明" bindinput="onReplaceRemarkInput" maxlength="200" auto-height="{{true}}"></textarea>
+            </view>
+          </view>
+        </view>
+      </scroll-view>
+
+      <!-- 底部操作 -->
+      <view class="sheet-footer">
+        <view class="sheet-btn sheet-btn--ghost {{replaceSheet.submitting ? 'sheet-btn--disabled' : ''}}" bindtap="onCloseReplaceSheet">
+          <text class="sheet-btn-tx">取消</text>
+        </view>
+        <view class="sheet-btn sheet-btn--primary {{replaceSheet.submitting ? 'sheet-btn--disabled' : ''}}" bindtap="onSubmitReplace">
+          <text class="sheet-btn-tx" wx:if="{{!replaceSheet.submitting}}">确认更换</text>
+          <text class="sheet-btn-tx" wx:else>提交中…</text>
+        </view>
+      </view>
+
+      <!-- 提交成功态（覆盖内容） -->
+      <view class="sheet-success" wx:if="{{replaceSheet.success}}">
+        <view class="sheet-success-icon"></view>
+        <text class="sheet-success-title">更换登记成功</text>
+        <text class="sheet-success-sub">已进入待标定状态，标定完成后恢复正常</text>
+        <view class="sheet-success-btn" bindtap="onCloseReplaceSheet">
+          <text class="sheet-success-btn-tx">我知道了</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ========== 完成标定 Sheet ========== -->
+  <view class="sheet-mask {{calibrateSheet.submitting ? 'sheet-mask--submitting' : '}}" wx:if="{{calibrateSheetVisible}}" catchtap="{{calibrateSheet.submitting ? 'noop' : 'onCloseCalibrateSheet'}}">
+    <view class="sheet-container" catchtap="noop">
+      <view class="sheet-handle"></view>
+      <view class="sheet-header">
+        <text class="sheet-title">完成标定</text>
+        <view class="sheet-close {{calibrateSheet.submitting ? 'sheet-close--disabled' : '}}" bindtap="onCloseCalibrateSheet">
+          <view class="sheet-close-ico"></view>
+        </view>
+      </view>
+
+      <scroll-view scroll-y class="sheet-body" enhanced show-scrollbar="{{false}}">
+        <!-- 服务端失败提示 -->
+        <view class="sheet-server-error" wx:if="{{calibrateSheet.serverError}}">
+          <text class="sheet-server-error-tx">{{calibrateSheet.serverError}}</text>
+          <text class="sheet-server-error-retry" bindtap="onSubmitCalibrate">点击重试</text>
+        </view>
+
+        <!-- 只读信息 -->
+        <view class="sheet-section">
+          <text class="sheet-section-title">试剂信息</text>
+          <view class="sheet-info-row">
+            <text class="sheet-info-label">站点</text>
+            <text class="sheet-info-value">{{calibrateSheet.siteName}}</text>
+          </view>
+          <view class="sheet-info-row">
+            <text class="sheet-info-label">试剂</text>
+            <text class="sheet-info-value">{{calibrateSheet.reagentName}}</text>
+          </view>
+          <view class="sheet-info-row" wx:if="{{calibrateSheet.replaceTime}}">
+            <text class="sheet-info-label">更换时间</text>
+            <text class="sheet-info-value">{{calibrateSheet.replaceTime}}</text>
+          </view>
+        </view>
+
+        <!-- 标定输入 -->
+        <view class="sheet-section">
+          <text class="sheet-section-title">标定数据</text>
+
+          <view class="sheet-field {{calibrateSheet.errors.standardValue ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">标样值 <text class="sheet-required">*</text></text>
+            <view class="sheet-input-wrap">
+              <input class="sheet-input" type="digit" value="{{calibrateSheet.standardValue}}" placeholder="请输入标样值" bindinput="onCalibrateStandardInput" />
+              <text class="sheet-input-suffix">{{calibrateSheet.unit}}</text>
+            </view>
+            <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.standardValue}}">
+              <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.standardValue}}
+            </text>
+          </view>
+
+          <view class="sheet-field {{calibrateSheet.errors.measuredValue ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">实测值 <text class="sheet-required">*</text></text>
+            <view class="sheet-input-wrap">
+              <input class="sheet-input" type="digit" value="{{calibrateSheet.measuredValue}}" placeholder="请输入实测值" bindinput="onCalibrateMeasuredInput" />
+              <text class="sheet-input-suffix">{{calibrateSheet.unit}}</text>
+            </view>
+            <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.measuredValue}}">
+              <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.measuredValue}}
+            </text>
+          </view>
+
+          <view class="sheet-field {{calibrateSheet.errors.result ? 'sheet-field--error' : ''}}">
+            <text class="sheet-field-label">标定结果 <text class="sheet-required">*</text></text>
+            <view class="sheet-radio-group">
+              <view class="sheet-radio {{calibrateSheet.result === 'pass' ? 'sheet-radio--on' : ''}}" data-result="pass" bindtap="onCalibrateResultTap">
+                <view class="sheet-radio-dot"></view>
+                <text class="sheet-radio-tx">通过</text>
+              </view>
+              <view class="sheet-radio {{calibrateSheet.result === 'fail' ? 'sheet-radio--on' : ''}}" data-result="fail" bindtap="onCalibrateResultTap">
+                <view class="sheet-radio-dot"></view>
+                <text class="sheet-radio-tx">不通过</text>
+              </view>
+            </view>
+            <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.result}}">
+              <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.result}}
+            </text>
+          </view>
+
+          <!-- 不通过时必须选择后续动作 -->
+          <view class="sheet-field {{calibrateSheet.errors.followUp ? 'sheet-field--error' : ''}}" wx:if="{{calibrateSheet.result === 'fail'}}">
+            <text class="sheet-field-label">后续动作 <text class="sheet-required">*</text></text>
+            <view class="sheet-radio-group">
+              <view class="sheet-radio {{calibrateSheet.followUp === 'recalibrate' ? 'sheet-radio--on' : ''}}" data-follow="recalibrate" bindtap="onCalibrateFollowUpTap">
+                <view class="sheet-radio-dot"></view>
+                <text class="sheet-radio-tx">重新标定</text>
+              </view>
+              <view class="sheet-radio {{calibrateSheet.followUp === 'repair' ? 'sheet-radio--on' : ''}}" data-follow="repair" bindtap="onCalibrateFollowUpTap">
+                <view class="sheet-radio-dot"></view>
+                <text class="sheet-radio-tx">报修</text>
+              </view>
+            </view>
+            <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.followUp}}">
+              <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.followUp}}
+            </text>
+          </view>
+
+          <view class="sheet-field">
+            <text class="sheet-field-label">备注</text>
+            <view class="sheet-textarea-wrap">
+              <textarea class="sheet-textarea" value="{{calibrateSheet.remark}}" placeholder="可填写标定时的情况说明" bindinput="onCalibrateRemarkInput" maxlength="200" auto-height="{{true}}"></textarea>
+            </view>
+          </view>
+        </view>
+      </scroll-view>
+
+      <!-- 底部操作 -->
+      <view class="sheet-footer">
+        <view class="sheet-btn sheet-btn--ghost {{calibrateSheet.submitting ? 'sheet-btn--disabled' : ''}}" bindtap="onCloseCalibrateSheet">
+          <text class="sheet-btn-tx">取消</text>
+        </view>
+        <view class="sheet-btn sheet-btn--primary {{calibrateSheet.submitting ? 'sheet-btn--disabled' : ''}}" bindtap="onSubmitCalibrate">
+          <text class="sheet-btn-tx" wx:if="{{!calibrateSheet.submitting}}">确认标定</text>
+          <text class="sheet-btn-tx" wx:else>提交中…</text>
+        </view>
+      </view>
+
+      <!-- 提交成功态 -->
+      <view class="sheet-success" wx:if="{{calibrateSheet.success}}">
+        <view class="sheet-success-icon"></view>
+        <text class="sheet-success-title">标定完成</text>
+        <text class="sheet-success-sub" wx:if="{{calibrateSheet.result === 'pass'}}">试剂状态已恢复正常</text>
+        <text class="sheet-success-sub" wx:elif="{{calibrateSheet.followUp === 'recalibrate'}}">已记录为重新标定</text>
+        <text class="sheet-success-sub" wx:else>已提交报修</text>
+        <view class="sheet-success-btn" bindtap="onCloseCalibrateSheet">
+          <text class="sheet-success-btn-tx">我知道了</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
 </view>

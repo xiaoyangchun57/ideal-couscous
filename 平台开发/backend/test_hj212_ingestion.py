@@ -73,6 +73,19 @@ class HJ212ParserTest(unittest.TestCase):
             ("HJ212:030", 6.0, "fault", "hj212_flag_fault"),
         ])
 
+    def test_2061_prefers_average_and_keeps_field_rtd_compatibility(self):
+        standard = parse_hj212_frame(make_real_shape_hj212(command="2061", cp=";".join((
+            "DataTime=20260911120000", "w01001-Avg=7.1", "w01001-Rtd=9.9", "w01001-Flag=N",
+        ))))
+        compatible = parse_hj212_frame(make_real_shape_hj212(
+            command="2061", cp="DataTime=20260911120000;w01010-Rtd=20.5;w01010-Flag=N"))
+        self.assertEqual([(item.protocol_code, item.raw_value) for item in standard.factors], [
+            ("HJ212:w01001", 7.1),
+        ])
+        self.assertEqual([(item.protocol_code, item.raw_value) for item in compatible.factors], [
+            ("HJ212:w01010", 20.5),
+        ])
+
     def test_permanganate_quality_control_fields_are_not_realtime_factors(self):
         frame = parse_hj212_frame(make_hj212(factors=";".join((
             "w01019-Rtd=1.2,Flag=N,w01019-Reference=1.0,w01019-Measured=1.1",
@@ -157,8 +170,8 @@ class HJ212IngestionContractTest(unittest.TestCase):
             connection.execute(
                 """INSERT INTO monitoring_business_schedules(
                        endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
-                       tolerance_seconds,effective_from)
-                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',600,'2020-01-01T00:00:00+00:00')""",
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',0,7200,'2020-01-01T00:00:00+00:00')""",
                 (endpoint_id,),
             )
             connection.commit()
@@ -211,6 +224,47 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ("HJ212:w01010", "on_time", "selected"),
         ])
 
+    def test_2011_result_time_and_2061_sample_time_share_the_confirmed_slot(self):
+        realtime = make_hj212(
+            qn="20260911140100001", command="2011", data_time="20260911140100",
+            factors="w01001-Rtd=7.1,Flag=N")
+        aggregate = make_real_shape_hj212(
+            qn="20260911140200001", command="2061",
+            cp="DataTime=20260911120000;w01001-Avg=7.1;w01001-Flag=N")
+        self.assertIsNone(self.server._process_raw(realtime, "2026-09-11T06:01:05+00:00"))
+        self.assertIsNone(self.server._process_raw(aggregate, "2026-09-11T06:02:00+00:00"))
+        for raw_id in self._raw_ids():
+            self.assertEqual(normalize_raw_frame(self.database, raw_id), "accepted")
+        with closing(sqlite3.connect(self.database)) as connection:
+            rows = connection.execute(
+                """SELECT batch.function_code,business.scheduled_at,business.observed_at,
+                          business.received_at,business.slot_state
+                   FROM monitoring_business_observations business
+                   JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                   ORDER BY batch.function_code"""
+            ).fetchall()
+        self.assertEqual(rows, [
+            (2011, "2026-09-11T04:00:00+00:00", "2026-09-11T06:01:00+00:00",
+             "2026-09-11T06:01:05+00:00", "selected"),
+            (2061, "2026-09-11T04:00:00+00:00", "2026-09-11T04:00:00+00:00",
+             "2026-09-11T06:02:00+00:00", "duplicate"),
+        ])
+
+    def test_2061_non_boundary_sample_time_is_visible_and_not_projected(self):
+        raw = make_real_shape_hj212(
+            command="2061", cp="DataTime=20260911130000;w01001-Avg=7.1;w01001-Flag=N")
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T07:02:00+00:00"))
+        self.assertEqual(normalize_raw_frame(self.database, self._raw_ids()[0]), "partial")
+        with closing(sqlite3.connect(self.database)) as connection:
+            issue = connection.execute(
+                "SELECT issue_type,object_summary,reparse_allowed FROM monitoring_quality_issues"
+            ).fetchone()
+            business_count = connection.execute(
+                "SELECT COUNT(*) FROM monitoring_business_observations"
+            ).fetchone()[0]
+        self.assertEqual(issue, ("business_time_outside_schedule", "HJ212:w01001", 0))
+        self.assertEqual(business_count, 0)
+
     def test_real_cp_shape_only_projects_n_and_leaves_d_f_as_quality_evidence(self):
         raw = make_real_shape_hj212(cp=";".join((
             "DataTime=20260911164900", "w01001-Rtd=0", "w01001-Flag=N",
@@ -224,7 +278,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
             business_count = connection.execute("SELECT COUNT(*) FROM monitoring_business_observations").fetchone()[0]
         self.assertEqual(values, [("HJ212:w01001", "valid")])
         self.assertIn("hj212_flag_fault", issues)
-        self.assertEqual(business_count, 0)
+        self.assertEqual(business_count, 1)
 
     def test_only_permanganate_realtime_value_can_be_mapped_or_projected(self):
         raw = make_hj212(factors=";".join((
@@ -272,7 +326,10 @@ class HJ212IngestionContractTest(unittest.TestCase):
             values = connection.execute(
                 "SELECT protocol_code,business_metric,standard_unit,quality,is_published FROM observation_values ORDER BY protocol_code"
             ).fetchall()
-            issues = {row[0] for row in connection.execute("SELECT issue_type FROM monitoring_quality_issues")}
+            issue_rows = connection.execute(
+                "SELECT issue_type,object_summary FROM monitoring_quality_issues ORDER BY object_summary"
+            ).fetchall()
+            issues = {row[0] for row in issue_rows}
         self.assertEqual(values, [
             ("HJ212:005", "dissolved_oxygen", "mg/L", "valid", 1),
             ("HJ212:w21001", "total_nitrogen", "mg/L", "valid", 1),
@@ -281,6 +338,9 @@ class HJ212IngestionContractTest(unittest.TestCase):
         ])
         self.assertIn("hj212_flag_fault", issues)
         self.assertNotIn("unmapped_factor", issues)
+        self.assertEqual([row[1] for row in issue_rows], [
+            "HJ212:022", "HJ212:027", "HJ212:029", "HJ212:030",
+        ])
 
     def test_legacy_005_fault_is_not_published(self):
         raw = make_hj212(data_time="20260911160000", factors="005-Rtd=7.25,Flag=F")
@@ -357,7 +417,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
             'eligible': 1, 'reprojected': 0, 'already_reprojected': 1, 'deferred': 0,
             'business_projected': 0, 'business_deferred': 0,
         })
-        self.assertEqual(HISTORICAL_REPROJECTION_VERSION, 'station-monitoring-historical-business-v1')
+        self.assertEqual(HISTORICAL_REPROJECTION_VERSION, 'station-monitoring-historical-business-v2')
 
     def test_historical_reprojection_resumes_after_business_period_is_configured(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -434,10 +494,10 @@ class HJ212IngestionContractTest(unittest.TestCase):
         self.assertEqual(len(configs), 1)
         self.assertEqual(configs[0]['protocol_codes'], ['HJ212:w01009', 'HJ212:005'])
         self.assertEqual([tuple(row) for row in rows], [
-            ('2026-09-11T08:00:00+00:00', 'HJ212:005', 'duplicate'),
-            ('2026-09-11T08:00:00+00:00', 'HJ212:w01009', 'selected'),
-            ('2026-09-11T12:00:00+00:00', 'HJ212:005', 'conflict'),
-            ('2026-09-11T12:00:00+00:00', 'HJ212:w01009', 'conflict'),
+            ('2026-09-11T04:00:00+00:00', 'HJ212:005', 'duplicate'),
+            ('2026-09-11T04:00:00+00:00', 'HJ212:w01009', 'selected'),
+            ('2026-09-11T08:00:00+00:00', 'HJ212:005', 'conflict'),
+            ('2026-09-11T08:00:00+00:00', 'HJ212:w01009', 'conflict'),
         ])
 
     def test_3020_response_requires_authenticated_durable_receipt(self):

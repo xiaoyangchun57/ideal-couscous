@@ -24,6 +24,7 @@ import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems } from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -86,10 +87,22 @@ export default function SitesPage() {
   const [monitoringError, setMonitoringError] = useState(null);
 
   // ---- filter state ----
-  const searchText = searchParams.get('q') || '';
+  const urlSearchText = searchParams.get('q') || '';
   const typeFilter = searchParams.get('type') || undefined;
   const districtFilter = searchParams.get('district') || undefined;
   const managerFilter = searchParams.get('manager') || undefined;
+  const commitSearchText = useCallback((value) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      const normalized = value.trim();
+      if (normalized) next.set('q', normalized);
+      else next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+  const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
+    urlSearchText, commitSearchText,
+  );
 
   // ---- archive modal ----
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
@@ -529,12 +542,10 @@ export default function SitesPage() {
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
         render: (_, record) => (
           <div>
-            <Space size={6}><Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
-              {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}</Space>
-            <Space size={6} style={{ display: 'flex', marginTop: 2 }}>
-              <Text type="secondary" copyable={{ text: record.code || '' }}>{record.code || '未提供编码'}</Text>
+            <Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
+            <div style={{ marginTop: 2 }}>
               <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
-            </Space>
+            </div>
           </div>
         ),
       },
@@ -1192,8 +1203,7 @@ export default function SitesPage() {
           placeholder="搜索站点名称 / 编码"
           prefix={<SearchOutlined style={{ color: tokens.colorTextQuaternary }} />}
           allowClear
-          value={searchText}
-          onChange={(e) => updateFilter('q', e.target.value)}
+          {...searchInputProps}
           style={{ width: filterInputWidth }}
         /></FilterField>
 

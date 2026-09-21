@@ -19,6 +19,13 @@ assert.deepEqual(resolveNotificationTarget({ source_type: 'plan_schedule', sourc
   kind: 'page',
   page: '/pages/plan-detail/plan-detail?id=43'
 });
+assert.deepEqual(resolveNotificationTarget({ source_type: 'vehicle_extension_conflict', source_id: 43 }), {
+  kind: 'page',
+  page: '/pages/plan-detail/plan-detail?id=43'
+});
+assert.equal(resolveNotificationTarget({
+  source_type: 'vehicle_extension_conflict', source_id: 'bad'
+}).kind, 'invalid');
 const planReviewTarget = resolveNotificationTarget({
   source_type: 'plan_schedule', source_id: 44,
   payload_json: JSON.stringify({ notification_target: 'review', review_type: 'plan_schedule' })

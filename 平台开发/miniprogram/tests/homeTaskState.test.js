@@ -9,7 +9,9 @@ const {
   homePackage,
   projectHome,
   projectIdentity,
+  projectReagentSummary,
   projectReview,
+  projectStationSummary,
   projectUnread
 } = require('../utils/homeTaskState.js');
 const { workorderCn, linkedWorkorderCn, metricCn } = require('../services/maps.js');
@@ -78,6 +80,28 @@ test('today package has an explicit empty state and no future-plan projection', 
   const state = projectHome({ summary: {}, upcoming: [{ schedule_id: 99 }], work_package: { has_plan: false } });
   assert.equal(state.workPackage.hasPlan, false);
   assert.equal(Object.hasOwn(state, 'upcoming'), false);
+});
+
+test('home overview projects mine-scope monitoring states and authoritative reagent concerns', () => {
+  assert.deepEqual(projectStationSummary({ summary: {
+    total: 8, normal: 3, attention: 2, not_connected: 1,
+    awaiting_first_frame: 1, raw_received_config_pending: 1,
+  } }), { total: 8, normal: 3, attention: 2, unavailable: 3 });
+
+  assert.deepEqual(projectReagentSummary({ concern_count: 0, items: [] }), {
+    concernCount: 0, display: '暂无需处理', items: [], remainingCount: 0,
+  });
+  const projected = projectReagentSummary({ concern_count: 3, items: [
+    { id: 1, site_id: 10, site_name: '南昌青云水厂', reagent_name: '余氯试剂', status: '临期' },
+    { id: 2, site_id: 10, site_name: '南昌青云水厂', reagent_name: 'pH 标液', status: '低余量' },
+    { id: 3, site_id: 11, site_name: '昌南站', reagent_name: '氨氮试剂', status: '已过期' },
+  ] });
+  assert.equal(projected.display, '3项需关注');
+  assert.deepEqual(projected.items.map(item => item.text), [
+    '南昌青云水厂 · 余氯试剂 · 临期',
+    '南昌青云水厂 · pH 标液 · 低余量',
+  ]);
+  assert.equal(projected.remainingCount, 1);
 });
 
 test('rework sites remain discoverable as independent today actions without a work package', () => {
@@ -276,6 +300,62 @@ test('main request distinguishes first failure and preserves old data across ref
     assert.equal(page.data.actions[0].title, '新任务');
   } finally {
     api.myToday = original;
+  }
+});
+
+test('station and reagent overview load retry and stale responses are independent', async () => {
+  const originals = {
+    stationMonitoringSites: api.stationMonitoringSites,
+    reagentOverview: api.reagentOverview,
+  };
+  try {
+    const page = pageInstance();
+    const oldStations = deferred();
+    const newStations = deferred();
+    let stationCall = 0;
+    api.stationMonitoringSites = options => {
+      assert.equal(options.scope, 'mine');
+      return (++stationCall === 1 ? oldStations.promise : newStations.promise);
+    };
+    page.loadStations();
+    page.loadStations();
+    newStations.resolve({ summary: { total: 2, normal: 1, attention: 1 } });
+    await flush();
+    oldStations.resolve({ summary: { total: 99, normal: 99, attention: 0 } });
+    await flush();
+    assert.deepEqual(page.data.stationSummary, { total: 2, normal: 1, attention: 1, unavailable: 0 });
+
+    const existing = page.data.stationSummary;
+    api.stationMonitoringSites = () => Promise.reject({ error: '站点服务失败' });
+    await page.loadStations(true);
+    assert.equal(page.data.stationsState, 'refresh_error');
+    assert.equal(page.data.stationSummary, existing);
+
+    api.reagentOverview = () => Promise.resolve({ concern_count: 1, items: [
+      { id: 3, site_id: 1, site_name: '青云站', reagent_name: '余氯试剂', status: '临期' },
+    ] });
+    await page.loadReagents();
+    assert.equal(page.data.reagentsState, 'ready');
+    assert.equal(page.data.reagentSummary.concernCount, 1);
+    assert.equal(page.data.stationSummary, existing, 'reagent success does not replace station state');
+
+    const reagentExisting = page.data.reagentSummary;
+    api.reagentOverview = () => Promise.reject({ message: '试剂服务失败' });
+    await page.loadReagents(true);
+    assert.equal(page.data.reagentsState, 'refresh_error');
+    assert.equal(page.data.reagentSummary, reagentExisting);
+
+    const callsBeforeUnload = page.setDataCalls;
+    const late = deferred();
+    api.reagentOverview = () => late.promise;
+    page.loadReagents();
+    page.onUnload();
+    late.resolve({ concern_count: 0, items: [] });
+    await flush();
+    assert.equal(page.setDataCalls, callsBeforeUnload + 1,
+      'only the loading transition occurs before unload; late data is ignored');
+  } finally {
+    Object.assign(api, originals);
   }
 });
 

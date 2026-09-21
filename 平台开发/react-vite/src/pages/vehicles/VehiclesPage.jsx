@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Table, Button, Space, Tag, Typography, App as AntApp, Modal, Form, Input, InputNumber, Tabs, Segmented, Select, Upload, Drawer, Descriptions, Alert, Checkbox, Tooltip } from 'antd';
 import { PlusOutlined, ReloadOutlined, ToolOutlined, FireOutlined, UploadOutlined, EditOutlined, SearchOutlined, FileProtectOutlined, SafetyCertificateOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
@@ -8,6 +8,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
 import WorkspacePage, { TableLongText, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { filterInputWidth } from '../../services/pageStyles';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -25,13 +26,15 @@ export default function VehiclesPage() {
   const { message, modal } = AntApp.useApp();
   const { tokens, isDark } = useTheme();
   const { user } = useAuth();
-  const canWrite = (user?.roles || [user?.role]).includes('admin');
+  const roles = user?.roles || [user?.role];
+  const isAdmin = roles.includes('admin');
+  const canMaintain = isAdmin || roles.includes('operator');
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
   const tab = ['ledger', 'history', 'decision'].includes(requestedTab) ? requestedTab : 'ledger';
   const requestedHistoryView = searchParams.get('history');
   const historyView = ['use', 'maint', 'refuel'].includes(requestedHistoryView) ? requestedHistoryView : 'use';
-  const searchText = searchParams.get('q') || '';
+  const urlSearchText = searchParams.get('q') || '';
   const [vehicles, setVehicles] = useState([]);
   const [useRecords, setUseRecords] = useState([]);
   const [maintRecords, setMaintRecords] = useState([]);
@@ -64,6 +67,8 @@ export default function VehiclesPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
+  const [submittingDocument, setSubmittingDocument] = useState(false);
+  const documentIdempotencyKey = useRef('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,6 +102,18 @@ export default function VehiclesPage() {
     });
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+  const commitSearchText = useCallback((value) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      const normalized = value.trim();
+      if (normalized) next.set('q', normalized);
+      else next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+  const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
+    urlSearchText, commitSearchText,
+  );
 
   const onCreateVehicle = async () => {
     if (submittingVehicle) return;
@@ -294,15 +311,28 @@ export default function VehiclesPage() {
   };
 
   const openDocument = (vehicle) => {
-    setActiveVehicle(vehicle); documentForm.resetFields(); setDocumentOpen(true);
+    setActiveVehicle(vehicle);
+    documentForm.resetFields();
+    documentIdempotencyKey.current = `vehicle-document-${vehicle.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setDocumentOpen(true);
   };
 
   const onDocument = async () => {
+    if (submittingDocument) return;
     try {
       const values = await documentForm.validateFields();
-      await api.postStrict('/vehicle/documents', { ...values, vehicle_id: activeVehicle.id });
-      message.success('证照已登记'); setDocumentOpen(false); documentForm.resetFields(); load();
+      setSubmittingDocument(true);
+      await api.postStrict('/vehicle/documents', {
+        ...values, vehicle_id: activeVehicle.id,
+        _idempotency_key: documentIdempotencyKey.current,
+      });
+      message.success('证照已登记');
+      setDocumentOpen(false);
+      documentForm.resetFields();
+      documentIdempotencyKey.current = '';
+      load();
     } catch (e) { if (e?.message) message.error(e.message); }
+    finally { setSubmittingDocument(false); }
   };
 
   const now = new Date();
@@ -357,7 +387,11 @@ export default function VehiclesPage() {
   }, [decisionRows, activeVehicle]);
 
   const activeDocuments = useMemo(() => {
-    const records = documents.filter(document => document.vehicle_id === activeVehicle?.id);
+    const records = documents
+      .filter(document => document.vehicle_id === activeVehicle?.id)
+      .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+      .filter((document, index, rows) => rows.findIndex(
+        candidate => candidate.document_type === document.document_type) === index);
     if (!activeVehicle) return records;
     const masterDates = [
       ['insurance', activeVehicle.insurance_expiry],
@@ -414,7 +448,7 @@ export default function VehiclesPage() {
     { title: '操作', width: 130, render: (_, r) => (
       <Space size={4}>
         <Tooltip title="查看车辆档案"><Button size="small" aria-label={`查看 ${r.plate_no} 的车辆档案`} icon={<EyeOutlined />} onClick={() => openDetail(r)} /></Tooltip>
-        {canWrite && (
+        {canMaintain && (
           <Tooltip title="编辑车辆"><Button size="small" aria-label={`编辑车辆 ${r.plate_no}`} icon={<EditOutlined />} onClick={() => {
             editForm.setFieldsValue({
               plate_no: r.plate_no, vehicle_name: r.vehicle_name, model: r.model, seats: r.seats,
@@ -426,8 +460,8 @@ export default function VehiclesPage() {
             setActiveVehicle(r); setEditVehicleOpen(true);
           }} /></Tooltip>
         )}
-        {canWrite && <Tooltip title="删除车辆"><Button size="small" danger aria-label={`删除车辆 ${r.plate_no}`} icon={<DeleteOutlined />} onClick={() => onDeleteVehicle(r)} /></Tooltip>}
-        <Tooltip title="登记车况检查"><Button size="small" aria-label={`登记 ${r.plate_no} 的车况检查`} icon={<SafetyCertificateOutlined />} onClick={() => openInspection(r)} /></Tooltip>
+        {isAdmin && <Tooltip title="删除车辆"><Button size="small" danger aria-label={`删除车辆 ${r.plate_no}`} icon={<DeleteOutlined />} onClick={() => onDeleteVehicle(r)} /></Tooltip>}
+        {canMaintain && <Tooltip title="登记车况检查"><Button size="small" aria-label={`登记 ${r.plate_no} 的车况检查`} icon={<SafetyCertificateOutlined />} onClick={() => openInspection(r)} /></Tooltip>}
       </Space>
     )},
   ];
@@ -475,9 +509,9 @@ export default function VehiclesPage() {
 
   const historyData = historyView === 'use' ? useRecords : historyView === 'maint' ? maintRecords : refuelRecords;
   const historyColumns = historyView === 'use' ? useColumns : historyView === 'maint' ? maintColumns : refuelColumns;
-  const historyAction = historyView === 'maint' && canWrite
+  const historyAction = historyView === 'maint' && canMaintain
     ? <Button type="primary" icon={<PlusOutlined />} onClick={() => { setActiveVehicle(null); maintForm.resetFields(); setMaintOpen(true); }}>记录保养</Button>
-    : historyView === 'refuel' && canWrite
+    : historyView === 'refuel' && canMaintain
       ? <Button type="primary" icon={<PlusOutlined />} onClick={() => { setActiveVehicle(null); refuelForm.resetFields(); setRefuelPhotos([]); setRefuelOpen(true); }}>记录补给</Button>
       : null;
 
@@ -485,7 +519,7 @@ export default function VehiclesPage() {
     <WorkspacePage
       title="车辆"
       subtitle="集中查看车辆台账、出车履历和待处理风险。"
-      primaryAction={canWrite ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setNewVehicleOpen(true)}>新增车辆</Button> : null}
+      primaryAction={isAdmin ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setNewVehicleOpen(true)}>新增车辆</Button> : null}
       statusItems={[
         { label: '待处理', value: decisionCount, color: tokens.colorWarning },
         { label: '出车中', value: stats.inUse, color: statusColors.info[isDark ? 'dark' : 'light'] },
@@ -509,7 +543,7 @@ export default function VehiclesPage() {
           key: 'ledger', label: '台账', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
               <Input aria-label="车辆搜索" placeholder="搜索车牌号 / 负责人" prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
-                allowClear value={searchText} onChange={(e) => updateQuery({ q: e.target.value })} style={{ width: filterInputWidth }} />
+                allowClear {...searchInputProps} style={{ width: filterInputWidth }} />
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={filteredVehicles} loading={loading} columns={ledgerColumns}
               emptyType={searchText ? 'filtered' : 'empty'} onRefresh={load} />
@@ -561,12 +595,12 @@ export default function VehiclesPage() {
             <Descriptions.Item label="最近检查">{activeVehicle.last_inspection_at || '-'}</Descriptions.Item>
           </Descriptions>
           <Space wrap>
-            <Button icon={<SafetyCertificateOutlined />} onClick={() => openInspection(activeVehicle)}>登记车况检查</Button>
-            <Button icon={<FireOutlined />} onClick={() => openRefuel(activeVehicle)}>
+            {canMaintain && <Button icon={<SafetyCertificateOutlined />} onClick={() => openInspection(activeVehicle)}>登记车况检查</Button>}
+            {canMaintain && <Button icon={<FireOutlined />} onClick={() => openRefuel(activeVehicle)}>
               {isElectric(activeVehicle.fuel_type) ? '记录充电' : '记录加油'}
-            </Button>
-            {canWrite && <Button icon={<ToolOutlined />} onClick={() => openMaint(activeVehicle)}>登记维保</Button>}
-            {canWrite && <Button icon={<FileProtectOutlined />} onClick={() => openDocument(activeVehicle)}>登记证照</Button>}
+            </Button>}
+            {canMaintain && <Button icon={<ToolOutlined />} onClick={() => openMaint(activeVehicle)}>登记维保</Button>}
+            {canMaintain && <Button icon={<FileProtectOutlined />} onClick={() => openDocument(activeVehicle)}>登记证照</Button>}
           </Space>
           <div>
             <Text strong>证照有效期</Text>
@@ -607,7 +641,8 @@ export default function VehiclesPage() {
         </Form>
       </Modal>
 
-      <Modal open={documentOpen} onCancel={() => { setDocumentOpen(false); documentForm.resetFields(); }} onOk={onDocument}
+      <Modal open={documentOpen} onCancel={() => { if (!submittingDocument) { setDocumentOpen(false); documentForm.resetFields(); } }} onOk={onDocument}
+        confirmLoading={submittingDocument} okButtonProps={{ disabled: submittingDocument }}
         title={activeVehicle ? `登记证照 - ${activeVehicle.plate_no}` : '登记证照'} okText="保存" cancelText="取消" destroyOnHidden>
         <Form form={documentForm} layout="vertical">
           <Form.Item name="document_type" label="证照类型" rules={[{ required: true }]}><Select options={Object.entries(DOC_TYPE).map(([value, label]) => ({ value, label }))} /></Form.Item>
@@ -704,13 +739,13 @@ export default function VehiclesPage() {
         onOk={onEditVehicle} title={activeVehicle ? `编辑车辆 - ${activeVehicle.plate_no}` : '编辑车辆'}
         okText="保存" cancelText="取消" destroyOnHidden>
         <Form form={editForm} layout="vertical">
-          <Form.Item name="plate_no" label="车牌号" rules={[{ required: true }]}><Input /></Form.Item>
+          {isAdmin && <Form.Item name="plate_no" label="车牌号" rules={[{ required: true }]}><Input /></Form.Item>}
           <Form.Item name="vehicle_name" label="车辆名称"><Input /></Form.Item>
           <Form.Item name="model" label="车型"><Input /></Form.Item>
           <Form.Item name="seats" label="座位数"><InputNumber min={1} max={99} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name="department" label="归属部门"><Input /></Form.Item>
           <Form.Item name="fuel_type" label="能源类型"><Select options={Object.entries(ENERGY_TYPE).map(([value, label]) => ({ value, label }))} /></Form.Item>
-          <Form.Item name="status" label="车辆状态"><Select options={Object.entries(VEH_STATUS).map(([value, item]) => ({ value, label: item.label }))} /></Form.Item>
+          {isAdmin && <Form.Item name="status" label="车辆状态"><Select options={Object.entries(VEH_STATUS).map(([value, item]) => ({ value, label: item.label }))} /></Form.Item>}
           <Form.Item name="current_mileage" label="当前里程（系统记录）"><InputNumber min={0} style={{ width: '100%' }} disabled /></Form.Item>
           <Form.Item name="next_maintenance_mileage" label="下次保养里程（系统计算）"><InputNumber min={0} style={{ width: '100%' }} disabled /></Form.Item>
           <Form.Item name="purchase_date" label="购置日期"><Input type="date" /></Form.Item>

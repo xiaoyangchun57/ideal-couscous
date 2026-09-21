@@ -96,12 +96,13 @@ function resolveNotificationTarget(notification) {
   }
   if (!sourceId) return invalidTarget('通知缺少对象 ID，无法打开具体业务。');
 
-  if (sourceType === 'plan_schedule') {
+  if (sourceType === 'plan_schedule' || sourceType === 'vehicle_extension_conflict') {
     if (!/^[1-9]\d*$/.test(sourceId)) {
       return invalidTarget('计划通知中的对象 ID 无效，无法打开计划。');
     }
     const payload = notificationPayload(notification);
-    if (payload.notification_target === 'review' && payload.review_type === 'plan_schedule') {
+    if (sourceType === 'plan_schedule'
+        && payload.notification_target === 'review' && payload.review_type === 'plan_schedule') {
       return {
         kind: 'review', reviewType: 'plan_schedule', sourceId,
         attachmentIds: [], page: reviewUrl('plan_schedule', sourceId)

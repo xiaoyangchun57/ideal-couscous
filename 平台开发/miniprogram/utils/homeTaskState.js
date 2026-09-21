@@ -193,6 +193,35 @@ function projectReview(rows) {
   };
 }
 
+function projectStationSummary(response) {
+  const summary = response && response.summary && typeof response.summary === 'object'
+    ? response.summary : {};
+  const normal = optionalCount(summary, 'normal') || 0;
+  const attention = optionalCount(summary, 'attention') || 0;
+  const total = optionalCount(summary, 'total') || 0;
+  return {
+    total,
+    normal,
+    attention,
+    unavailable: Math.max(0, total - normal - attention),
+  };
+}
+
+function projectReagentSummary(response) {
+  const rows = response && Array.isArray(response.items) ? response.items : [];
+  const count = optionalCount(response, 'concern_count');
+  const concernCount = count === null ? rows.length : count;
+  return {
+    concernCount,
+    display: concernCount > 0 ? `${concernCount}项需关注` : '暂无需处理',
+    items: rows.slice(0, 2).map(item => ({
+      key: `${item.site_id || ''}-${item.id || item.reagent_id || ''}`,
+      text: [item.site_name, item.reagent_name, item.status].map(value => String(value || '').trim()).filter(Boolean).join(' · '),
+    })).filter(item => item.text),
+    remainingCount: Math.max(0, concernCount - 2),
+  };
+}
+
 function errorMessage(error, fallback) {
   const value = error || {};
   return String(value.error || value.message || fallback);
@@ -205,6 +234,8 @@ module.exports = {
   homePackage,
   projectHome,
   projectIdentity,
+  projectReagentSummary,
   projectReview,
+  projectStationSummary,
   projectUnread
 };

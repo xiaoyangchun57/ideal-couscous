@@ -97,7 +97,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                     previous_coverage_exception_reason TEXT,
                     previous_vehicle_exception_reason TEXT,
                     previous_no_vehicle_required INTEGER,
-                    change_reason TEXT, created_at TEXT
+                    change_reason TEXT, created_at TEXT,
+                    vehicle_adjustment_required INTEGER NOT NULL DEFAULT 0,
+                    vehicle_adjustment_detail TEXT DEFAULT ''
                 );
                 CREATE TABLE insp_plans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT, assignee TEXT,
@@ -174,6 +176,13 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 CREATE TABLE mobile_idempotency (
                     idempotency_key TEXT, endpoint TEXT, response_json TEXT,
                     PRIMARY KEY (idempotency_key, endpoint)
+                );
+                CREATE TABLE vehicle_extension_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,source_application_id INTEGER NOT NULL,
+                    target_application_id INTEGER NOT NULL,target_schedule_id INTEGER,
+                    conflict_start TEXT,conflict_end TEXT,confirmed_by INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source_application_id,target_application_id,conflict_end)
                 );
                 CREATE TABLE timeline_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT, source_id INTEGER,
@@ -886,7 +895,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                          (409, 'PLAN_VERSION_CONFLICT'))
         self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
 
-    def test_change_review_notification_exists_only_after_formal_submit(self):
+    def test_change_submit_applies_directly_without_review_notification(self):
         schedule_id = 71
         self.add_submitted_schedule(schedule_id)
         with self.db() as db:
@@ -905,37 +914,42 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                 headers=self.headers('operator-token'),
                                 json={'version': 1, 'remarks': '变更后安排'})
         self.assertEqual(saved.status_code, 200, saved.json)
+        with self.db() as db:
+            db.execute("UPDATE users SET status='disabled' WHERE id=1")
         submitted = self.client.post('/api/plan-schedules/71/submit',
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        self.assertEqual(submitted.json['status'], 'change_submitted')
+        self.assertEqual(submitted.json['status'], 'approved')
+        self.assertTrue(submitted.json['direct_applied'])
         with self.db() as db:
             notices = db.execute(
                 'SELECT source_type,title,payload_json FROM notifications WHERE source_id=?',
                 (schedule_id,)
             ).fetchall()
             self.assertEqual([(row['source_type'], row['title']) for row in notices],
-                             [('plan_schedule', '巡检计划变更待审')])
-            self.assertEqual(json.loads(notices[0]['payload_json']), {
-                'notification_target': 'review', 'review_type': 'plan_schedule',
-            })
+                             [('plan_schedule', '计划变更已生效')])
+            self.assertFalse(notices[0]['payload_json'])
             self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
-                WHERE schedule_id=? AND event_type='change_submitted'""",
+                WHERE schedule_id=? AND event_type='change_applied'""",
                                         (schedule_id,)).fetchone()[0], 1)
+            self.assertIsNone(db.execute(
+                'SELECT approver_id FROM plan_schedules WHERE id=?', (schedule_id,)
+            ).fetchone()['approver_id'])
 
         repeated = self.client.post('/api/plan-schedules/71/submit',
                                     headers=self.headers('operator-token'),
                                     json={'version': saved.json['version']})
         self.assertEqual(repeated.status_code, 200, repeated.json)
-        self.assertEqual(repeated.json['status'], 'change_submitted')
+        self.assertEqual(repeated.json['status'], 'approved')
+        self.assertTrue(repeated.json['direct_applied'])
         self.assertTrue(repeated.json['already_submitted'])
         with self.db() as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
                 (schedule_id,)).fetchone()[0], 1)
             self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
-                WHERE schedule_id=? AND event_type='change_submitted'""",
+                WHERE schedule_id=? AND event_type='change_applied'""",
                                         (schedule_id,)).fetchone()[0], 1)
 
         unauthorized = self.client.post('/api/plan-schedules/71/submit',
@@ -1674,6 +1688,53 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.assertEqual([row['status'] for row in current_rows], ['cancelled', 'approved'])
         self.assertEqual(other_status, 'approved')
 
+    def test_vehicle_adjustment_flag_survives_draft_and_clears_after_approved_rebooking(self):
+        self.add_submitted_schedule(651)
+        with self.db() as db:
+            db.execute("INSERT INTO vehicles VALUES (2,'TEST-002','Other vehicle','idle',1000,NULL,NULL)")
+            operation_day = db.execute("SELECT date('now','localtime')").fetchone()[0]
+            db.execute("""UPDATE plan_schedules SET status='approved',vehicle_adjustment_required=1,
+                vehicle_adjustment_detail='overlap' WHERE id=651""")
+            source_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                VALUES (1,3,? || ' 07:00:00',? || ' 19:00:00','巡检','前序延期','approved')""",
+                (operation_day, operation_day)).lastrowid
+            target_id = db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                VALUES (1,2,? || ' 08:00:00',? || ' 18:00:00','巡检',
+                        '巡检计划#651用车（原预约）','approved')""",
+                (operation_day, operation_day)).lastrowid
+            db.execute("""INSERT INTO vehicle_extension_conflicts
+                (source_application_id,target_application_id,target_schedule_id,conflict_start,conflict_end)
+                VALUES (?,?,651,? || ' 08:00:00',? || ' 19:00:00')""",
+                (source_id, target_id, operation_day, operation_day))
+        requested = self.client.post('/api/plan-schedules/651/request-change',
+            headers=self.headers('operator-token'), json={'change_reason': '更换冲突车辆'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        saved = self.client.put('/api/plan-schedules/651',
+            headers=self.headers('operator-token'), json={'version': 1, 'vehicle_id': 2})
+        self.assertEqual(saved.status_code, 200, saved.json)
+        with self.db() as db:
+            self.assertEqual(db.execute("""SELECT vehicle_adjustment_required
+                FROM plan_schedules WHERE id=651""").fetchone()[0], 1)
+        submitted = self.client.post('/api/plan-schedules/651/submit',
+            headers=self.headers('operator-token'), json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = submitted
+        self.assertEqual(approved.json['status'], 'approved')
+        with self.db() as db:
+            schedule = db.execute("""SELECT vehicle_adjustment_required,vehicle_adjustment_detail
+                FROM plan_schedules WHERE id=651""").fetchone()
+            old_status = db.execute('SELECT status FROM vehicle_applications WHERE id=?',
+                                    (target_id,)).fetchone()[0]
+            new_reservation = db.execute("""SELECT vehicle_id,status FROM vehicle_applications
+                WHERE reason LIKE ? AND id!=? ORDER BY id DESC LIMIT 1""",
+                (app_module._ps_vehicle_reason_like(651), target_id)).fetchone()
+        self.assertEqual((schedule['vehicle_adjustment_required'], schedule['vehicle_adjustment_detail']),
+                         (0, ''))
+        self.assertEqual(old_status, 'cancelled')
+        self.assertEqual((new_reservation['vehicle_id'], new_reservation['status']), (2, 'approved'))
+
     def test_approved_vehicle_change_keeps_checked_out_old_vehicle_returnable(self):
         schedule_id = 66
         self.add_submitted_schedule(schedule_id)
@@ -1727,9 +1788,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        approved = self.client.post('/api/plan-schedules/66/approve',
-                                    headers=self.headers('manager-token'))
-        self.assertEqual(approved.status_code, 200, approved.json)
+        approved = submitted
+        self.assertEqual(approved.json['status'], 'approved')
 
         with self.db() as db:
             old_application = db.execute(
@@ -1821,10 +1881,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
 
-        approved = self.client.post('/api/plan-schedules/67/approve',
-                                    headers=self.headers('manager-token'))
-
-        self.assertEqual(approved.status_code, 200, approved.json)
+        approved = submitted
+        self.assertEqual(approved.json['status'], 'approved')
         with self.db() as db:
             applications = db.execute("""SELECT id,status,start_at,end_at FROM vehicle_applications
                 WHERE reason LIKE ? ORDER BY id""",
@@ -1880,10 +1938,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
 
-        approved = self.client.post('/api/plan-schedules/69/approve',
-                                    headers=self.headers('manager-token'))
-
-        self.assertEqual(approved.status_code, 200, approved.json)
+        approved = submitted
+        self.assertEqual(approved.json['status'], 'approved')
         with self.db() as db:
             applications = db.execute("""SELECT id,status FROM vehicle_applications
                 WHERE reason LIKE ? ORDER BY id""",
@@ -1931,16 +1987,11 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                     'vehicle_id': 1,
                                 })
         self.assertEqual(saved.status_code, 200, saved.json)
+        before = self.side_effect_snapshot(schedule_id)
         submitted = self.client.post('/api/plan-schedules/70/submit',
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
-        self.assertEqual(submitted.status_code, 200, submitted.json)
-        before = self.side_effect_snapshot(schedule_id)
-
-        approved = self.client.post('/api/plan-schedules/70/approve',
-                                    headers=self.headers('manager-token'))
-
-        self.assertEqual((approved.status_code, approved.json.get('code')),
+        self.assertEqual((submitted.status_code, submitted.json.get('code')),
                          (409, 'PLAN_VEHICLE_RESERVATION_CONFLICT'))
         self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
         with self.db() as db:
@@ -1999,9 +2050,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        approved = self.client.post('/api/plan-schedules/68/approve',
-                                    headers=self.headers('manager-token'))
-        self.assertEqual(approved.status_code, 200, approved.json)
+        approved = submitted
+        self.assertEqual(approved.json['status'], 'approved')
 
         with self.db() as db:
             statuses = {
@@ -2052,7 +2102,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.assertEqual((stale.status_code, stale.json.get('code')),
                          (409, 'VEHICLE_APPROVAL_STALE'))
 
-    def test_overdue_rework_reservation_blocks_rebooking_until_execution_closes(self):
+    def test_overdue_rework_active_use_blocks_rebooking_until_execution_closes(self):
         self.add_submitted_schedule(42)
         with self.db() as db:
             db.execute("UPDATE plan_schedules SET status='approved', tasks_generated=1 WHERE id=42")
@@ -2075,7 +2125,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             state = app_module._vehicle_plan_application_state(db, application)
 
         self.assertEqual(application['reason'], 'legacy remediation')
-        self.assertTrue(state['reserves_vehicle'])
+        self.assertFalse(state['reserves_vehicle'])
+        self.assertTrue(state['has_active_use'])
         self.assertTrue(state['needs_extension'])
 
         app_module.notify_overdue_vehicle_arrangements_job()

@@ -8,6 +8,7 @@ import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
 import { filterInputWidth } from '../../services/pageStyles';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -24,7 +25,7 @@ export default function ReagentMasterPage() {
   const [editing, setEditing] = useState(null); // null=新增，对象=编辑
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
-  const search = searchParams.get('q') || '';
+  const urlSearch = searchParams.get('q') || '';
 
   const updateSearch = useCallback((value) => {
     setSearchParams((previous) => {
@@ -35,6 +36,7 @@ export default function ReagentMasterPage() {
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  const { draft: search, inputProps: searchInputProps } = useUrlSyncedSearch(urlSearch, updateSearch);
 
   const filteredData = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -182,8 +184,7 @@ export default function ReagentMasterPage() {
             placeholder="搜索试剂名称、厂家、规格..."
             prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
             allowClear
-            value={search}
-            onChange={(event) => updateSearch(event.target.value)}
+            {...searchInputProps}
             style={{ width: filterInputWidth, borderRadius: 8 }}
           />
           <Text type="secondary">共 {filteredData.length} 项</Text>

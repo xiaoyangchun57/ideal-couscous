@@ -33,6 +33,7 @@ Page({
     const id = options.site_id || app.globalData.selSiteId;
     const monitoringPublic = getUser()?.capabilities?.station_monitoring_public === true;
     const requestedMonitoring = options.source === 'responsible_sites_monitoring';
+    this._calibrateOnLoad = options.action === 'calibrate';
     const readOnlySource = options.source === 'inspection_readonly'
       || options.source === 'responsible_sites_profile' || requestedMonitoring;
     const monitoringSource = monitoringPublic && requestedMonitoring;
@@ -87,7 +88,12 @@ Page({
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
         const source = this.data.readOnlySource ? (res.site || {}) : (res.site || {});
         const checkedIn = !!source.checked_in;
-        this.setData({ site: Object.assign({}, source, { checked_in: checkedIn, can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn), checkin_sync_pending: false, monitoring: res.monitoring || { latest_values: [] } }), monitoringLoading: false, monitoringError: '' });
+        this.setData({ site: Object.assign({}, source, { checked_in: checkedIn, can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn), checkin_sync_pending: false, monitoring: res.monitoring || { latest_values: [] } }), monitoringLoading: false, monitoringError: '' }, () => {
+          if (this._calibrateOnLoad && this.data.site && this.data.site.can_calibrate) {
+            this._calibrateOnLoad = false;
+            this.onCalibrate();
+          }
+        });
       })
       .catch(() => {
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;

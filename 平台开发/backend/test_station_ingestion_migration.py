@@ -60,6 +60,117 @@ class StationIngestionMigrationTest(unittest.TestCase):
         ]):
             return migration.main()
 
+    @staticmethod
+    def _apply_through_006(database: Path) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == migration.MONITORING_RESULT_WINDOW_MIGRATION_VERSION:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version), "2026-09-21T00:00:00+00:00", "isolated-006"),
+                )
+            connection.commit()
+
+    def test_existing_001_through_006_database_upgrades_to_007_and_repeats_without_writes(self):
+        self._apply_through_006(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('INCREMENTAL-007','isolated',1,'bound')"""
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,effective_from)
+                   VALUES (?,'HJ212:w01001','Asia/Shanghai',14400,'00:00:00',0,
+                           '2026-09-21T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            before_schedule_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitoring_business_schedules'"
+            ).fetchone()[0]
+            connection.commit()
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1]: row for row in connection.execute(
+                "PRAGMA table_info(monitoring_business_schedules)"
+            )}
+            self.assertNotEqual(connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitoring_business_schedules'"
+            ).fetchone()[0], before_schedule_sql)
+            self.assertEqual((columns["result_delay_seconds"][2], columns["result_delay_seconds"][3],
+                              str(columns["result_delay_seconds"][4])), ("INTEGER", 1, "0"))
+            self.assertEqual(connection.execute(
+                "SELECT result_delay_seconds FROM monitoring_business_schedules"
+            ).fetchone()[0], 7200)
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE monitoring_business_schedules SET result_delay_seconds=interval_seconds+1"
+                )
+            migration.verify_station_monitoring_schema(connection)
+        second_applied, second_backup = migration.apply_migration(self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_failed_007_upgrade_restores_the_001_through_006_database(self):
+        self._apply_through_006(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            before_schema = migration._schema_snapshot(connection)
+            before_versions = connection.execute(
+                "SELECT version,checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+
+        with mock.patch.object(
+            migration, "verify_station_monitoring_schema",
+            side_effect=migration.MigrationError("forced 007 verification failure"),
+        ):
+            with self.assertRaisesRegex(migration.MigrationError, "forced 007 verification failure"):
+                migration.apply_migration(self.database, self.backups)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(migration._schema_snapshot(connection), before_schema)
+            self.assertEqual(connection.execute(
+                "SELECT version,checksum FROM schema_migrations ORDER BY version"
+            ).fetchall(), before_versions)
+            self.assertNotIn("result_delay_seconds", {
+                row[1] for row in connection.execute("PRAGMA table_info(monitoring_business_schedules)")
+            })
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_007_upgrade_rejects_and_restores_any_undeclared_schema_change(self):
+        self._apply_through_006(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            before_schema = migration._schema_snapshot(connection)
+        original_execute = migration._execute_migration_sql
+
+        def execute_with_undeclared_change(connection, script):
+            original_execute(connection, script)
+            connection.execute("ALTER TABLE sites ADD COLUMN undeclared_007_value TEXT")
+
+        with mock.patch.object(
+            migration, "_execute_migration_sql", side_effect=execute_with_undeclared_change,
+        ):
+            with self.assertRaisesRegex(
+                migration.MigrationError, "modified pre-existing schema objects",
+            ):
+                migration.apply_migration(self.database, self.backups)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(migration._schema_snapshot(connection), before_schema)
+            self.assertNotIn("undeclared_007_value", {
+                row[1] for row in connection.execute("PRAGMA table_info(sites)")
+            })
+            self.assertNotIn("result_delay_seconds", {
+                row[1] for row in connection.execute("PRAGMA table_info(monitoring_business_schedules)")
+            })
+
     def test_check_rejects_database_with_only_first_stage_migration(self):
         with closing(sqlite3.connect(self.database)) as connection:
             migration._execute_migration_sql(connection, migration.MIGRATIONS[0][1].read_text(encoding="utf-8"))
@@ -105,6 +216,10 @@ class StationIngestionMigrationTest(unittest.TestCase):
                 'DELETE FROM schema_migrations WHERE version=?',
                 (migration.HJ212_LEGACY_005_MIGRATION_VERSION,),
             )
+            connection.execute(
+                'DELETE FROM schema_migrations WHERE version=?',
+                (migration.MONITORING_RESULT_WINDOW_MIGRATION_VERSION,),
+            )
             endpoint = connection.execute(
                 """INSERT INTO trusted_endpoints(
                        station_code,credential_hmac,business_site_id,endpoint_state)
@@ -120,16 +235,16 @@ class StationIngestionMigrationTest(unittest.TestCase):
                        endpoint_id,protocol_code,expected_interval_seconds,effective_from)
                    VALUES (?,?,?,'2020-01-01T00:00:00+00:00')""",
                 ((endpoint.lastrowid, 'HJ212:w01001', 60),
-                 (endpoint.lastrowid, 'HJ212:w01010', 3600)),
+                 (endpoint.lastrowid, 'HJ212:w01010', 14400)),
             )
             connection.commit()
         applied, _ = migration.apply_migration(self.database, self.root / 'confirmed-backups')
         self.assertTrue(applied)
         with closing(sqlite3.connect(self.database)) as connection:
             schedules = connection.execute(
-                """SELECT protocol_code,interval_seconds FROM monitoring_business_schedules
+                """SELECT protocol_code,interval_seconds,result_delay_seconds FROM monitoring_business_schedules
                    ORDER BY protocol_code""").fetchall()
-        self.assertEqual(schedules, [('HJ212:w01010', 3600)])
+        self.assertEqual(schedules, [('HJ212:w01010', 14400, 7200)])
 
     def test_missing_target_path_is_rejected_without_creating_sqlite_file(self):
         missing = self.root / "not-created" / "water.db"

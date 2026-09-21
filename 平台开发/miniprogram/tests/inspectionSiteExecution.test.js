@@ -31,6 +31,7 @@ let toasts = [];
 let modals = [];
 let scrollCalls = [];
 let switchTabs = 0;
+let navigationUrls = [];
 
 global.getApp = () => app;
 global.Page = page => { definition = page; };
@@ -48,7 +49,7 @@ global.wx = {
   authorize: ({ success }) => success(),
   getLocation: ({ success }) => success({ latitude: 28.6, longitude: 115.7 }),
   switchTab: options => { switchTabs += 1; if (options.success) options.success(); },
-  navigateTo: () => {}, reLaunch: () => {}, stopPullDownRefresh: () => {},
+  navigateTo: options => { navigationUrls.push(options.url); }, reLaunch: () => {}, stopPullDownRefresh: () => {},
   setNavigationBarTitle: () => {}, pageScrollTo: options => { scrollCalls.push(options); },
   removeSavedFile: () => {},
 };
@@ -75,6 +76,7 @@ function resetStorage() {
   modals = [];
   scrollCalls = [];
   switchTabs = 0;
+  navigationUrls = [];
 }
 
 function seedStation(page, overrides) {
@@ -214,6 +216,32 @@ const originals = {
     await flush();
     await flush();
     assert.equal(postCheckinRefreshes, 1, 'successful arrival refreshes the exact site from server facts');
+
+    resetStorage();
+    const remoteCheckin = createPage();
+    seedStation(remoteCheckin, { checked_in: false });
+    remoteCheckin.refreshStationStage = () => {};
+    api.trackEvent = () => {};
+    api.checkIn = () => Promise.reject({
+      code: 'SITE_GEOFENCE_EXCEEDED',
+      error: '距站点约 900m，超出 300m 到场范围，无法打卡',
+    });
+    remoteCheckin.onCheckIn();
+    await flush();
+    await flush();
+    assert.equal(modals.at(-1).confirmText, '去校准');
+    assert.equal(modals.at(-1).cancelText, '暂不校准');
+    assert.match(modals.at(-1).content, /定位不准？去校准/);
+    assert.equal(navigationUrls.at(-1),
+      '/pages/site/site?site_id=20&source=inspection_calibration&action=calibrate');
+
+    navigationUrls = [];
+    api.checkIn = () => Promise.reject({ code: 'PLAN_NOT_EXECUTABLE', error: '任务状态已变化' });
+    remoteCheckin.onCheckIn();
+    await flush();
+    await flush();
+    assert.equal(modals.at(-1).showCancel, false);
+    assert.equal(navigationUrls.length, 0, 'non-geofence failures never offer calibration navigation');
 
     resetStorage();
     const itemPage = createPage();

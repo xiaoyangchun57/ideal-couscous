@@ -79,6 +79,7 @@ const api = {
     return request('/api/station-monitoring/sites' + (pairs.length ? '?' + pairs.join('&') : ''), 'GET', {}, { queue: false });
   },
   stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
+  reagentOverview: () => request('/api/reagent-overview', 'GET', {}, { queue: false }),
   responsibleSites: (options) => {
     const query = options || {};
     const pairs = [];
@@ -124,8 +125,14 @@ const api = {
   vehicleApplications: (options) => request('/api/vehicle/applications' + vehicleListQuery(options), 'GET'),
   requestReworkResource: (planId, payload) =>
     request('/api/inspection-v2/rework-plans/' + planId + '/resource-request', 'POST', payload),
-  extendVehicleApplication: (applicationId, endDate) =>
-    request('/api/vehicle/applications/' + applicationId + '/extend', 'POST', { end_date: endDate }),
+  extendVehicleApplication: (applicationId, endDate, options) => {
+    const value = options || {};
+    return request('/api/vehicle/applications/' + applicationId + '/extend', 'POST', {
+      end_date: endDate,
+      confirm_conflicts: value.confirmConflicts === true,
+      _idempotency_key: value.idempotencyKey || '',
+    }, { queue: false });
+  },
 
   // 站点任务（含已完成）
   siteTasks: (siteId) => request('/api/mobile/site-tasks/' + siteId, 'GET'),

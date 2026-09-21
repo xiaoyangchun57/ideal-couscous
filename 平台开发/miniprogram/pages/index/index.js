@@ -5,7 +5,9 @@ const {
   formatHomeDate,
   projectHome,
   projectIdentity,
+  projectReagentSummary,
   projectReview,
+  projectStationSummary,
   projectUnread
 } = require('../../utils/homeTaskState.js');
 const { currentUnreadRevision } = require('../../utils/notificationCount.js');
@@ -44,14 +46,23 @@ Page({
     reviewState: 'hidden',
     reviewCount: null,
     reviewDisplay: '',
+
+    stationsState: 'initial_loading',
+    stationsError: '',
+    stationSummary: null,
+    reagentsState: 'initial_loading',
+    reagentsError: '',
+    reagentSummary: null,
   },
 
   onLoad() {
     this._alive = true;
-    this._requestGeneration = { main: 0, notifications: 0, review: 0 };
+    this._requestGeneration = { main: 0, notifications: 0, review: 0, stations: 0, reagents: 0 };
     this._unreadRevision = currentUnreadRevision();
     this._navigationInFlight = false;
     this._hasMainData = false;
+    this._hasStationsData = false;
+    this._hasReagentsData = false;
     this.setData(projectIdentity(getUser(), todayStr(), new Date().getHours()));
   },
 
@@ -65,6 +76,8 @@ Page({
     this.loadMain();
     this.loadNotifications();
     if (this.data.canReview) this.loadReview();
+    this.loadStations();
+    this.loadReagents();
   },
 
   onUnload() {
@@ -76,12 +89,14 @@ Page({
     const tasks = [this.loadMain(true)];
     tasks.push(this.loadNotifications(true));
     if (this.data.canReview) tasks.push(this.loadReview(true));
+    tasks.push(this.loadStations(true));
+    tasks.push(this.loadReagents(true));
 
     Promise.all(tasks).then(() => wx.stopPullDownRefresh(), () => wx.stopPullDownRefresh());
   },
 
   _beginRequest(kind) {
-    if (!this._requestGeneration) this._requestGeneration = { main: 0, notifications: 0, review: 0 };
+    if (!this._requestGeneration) this._requestGeneration = { main: 0, notifications: 0, review: 0, stations: 0, reagents: 0 };
     this._requestGeneration[kind] += 1;
     return this._requestGeneration[kind];
   },
@@ -158,6 +173,48 @@ Page({
       });
   },
 
+  loadStations() {
+    const generation = this._beginRequest('stations');
+    const preserveExisting = !!this._hasStationsData;
+    this.setData({ stationsState: preserveExisting ? 'refreshing' : 'initial_loading', stationsError: '' });
+    return api.stationMonitoringSites({ scope: 'mine' }).then(res => {
+      if (!this._isCurrentRequest('stations', generation)) return;
+      this._hasStationsData = true;
+      this.setData({ stationsState: 'ready', stationsError: '', stationSummary: projectStationSummary(res) });
+    }).catch(err => {
+      if (!this._isCurrentRequest('stations', generation)) return;
+      this.setData({
+        stationsState: preserveExisting ? 'refresh_error' : 'blocking_error',
+        stationsError: errorMessage(err, '站点数据加载失败，请重试'),
+      });
+    });
+  },
+
+  loadReagents() {
+    const generation = this._beginRequest('reagents');
+    const preserveExisting = !!this._hasReagentsData;
+    this.setData({ reagentsState: preserveExisting ? 'refreshing' : 'initial_loading', reagentsError: '' });
+    return api.reagentOverview().then(res => {
+      if (!this._isCurrentRequest('reagents', generation)) return;
+      this._hasReagentsData = true;
+      this.setData({ reagentsState: 'ready', reagentsError: '', reagentSummary: projectReagentSummary(res) });
+    }).catch(err => {
+      if (!this._isCurrentRequest('reagents', generation)) return;
+      this.setData({
+        reagentsState: preserveExisting ? 'refresh_error' : 'blocking_error',
+        reagentsError: errorMessage(err, '试剂情况加载失败，请重试'),
+      });
+    });
+  },
+
+  onRetryStations() {
+    return this.loadStations();
+  },
+
+  onRetryReagents() {
+    return this.loadReagents();
+  },
+
   _navigateLocked(method, url, onFailure) {
     let finished = false;
     const finish = () => {
@@ -213,6 +270,12 @@ Page({
     app.globalData.selWorkorderNo = null;
     return this._navigateOnce('navigateTo', '/pages/workorder/workorder', () => {
       wx.showToast({ title: '打开工单列表失败，请重试', icon: 'none' });
+    });
+  },
+
+  goResponsibleSites() {
+    return this._navigateOnce('navigateTo', '/pages/responsible-sites/responsible-sites', () => {
+      wx.showToast({ title: '打开站点列表失败，请重试', icon: 'none' });
     });
   },
 

@@ -146,6 +146,7 @@ Page({
     executionTarget: null,
     reworkBlockReason: '',
     executionBlockReason: '',
+    vehicleAdjustmentRequired: false,
     canFavorite: false,
     favoriting: false,
     favorite: null,
@@ -281,6 +282,7 @@ Page({
           executionTarget: actionTarget,
           reworkBlockReason: res.rework_block_reason || '',
           executionBlockReason: res.execution_block_reason || '',
+          vehicleAdjustmentRequired: res.vehicle_adjustment_required === true,
           canFavorite: canUseFavorites && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0),
           canCancel: res.can_cancel === true,
           cancelBlockReason: res.can_cancel === true
@@ -569,12 +571,12 @@ Page({
       });
   },
 
-  // 开始修改只会进入编辑态；正式提交仍由编辑页完成。
+  // 开始修改只进入编辑态；保存生效仍由编辑页完成。
   onChangeRequest() {
     wx.showModal({
       title: '开始修改计划',
       editable: true,
-      content: '此步只进入编辑，不会提交管理员审核。完成修改后请点“提交变更审核”。',
+      content: '此步只进入编辑。完成修改并确认后，新计划将直接生效。',
       placeholderText: '请填写修改原因（如日期或站点顺序错误）',
       success: (r) => {
         if (!r.confirm) return;
@@ -585,7 +587,7 @@ Page({
         }
         api.requestPlanScheduleChange(this.scheduleId, reason)
           .then(() => {
-            wx.showToast({ title: '请完成修改并提交审核', icon: 'none' });
+            wx.showToast({ title: '请完成修改并确认生效', icon: 'none' });
             wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
           })
           .catch(err => {

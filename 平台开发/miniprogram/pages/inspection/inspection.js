@@ -1948,7 +1948,22 @@ Page({
             }
             this.refreshStationStage(site.id);
             this.setData({ syncCount: pendingSyncCount() });
-            wx.showModal({ title: '打卡未完成', content: error.error || '服务器拒绝了本次打卡，请按提示处理', showCancel: false });
+            const canCalibrate = error && error.code === 'SITE_GEOFENCE_EXCEEDED';
+            wx.showModal({
+              title: '打卡未完成',
+              content: (error.error || '服务器拒绝了本次打卡，请按提示处理')
+                + (canCalibrate ? '\n\n定位不准？去校准' : ''),
+              showCancel: canCalibrate,
+              confirmText: canCalibrate ? '去校准' : '知道了',
+              cancelText: canCalibrate ? '暂不校准' : undefined,
+              success: (result) => {
+                if (!canCalibrate || !result.confirm) return;
+                wx.navigateTo({
+                  url: '/pages/site/site?site_id=' + encodeURIComponent(site.id)
+                    + '&source=inspection_calibration&action=calibrate'
+                });
+              }
+            });
             return;
           }
           this.setData({ syncCount: pendingSyncCount() });

@@ -695,6 +695,12 @@ test('detail cancellation source preserves retry context and package labels keep
   assert.match(template, /loading="\{\{cancelSheet\.submitting\}\}"/);
   assert.match(template, /提交审批/);
   assert.match(page, /开始修改计划/);
+  assert.match(page, /vehicleAdjustmentRequired:\s*res\.vehicle_adjustment_required === true/);
+  assert.match(template, /vehicleAdjustmentRequired[\s\S]*车辆需调整[\s\S]*bindtap="onChangeRequest"[\s\S]*调整车辆/);
+  const editPage = fs.readFileSync(path.resolve(__dirname, '../pages/plan-edit/plan-edit.js'), 'utf8');
+  const editTemplate = fs.readFileSync(path.resolve(__dirname, '../pages/plan-edit/plan-edit.wxml'), 'utf8');
+  assert.match(editPage, /vehicleAdjustmentRequired:\s*res\.vehicle_adjustment_required === true/);
+  assert.match(editTemplate, /vehicleAdjustmentRequired[\s\S]*车辆需调整[\s\S]*保存草稿不会解除限制/);
   assert.match(inspectionTemplate, /currentPackage\.plan_display_name/);
   assert.equal(maps.PLAN_SCHEDULE_STATUS.cancelled, '已取消');
   assert.equal(maps.PLAN_SCHEDULE_STATUS_CLS.cancelled, 'gray');

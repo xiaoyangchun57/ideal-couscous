@@ -14,9 +14,9 @@ except ImportError:  # pragma: no cover
     from sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
 
-NORMALIZATION_VERSION = "station-monitoring-normalizer-v2"
-BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v1"
-HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v1"
+NORMALIZATION_VERSION = "station-monitoring-normalizer-v3"
+BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v2"
+HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v2"
 
 
 def _utc_now() -> str:
@@ -34,8 +34,9 @@ def _as_utc(value: datetime, timezone_name: str) -> str:
 def _record_issue(connection, raw_id, batch_id, site_id, issue_type, summary, *, retryable=True):
     """One issue represents one raw business occurrence; retries never inflate it."""
     existing = connection.execute(
-        "SELECT id FROM monitoring_quality_issues WHERE raw_frame_id IS ? AND issue_type=? AND status='open'",
-        (raw_id, issue_type),
+        """SELECT id FROM monitoring_quality_issues
+           WHERE raw_frame_id IS ? AND issue_type=? AND object_summary=? AND status='open'""",
+        (raw_id, issue_type, summary[:160]),
     ).fetchone()
     now = _utc_now()
     if existing:
@@ -94,8 +95,15 @@ def _business_schedule_for(connection, endpoint_id: int, protocol_code: str, at_
     return rows[0] if rows else None
 
 
-def _scheduled_at(schedule, observed_at: str) -> str | None:
-    """Return the UTC slot only when device DataTime is an exact configured point."""
+def _schedule_integer(schedule, key: str, default: int = 0) -> int:
+    try:
+        return int(schedule[key]) if key in schedule.keys() else default
+    except AttributeError:
+        return int(schedule.get(key, default))
+
+
+def _scheduled_at(schedule, observed_at: str, function_code: int | None = None) -> str | None:
+    """Resolve sample time from an exact sample timestamp or a delayed result window."""
     try:
         zone = ZoneInfo(schedule["timezone"])
     except ZoneInfoNotFoundError as exc:
@@ -105,9 +113,29 @@ def _scheduled_at(schedule, observed_at: str) -> str | None:
     observed_seconds = observed.hour * 3600 + observed.minute * 60 + observed.second
     anchor_seconds = anchor.hour * 3600 + anchor.minute * 60 + anchor.second
     interval = int(schedule["interval_seconds"])
+    result_delay = _schedule_integer(schedule, "result_delay_seconds")
+    if function_code == 2011 and result_delay:
+        reference = observed - timedelta(seconds=result_delay)
+        local_anchor = datetime.combine(reference.date(), anchor, zone)
+        if reference < local_anchor:
+            local_anchor -= timedelta(days=1)
+        elapsed = int((reference - local_anchor).total_seconds())
+        slot = local_anchor + timedelta(seconds=(elapsed // interval) * interval)
+        return slot.astimezone(timezone.utc).replace(microsecond=0).isoformat()
     if observed.microsecond or (observed_seconds - anchor_seconds) % interval:
         return None
     return observed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def business_slot_deadline(configuration: dict, scheduled_at: str) -> str:
+    """Return when an empty slot is finally missing rather than still awaiting analysis."""
+    scheduled = datetime.fromisoformat(scheduled_at)
+    delay = int(configuration.get("result_delay_seconds") or 0)
+    if delay:
+        seconds = delay + int(configuration.get("expected_interval_seconds") or 0)
+    else:
+        seconds = int(configuration.get("tolerance_seconds") or 0)
+    return (scheduled + timedelta(seconds=seconds)).isoformat()
 
 
 def _protocol_business_priority(protocol_code: str) -> tuple[int, str]:
@@ -163,16 +191,22 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
                                   site_id: int, protocol_code: str, business_metric: str,
                                   instrument_asset_code: str | None, observed_at: str,
                                   received_at: str, standard_value: float, standard_unit: str,
-                                  quality: str) -> bool:
+                                  quality: str, function_code: int | None = None) -> bool:
     schedule = _business_schedule_for(connection, endpoint_id, protocol_code, observed_at)
     if not schedule:
         return False
-    scheduled_at = _scheduled_at(schedule, observed_at)
+    scheduled_at = _scheduled_at(schedule, observed_at, function_code)
     if scheduled_at is None:
         return False
     received = datetime.fromisoformat(received_at)
     observed = datetime.fromisoformat(observed_at)
-    timeliness = "late" if received - observed > timedelta(seconds=int(schedule["tolerance_seconds"])) else "on_time"
+    result_delay = _schedule_integer(schedule, "result_delay_seconds")
+    if function_code in {2011, 2061} and result_delay:
+        deadline = datetime.fromisoformat(scheduled_at) + timedelta(
+            seconds=result_delay + int(schedule["interval_seconds"]))
+        timeliness = "late" if received >= deadline else "on_time"
+    else:
+        timeliness = "late" if received - observed > timedelta(seconds=int(schedule["tolerance_seconds"])) else "on_time"
     connection.execute(
         """INSERT INTO monitoring_business_observations(
                source_observation_value_id,observation_batch_id,schedule_id,endpoint_id,business_site_id,
@@ -214,7 +248,7 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                     """SELECT value.id AS value_id,value.observation_batch_id,value.protocol_code,
                               value.business_metric,value.instrument_asset_code,value.standard_value,
                               value.standard_unit,value.quality,batch.raw_frame_id,batch.endpoint_id,
-                              batch.business_site_id,batch.observed_at,batch.received_at
+                              batch.business_site_id,batch.observed_at,batch.received_at,batch.function_code
                        FROM observation_values value
                        JOIN observation_batches batch ON batch.id=value.observation_batch_id
                        LEFT JOIN monitoring_business_observations business
@@ -224,14 +258,24 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                          AND batch.projection_state='completed' AND business.id IS NULL""",
                     (value_id,),
                 ).fetchone()
-                if row and _project_business_observation(
+                if row:
+                    was_projected = _project_business_observation(
                         connection, value_id=row["value_id"], batch_id=row["observation_batch_id"],
                         endpoint_id=row["endpoint_id"], site_id=row["business_site_id"],
                         protocol_code=row["protocol_code"], business_metric=row["business_metric"],
                         instrument_asset_code=row["instrument_asset_code"], observed_at=row["observed_at"],
                         received_at=row["received_at"], standard_value=row["standard_value"],
-                        standard_unit=row["standard_unit"], quality=row["quality"]):
-                    projected += 1
+                        standard_unit=row["standard_unit"], quality=row["quality"],
+                        function_code=row["function_code"])
+                    if was_projected:
+                        projected += 1
+                    elif row["function_code"] == 2061 and _business_schedule_for(
+                            connection, row["endpoint_id"], row["protocol_code"], row["observed_at"]):
+                        _record_issue(
+                            connection, row["raw_frame_id"], row["observation_batch_id"],
+                            row["business_site_id"], "business_time_outside_schedule", row["protocol_code"],
+                            retryable=False,
+                        )
                 connection.commit()
         except (sqlite3.Error, OSError):
             deferred += 1
@@ -283,12 +327,12 @@ def normalize_raw_frame(
             endpoint_timezone = _endpoint_timezone(connection, raw["endpoint_id"])
             if family == "hj212":
                 frame = parse_hj212_frame(raw["raw_frame"])
-                if frame.command != "2011" or frame.data_time is None:
+                if frame.command not in {"2011", "2061"} or frame.data_time is None:
                     return _mark_waiting(connection, raw_id, None, "hj212_not_projectable", "HJ212 command has no projectable observation")
                 report_factors = frame.factors
                 reported_at = _as_utc(frame.data_time, endpoint_timezone)
                 observed_at = _as_utc(frame.data_time, endpoint_timezone)
-                function_code = 2011
+                function_code = int(frame.command)
                 serial_number = 0
                 parser_version = HJ212_PARSER_VERSION
             elif family == "sl651":
@@ -392,15 +436,22 @@ def normalize_raw_frame(
                  parser_version, int(published and factor.quality in {"valid", "suspect"})),
             )
             if published and factor.quality in {"valid", "suspect"}:
-                _project_business_observation(
+                projected = _project_business_observation(
                     connection, value_id=int(value_cursor.lastrowid), batch_id=batch_id,
                     endpoint_id=raw["endpoint_id"], site_id=site_id, protocol_code=factor.protocol_code,
                     business_metric=metric,
                     instrument_asset_code=mapping["instrument_asset_code"] or profile["instrument_asset_code"],
                     observed_at=observed_at, received_at=raw["received_at"],
                     standard_value=factor.raw_value, standard_unit=definition["standard_unit"],
-                    quality=factor.quality,
+                    quality=factor.quality, function_code=function_code,
                 )
+                if not projected and function_code == 2061 and _business_schedule_for(
+                        connection, raw["endpoint_id"], factor.protocol_code, observed_at):
+                    batch_status = "partial"
+                    _record_issue(
+                        connection, raw_id, batch_id, site_id,
+                        "business_time_outside_schedule", factor.protocol_code, retryable=False,
+                    )
         connection.execute("UPDATE observation_batches SET batch_status=? WHERE id=?", (batch_status, batch_id))
         connection.execute("UPDATE ingest_raw_frames SET disposition='accepted', persistence_state='persisted' WHERE id=?", (raw_id,))
         connection.execute("DELETE FROM monitoring_normalization_retries WHERE raw_frame_id=?", (raw_id,))
@@ -483,6 +534,7 @@ def current_factor_configurations(connection, site_id: int, *, at_time: str | No
             "schedule_anchor_local_time": schedule["anchor_local_time"] if schedule else None,
             "expected_interval_seconds": schedule["interval_seconds"] if schedule else None,
             "tolerance_seconds": schedule["tolerance_seconds"] if schedule else None,
+            "result_delay_seconds": _schedule_integer(schedule, "result_delay_seconds") if schedule else None,
         })
         if schedule:
             at_datetime = datetime.fromisoformat(at_time).astimezone(timezone.utc)
@@ -493,8 +545,25 @@ def current_factor_configurations(connection, site_id: int, *, at_time: str | No
             item["next_expected_at"] = next(
                 (slot["scheduled_at"] for slot in future_slots
                  if datetime.fromisoformat(slot["scheduled_at"]) > at_datetime), None)
+            interval = int(item["expected_interval_seconds"] or 0)
+            delay = int(item["result_delay_seconds"] or 0)
+            recent_slots = expected_business_slots(
+                connection, item,
+                (at_datetime - timedelta(seconds=max(interval + delay, interval * 2))).isoformat(),
+                (at_datetime + timedelta(seconds=max(interval, 1))).isoformat(),
+            )
+            due_slots = [slot for slot in recent_slots
+                         if datetime.fromisoformat(slot["result_window_end_at"]) <= at_datetime]
+            pending_slots = [slot for slot in recent_slots
+                             if datetime.fromisoformat(slot["scheduled_at"]) <= at_datetime
+                             < datetime.fromisoformat(slot["result_window_end_at"])]
+            item["has_due_slot"] = bool(due_slots)
+            item["pending_until"] = min(
+                (slot["result_window_end_at"] for slot in pending_slots), default=None)
         else:
             item["next_expected_at"] = None
+            item["has_due_slot"] = False
+            item["pending_until"] = None
         result.append(item)
     return result
 
@@ -548,8 +617,18 @@ def expected_business_slots(connection, configuration: dict, start: str, end: st
                     slots[utc_text] = {
                         "scheduled_at": utc_text, "schedule_id": schedule["id"],
                         "interval_seconds": interval, "tolerance_seconds": int(schedule["tolerance_seconds"]),
+                        "result_delay_seconds": _schedule_integer(schedule, "result_delay_seconds"),
                         "timezone": schedule["timezone"],
                     }
+                    slots[utc_text]["result_window_start_at"] = (
+                        utc_slot + timedelta(seconds=slots[utc_text]["result_delay_seconds"])
+                    ).isoformat()
+                    slots[utc_text]["result_window_end_at"] = business_slot_deadline(
+                        {
+                            "expected_interval_seconds": interval,
+                            "tolerance_seconds": slots[utc_text]["tolerance_seconds"],
+                            "result_delay_seconds": slots[utc_text]["result_delay_seconds"],
+                        }, utc_text)
             local_day += timedelta(days=1)
     return [slots[key] for key in sorted(slots)]
 

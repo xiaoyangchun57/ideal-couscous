@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,7 +15,8 @@ from sl651_parser import (FrameError, UP_FLOW_CONTROL, crc16_modbus, encode_bcd_
                           encode_bcd_time, encode_station_code, parse_frame, parse_water_quality_payload,
                           parse_water_quality_report)
 from sl651_server import IngestionStorage, credential_hmac
-from station_monitoring import _project_business_observation, expected_business_slots, normalize_raw_frame
+from station_monitoring import (_project_business_observation, _scheduled_at,
+                                expected_business_slots, normalize_raw_frame)
 
 
 def bcd_number(value, digits, precision=0):
@@ -100,6 +102,25 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         raw_id, duplicate = self.storage.persist_parsed(frame, self.storage.authenticate(frame), received_at)
         self.assertFalse(duplicate)
         return raw_id
+
+    def test_delayed_result_window_is_half_open_and_crosses_midnight(self):
+        schedule = {
+            'timezone': 'Asia/Shanghai', 'anchor_local_time': '00:00:00',
+            'interval_seconds': 14400, 'result_delay_seconds': 7200,
+        }
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T17:59:59+00:00', 2011),
+            '2026-09-11T12:00:00+00:00',
+        )
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T18:00:00+00:00', 2011),
+            '2026-09-11T16:00:00+00:00',
+        )
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T04:00:00+00:00', 2061),
+            '2026-09-11T04:00:00+00:00',
+        )
+        self.assertIsNone(_scheduled_at(schedule, '2026-09-11T05:00:00+00:00', 2061))
 
     def test_32h_golden_factor_payload_covers_current_water_quality_and_status_definitions(self):
         payload = (
@@ -713,6 +734,32 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('2020-06-12T16:00:00+00:00', [
             point['scheduled_at'] for point in response.get_json()['points']])
 
+    def test_unfinished_result_window_is_pending_not_missing_coverage(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                'UPDATE monitoring_business_schedules SET result_delay_seconds=7200,tolerance_seconds=0'
+            )
+            connection.commit()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2020, 6, 12, 3, 0, 0, tzinfo=timezone.utc)
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+        with mock.patch.object(web_app, 'datetime', FixedDateTime):
+            response = web_app.app.test_client().get(
+                f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+                '&start=2020-06-12T00:00:00%2B00:00&end=2020-06-12T04:00:00%2B00:00',
+                headers=self._headers('monitor-admin'),
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        coverage = response.get_json()['coverage']
+        self.assertEqual(coverage['expected_points'], 0)
+        self.assertEqual(coverage['pending_points'], 1)
+        self.assertEqual(coverage['missing_points'], 0)
+        self.assertEqual(coverage['gap_count'], 0)
+
     def test_instrument_route_exposes_factor_configuration_without_health_projection(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
@@ -736,6 +783,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('status', water)
 
     def test_station_monitoring_overview_uses_independent_monitoring_fields(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE sites SET manager='旧负责人文本' WHERE id=?", (self.site_id,))
+            connection.commit()
         response = web_app.app.test_client().get(
             f'/api/station-monitoring/sites/{self.site_id}/overview', headers=self._headers('monitor-admin'))
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -748,6 +798,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('reason', body['site'])
         self.assertTrue(body['site']['can_calibrate'])
         self.assertEqual(body['site']['type_cn'], '其他站点')
+        self.assertEqual(body['site']['manager'], 'Operator')
+        self.assertEqual([person['id'] for person in body['site']['responsible_people']], [self.operator_id])
         self.assertEqual(set(body['axes']), {'communication', 'data'})
         self.assertNotIn('instruments', body)
         self.assertNotIn('recent_items', body)
@@ -759,6 +811,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
     def test_station_monitoring_list_uses_explicit_server_scopes_and_responsibility(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute('INSERT INTO user_sites(user_id,site_id) VALUES (?,?)', (self.admin_id, self.site_id))
+            connection.execute("INSERT INTO user_roles(user_id,role) VALUES (?,?)", (self.admin_id, 'operator'))
             connection.execute("UPDATE sites SET name='本人水站', code='MINE-001' WHERE id=?", (self.site_id,))
             connection.execute("UPDATE sites SET name='其他水站', code='OTHER-002' WHERE id=?", (self.other_site_id,))
             connection.commit()
@@ -835,9 +888,54 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(body['axes']['communication']['status_label'], '最近未收到报文')
         self.assertEqual(body['axes']['communication']['reason'], '最后收到报文时间已超出配置周期')
         self.assertEqual(body['axes']['data']['state'], 'no_valid_observation')
-        self.assertEqual(body['axes']['data']['reason'], '当前配置因子中仍有因子尚未形成正式业务观测')
+        self.assertEqual(body['axes']['data']['reason'], '完整结果窗口结束后仍有配置因子缺测')
         self.assertNotEqual(body['axes']['data']['reason'], body['axes']['communication']['reason'])
         self.assertTrue(all(item['standard_unit'] for item in body['monitoring']['factors']))
+
+    def test_presented_value_uses_business_slot_and_retains_source_data_time(self):
+        presented = web_app._station_monitoring_presented_value({
+            'scheduled_at': '2026-09-21T04:00:00+00:00',
+            'observed_at': '2026-09-21T06:01:00+00:00',
+            'received_at': '2026-09-21T06:01:05+00:00',
+        })
+        self.assertEqual(presented['observed_at'], '2026-09-21T04:00:00+00:00')
+        self.assertEqual(presented['source_data_time'], '2026-09-21T06:01:00+00:00')
+        self.assertEqual(presented['received_at'], '2026-09-21T06:01:05+00:00')
+
+    def test_factor_projection_exposes_each_fault_reason_independently(self):
+        now = '2026-09-21T06:01:00+00:00'
+        with closing(sqlite3.connect(self.database)) as connection:
+            raw = connection.execute(
+                """INSERT INTO ingest_raw_frames(
+                       endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                       crc_status,authentication_status,disposition,persistence_state)
+                   VALUES (?,?,?,?,?,?,'valid','authenticated','accepted','persisted')""",
+                (self.endpoint_id, '0012345678', now, 'four-faults', b'isolated', 8),
+            )
+            batch = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,'device_reported',?,?,'partial','completed',?)""",
+                (raw.lastrowid, self.endpoint_id, self.site_id, 2011, 1, now, now, now,
+                 'realtime', 'four-faults', 'isolated', now),
+            )
+            connection.executemany(
+                """INSERT INTO monitoring_quality_issues(
+                       raw_frame_id,observation_batch_id,business_site_id,issue_type,object_summary,
+                       first_seen_at,last_seen_at)
+                   VALUES (?,?,?,'hj212_flag_fault',?,?,?)""",
+                [(raw.lastrowid, batch.lastrowid, self.site_id, code, now, now)
+                 for code in ('0311', '4612', '4A11', '4C1A')],
+            )
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            configs = web_app.monitoring_factor_configurations(connection, self.site_id)
+            states = web_app._station_monitoring_factor_states(connection, self.site_id, configs, [])
+        self.assertEqual(len(states), 4)
+        self.assertEqual({item['state'] for item in states}, {'fault'})
+        self.assertEqual({item['reason_code'] for item in states}, {'hj212_flag_fault'})
 
     def test_station_monitoring_normal_requires_every_configured_factor_fresh(self):
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
