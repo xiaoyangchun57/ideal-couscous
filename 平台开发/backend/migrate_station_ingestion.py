@@ -23,6 +23,7 @@ MIGRATIONS = (
     ("20260912_005_retention_recovery", Path(__file__).with_name("migrations") / "20260912_005_retention_recovery.sql"),
     ("20260918_006_hj212_legacy_005_dissolved_oxygen", Path(__file__).with_name("migrations") / "20260918_006_hj212_legacy_005_dissolved_oxygen.sql"),
     ("20260921_007_monitoring_result_window", Path(__file__).with_name("migrations") / "20260921_007_monitoring_result_window.sql"),
+    ("20260922_008_station_master_refresh", Path(__file__).with_name("migrations") / "20260922_008_station_master_refresh.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -30,11 +31,17 @@ RETENTION_MIGRATION_VERSION = "20260912_004_monitoring_retention"
 RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
 HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_oxygen"
 MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_window"
+STATION_MASTER_REFRESH_MIGRATION_VERSION = "20260922_008_station_master_refresh"
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
             ADD COLUMN result_delay_seconds INTEGER NOT NULL DEFAULT 0
             CHECK (result_delay_seconds BETWEEN 0 AND interval_seconds)""",
+    },
+    STATION_MASTER_REFRESH_MIGRATION_VERSION: {
+        "sites": """ALTER TABLE sites
+            ADD COLUMN master_status TEXT NOT NULL DEFAULT 'active'
+            CHECK (master_status IN ('active', 'retired'))""",
     },
 }
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
@@ -62,6 +69,8 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_storage_health",
     "monitoring_business_schedules",
     "monitoring_business_observations",
+    "site_name_aliases",
+    "station_master_refresh_audits",
 })
 
 
@@ -285,6 +294,26 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not result_window or result_window[0] != migration_checksum(MONITORING_RESULT_WINDOW_MIGRATION_VERSION):
         raise MigrationError("monitoring result-window migration is missing or incompatible")
+    station_master = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?", (STATION_MASTER_REFRESH_MIGRATION_VERSION,)
+    ).fetchone()
+    if not station_master or station_master[0] != migration_checksum(STATION_MASTER_REFRESH_MIGRATION_VERSION):
+        raise MigrationError("station master refresh migration is missing or incompatible")
+    required_master_tables = {"site_name_aliases", "station_master_refresh_audits"}
+    if required_master_tables - existing:
+        raise MigrationError("station master refresh tables are missing")
+    site_columns = {row[1]: row for row in connection.execute("PRAGMA table_info(sites)")}
+    master_status = site_columns.get("master_status")
+    if master_status is None or not master_status[3] or str(master_status[4]).strip("'") != "active":
+        raise MigrationError("station master status column is missing or incompatible")
+    audit_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_master_refresh_audits)")
+    }
+    if {"source_fingerprint", "preview_fingerprint", "accepted_rows", "applied_at"} - audit_columns:
+        raise MigrationError("station master refresh audit contract is missing or incompatible")
+    _require_unique_columns(connection, "site_name_aliases", ("site_id", "normalized_alias"))
+    _require_unique_columns(connection, "station_master_refresh_audits", ("source_fingerprint",))
+    _require_unique_columns(connection, "station_master_refresh_audits", ("preview_fingerprint",))
     schedule_columns = {
         row[1]: row for row in connection.execute("PRAGMA table_info(monitoring_business_schedules)")
     }

@@ -49,6 +49,10 @@ class StationIngestionMigrationTest(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+            site_columns = {row[1]: row for row in connection.execute("PRAGMA table_info(sites)")}
+            self.assertEqual(str(site_columns["master_status"][4]).strip("'"), "active")
+            self.assertTrue(migration._table_exists(connection, "site_name_aliases"))
+            self.assertTrue(migration._table_exists(connection, "station_master_refresh_audits"))
         self.assertEqual(self._run_check(self.database), 0)
         second_applied, second_backup = migration.apply_migration(self.database, self.backups)
         self.assertFalse(second_applied)
@@ -72,6 +76,38 @@ class StationIngestionMigrationTest(unittest.TestCase):
                     (version, migration.migration_checksum(version), "2026-09-21T00:00:00+00:00", "isolated-006"),
                 )
             connection.commit()
+
+    @staticmethod
+    def _apply_through_007(database: Path) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == migration.STATION_MASTER_REFRESH_MIGRATION_VERSION:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version), "2026-09-22T00:00:00+00:00", "isolated-007"),
+                )
+            connection.commit()
+
+    def test_existing_001_through_007_database_upgrades_to_008_and_repeats_without_writes(self):
+        self._apply_through_007(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            before_site = connection.execute("SELECT id,name FROM sites").fetchall()
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT id,name FROM sites").fetchall(), before_site)
+            self.assertEqual(connection.execute(
+                "SELECT master_status FROM sites"
+            ).fetchall(), [("active",)])
+            migration.verify_station_monitoring_schema(connection)
+        second_applied, second_backup = migration.apply_migration(self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
 
     def test_existing_001_through_006_database_upgrades_to_007_and_repeats_without_writes(self):
         self._apply_through_006(self.database)
@@ -149,10 +185,14 @@ class StationIngestionMigrationTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             before_schema = migration._schema_snapshot(connection)
         original_execute = migration._execute_migration_sql
+        injected = False
 
         def execute_with_undeclared_change(connection, script):
+            nonlocal injected
             original_execute(connection, script)
-            connection.execute("ALTER TABLE sites ADD COLUMN undeclared_007_value TEXT")
+            if not injected:
+                connection.execute("ALTER TABLE sites ADD COLUMN undeclared_007_value TEXT")
+                injected = True
 
         with mock.patch.object(
             migration, "_execute_migration_sql", side_effect=execute_with_undeclared_change,
