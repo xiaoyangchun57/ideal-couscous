@@ -4,11 +4,30 @@ const { getUser } = require('../../utils/auth.js');
 
 const app = getApp();
 
+const MONITORING_UNAVAILABLE_CODES = new Set([
+  'STATION_MONITORING_PUBLIC_DISABLED',
+  'STATION_MONITORING_ADMIN_ONLY'
+]);
+
+function monitoringUnavailable(error) {
+  return !!(error && error.status === 403 && MONITORING_UNAVAILABLE_CODES.has(error.code));
+}
+
+function projectSite(site) {
+  const siteId = site.site_id != null ? site.site_id : site.id;
+  return Object.assign({}, site, {
+    id: siteId,
+    site_id: siteId,
+    type_cn: site.type_cn || maps.map(maps.SITE_TYPE, site.type, '其他站点')
+  });
+}
+
 Page({
   data: {
+    activeTab: 'stations',
     sites: [], loading: false, error: '', scope: 'mine', keyword: '', keywordInput: '',
     availableScopes: ['mine'], canViewAll: false, scopeCounts: { mine: 0, all: null },
-    monitoringPublic: false,
+    monitoringEnabled: false, monitoringPublic: false,
     emptyTitle: '暂未分配负责站点', emptyDescription: '当前账号下暂无监测站点，如有疑问请联系管理员'
   },
 
@@ -16,7 +35,10 @@ Page({
 
   onShow() {
     this._inactive = false;
-    this.setData({ monitoringPublic: getUser()?.capabilities?.station_monitoring_public === true });
+    this._monitoringAvailable = getUser()?.capabilities?.station_monitoring_public === true;
+    if (!this._monitoringAvailable) {
+      this.setData({ monitoringEnabled: false, monitoringPublic: false });
+    }
     this.loadSites(this.data.scope || 'mine', this.data.keyword || '');
   },
 
@@ -27,23 +49,33 @@ Page({
     const requestId = (this._sitesRequestId || 0) + 1;
     this._sitesRequestId = requestId;
     this.setData({ loading: true, error: '' });
-    const request = this.data.monitoringPublic ? api.stationMonitoringSites : api.responsibleSites;
-    request({ scope: requestedScope, keyword: requestedKeyword }).then(res => {
+    let usingMonitoring = this._monitoringAvailable === true;
+    const options = { scope: requestedScope, keyword: requestedKeyword };
+    const request = usingMonitoring ? api.stationMonitoringSites : api.responsibleSites;
+    request(options).catch(error => {
+      if (this._unloaded || this._inactive || this._sitesRequestId !== requestId) return null;
+      if (!usingMonitoring || !monitoringUnavailable(error)) throw error;
+      usingMonitoring = false;
+      this._monitoringAvailable = false;
+      return api.responsibleSites(options);
+    }).then(res => {
+      if (!res) return;
       if (this._unloaded || this._inactive || this._sitesRequestId !== requestId) return;
       const availableScopes = Array.isArray(res.available_scopes) ? res.available_scopes : ['mine'];
       const resolvedScope = res.scope === 'all' ? 'all' : 'mine';
       const resolvedKeyword = requestedKeyword;
       this.setData({
-        sites: (res.items || []).map(site => Object.assign({}, site, { type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点') })),
+        sites: (res.items || []).map(projectSite),
         loading: false, scope: resolvedScope, keyword: resolvedKeyword,
         keywordInput: resolvedKeyword, availableScopes,
+        monitoringEnabled: usingMonitoring, monitoringPublic: usingMonitoring,
         canViewAll: availableScopes.includes('all'), scopeCounts: res.scope_counts || { mine: 0, all: null },
         emptyTitle: resolvedScope === 'all' && resolvedKeyword ? '未找到匹配站点' : (resolvedScope === 'all' ? '暂无站点' : '暂未分配负责站点'),
         emptyDescription: resolvedScope === 'all' && resolvedKeyword ? '请更换站点名称或编号后重试' : (resolvedScope === 'all' ? '当前暂无可查看站点' : '当前账号下暂无负责站点，如有疑问请联系管理员')
       });
     }).catch(() => {
       if (this._unloaded || this._inactive || this._sitesRequestId !== requestId) return;
-      this.setData({ loading: false, error: this.data.monitoringPublic ? '站点监测信息加载失败，请重试' : '站点目录加载失败，请重试' });
+      this.setData({ loading: false, error: usingMonitoring ? '站点监测信息加载失败，请重试' : '站点目录加载失败，请重试' });
     });
   },
 

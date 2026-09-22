@@ -93,7 +93,7 @@
       <view class="mon-neutral-bar" wx:if="{{!monitoringEnabled}}">
         <image class="mon-neutral-ico" src="/images/station-monitoring/empty-offline.svg" mode="aspectFit"/>
         <view class="mon-neutral-content">
-          <text class="mon-neutral-title">监测数据尚未启用</text>
+          <text class="mon-neutral-title">监测能力未启用</text>
           <text class="mon-neutral-sub">站点档案与位置校准正常可用，监测数据请联系管理员开通</text>
         </view>
       </view>
@@ -106,8 +106,8 @@
               <view class="mon-tag mon-tag-info" wx:if="{{scope === 'all' && item.is_responsible}}">
                 <text class="mon-tag-tx">我负责</text>
               </view>
-              <view class="mon-status-chip mon-status-{{item.monitoring_status || 'unknown'}}" wx:if="{{monitoringPublic}}">
-                <text class="mon-status-tx">{{item.monitoring_status_label || '状态未知'}}</text>
+              <view class="mon-status-chip mon-status-{{item.monitoring_status}}" wx:if="{{monitoringPublic}}">
+                <text class="mon-status-tx">{{item.monitoring_status_label}}</text>
               </view>
             </view>
           </view>

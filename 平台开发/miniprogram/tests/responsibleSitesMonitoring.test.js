@@ -7,7 +7,8 @@ let definition;
 global.getApp = () => ({ globalData: {} });
 global.Page = page => { definition = page; };
 let cachedUser = { capabilities: { station_monitoring_public: true } };
-global.wx = { navigateTo: () => {}, getStorageSync: key => key === 'user' ? cachedUser : null };
+const navigations = [];
+global.wx = { navigateTo: options => navigations.push(options.url), getStorageSync: key => key === 'user' ? cachedUser : null };
 require('../pages/responsible-sites/responsible-sites.js');
 
 const originals = { stationMonitoringSites: api.stationMonitoringSites, responsibleSites: api.responsibleSites };
@@ -24,6 +25,8 @@ const makePage = () => {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(wxml, /最后收到报文/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
+    assert.match(wxml, /监测能力未启用/);
+    assert.doesNotMatch(wxml, /状态未知/);
     assert.doesNotMatch(wxml, /RTU|仪器状态|最后通信/);
     const calls = [];
     api.stationMonitoringSites = options => {
@@ -34,11 +37,14 @@ const makePage = () => {
       });
     };
     const page = makePage();
+    assert.equal(page.data.activeTab, 'stations', 'the approved station mode is visible by default');
     page.onShow();
     await flush();
     assert.deepEqual(calls[0], { scope: 'mine', keyword: '' }, 'first request must use mine');
     assert.equal(page.data.canViewAll, true, 'scope switch follows server capability');
     assert.equal(page.data.sites[0].is_responsible, true);
+    assert.equal(page.data.monitoringEnabled, true);
+    assert.equal(page.data.sites[0].monitoring_status_label, '等待首帧');
 
     let staticCalls = 0;
     let closedMonitoringCalls = 0;
@@ -52,8 +58,48 @@ const makePage = () => {
     closed.onShow();
     await flush();
     assert.equal(closed.data.monitoringPublic, false);
+    assert.equal(closed.data.monitoringEnabled, false);
     assert.equal(staticCalls, 1);
     assert.equal(closedMonitoringCalls, 0, 'closed capability must make zero monitoring requests');
+
+    let staleCapabilityMonitoringCalls = 0;
+    let staleCapabilityDirectoryCalls = 0;
+    cachedUser = { capabilities: { station_monitoring_public: true } };
+    api.stationMonitoringSites = () => {
+      staleCapabilityMonitoringCalls += 1;
+      return Promise.reject({ status: 403, code: 'STATION_MONITORING_PUBLIC_DISABLED' });
+    };
+    api.responsibleSites = options => {
+      staleCapabilityDirectoryCalls += 1;
+      return Promise.resolve({
+        scope: options.scope, available_scopes: ['mine'], scope_counts: { mine: 1, all: null },
+        items: [{ site_id: 6, name: '回退站点', monitoring_status_label: '不应展示' }]
+      });
+    };
+    const staleCapability = makePage();
+    staleCapability.onShow();
+    assert.equal(staleCapability.data.monitoringPublic, false, 'monitoring fields stay hidden until the endpoint confirms availability');
+    await flush();
+    await flush();
+    assert.equal(staleCapabilityMonitoringCalls, 1);
+    assert.equal(staleCapabilityDirectoryCalls, 1, 'an explicit monitoring gate response falls back to the authorized directory');
+    assert.equal(staleCapability.data.monitoringPublic, false);
+    assert.equal(staleCapability.data.monitoringEnabled, false);
+    assert.equal(staleCapability.data.sites[0].id, 6, 'site_id is normalized for list keys and navigation');
+    assert.equal(staleCapability.data.sites[0].site_id, 6);
+    staleCapability.openSite({ currentTarget: { dataset: { id: 6 } } });
+    assert.equal(navigations.at(-1), '/pages/site/site?site_id=6&source=responsible_sites_profile');
+
+    let networkFallbackCalls = 0;
+    api.stationMonitoringSites = () => Promise.reject({ status: 0, network: true });
+    api.responsibleSites = () => { networkFallbackCalls += 1; return Promise.resolve({ items: [] }); };
+    const networkFailure = makePage();
+    networkFailure.onShow();
+    await flush();
+    assert.equal(networkFallbackCalls, 0, 'network failures must stay visible instead of silently changing data sources');
+    assert.equal(networkFailure.data.sites.length, 0);
+    assert.equal(networkFailure.data.error, '站点监测信息加载失败，请重试');
+
     cachedUser = { capabilities: { station_monitoring_public: true } };
     api.stationMonitoringSites = options => {
       calls.push(options);
@@ -74,6 +120,13 @@ const makePage = () => {
     page.onClearSearch();
     await flush();
     assert.deepEqual(calls[3], { scope: 'all', keyword: '' });
+
+    const blockedScopeCallCount = calls.length;
+    const blockedScope = makePage();
+    blockedScope.data.canViewAll = false;
+    blockedScope.onScopeAll();
+    await flush();
+    assert.equal(calls.length, blockedScopeCallCount, 'a non-admin view cannot request the all scope');
 
     api.stationMonitoringSites = () => Promise.resolve({
       scope: 'mine', available_scopes: ['mine'], scope_counts: { mine: 0, all: null }, items: []
@@ -103,6 +156,25 @@ const makePage = () => {
     await flush();
     assert.equal(retained.data.sites[0].id, 8);
     assert.match(retained.data.error, /重试/);
+
+    api.stationMonitoringSites = options => Promise.resolve({
+      scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
+      items: [{ site_id: 12, name: '状态保持站点' }]
+    });
+    const preserved = makePage();
+    preserved.data.scope = 'all';
+    preserved.data.keyword = ' 保留条件 ';
+    preserved.onShow();
+    await flush();
+    assert.equal(preserved.data.scope, 'all');
+    assert.equal(preserved.data.keyword, '保留条件');
+    preserved.onHide();
+    preserved.onShow();
+    await flush();
+    assert.equal(preserved.data.scope, 'all');
+    assert.equal(preserved.data.keyword, '保留条件', 'returning from detail keeps the confirmed scope and search');
+    preserved.openSite({ currentTarget: { dataset: { id: 12 } } });
+    assert.equal(navigations.at(-1), '/pages/site/site?site_id=12&source=responsible_sites_monitoring');
 
     const failedCalls = [];
     api.stationMonitoringSites = options => {
