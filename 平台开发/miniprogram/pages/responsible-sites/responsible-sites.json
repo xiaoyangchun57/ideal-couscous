@@ -1,4 +1,7 @@
 {
-  "navigationBarTitleText": "站点",
-  "usingComponents": {}
+  "navigationStyle": "custom",
+  "enablePullDownRefresh": true,
+  "usingComponents": {
+    "custom-navbar": "/components/custom-navbar/custom-navbar"
+  }
 }
