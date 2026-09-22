@@ -57,6 +57,7 @@ Page({
       if (!usingMonitoring || !monitoringUnavailable(error)) throw error;
       usingMonitoring = false;
       this._monitoringAvailable = false;
+      this.setData({ monitoringEnabled: false, monitoringPublic: false });
       return api.responsibleSites(options);
     }).then(res => {
       if (!res) return;

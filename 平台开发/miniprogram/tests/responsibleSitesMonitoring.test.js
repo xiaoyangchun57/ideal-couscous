@@ -46,6 +46,34 @@ const makePage = () => {
     assert.equal(page.data.monitoringEnabled, true);
     assert.equal(page.data.sites[0].monitoring_status_label, '等待首帧');
 
+    api.stationMonitoringSites = () => Promise.resolve({
+      scope: 'mine', available_scopes: ['mine'], scope_counts: { mine: 1, all: null },
+      items: [{ id: 10, site_id: 10, name: '门禁前成功站点', monitoring_status_label: '等待首帧' }]
+    });
+    const gatedAfterSuccess = makePage();
+    gatedAfterSuccess.onShow();
+    await flush();
+    assert.equal(gatedAfterSuccess.data.monitoringPublic, true);
+
+    let failedGateDirectoryCalls = 0;
+    api.stationMonitoringSites = () => Promise.reject({ status: 403, code: 'STATION_MONITORING_ADMIN_ONLY' });
+    api.responsibleSites = () => {
+      failedGateDirectoryCalls += 1;
+      return new Promise((resolve, reject) => { rejectDirectoryFallback = reject; });
+    };
+    let rejectDirectoryFallback;
+    gatedAfterSuccess.loadSites('mine', '');
+    await flush();
+    assert.equal(failedGateDirectoryCalls, 1, 'a monitoring gate response still attempts the authorized directory');
+    assert.equal(gatedAfterSuccess.data.monitoringPublic, false, 'a gate response hides retained monitoring fields before fallback completes');
+    assert.equal(gatedAfterSuccess.data.monitoringEnabled, false);
+    rejectDirectoryFallback(new Error('directory unavailable'));
+    await flush();
+    assert.equal(gatedAfterSuccess.data.sites[0].monitoring_status_label, '等待首帧', 'the last successful directory remains available');
+    assert.equal(gatedAfterSuccess.data.error, '站点目录加载失败，请重试');
+    gatedAfterSuccess.openSite({ currentTarget: { dataset: { id: 10 } } });
+    assert.equal(navigations.at(-1), '/pages/site/site?site_id=10&source=responsible_sites_profile');
+
     let staticCalls = 0;
     let closedMonitoringCalls = 0;
     cachedUser = { capabilities: { station_monitoring_public: false } };
