@@ -214,6 +214,25 @@ class StationMonitoringPublicGateTest(unittest.TestCase):
         self.assertEqual(all_sites.get_json()['available_scopes'], ['mine', 'all'])
         self.assertEqual(len(all_sites.get_json()['items']), 2)
 
+    def test_retired_master_site_leaves_current_directories_but_keeps_profile_history(self):
+        with sqlite3.connect(self.database) as db:
+            db.execute("UPDATE sites SET master_status='retired' WHERE id=?", (self.other_site_id,))
+            db.commit()
+        self.set_mode('public')
+        admin_headers = self.headers('gate-admin')
+        simple = self.client.get('/api/sites', headers=admin_headers)
+        static = self.client.get('/api/mobile/responsible-sites?scope=all', headers=admin_headers)
+        monitoring = self.client.get('/api/station-monitoring/sites?scope=all', headers=admin_headers)
+        self.assertEqual([item['id'] for item in simple.get_json()], [self.site_id])
+        self.assertEqual([item['id'] for item in static.get_json()['items']], [self.site_id])
+        self.assertEqual(static.get_json()['scope_counts']['all'], 1)
+        self.assertEqual([item['site_id'] for item in monitoring.get_json()['items']], [self.site_id])
+        self.assertEqual(monitoring.get_json()['scope_counts']['all'], 1)
+        profile = self.client.get(
+            f'/api/mobile/site-profile/{self.other_site_id}', headers=admin_headers)
+        self.assertEqual(profile.status_code, 200, profile.get_json())
+        self.assertEqual(profile.get_json()['site']['id'], self.other_site_id)
+
     def test_site_monitoring_projections_use_the_same_request_user_gate(self):
         operator_headers = self.headers('gate-operator')
         admin_headers = self.headers('gate-admin')
