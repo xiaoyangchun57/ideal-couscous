@@ -1197,6 +1197,7 @@ def migrate_reagent_qc():
             )""")
         for col_sql in [
             "ALTER TABLE reagent_inventory ADD COLUMN qc_status TEXT DEFAULT 'passed'",
+            "ALTER TABLE reagent_inventory ADD COLUMN batch_no TEXT DEFAULT ''",
             "ALTER TABLE reagent_records ADD COLUMN plan_id INTEGER",
             "ALTER TABLE reagent_qc_records ADD COLUMN plan_id INTEGER",
         ]:
@@ -1204,6 +1205,17 @@ def migrate_reagent_qc():
                 db.execute(col_sql)
             except Exception:
                 pass
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS reagent_idempotency (
+                operator_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                status_code INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (operator_id, endpoint, idempotency_key)
+            )""")
         db.commit()
 
 
@@ -24970,6 +24982,173 @@ def api_inspection_photos_check(site_id):
         return jsonify({'site_id': site_id, 'period': period, 'complete': len(missing) == 0, 'missing': missing})
 
 
+# ---------- 试剂安全维护公共能力 ----------
+_REAGENT_REASON_ORDER = ('expired', 'expiring', 'low_volume', 'pending_qc', 'failed_qc')
+
+
+def _reagent_int_field(value, field, *, required=True, minimum=1):
+    if value in (None, ''):
+        if not required:
+            return None, None
+        return None, (jsonify({'error': f'缺少 {field}', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if isinstance(value, bool):
+        return None, (jsonify({'error': f'{field} 必须是整数', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None, (jsonify({'error': f'{field} 必须是整数', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if isinstance(value, float) and not value.is_integer():
+        return None, (jsonify({'error': f'{field} 必须是整数', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if parsed < minimum:
+        return None, (jsonify({'error': f'{field} 必须不小于 {minimum}', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    return parsed, None
+
+
+def _reagent_number_field(value, field, *, minimum=None, strictly_positive=False):
+    if value in (None, '') or isinstance(value, bool):
+        return None, (jsonify({'error': f'{field} 必须是有效数字', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None, (jsonify({'error': f'{field} 必须是有效数字', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if not math.isfinite(parsed):
+        return None, (jsonify({'error': f'{field} 必须是有限数字', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if strictly_positive and parsed <= 0:
+        return None, (jsonify({'error': f'{field} 必须大于 0', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    if minimum is not None and parsed < minimum:
+        return None, (jsonify({'error': f'{field} 必须不小于 {minimum}', 'code': 'REAGENT_INVALID_INPUT'}), 400)
+    return parsed, None
+
+
+def _reagent_business_time(value, field, *, default_now=False):
+    if value in (None, ''):
+        if default_now:
+            return datetime.now().strftime('%Y-%m-%d %H:%M:%S'), None
+        return None, None
+    raw = str(value).strip().replace('T', ' ')
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if parsed.strftime(fmt) == raw:
+            return parsed.strftime('%Y-%m-%d %H:%M:%S'), None
+    return None, (jsonify({'error': f'{field} 不是可识别的业务时间',
+                           'code': 'REAGENT_INVALID_TIME'}), 400)
+
+
+def _reagent_idempotency_key(data):
+    key = str(data.get('_idempotency_key') or '').strip()
+    if len(key) > 160:
+        return None, (jsonify({'error': '幂等键不能超过 160 个字符',
+                               'code': 'REAGENT_IDEMPOTENCY_KEY_INVALID'}), 400)
+    return key, None
+
+
+def _reagent_request_hash(payload):
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                           separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _ensure_reagent_idempotency_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS reagent_idempotency (
+        operator_id INTEGER NOT NULL,
+        endpoint TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        status_code INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        PRIMARY KEY (operator_id, endpoint, idempotency_key)
+    )""")
+
+
+def _reagent_idempotency_replay(db, operator_id, endpoint, key, request_hash):
+    if not key:
+        return None
+    _ensure_reagent_idempotency_schema(db)
+    row = db.execute("""SELECT request_hash,response_json,status_code
+        FROM reagent_idempotency
+        WHERE operator_id=? AND endpoint=? AND idempotency_key=?""",
+        (operator_id, endpoint, key)).fetchone()
+    if not row:
+        return None
+    if row['request_hash'] != request_hash:
+        return ({'error': '同一幂等键不能用于不同的请求内容',
+                 'code': 'IDEMPOTENCY_KEY_REUSED'}, 409)
+    return (json.loads(row['response_json']), int(row['status_code']))
+
+
+def _reagent_idempotency_store(db, operator_id, endpoint, key, request_hash,
+                               response, status_code):
+    if not key:
+        return
+    _ensure_reagent_idempotency_schema(db)
+    db.execute("""INSERT INTO reagent_idempotency
+        (operator_id,endpoint,idempotency_key,request_hash,response_json,status_code)
+        VALUES (?,?,?,?,?,?)""", (
+        operator_id, endpoint, key, request_hash,
+        json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+        status_code,
+    ))
+
+
+def _reagent_transaction_access(db, site_id, *, write=False):
+    site = db.execute('SELECT id,name FROM sites WHERE id=?', (site_id,)).fetchone()
+    if not site:
+        return None, (jsonify({'error': '站点不存在', 'code': 'REAGENT_SITE_NOT_FOUND'}), 404)
+    current = getattr(g, 'current_user', None) or {}
+    user_id = current.get('id')
+    user_row = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    if not user_row or ('status' in user_row.keys() and user_row['status'] != 'active'):
+        return None, (jsonify({'error': '当前账号不可用', 'code': 'ACCOUNT_DISABLED'}), 403)
+    user_data = dict(user_row)
+    roles = (_roles_for_user(db, user_id, user_data.get('role') or 'operator')
+             if _table_exists(db, 'user_roles')
+             else _normalize_user_roles([user_data.get('role')], user_data.get('role') or 'operator'))
+    if write and not set(roles).intersection({'admin', 'operator'}):
+        return None, (jsonify({'error': '当前角色无权维护试剂',
+                               'code': 'REAGENT_WRITE_FORBIDDEN'}), 403)
+    if 'admin' not in roles:
+        assigned = db.execute(
+            'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+            (user_id, site_id)).fetchone()
+        if not assigned:
+            return None, (jsonify({'error': '无权限操作该站点',
+                                   'code': 'REAGENT_SITE_FORBIDDEN'}), 403)
+    return {'user_id': user_id, 'user': user_data, 'roles': roles, 'site': dict(site)}, None
+
+
+def _reagent_active_admin_ids(db):
+    role_sql = "u.role='admin'"
+    if _table_exists(db, 'user_roles'):
+        role_sql += " OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role='admin')"
+    status_sql = " AND u.status='active'" if _table_has_column(db, 'users', 'status') else ''
+    return [row['id'] for row in db.execute(
+        f'SELECT DISTINCT u.id FROM users u WHERE ({role_sql}){status_sql} ORDER BY u.id'
+    ).fetchall()]
+
+
+def _reagent_refresh_inventory_alerts(db, inventory, reasons):
+    site_id = inventory['site_id']
+    reagent_id = inventory['reagent_id']
+    db.execute("""UPDATE reagent_alerts SET handled=1,
+        handled_at=COALESCE(handled_at,datetime('now','localtime'))
+        WHERE site_id=? AND reagent_id=? AND handled=0
+          AND alert_type IN ('low_stock','near_expiry','expired')""", (site_id, reagent_id))
+    alert_types = {'low_volume': 'low_stock', 'expiring': 'near_expiry', 'expired': 'expired'}
+    for reason in reasons:
+        alert_type = alert_types.get(reason)
+        if alert_type:
+            db.execute("""INSERT INTO reagent_alerts
+                (site_id,reagent_id,alert_type,current_qty,threshold_qty)
+                VALUES (?,?,?,?,?)""", (
+                site_id, reagent_id, alert_type, inventory.get('current_qty'),
+                inventory.get('low_stock_threshold'),
+            ))
+
+
 # ---------- 试剂状态计算（纯手动，不预测）----------
 def compute_reagent_status(inv):
     """根据库存行计算试剂状态与剩余可用天数。
@@ -24984,16 +25163,22 @@ def compute_reagent_status(inv):
     remaining = None
     expires_at = None
     flags = []
-    if expected is not None and last:
+    expected_days = None
+    if expected is not None:
         try:
-            ld = datetime.strptime(last[:19], '%Y-%m-%d %H:%M:%S')
+            expected_days = int(expected)
+        except (TypeError, ValueError):
+            expected_days = None
+    if expected_days is not None and last:
+        try:
+            ld = datetime.strptime(str(last)[:19], '%Y-%m-%d %H:%M:%S')
         except ValueError:
             try:
-                ld = datetime.strptime(last[:10], '%Y-%m-%d')
+                ld = datetime.strptime(str(last)[:10], '%Y-%m-%d')
             except ValueError:
                 ld = None
         if ld:
-            exp = ld + timedelta(days=expected)
+            exp = ld + timedelta(days=expected_days)
             expires_at = exp.strftime('%Y-%m-%d')
             remaining = (exp.date() - datetime.now().date()).days
             if remaining <= 0:
@@ -25006,7 +25191,29 @@ def compute_reagent_status(inv):
         status = '未设置' if (expected is None and last is None) else '正常'
     else:
         status = '已过期' if '已过期' in flags else ('临期' if '临期' in flags else '低余量')
-    return {'remaining_days': remaining, 'expires_at': expires_at, 'status': status}
+    reason_map = {'已过期': 'expired', '临期': 'expiring', '低余量': 'low_volume'}
+    return {
+        'remaining_days': remaining,
+        'expires_at': expires_at,
+        'status': status,
+        'attention_reasons': [reason_map[flag] for flag in flags],
+    }
+
+
+def _reagent_project_inventory(row, *, can_maintain=False):
+    item = dict(row)
+    item.update(compute_reagent_status(item))
+    qc_status = str(item.get('qc_status') or 'passed')
+    item['qc_status'] = qc_status
+    if qc_status == 'pending':
+        item['attention_reasons'].append('pending_qc')
+    elif qc_status == 'failed':
+        item['attention_reasons'].append('failed_qc')
+    item['attention_reasons'] = [reason for reason in _REAGENT_REASON_ORDER
+                                 if reason in item['attention_reasons']]
+    item['can_replace'] = bool(can_maintain)
+    item['can_calibrate'] = bool(can_maintain)
+    return item
 
 
 # ---------- 3.1 试剂主数据 ----------
@@ -25143,21 +25350,18 @@ def api_reagents_delete(rid):
 @app.route('/api/reagent-inventory/<int:site_id>', methods=['GET'])
 def api_reagent_inventory(site_id):
     """获取站点试剂库存（含计算的剩余可用天数与状态）"""
-    denied = _site_access_denied(site_id)
-    if denied:
-        return denied
     with get_db() as db:
+        access, access_error = _reagent_transaction_access(db, site_id)
+        if access_error:
+            return access_error
         rows = db.execute(
             '''SELECT ri.*, r.name as reagent_name, r.manufacturer, r.unit, r.shelf_life_days
                FROM reagent_inventory ri
                JOIN reagents r ON ri.reagent_id = r.id
                WHERE ri.site_id=? ORDER BY r.name''',
             (site_id,)).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d.update(compute_reagent_status(d))
-            out.append(d)
+        can_maintain = bool(set(access['roles']).intersection({'admin', 'operator'}))
+        out = [_reagent_project_inventory(row, can_maintain=can_maintain) for row in rows]
         return jsonify(out)
 
 
@@ -25165,112 +25369,271 @@ def api_reagent_inventory(site_id):
 @app.route('/api/reagent-inventory', methods=['POST'])
 def api_reagent_inventory_create():
     """从试剂主数据目录中为本站点新增一条试剂库存记录（受站点范围约束）"""
-    data = request.get_json() or {}
-    site_id = data['site_id']
-    allowed = _filter_site_ids()
-    if allowed is not None and (not site_id or int(site_id) not in allowed):
-        return jsonify({'ok': False, 'error': '无权限为非本人站点添加试剂库存'}), 403
-    reagent_id = data['reagent_id']
-    current_qty = data.get('current_qty')
-    last_replaced_at = data.get('last_replaced_at')
-    expected_duration_days = data.get('expected_duration_days')
+    data = request.get_json(silent=True) or {}
+    site_id, error = _reagent_int_field(data.get('site_id'), 'site_id')
+    if error: return error
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    current_qty, error = _reagent_number_field(data.get('current_qty'), 'current_qty', minimum=0)
+    if error: return error
+    expected_duration_days, error = _reagent_int_field(
+        data.get('expected_duration_days'), 'expected_duration_days', required=False)
+    if error: return error
+    last_replaced_at, error = _reagent_business_time(
+        data.get('last_replaced_at'), 'last_replaced_at')
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    batch_no = str(data.get('batch_no') or '').strip()[:100]
+    normalized = {
+        'site_id': site_id, 'reagent_id': reagent_id, 'current_qty': current_qty,
+        'last_replaced_at': last_replaced_at,
+        'expected_duration_days': expected_duration_days, 'batch_no': batch_no,
+    }
+    request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
-        exist = db.execute(
-            'SELECT id FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
-            (site_id, reagent_id)).fetchone()
-        if exist:
-            return jsonify({'ok': False, 'error': '该站点已存在此试剂库存，请勿重复添加'}), 400
-        db.execute(
-            'INSERT INTO reagent_inventory (site_id, reagent_id, current_qty, last_replaced_at, expected_duration_days) VALUES (?,?,?,?,?)',
-            (site_id, reagent_id, current_qty, last_replaced_at, expected_duration_days))
-        db.commit()
-        row = db.execute('SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?', (site_id, reagent_id)).fetchone()
-        return jsonify(dict(row)), 201
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'reagent-inventory:create', idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            reagent = db.execute('SELECT id,name,unit FROM reagents WHERE id=?', (reagent_id,)).fetchone()
+            if not reagent:
+                db.rollback()
+                return jsonify({'error': '试剂不存在', 'code': 'REAGENT_NOT_FOUND'}), 404
+            if db.execute('SELECT 1 FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                          (site_id, reagent_id)).fetchone():
+                db.rollback()
+                return jsonify({'error': '该站点已存在此试剂库存',
+                                'code': 'REAGENT_INVENTORY_EXISTS'}), 409
+            db.execute("""INSERT INTO reagent_inventory
+                (site_id,reagent_id,current_qty,last_replaced_at,expected_duration_days,batch_no,qc_status)
+                VALUES (?,?,?,?,?,?,'passed')""",
+                (site_id, reagent_id, current_qty, last_replaced_at,
+                 expected_duration_days, batch_no))
+            row = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""", (site_id, reagent_id)).fetchone()
+            response = dict(row)
+            _reagent_idempotency_store(
+                db, access['user_id'], 'reagent-inventory:create', idempotency_key,
+                request_hash, response, 201)
+            db.commit()
+            return jsonify(response), 201
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] create failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂库存暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 # ---------- 3.2.2 删除站点试剂库存 ----------
 @app.route('/api/reagent-inventory/<int:site_id>/<int:reagent_id>', methods=['DELETE'])
 def api_reagent_inventory_delete(site_id, reagent_id):
     """删除某站点的某条试剂库存记录"""
+    data = request.get_json(silent=True) or {}
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    normalized = {'site_id': site_id, 'reagent_id': reagent_id}
+    request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
-        db.execute('DELETE FROM reagent_inventory WHERE site_id=? AND reagent_id=?', (site_id, reagent_id))
-        db.commit()
-        return jsonify({'ok': True})
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'reagent-inventory:delete', idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute(
+                'SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            db.execute("""UPDATE reagent_alerts SET handled=1,
+                handled_at=COALESCE(handled_at,datetime('now','localtime'))
+                WHERE site_id=? AND reagent_id=? AND handled=0""", (site_id, reagent_id))
+            db.execute('DELETE FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                       (site_id, reagent_id))
+            response = {'ok': True, 'site_id': site_id, 'reagent_id': reagent_id}
+            _reagent_idempotency_store(
+                db, access['user_id'], 'reagent-inventory:delete', idempotency_key,
+                request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] delete failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂库存暂未删除，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 # ---------- 3.3 记录试剂用量 ----------
 @app.route('/api/reagent-inventory/usage', methods=['POST'])
 def api_reagent_usage():
     """记录试剂用量，自动更新库存"""
-    data = request.get_json() or {}
-    site_id = data['site_id']
-    reagent_id = data['reagent_id']
-    used_qty = data['used_qty']
-    expected_duration_days = data.get('expected_duration_days')
-    operator_id = g.current_user.get('id')
-    remark = data.get('remark', '')
-
+    data = request.get_json(silent=True) or {}
+    site_id, error = _reagent_int_field(data.get('site_id'), 'site_id')
+    if error: return error
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    used_qty, error = _reagent_number_field(data.get('used_qty'), 'used_qty', strictly_positive=True)
+    if error: return error
+    expected_duration_days, error = _reagent_int_field(
+        data.get('expected_duration_days'), 'expected_duration_days', required=False)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'site_id': site_id, 'reagent_id': reagent_id, 'used_qty': used_qty,
+        'expected_duration_days': expected_duration_days, 'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
-        # 插入用量记录
-        db.execute(
-            'INSERT INTO reagent_usage (site_id, reagent_id, used_qty, expected_duration_days, operator_id, remark) VALUES (?,?,?,?,?,?)',
-            (site_id, reagent_id, used_qty, expected_duration_days, operator_id, remark))
-        # 更新库存
-        db.execute(
-            'UPDATE reagent_inventory SET current_qty=current_qty-?, updated_at=datetime("now","localtime") WHERE site_id=? AND reagent_id=?',
-            (used_qty, site_id, reagent_id))
-        db.commit()
-        # 检查是否低于阈值
-        inv = db.execute(
-            'SELECT current_qty, low_stock_threshold FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
-            (site_id, reagent_id)).fetchone()
-        if inv and inv['current_qty'] <= inv['low_stock_threshold']:
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'reagent-inventory:usage', idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute(
+                'SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            current_qty = float(inventory['current_qty'] or 0)
+            if used_qty > current_qty:
+                db.rollback()
+                return jsonify({'error': '本次用量不能超过当前库存',
+                                'code': 'REAGENT_USAGE_EXCEEDS_STOCK'}), 409
             db.execute(
-                "INSERT INTO reagent_alerts (site_id, reagent_id, alert_type, current_qty, threshold_qty) VALUES (?,?,'low_stock',?,?)",
-                (site_id, reagent_id, inv['current_qty'], inv['low_stock_threshold']))
+                '''INSERT INTO reagent_usage
+                   (site_id,reagent_id,used_qty,expected_duration_days,operator_id,remark)
+                   VALUES (?,?,?,?,?,?)''',
+                (site_id, reagent_id, used_qty, expected_duration_days,
+                 access['user_id'], remark))
+            remaining_qty = current_qty - used_qty
+            db.execute("""UPDATE reagent_inventory SET current_qty=?,
+                updated_at=datetime('now','localtime') WHERE site_id=? AND reagent_id=?""",
+                (remaining_qty, site_id, reagent_id))
+            threshold = inventory['low_stock_threshold']
+            if threshold is not None and remaining_qty <= float(threshold) and not db.execute(
+                    """SELECT 1 FROM reagent_alerts WHERE site_id=? AND reagent_id=?
+                       AND alert_type='low_stock' AND handled=0""", (site_id, reagent_id)).fetchone():
+                db.execute("""INSERT INTO reagent_alerts
+                    (site_id,reagent_id,alert_type,current_qty,threshold_qty)
+                    VALUES (?,?,'low_stock',?,?)""",
+                    (site_id, reagent_id, remaining_qty, threshold))
+            response = {'ok': True, 'remaining_qty': remaining_qty}
+            _reagent_idempotency_store(
+                db, access['user_id'], 'reagent-inventory:usage', idempotency_key,
+                request_hash, response, 200)
             db.commit()
-        return jsonify({'ok': True, 'remaining_qty': inv['current_qty'] if inv else 0})
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] usage failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂用量暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 # ---------- 3.4 记录试剂更换 ----------
 @app.route('/api/reagent-inventory/replacement', methods=['POST'])
 def api_reagent_replacement():
     """记录试剂更换，更新库存+写reagent_records"""
-    data = request.get_json() or {}
-    site_id = data['site_id']
-    reagent_id = data['reagent_id']
-    old_qty = data.get('old_qty', 0)
-    new_qty = data.get('new_qty')
-    old_batch_no = data.get('old_batch_no', '')
-    new_batch_no = data.get('new_batch_no', '')
-    operator = _current_actor_name('未知用户')
-    operator_id = g.current_user.get('id')
-    expected_duration_days = data.get('expected_duration_days')
-    replaced_at = data.get('replaced_at') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+    data = request.get_json(silent=True) or {}
+    site_id, error = _reagent_int_field(data.get('site_id'), 'site_id')
+    if error: return error
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    new_qty, error = _reagent_number_field(data.get('new_qty'), 'new_qty', strictly_positive=True)
+    if error: return error
+    expected_duration_days, error = _reagent_int_field(
+        data.get('expected_duration_days'), 'expected_duration_days')
+    if error: return error
+    raw_replaced_at = data.get('replaced_at')
+    replaced_at, error = _reagent_business_time(
+        raw_replaced_at, 'replaced_at', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    new_batch_no = str(data.get('new_batch_no') or '').strip()[:100]
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'site_id': site_id, 'reagent_id': reagent_id, 'new_qty': new_qty,
+        'new_batch_no': new_batch_no, 'expected_duration_days': expected_duration_days,
+        'replaced_at': replaced_at if raw_replaced_at not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # 写历史表（原有表）
-        reagent_name = db.execute('SELECT name FROM reagents WHERE id=?', (reagent_id,)).fetchone()
-        db.execute(
-            'INSERT INTO reagent_records (site_id, reagent_name, reagent_type, usage_date, replacement_date, operator, operator_id, notes, old_batch_no, new_batch_no, old_qty, new_qty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (site_id, reagent_name['name'] if reagent_name else '', '', replaced_at, replaced_at,
-             operator, operator_id, '更换试剂', old_batch_no, new_batch_no, old_qty, new_qty))
-        # 更新库存（last_replaced_at 用本次更换日期；expected_duration_days 由运维人员手动填写）
-        # 更换后进入“待标定”状态：必须使用标样验证通过才算更换完成。
-        inv = db.execute(
-            'SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
-            (site_id, reagent_id)).fetchone()
-        if inv:
-            db.execute(
-                "UPDATE reagent_inventory SET current_qty=?, last_replaced_at=?, expected_duration_days=?, updated_at=?, qc_status='pending' WHERE site_id=? AND reagent_id=?",
-                (new_qty, replaced_at, expected_duration_days, now, site_id, reagent_id))
-        else:
-            db.execute(
-                "INSERT INTO reagent_inventory (site_id, reagent_id, current_qty, last_replaced_at, expected_duration_days, qc_status) VALUES (?,?,?,?,?,'pending')",
-                (site_id, reagent_id, new_qty, replaced_at, expected_duration_days))
-        db.commit()
-        return jsonify({'ok': True, 'qc_status': 'pending'})
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'reagent-inventory:replacement',
+                idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""", (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            inventory_data = dict(inventory)
+            operator = access['user'].get('real_name') or access['user'].get('username') or '未知用户'
+            db.execute("""INSERT INTO reagent_records
+                (site_id,reagent_name,reagent_type,usage_date,replacement_date,operator,
+                 operator_id,notes,old_batch_no,new_batch_no,old_qty,new_qty)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, inventory['reagent_name'], '', replaced_at, replaced_at,
+                operator, access['user_id'], remark or '更换试剂',
+                inventory_data.get('batch_no') or '', new_batch_no,
+                inventory['current_qty'], new_qty,
+            ))
+            db.execute("""UPDATE reagent_inventory SET current_qty=?,batch_no=?,
+                last_replaced_at=?,expected_duration_days=?,
+                updated_at=datetime('now','localtime'),qc_status='pending'
+                WHERE site_id=? AND reagent_id=?""", (
+                new_qty, new_batch_no, replaced_at, expected_duration_days,
+                site_id, reagent_id,
+            ))
+            refreshed = dict(db.execute(
+                'SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                (site_id, reagent_id)).fetchone())
+            projected = _reagent_project_inventory(refreshed, can_maintain=True)
+            _reagent_refresh_inventory_alerts(db, refreshed, projected['attention_reasons'])
+            response = {
+                'ok': True, 'qc_status': 'pending', 'current_qty': new_qty,
+                'unit': inventory['unit'], 'replaced_at': replaced_at,
+            }
+            _reagent_idempotency_store(
+                db, access['user_id'], 'reagent-inventory:replacement',
+                idempotency_key, request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] replacement failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂更换暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 # ---------- 3.4.2 试剂标定（更换后使用标样验证） ----------
@@ -25278,60 +25641,101 @@ def api_reagent_replacement():
 def api_reagent_qc_submit():
     """记录试剂标定结果（更换后使用标样）：
     passed=1 → qc_status='passed'（更换完成）；passed=0 → qc_status='failed' + 记录处置动作（校准/报修）。"""
-    u = g.current_user
     data = request.get_json(silent=True) or {}
-    site_id = data.get('site_id')
-    reagent_id = data.get('reagent_id')
-    if not site_id or not reagent_id:
-        return jsonify({'error': '缺少 site_id 或 reagent_id'}), 400
-    passed = 1 if data.get('passed') in (1, True, '1', 'true') else 0
-    standard_value = data.get('standard_value')
-    measured_value = data.get('measured_value')
-    deviation = None
-    if standard_value not in (None, '') and measured_value not in (None, ''):
-        try:
-            deviation = round(float(measured_value) - float(standard_value), 4)
-        except (TypeError, ValueError):
-            deviation = None
+    site_id, error = _reagent_int_field(data.get('site_id'), 'site_id')
+    if error: return error
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    standard_value, error = _reagent_number_field(data.get('standard_value'), 'standard_value')
+    if error: return error
+    measured_value, error = _reagent_number_field(data.get('measured_value'), 'measured_value')
+    if error: return error
+    raw_passed = data.get('passed')
+    if raw_passed in (1, True, '1', 'true'):
+        passed = 1
+    elif raw_passed in (0, False, '0', 'false'):
+        passed = 0
+    else:
+        return jsonify({'error': 'passed 必须明确为通过或不通过',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    deviation = round(measured_value - standard_value, 4)
     fail_action = (data.get('fail_action') or '').strip()  # calibrate=校准 / repair=报修
     if not passed and fail_action not in ('calibrate', 'repair'):
         return jsonify({'error': '标定不通过时必须选择处置动作（重新标定或报修）'}), 400
-    operator = _current_actor_name('未知用户')
-    qc_time = data.get('qc_time') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    remark = data.get('remark', '')
+    raw_qc_time = data.get('qc_time')
+    qc_time, error = _reagent_business_time(raw_qc_time, 'qc_time', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'site_id': site_id, 'reagent_id': reagent_id,
+        'standard_value': standard_value, 'measured_value': measured_value,
+        'passed': passed, 'fail_action': fail_action if not passed else '',
+        'qc_time': qc_time if raw_qc_time not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
-        inv = db.execute('SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
-                         (site_id, reagent_id)).fetchone()
-        if not inv:
-            return jsonify({'error': '该站点无此试剂库存记录'}), 404
-        db.execute("""
-            INSERT INTO reagent_qc_records
-                (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-                 fail_action, operator, operator_id, qc_time, remark)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-              fail_action if not passed else '', operator, u.get('id'), qc_time, remark))
-        new_status = 'passed' if passed else 'failed'
-        db.execute("UPDATE reagent_inventory SET qc_status=?, updated_at=? WHERE site_id=? AND reagent_id=?",
-                   (new_status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), site_id, reagent_id))
-        if not passed:
-            # 标定不通过 → 通知管理者跟进（重新标定或报修）
-            reagent_name = db.execute('SELECT name FROM reagents WHERE id=?', (reagent_id,)).fetchone()
-            site_name = db.execute('SELECT name FROM sites WHERE id=?', (site_id,)).fetchone()
-            action_cn = '重新标定' if fail_action == 'calibrate' else '报修'
-            approvers = db.execute("SELECT id FROM users WHERE role IN ('admin','manager')").fetchall()
-            for ap in approvers:
-                _create_notification(ap['id'], 'reagent_qc', site_id, '试剂标定不通过',
-                                     f'{site_name["name"] if site_name else site_id} 的 '
-                                     f'{reagent_name["name"] if reagent_name else reagent_id} '
-                                     f'标定不通过（偏差 {deviation}），需{action_cn}。', db=db)
-        db.commit()
-        return jsonify({'ok': True, 'qc_status': new_status, 'deviation': deviation})
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'reagent-qc:submit', idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""", (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            operator = access['user'].get('real_name') or access['user'].get('username') or '未知用户'
+            db.execute("""INSERT INTO reagent_qc_records
+                (site_id,reagent_id,standard_value,measured_value,deviation,passed,
+                 fail_action,operator,operator_id,qc_time,remark)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, reagent_id, standard_value, measured_value, deviation, passed,
+                fail_action if not passed else '', operator, access['user_id'], qc_time, remark,
+            ))
+            new_status = 'passed' if passed else 'failed'
+            db.execute("""UPDATE reagent_inventory SET qc_status=?,
+                updated_at=datetime('now','localtime') WHERE site_id=? AND reagent_id=?""",
+                (new_status, site_id, reagent_id))
+            if not passed:
+                action_cn = '重新标定' if fail_action == 'calibrate' else '报修'
+                content = (f'{access["site"]["name"]} 的 {inventory["reagent_name"]} '
+                           f'标定不通过（偏差 {deviation}），需{action_cn}。')
+                for admin_id in _reagent_active_admin_ids(db):
+                    _create_notification(admin_id, 'reagent_qc', site_id,
+                                         '试剂标定不通过', content, db=db)
+            response = {'ok': True, 'qc_status': new_status, 'deviation': deviation}
+            _reagent_idempotency_store(
+                db, access['user_id'], 'reagent-qc:submit', idempotency_key,
+                request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] qc failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂标定暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 @app.route('/api/reagent-qc/pending', methods=['GET'])
 def api_reagent_qc_pending():
     """待标定清单：更换后尚未使用标样验证的试剂（qc_status='pending'），供移动端/PC 工作台提示。"""
+    allowed = _filter_site_ids()
+    if allowed == []:
+        return jsonify([])
+    scope_sql = ''
+    params = []
+    if allowed is not None:
+        scope_sql = ' AND ri.site_id IN (%s)' % ','.join('?' for _ in allowed)
+        params = list(allowed)
     with get_db() as db:
         rows = db.execute("""
             SELECT ri.site_id, ri.reagent_id, ri.current_qty, ri.last_replaced_at, ri.qc_status,
@@ -25339,10 +25743,12 @@ def api_reagent_qc_pending():
             FROM reagent_inventory ri
             LEFT JOIN sites s ON ri.site_id = s.id
             LEFT JOIN reagents r ON ri.reagent_id = r.id
-            WHERE ri.qc_status = 'pending'
+            WHERE ri.qc_status = 'pending'""" + scope_sql + """
             ORDER BY ri.last_replaced_at DESC
-        """).fetchall()
-        return jsonify([dict(x) for x in rows])
+        """, params).fetchall()
+        can_maintain = _has_any_role(g.current_user, 'admin', 'operator')
+        return jsonify([dict(x, can_replace=can_maintain, can_calibrate=can_maintain)
+                        for x in rows])
 
 
 # ---------- 3.5 试剂告警 ----------
@@ -33128,30 +33534,43 @@ def api_reagent_overview():
     """跨站试剂状态总览：返回所有站点的试剂及其计算状态。
     一线/管理者只需看「剩余可用天数低于阈值」或「低余量」的试剂。
     """
-    status_filter = request.args.get('status')  # 可选：临期/低余量/已过期
+    status_filter = request.args.get('status')  # 兼容中文状态，也接受稳定原因码
     allowed = _filter_site_ids()
+    empty_counts = {reason: 0 for reason in _REAGENT_REASON_ORDER}
+    if allowed == []:
+        return jsonify({'total': 0, 'concern_count': 0,
+                        'status_counts': empty_counts, 'items': []})
+    scope_sql = ''
+    params = []
+    if allowed is not None:
+        scope_sql = ' WHERE ri.site_id IN (%s)' % ','.join('?' for _ in allowed)
+        params = list(allowed)
     with get_db() as db:
         rows = db.execute(
             '''SELECT ri.*, r.name as reagent_name, r.unit, r.shelf_life_days,
                       s.name as site_name, s.id as site_id
                FROM reagent_inventory ri
                JOIN reagents r ON ri.reagent_id = r.id
-               JOIN sites s ON ri.site_id = s.id
-               ORDER BY s.name, r.name''').fetchall()
-        out = []
-        for r in rows:
-            if allowed is not None and r['site_id'] not in allowed:
-                continue
-            d = dict(r)
-            d.update(compute_reagent_status(d))
-            if status_filter and d['status'] != status_filter:
-                continue
-            out.append(d)
-        # 仅返回需要关注的状态（临期/低余量/已过期），未设置/正常不占列表
-        concern = [d for d in out if d['status'] in ('临期', '低余量', '已过期')]
+               JOIN sites s ON ri.site_id = s.id''' + scope_sql +
+            ''' ORDER BY s.name, r.name''', params).fetchall()
+        can_maintain = _has_any_role(g.current_user, 'admin', 'operator')
+        projected = [_reagent_project_inventory(row, can_maintain=can_maintain)
+                     for row in rows]
+        status_counts = dict(empty_counts)
+        for item in projected:
+            for reason in item['attention_reasons']:
+                status_counts[reason] += 1
+        concern = [item for item in projected if item['attention_reasons']]
+        if status_filter:
+            if status_filter in _REAGENT_REASON_ORDER:
+                concern = [item for item in concern
+                           if status_filter in item['attention_reasons']]
+            else:
+                concern = [item for item in concern if item['status'] == status_filter]
         return jsonify({
-            'total': len(out),
+            'total': len(projected),
             'concern_count': len(concern),
+            'status_counts': status_counts,
             'items': concern,
         })
 
