@@ -10,6 +10,8 @@
 
 本目录固定保留五份当前交接：`A_CURRENT.md`、`B_CURRENT.md`、`C_CURRENT.md`、`MAIN_CURRENT.md`、`DESIGN_CURRENT.md`。每次新任务直接替换对应文件中的已闭环内容，不按日期无限新增文件。历史以 Git 和 PR 为准。
 
+设计规范入口为 `README-design.md`。规范用于约束视觉和交互实现，不能覆盖当前 `CURRENT` 文件中的业务范围、权限、接口、状态迁移或写入边界；发生冲突时，先停止实现并由产品与对应域负责人裁决。
+
 ## 2. 全系统长期责任矩阵
 
 | 单元 | 主责业务域 | 完整责任 |
@@ -50,6 +52,8 @@
 4. 可运行后由设计师检查视觉一致性，独立 UI 验收检查真实行为，二者不能互相替代。
 
 纯接口、数据迁移、权限修复和无视觉变化的缺陷不强制经过设计师。设计系统资产和通用组件由设计师维护，业务开发不得另造第二套样式。
+
+设计规范的阅读顺序：`DESIGN-RULES.md` → 按需查 `COMPONENT-DECISION-TREE.md` → 设计完成后用 `DESIGN-CHECKLIST.md` → 开发接线参考 `DEV-HANDOFF.md` → 回传前按 `DELIVERY-STANDARD.md`。新增公共组件或 Token 才读取 `CONTRIBUTING.md`。
 
 ## 6. 当前已知边界
 
