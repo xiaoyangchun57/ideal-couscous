@@ -2,7 +2,8 @@
 
 > 基线：开始任务时的 `origin/main`；在 PR 中记录任务起点 SHA
 > 分支建议：`collab/a-station-tab-read`
-> 停点：提交并推送分支，创建 PR，等待主线 Review；不部署
+> 状态：`PR #1 / CODE_REVIEW_REWORK_REQUIRED`
+> 停点：完成下述单点返修并更新原 PR，等待复审；不合并、不部署
 
 ## 目标
 
@@ -23,3 +24,12 @@
 - 接口范围、错误文案、过期响应、返回详情后的状态保持、正确详情路由全部落实。
 - 覆盖管理员/非管理员、本人/全部、搜索清除、无权限、空态、首次失败和保留旧数据后的刷新失败。
 - 回传产品判断、修改文件、测试结果、真实 UI `PASS/NOT RUN` 和残余依赖。
+
+## PR #1 单点返修
+
+监测列表曾成功加载后，如果 `/api/station-monitoring/sites` 明确返回 `STATION_MONITORING_PUBLIC_DISABLED` 或 `STATION_MONITORING_ADMIN_ONLY`，页面已得到“不得继续展示监测字段”的权威结论。当前代码只有目录回退成功时才把 `monitoringEnabled/monitoringPublic` 设为 `false`；若随后目录请求失败，旧监测状态仍会继续显示。
+
+- 在确认是上述门禁响应且请求仍为当前请求时，立即关闭监测展示，再发起目录回退；保留旧站点目录和可重试错误，不保留旧监测字段。
+- 增加一条回归：先成功加载监测列表，再模拟门禁 403 + 目录回退失败；断言两个监测开关均为 `false`、旧站点目录可保留、错误可重试，详情来源按档案模式处理。
+- 只运行 `responsibleSitesMonitoring.test.js`、相关 JS 语法检查和 `git diff --check`；无需重复小程序 230 项完整测试。
+- 不扩展文件范围，不顺手接试剂、第五 Tab、首页或“我的”。
