@@ -1,6 +1,6 @@
 # 主线当前任务：第五 Tab 与跨域集成
 
-> 基线：`011b39667b40556b7409a0e3cbfcb76986d565ca`
+> 基线：开始任务时的 `origin/main`；在集成记录中保存任务起点 SHA
 > 分支建议：`collab/main-station-navigation`
 > 停点：等待 A/C PR 后完成集成 Review 和真实 UI 交接；不部署
 

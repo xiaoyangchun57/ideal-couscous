@@ -1,6 +1,6 @@
 # 设计师当前任务：站点图标复核
 
-> 基线：`011b39667b40556b7409a0e3cbfcb76986d565ca`
+> 基线：开始任务时的 `origin/main`；在设计 PR 中记录任务起点 SHA
 > 分支建议：`design/station-icon-review`
 > 停点：提交并推送设计分支，回传静态 Review；不修改业务 JS、接口或状态机
 

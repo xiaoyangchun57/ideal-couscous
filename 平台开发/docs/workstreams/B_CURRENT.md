@@ -1,6 +1,6 @@
 # 协作者 B 当前任务：Web 收口与真实体验
 
-> 基线：`011b39667b40556b7409a0e3cbfcb76986d565ca`
+> 基线：开始任务时的 `origin/main`；在 PR 中记录任务起点 SHA
 > 分支建议：`collab/b-web-closeout`
 > 停点：提交并推送分支，创建 PR，等待主线 Review；不部署
 

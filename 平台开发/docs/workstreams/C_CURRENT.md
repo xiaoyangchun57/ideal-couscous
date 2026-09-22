@@ -1,6 +1,6 @@
 # 协作者 C 当前任务：试剂跨站读取与安全维护
 
-> 基线：`011b39667b40556b7409a0e3cbfcb76986d565ca`
+> 基线：开始任务时的 `origin/main`；在 PR 中记录任务起点 SHA
 > 分支建议：`collab/c-reagent-contract`
 > 停点：提交并推送分支，创建 PR，等待主线 Review；不部署、不操作生产数据
 

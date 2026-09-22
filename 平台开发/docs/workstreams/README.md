@@ -1,12 +1,12 @@
 # 水质运维长期协作基线
 
 > 状态：`ACTIVE_COLLABORATION_BASELINE`
-> 代码基线：`011b39667b40556b7409a0e3cbfcb76986d565ca`
+> 协作基线：开始任务时的远程 `origin/main`；实际 HEAD 记录在任务分支和 PR 中
 > 性质：协作开发基线，不是发布候选，不允许据此部署
 
 ## 1. 使用方式
 
-所有参与者从远程 `main` 拉取代码，确认历史包含上述基线提交，再从最新 `main` 创建自己的任务分支。交接只使用仓库相对路径、提交号和 PR，不依赖任何人的本机路径。
+所有参与者先执行 `git fetch origin`，记录 `git rev-parse origin/main` 的输出，再从该提交创建自己的任务分支。交接只使用仓库相对路径、任务起点提交号和 PR，不依赖任何人的本机路径。`CURRENT` 文件不硬编码自身所在提交的 SHA，避免文档提交后立即过期。
 
 本目录固定保留五份当前交接：`A_CURRENT.md`、`B_CURRENT.md`、`C_CURRENT.md`、`MAIN_CURRENT.md`、`DESIGN_CURRENT.md`。每次新任务直接替换对应文件中的已闭环内容，不按日期无限新增文件。历史以 Git 和 PR 为准。
 
