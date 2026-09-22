@@ -1216,6 +1216,22 @@ def migrate_reagent_qc():
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (operator_id, endpoint, idempotency_key)
             )""")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS reagent_inventory_deletion_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inventory_id INTEGER,
+                site_id INTEGER NOT NULL,
+                site_name TEXT DEFAULT '',
+                reagent_id INTEGER NOT NULL,
+                reagent_name TEXT DEFAULT '',
+                unit TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                operator_id INTEGER NOT NULL,
+                operator_name TEXT DEFAULT '',
+                idempotency_key TEXT DEFAULT '',
+                deleted_at TEXT NOT NULL,
+                delete_before_state TEXT NOT NULL DEFAULT '{}'
+            )""")
         db.commit()
 
 
@@ -25434,11 +25450,21 @@ def api_reagent_inventory_create():
 # ---------- 3.2.2 删除站点试剂库存 ----------
 @app.route('/api/reagent-inventory/<int:site_id>/<int:reagent_id>', methods=['DELETE'])
 def api_reagent_inventory_delete(site_id, reagent_id):
-    """删除某站点的某条试剂库存记录"""
+    """删除某站点的某条试剂库存记录，并永久保留删除摘要。"""
     data = request.get_json(silent=True) or {}
+    reason = data.get('reason', '')
+    if not isinstance(reason, str):
+        reason = str(reason or '')
+    reason = reason.strip()
+    if not reason:
+        return jsonify({'error': '请填写删除原因',
+                        'code': 'DELETE_REASON_REQUIRED'}), 400
+    if len(reason) > 200:
+        return jsonify({'error': '删除原因不能超过200字',
+                        'code': 'DELETE_REASON_TOO_LONG'}), 400
     idempotency_key, error = _reagent_idempotency_key(data)
     if error: return error
-    normalized = {'site_id': site_id, 'reagent_id': reagent_id}
+    normalized = {'site_id': site_id, 'reagent_id': reagent_id, 'reason': reason}
     request_hash = _reagent_request_hash(normalized)
     with get_db() as db:
         try:
@@ -25450,19 +25476,45 @@ def api_reagent_inventory_delete(site_id, reagent_id):
                 db, access['user_id'], 'reagent-inventory:delete', idempotency_key, request_hash)
             if replay:
                 db.rollback(); return jsonify(replay[0]), replay[1]
-            inventory = db.execute(
-                'SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+            inventory = db.execute("""SELECT ri.*, s.name AS site_name,
+                r.name AS reagent_name, r.unit AS reagent_unit
+                FROM reagent_inventory ri
+                JOIN sites s ON s.id=ri.site_id
+                JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
                 (site_id, reagent_id)).fetchone()
             if not inventory:
                 db.rollback()
                 return jsonify({'error': '该站点无此试剂库存记录',
                                 'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            before_state = dict(inventory)
+            deleted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            audit = db.execute("""INSERT INTO reagent_inventory_deletion_audits
+                (inventory_id,site_id,site_name,reagent_id,reagent_name,unit,
+                 reason,operator_id,operator_name,idempotency_key,deleted_at,
+                 delete_before_state)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                inventory['id'], site_id, inventory['site_name'], reagent_id,
+                inventory['reagent_name'], inventory['reagent_unit'], reason,
+                access['user_id'], access['user'].get('real_name') or
+                access['user'].get('username') or '', idempotency_key or '',
+                deleted_at, json.dumps(before_state, ensure_ascii=False, sort_keys=True),
+            ))
             db.execute("""UPDATE reagent_alerts SET handled=1,
                 handled_at=COALESCE(handled_at,datetime('now','localtime'))
                 WHERE site_id=? AND reagent_id=? AND handled=0""", (site_id, reagent_id))
-            db.execute('DELETE FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
-                       (site_id, reagent_id))
-            response = {'ok': True, 'site_id': site_id, 'reagent_id': reagent_id}
+            deleted = db.execute(
+                'DELETE FROM reagent_inventory WHERE site_id=? AND reagent_id=?',
+                (site_id, reagent_id))
+            if deleted.rowcount != 1:
+                raise sqlite3.IntegrityError('reagent inventory changed during delete')
+            response = {
+                'ok': True,
+                'site_id': site_id,
+                'reagent_id': reagent_id,
+                'audit_id': audit.lastrowid,
+                'deleted_at': deleted_at,
+            }
             _reagent_idempotency_store(
                 db, access['user_id'], 'reagent-inventory:delete', idempotency_key,
                 request_hash, response, 200)

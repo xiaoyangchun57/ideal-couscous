@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -169,6 +170,7 @@ class ReagentContractTest(unittest.TestCase):
         self.assertIn('qc_status', inventory_columns)
         self.assertIn('batch_no', inventory_columns)
         self.assertIn('reagent_idempotency', tables)
+        self.assertIn('reagent_inventory_deletion_audits', tables)
 
     def test_overview_scopes_multi_reason_zero_unit_and_capabilities(self):
         admin = self.client.get('/api/reagent-overview', headers=self.headers('admin-token'))
@@ -300,14 +302,89 @@ class ReagentContractTest(unittest.TestCase):
         self.assertEqual(self.db_value('SELECT COUNT(*) FROM reagent_usage'), 1)
 
         delete_url = '/api/reagent-inventory/1/12'
+        delete_payload = {'_idempotency_key': 'delete-1', 'reason': '误建库存记录'}
         first_delete = self.client.delete(delete_url, headers=self.headers('dual-token'),
-                                          json={'_idempotency_key': 'delete-1'})
+                                          json=delete_payload)
         replay_delete = self.client.delete(delete_url, headers=self.headers('dual-token'),
-                                           json={'_idempotency_key': 'delete-1'})
+                                           json=delete_payload)
+        conflict_delete = self.client.delete(
+            delete_url, headers=self.headers('dual-token'),
+            json={'_idempotency_key': 'delete-1', 'reason': '另一个删除原因'})
         self.assertEqual(first_delete.status_code, 200, first_delete.json)
         self.assertEqual(replay_delete.json, first_delete.json)
+        self.assertEqual((conflict_delete.status_code, conflict_delete.json['code']),
+                         (409, 'IDEMPOTENCY_KEY_REUSED'))
         self.assertEqual(self.db_value(
             'SELECT COUNT(*) FROM reagent_inventory WHERE site_id=1 AND reagent_id=12'), 0)
+        with self.temporary_db() as db:
+            audit = db.execute('''SELECT * FROM reagent_inventory_deletion_audits
+                WHERE site_id=1 AND reagent_id=12''').fetchone()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit['reason'], '误建库存记录')
+        self.assertEqual(audit['operator_id'], 5)
+        self.assertEqual(audit['reagent_name'], '总磷试剂')
+        self.assertEqual(audit['unit'], '盒')
+        self.assertEqual(audit['idempotency_key'], 'delete-1')
+        self.assertEqual(json.loads(audit['delete_before_state'])['current_qty'], 0)
+        self.assertEqual(self.db_value(
+            'SELECT COUNT(*) FROM reagent_inventory_deletion_audits'), 1)
+
+    def test_delete_requires_reason_and_preserves_scope(self):
+        delete_url = '/api/reagent-inventory/1/11'
+        missing_reason = self.client.delete(
+            delete_url, headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'missing-reason'})
+        too_long = self.client.delete(
+            delete_url, headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'long-reason', 'reason': '删' * 201})
+        reviewer = self.client.delete(
+            delete_url, headers=self.headers('reviewer-token'),
+            json={'_idempotency_key': 'reviewer-delete', 'reason': '无权删除'})
+        cross_site = self.client.delete(
+            '/api/reagent-inventory/2/10', headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'cross-site-delete', 'reason': '跨站删除'})
+        missing_site = self.client.delete(
+            '/api/reagent-inventory/999/10', headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'missing-site-delete', 'reason': '站点不存在'})
+        missing_inventory = self.client.delete(
+            '/api/reagent-inventory/1/12', headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'missing-inventory-delete', 'reason': '库存不存在'})
+
+        self.assertEqual((missing_reason.status_code, missing_reason.json['code']),
+                         (400, 'DELETE_REASON_REQUIRED'))
+        self.assertEqual((too_long.status_code, too_long.json['code']),
+                         (400, 'DELETE_REASON_TOO_LONG'))
+        self.assertEqual((reviewer.status_code, reviewer.json['code']),
+                         (403, 'REAGENT_WRITE_FORBIDDEN'))
+        self.assertEqual((cross_site.status_code, cross_site.json['code']),
+                         (403, 'REAGENT_SITE_FORBIDDEN'))
+        self.assertEqual((missing_site.status_code, missing_site.json['code']),
+                         (404, 'REAGENT_SITE_NOT_FOUND'))
+        self.assertEqual((missing_inventory.status_code, missing_inventory.json['code']),
+                         (404, 'REAGENT_INVENTORY_NOT_FOUND'))
+        self.assertEqual(self.db_value('SELECT COUNT(*) FROM reagent_inventory'), 3)
+        self.assertEqual(self.db_value(
+            'SELECT COUNT(*) FROM reagent_inventory_deletion_audits'), 0)
+        self.assertEqual(self.db_value('SELECT COUNT(*) FROM reagent_idempotency'), 0)
+
+    def test_delete_failure_rolls_back_every_write(self):
+        with self.temporary_db() as db:
+            db.execute('''CREATE TRIGGER fail_reagent_inventory_delete
+                BEFORE DELETE ON reagent_inventory
+                BEGIN SELECT RAISE(ABORT, 'forced inventory delete failure'); END''')
+            db.commit()
+        response = self.client.delete(
+            '/api/reagent-inventory/1/10', headers=self.headers('operator-token'),
+            json={'_idempotency_key': 'rollback-delete', 'reason': '测试回滚'})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (503, 'REAGENT_RETRYABLE'))
+        self.assertEqual(self.db_value('''SELECT COUNT(*) FROM reagent_inventory
+            WHERE site_id=1 AND reagent_id=10'''), 1)
+        self.assertEqual(self.db_value('''SELECT COUNT(*) FROM reagent_alerts
+            WHERE site_id=1 AND reagent_id=10 AND handled=0'''), 1)
+        self.assertEqual(self.db_value(
+            'SELECT COUNT(*) FROM reagent_inventory_deletion_audits'), 0)
+        self.assertEqual(self.db_value('SELECT COUNT(*) FROM reagent_idempotency'), 0)
 
     def test_replacement_failure_rolls_back_every_write(self):
         with self.temporary_db() as db:
