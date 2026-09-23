@@ -80,6 +80,11 @@ export function mergeMonitoringSites(siteRows, monitoringPayload, previousRows =
   });
 }
 
+export function monitoringLatestSummary(values, limit = 2) {
+  const items = Array.isArray(values) ? values : [];
+  return { visible: items.slice(0, limit), remaining: Math.max(0, items.length - limit), total: items.length };
+}
+
 export function monitoringSummaryItems(summary = {}) {
   return MONITORING_STATUS_ORDER.map((key) => ({
     key,

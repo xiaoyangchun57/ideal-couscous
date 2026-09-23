@@ -6,6 +6,7 @@ import {
   axisView,
   hasAdminRole,
   mergeMonitoringSites,
+  monitoringLatestSummary,
   monitoringStatusView,
   monitoringSummaryItems,
   monitoringDefaultTrendMetric,
@@ -28,6 +29,13 @@ test('monitoring status metadata covers the eight product states', () => {
     'data_unavailable',
   ]);
   assert.deepEqual(Object.keys(AXIS_META), ['communication', 'data']);
+});
+
+test('latest value summary bounds a six-factor station without losing zero or total', () => {
+  const values = Array.from({ length: 6 }, (_, index) => ({ business_metric: `factor_${index}`, standard_value: index }));
+  assert.deepEqual(monitoringLatestSummary(values), { visible: values.slice(0, 2), remaining: 4, total: 6 });
+  assert.equal(monitoringLatestSummary(values).visible[0].standard_value, 0);
+  assert.deepEqual(monitoringLatestSummary(undefined), { visible: [], remaining: 0, total: 0 });
 });
 
 test('monitoring status never falls back to the legacy station status', () => {

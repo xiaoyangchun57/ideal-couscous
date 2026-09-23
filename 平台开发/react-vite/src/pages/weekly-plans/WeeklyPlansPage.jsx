@@ -9,9 +9,6 @@ const { Text, Title } = Typography;
 
 const STATUS_MAP = { draft: { label: '草稿', color: 'default' }, submitted: { label: '已提交', color: 'blue' }, approved: { label: '已批准', color: 'green' }, archived: { label: '已归档', color: 'default' } };
 
-// 新建周计划默认巡检人（沿用既有默认值：1 号账号），仅在其仍为可分配人员时生效
-const DEFAULT_INSPECTOR_ID = 1;
-
 export default function WeeklyPlansPage() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -79,10 +76,9 @@ export default function WeeklyPlansPage() {
             locale={{ emptyText: <Empty description="暂无周计划" /> }} />
         </div>
       </Card>
-      <Modal open={createOpen} onCancel={() => setCreateOpen(false)} onOk={onCreate} title="新建周计划" okText="保存草稿" cancelText="取消" width={520} destroyOnHidden>
+      <Modal open={createOpen} onCancel={() => { form.resetFields(); setCreateOpen(false); }} onOk={onCreate} title="新建周计划" okText="保存草稿" cancelText="取消" width={520} destroyOnHidden>
         <Form form={form} layout="vertical">
-          <Form.Item name="user_id" label="巡检人" rules={[{ required: true }]}
-            initialValue={inspectorCandidates.some((u) => u.id === DEFAULT_INSPECTOR_ID) ? DEFAULT_INSPECTOR_ID : undefined}>
+          <Form.Item name="user_id" label="巡检人" rules={[{ required: true }]}>
             <Select options={inspectorCandidates.map(u => ({ value: u.id, label: u.real_name || u.username }))} />
           </Form.Item>
           <Form.Item name="week_start" label="周开始日期（周一）" rules={[{ required: true }]}><Input placeholder="2026-07-13" /></Form.Item>

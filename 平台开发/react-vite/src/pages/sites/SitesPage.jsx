@@ -22,7 +22,7 @@ import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
-import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems } from './stationMonitoring';
+import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems, monitoringLatestSummary } from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
@@ -580,11 +580,20 @@ export default function SitesPage() {
         title: '最后数据',
         key: 'latest_values',
         width: 190,
-        render: (_, record) => (
-          Array.isArray(record.latest_values) && record.latest_values.length > 0
-            ? <Space direction="vertical" size={0}>{record.latest_values.map((item, index) => <Text key={`${item.business_metric || 'factor'}-${index}`} style={{ fontSize: 12 }}>{item.factor_name_cn || item.business_metric || `监测因子${index + 1}`}：{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}</Text>)}</Space>
-            : <Text type="secondary">暂无已形成的有效观测</Text>
-        ),
+        render: (_, record) => {
+          const { visible, remaining, total } = monitoringLatestSummary(record.latest_values);
+          if (!total) return <Text type="secondary">暂无已形成的有效观测</Text>;
+          return (
+            <Space direction="vertical" size={0}>
+              {visible.map((item, index) => (
+                <Text key={`${item.business_metric || 'factor'}-${index}`} ellipsis={{ tooltip: true }} style={{ display: 'block', width: 168, fontSize: 12 }}>
+                  {item.factor_name_cn || item.business_metric || `监测因子${index + 1}`}：{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}
+                </Text>
+              ))}
+              {remaining > 0 && <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => navigate(`/sites/${record.id}`)}>还有 {remaining} 项 · 查看全部</Button>}
+            </Space>
+          );
+        },
       }, {
         title: '关键时间',
         key: 'monitoring_times',
@@ -1293,7 +1302,7 @@ export default function SitesPage() {
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
-          scroll={{ x: 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
+          scroll={{ x: monitoringPublic ? 1215 : 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
       )}
 
       <Modal

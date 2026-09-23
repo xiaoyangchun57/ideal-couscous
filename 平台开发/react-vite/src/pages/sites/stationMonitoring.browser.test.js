@@ -579,6 +579,53 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     } finally { await close(); }
   });
 
+  for (const width of [1366, 390]) {
+    await t.test(`six-factor summary stays bounded and horizontally reachable at ${width}px`, async () => {
+      const factors = Array.from({ length: 6 }, (_, index) => ({
+        business_metric: `factor_${index + 1}`, factor_name_cn: `因子${index + 1}`,
+        standard_value: index, standard_unit: 'mg/L', observed_at: '2026-09-10T07:00:00+08:00',
+      }));
+      const { page, close } = await session(['admin'], { width, height: 760 }, async (route, url) => {
+        if (url.pathname === '/api/station-monitoring/sites') {
+          await route.fulfill({ json: { scope: 'all', available_scopes: ['all', 'mine'],
+            items: [{ ...overview().site, latest_values: factors }, { ...overview('not_connected', 8).site, latest_values: [] }],
+            summary: { interval_unconfigured: 1, not_connected: 1 } } });
+          return true;
+        }
+        if (url.pathname === '/api/station-monitoring/sites/7/overview') {
+          const detail = overview();
+          detail.monitoring.latest_values = factors;
+          await route.fulfill({ json: detail });
+          return true;
+        }
+        return false;
+      });
+      try {
+        await page.goto(`${baseURL}/sites`);
+        const station = page.getByRole('row').filter({ hasText: row.name });
+        await visible(station.getByText('因子1：0 mg/L', { exact: true }));
+        await visible(station.getByText('因子2：1 mg/L', { exact: true }));
+        await visible(station.getByRole('button', { name: '还有 4 项 · 查看全部' }));
+        assert.equal(await station.getByText('因子6：5 mg/L', { exact: true }).count(), 0);
+        const bounds = await station.boundingBox();
+        assert.ok(bounds && bounds.height <= 115, `six-factor row height: ${bounds?.height}`);
+        const tableBody = page.locator('.workspace-table .ant-table-body');
+        const horizontal = await tableBody.evaluate((element) => {
+          const before = element.scrollLeft;
+          element.scrollLeft = element.scrollWidth;
+          return { viewport: element.clientWidth, content: element.scrollWidth,
+            before, after: element.scrollLeft };
+        });
+        assert.ok(horizontal.content >= 1215, JSON.stringify(horizontal));
+        assert.ok(horizontal.after > horizontal.before, JSON.stringify(horizontal));
+        const action = await station.getByRole('button', { name: /查看 隔离测试站甲 的站点档案/ }).boundingBox();
+        assert.ok(action && action.x >= 0 && action.x + action.width <= width + 1, `action: ${JSON.stringify(action)}`);
+        await station.getByRole('button', { name: '还有 4 项 · 查看全部' }).click();
+        await visible(page.getByText('因子6', { exact: true }));
+      } finally { await close(); }
+    });
+  }
+
   await t.test('short desktop monitoring body scroll reaches the final section', async () => {
     const { page, close } = await session(['admin'], { width: 1280, height: 600 });
     try {
