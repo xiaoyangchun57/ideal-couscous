@@ -3,15 +3,19 @@ import { Table, Card, Button, Space, Tag, Typography, message, Modal, Form, Sele
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { TableLongText } from '../../components/WorkspacePage';
+import { filterAssignableUsers } from '../../utils/assignableUsers';
 
 const { Text, Title } = Typography;
 
 const STATUS_MAP = { draft: { label: '草稿', color: 'default' }, submitted: { label: '已提交', color: 'blue' }, approved: { label: '已批准', color: 'green' }, archived: { label: '已归档', color: 'default' } };
 
+// 新建周计划默认巡检人（沿用既有默认值：1 号账号），仅在其仍为可分配人员时生效
+const DEFAULT_INSPECTOR_ID = 1;
+
 export default function WeeklyPlansPage() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [users, setUsers] = useState([]);
+  const [inspectorCandidates, setInspectorCandidates] = useState([]);
   const [vehicles, setVehicles] = useState([]);
   const [form] = Form.useForm();
   const [createOpen, setCreateOpen] = useState(false);
@@ -24,7 +28,10 @@ export default function WeeklyPlansPage() {
   };
   useEffect(() => {
     load();
-    api.get('/users').then(u => setUsers(Array.isArray(u) ? u : [])).catch(() => {});
+    // 巡检人候选：排除已注销 / 已停用账号，避免把新计划派给已退出人员
+    api.get('/users?status=active')
+      .then(u => setInspectorCandidates(filterAssignableUsers(u)))
+      .catch(() => setInspectorCandidates([]));
     api.get('/vehicles').then(v => setVehicles(Array.isArray(v) ? v : [])).catch(() => {});
   }, []);
 
@@ -74,8 +81,9 @@ export default function WeeklyPlansPage() {
       </Card>
       <Modal open={createOpen} onCancel={() => setCreateOpen(false)} onOk={onCreate} title="新建周计划" okText="保存草稿" cancelText="取消" width={520} destroyOnHidden>
         <Form form={form} layout="vertical">
-          <Form.Item name="user_id" label="巡检人" rules={[{ required: true }]} initialValue={1}>
-            <Select options={users.map(u => ({ value: u.id, label: u.real_name || u.username }))} />
+          <Form.Item name="user_id" label="巡检人" rules={[{ required: true }]}
+            initialValue={inspectorCandidates.some((u) => u.id === DEFAULT_INSPECTOR_ID) ? DEFAULT_INSPECTOR_ID : undefined}>
+            <Select options={inspectorCandidates.map(u => ({ value: u.id, label: u.real_name || u.username }))} />
           </Form.Item>
           <Form.Item name="week_start" label="周开始日期（周一）" rules={[{ required: true }]}><Input placeholder="2026-07-13" /></Form.Item>
           <Form.Item name="vehicle_id" label="派车（可选）">

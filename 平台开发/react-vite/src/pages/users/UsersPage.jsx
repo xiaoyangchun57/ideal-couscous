@@ -19,6 +19,7 @@ import {
 } from '../../services/pageStyles';
 import { finishWechatBindingUnbind } from './wechatBindingActions';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { filterAssignableUsers } from '../../utils/assignableUsers';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
@@ -185,8 +186,9 @@ export default function UsersPage() {
         return;
       }
       let targetId;
-      const candidates = users.filter((user) => user.id !== record.id && user.status === 'active'
-        && (user.roles || [user.role]).includes('operator'));
+      // 转交接收人候选：复用统一判定，排除已注销 / 已停用账号，并限定为运维人员
+      const candidates = filterAssignableUsers(users, { role: 'operator' })
+        .filter((user) => user.id !== record.id);
       modal.confirm({
         title: `先转交“${record.real_name}”的未完成工作`,
         content: <Space direction="vertical" size={12} style={{ width: '100%' }}>
