@@ -273,10 +273,21 @@ Page({
     });
   },
 
-  goResponsibleSites() {
-    return this._navigateOnce('navigateTo', '/pages/responsible-sites/responsible-sites', () => {
-      wx.showToast({ title: '打开站点列表失败，请重试', icon: 'none' });
+  _goStationHub(target, failureTitle) {
+    if (this._navigationInFlight || this._alive === false) return false;
+    app.globalData.stationHubTarget = target;
+    return this._navigateOnce('switchTab', '/pages/responsible-sites/responsible-sites', () => {
+      if (app.globalData.stationHubTarget === target) app.globalData.stationHubTarget = null;
+      wx.showToast({ title: failureTitle, icon: 'none' });
     });
+  },
+
+  goResponsibleSites() {
+    return this._goStationHub({ view: 'stations' }, '打开站点列表失败，请重试');
+  },
+
+  goResponsibleSitesReagent() {
+    return this._goStationHub({ view: 'reagents', filter: '' }, '打开试剂情况失败，请重试');
   },
 
   goReview() {

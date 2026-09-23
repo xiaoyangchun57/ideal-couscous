@@ -97,8 +97,6 @@ Page({
       },
     });
   },
-  goResponsibleSites() { wx.navigateTo({ url: '/pages/responsible-sites/responsible-sites' }); },
-
   onLogout() {
     wx.showModal({
       title: '退出登录',

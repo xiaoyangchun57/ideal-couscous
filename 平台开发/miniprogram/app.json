@@ -30,6 +30,7 @@
     "list": [
       { "pagePath": "pages/index/index", "text": "首页", "iconPath": "images/tab-home.png", "selectedIconPath": "images/tab-home-on.png" },
       { "pagePath": "pages/plan/plan", "text": "巡检", "iconPath": "images/tab-inspection.png", "selectedIconPath": "images/tab-inspection-on.png" },
+      { "pagePath": "pages/responsible-sites/responsible-sites", "text": "站点", "iconPath": "images/tab-site.png", "selectedIconPath": "images/tab-site-on.png" },
       { "pagePath": "pages/alert/alert", "text": "告警", "iconPath": "images/tab-alert.png", "selectedIconPath": "images/tab-alert-on.png" },
       { "pagePath": "pages/mine/mine", "text": "我的", "iconPath": "images/tab-mine.png", "selectedIconPath": "images/tab-mine-on.png" }
     ]

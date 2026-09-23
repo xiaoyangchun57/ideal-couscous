@@ -1,13 +1,20 @@
-﻿/* ========== 站点 Tab 页面 ========== */
+/* ========== 站点 Tab 页面 ========== */
 .stab-page {
   min-height: 100vh;
   background: var(--color-background);
   padding-bottom: 40rpx;
 }
 
+/* 导航栏标题 */
+.stab-nav-title {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
 /* 主模式分段：站点 / 试剂 */
 .stab-seg {
-  padding: 16rpx 32rpx 12rpx;
+  padding: 24rpx 32rpx 16rpx;
   position: sticky;
   top: 0;
   z-index: 20;
