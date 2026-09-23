@@ -186,7 +186,7 @@
     </view>
 
     <!-- 加载失败 -->
-    <view class="ro-empty" wx:if="{{reagentError && !reagentLoading && reagentEnabled}}">
+    <view class="ro-empty" wx:if="{{reagentError && !reagentLoading && reagentEnabled && !reagentNoViewPermission && !reagentItems.length}}">
       <image class="ro-empty-icon" src="/images/reagent/empty-error.svg" mode="aspectFit" />
       <text class="ro-empty-title">加载失败</text>
       <text class="ro-empty-sub">{{reagentError || '请检查网络后重试'}}</text>
@@ -217,7 +217,7 @@
     </view>
 
     <!-- 试剂列表 -->
-    <view class="ro-list" wx:if="{{reagentItems.length > 0 && !reagentLoading && reagentEnabled}}">
+    <view class="ro-list" wx:if="{{reagentItems.length > 0 && !reagentLoading && reagentEnabled && !reagentNoViewPermission}}">
       <view class="ro-card card" wx:for="{{reagentItems}}" wx:key="key">
         <text class="ro-site-name">{{item.site_name}}</text>
         <view class="ro-reagent-head">
@@ -244,13 +244,17 @@
         </view>
       </view>
     </view>
+    <view class="mon-stale-bar" wx:if="{{reagentError && reagentItems.length && !reagentLoading && !reagentNoViewPermission}}">
+      <text class="mon-stale-tx">{{reagentError}}</text>
+      <button class="btn-ghost btn-sm" bindtap="onReagentRetry">重试</button>
+    </view>
   </block>
 
   <!-- 底部安全区占位 -->
   <view class="stab-bottom-spacer"></view>
 
   <!-- ========== 登记更换 Sheet ========== -->
-  <view class="sheet-mask {{replaceSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{replaceSheetVisible}}" catchtap="{{replaceSheet.submitting ? 'noop' : 'onCloseReplaceSheet'}}">
+  <view class="sheet-mask {{replaceSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{replaceSheetVisible}}" catchtap="onCloseReplaceSheet">
     <view class="sheet-container" catchtap="noop">
       <view class="sheet-handle"></view>
       <view class="sheet-header">
@@ -370,7 +374,7 @@
   </view>
 
   <!-- ========== 完成标定 Sheet ========== -->
-  <view class="sheet-mask {{calibrateSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{calibrateSheetVisible}}" catchtap="{{calibrateSheet.submitting ? 'noop' : 'onCloseCalibrateSheet'}}">
+  <view class="sheet-mask {{calibrateSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{calibrateSheetVisible}}" catchtap="onCloseCalibrateSheet">
     <view class="sheet-container" catchtap="noop">
       <view class="sheet-handle"></view>
       <view class="sheet-header">

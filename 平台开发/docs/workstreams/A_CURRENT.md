@@ -1,9 +1,9 @@
 # A 领域工作台：站点与监测数据
 
 > 负责人：协作者 A
-> 当前状态：`PR #1 / CODE_REVIEW_REWORK_REQUIRED`
+> 当前状态：`PR #1 / STATION_TAB_INTEGRATION_REVIEW_PENDING`
 > 当前分支：`collab/a-station-tab-read`
-> 停点：更新原 PR 并等待复审；不新建 PR、不合并、不部署
+> 停点：原 PR 接线与定向测试后等待产品 Code Review；不新建 PR、不合并、不部署
 
 ## 1. 领域使命
 
@@ -61,11 +61,9 @@ A 对本领域承担产品、后端、Web、小程序、数据适配、测试和
 
 本轮不修改首页、`app.json`、“我的”、试剂后端或 `backend/app.py`。
 
-### PR #1 唯一返修
+### PR #1 当前接线
 
-监测列表成功展示后，如果监测接口明确返回 `STATION_MONITORING_PUBLIC_DISABLED` 或 `STATION_MONITORING_ADMIN_ONLY`，必须立即关闭 `monitoringEnabled/monitoringPublic`。即使随后目录回退失败，也只能保留旧站点目录和可重试错误，不得继续显示旧监测字段；详情来源切换为档案模式。
-
-补一条“先成功、再门禁 403、再目录失败”的回归。只运行 `responsibleSitesMonitoring.test.js`、相关 JS 语法和 `git diff --check`，在原 PR 更新。
+已保留门禁 403 后立即关闭监测字段、目录回退失败时保留可重试旧目录及档案详情来源的定向回归。基于主线 `5b33d5f` 的五 Tab 导航和站点页设计，在原 PR 消费并清理首页 `stationHubTarget`；无目标时保留当前模式、范围和筛选。站点页试剂模式按 C 分支 `collab/c-reagent-contract` 的稳定字段接入跨站摘要、原因并集筛选、服务端动作能力以及更换/标定通用端点；失败保留表单和幂等键，输入改变才生成新键。C 契约尚未进入 `main`，当前仅能以固定契约夹具验证，真实后端联调及微信实际 UI 均为 `NOT RUN`；须经 C 核对试剂语义和产品复审。
 
 ## 8. 当前跨域结果责任
 
@@ -73,11 +71,11 @@ A 对本领域承担产品、后端、Web、小程序、数据适配、测试和
 
 - 主线提供已通过静态 Review 的五 Tab 资产、导航注册和首页 `stationHubTarget` 发起能力。
 - C 提供试剂跨站读取和维护契约，并直接与 A 对齐接口。
-- A 在 PR #1 通过并取得站点页写入权后，负责消费一次性目标、接入真实试剂契约并完成端到端验证。
+- A 已取得本轮站点页接线权，并在原 PR 消费一次性目标、按 C 分支固定契约接线；C 后端合入后由 A 完成真实端到端和 UI 验证，再交产品验收。
 
 ## 9. 下一候选
 
-- `READY_AFTER_PR`：接管站点 Tab 最终接线，覆盖首页直达站点/试剂、返回状态保持和失败重试。
+- `IN_REVIEW`：站点 Tab 最终接线已在原 PR 完成夹具验证；待 C 契约合入后执行真实后端联调、微信真实 UI 及跨域验收。
 - `WAITING_STATION_MASTER_REFRESH`：恢复全站数据接入匹配和监测展示验证；正式站点名称、MN、有效状态和别名更新前不批量写生产数据。
 - `ASSESS`：核对 Web 站点全景、驾驶舱、趋势与小程序站点页是否使用同一监测语义，提出最短收口方案。
 
