@@ -77,3 +77,25 @@ test('external URL sync and clear cancel pending work', () => {
   state.clock.flush();
   assert.deepEqual(state.commits, ['']);
 });
+
+test('a live composition draft cannot be overwritten by an external URL write', () => {
+  const state = setup('旧搜索词');
+  state.controller.compositionStart();
+  state.controller.change('zhong');
+  assert.equal(state.drafts.at(-1), 'zhong');
+  // 选词进行中：浏览器前进/后退或跨模块写入导致 URL 变化，不得覆盖选词草稿
+  state.controller.syncExternal('外部带入');
+  state.controller.syncExternal('');
+  state.clock.flush();
+  assert.equal(state.drafts.at(-1), 'zhong');
+  assert.deepEqual(state.commits, []);
+  // 选词结束：以用户选中的文本为准提交
+  state.controller.compositionEnd('中文');
+  state.clock.flush();
+  assert.equal(state.drafts.at(-1), '中文');
+  assert.deepEqual(state.commits, ['中文']);
+  // 选词结束后外部同步恢复生效
+  state.controller.syncExternal('外部带入');
+  assert.equal(state.drafts.at(-1), '外部带入');
+  assert.deepEqual(state.commits, ['中文']);
+});
