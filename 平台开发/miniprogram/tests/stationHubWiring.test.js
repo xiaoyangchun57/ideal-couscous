@@ -159,10 +159,17 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(calibration.standard_value, 0);
     assert.equal(p.data.calibrateSheet.success, true);
 
+    p.onCloseCalibrateSheet();
+    p.onOpenReplaceSheet({ currentTarget: { dataset: { id: '1:7' } } });
+    assert.equal(p.data.replaceSheetVisible, true);
     api.reagentOverview = () => Promise.reject({ status: 403, error: '禁止访问' });
     await p.loadReagents();
     assert.equal(p.data.reagentNoViewPermission, true);
     assert.equal(p.data.reagentItems.length, 0, 'permission loss removes stale data');
+    assert.equal(p.data.replaceSheetVisible, false, 'permission loss closes stale maintenance form');
+    assert.equal(p.data.replaceSheet.siteId, null, 'permission loss removes stale form target');
+    p.onSubmitReplace();
+    assert.equal(replaceRequests.length, 3, 'stale maintenance form cannot submit after permission loss');
     api.reagentOverview = () => Promise.reject({ status: 0, error: '网络断开' });
     await p.loadReagents();
     assert.equal(p.data.reagentError, '网络断开');
@@ -171,6 +178,16 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     await p.onReagentRetry();
     assert.equal(p.data.reagentNoViewPermission, false);
     assert.equal(p.data.reagentItems.length, 3);
+
+    p.onOpenCalibrateSheet({ currentTarget: { dataset: { id: '1:7' } } });
+    assert.equal(p.data.calibrateSheetVisible, true);
+    api.reagentOverview = () => Promise.reject({ status: 401, error: '登录已失效' });
+    await p.loadReagents();
+    assert.equal(p.data.calibrateSheetVisible, false, 'expired session closes stale calibration form');
+    assert.equal(p.data.calibrateSheet.siteId, null);
+    assert.equal(p.data.reagentItems.length, 0);
+    api.reagentOverview = () => Promise.resolve(summary);
+    await p.onReagentRetry();
 
     api.reagentOverview = () => Promise.reject({ status: 0, error: '暂时离线' });
     await p.loadReagents();

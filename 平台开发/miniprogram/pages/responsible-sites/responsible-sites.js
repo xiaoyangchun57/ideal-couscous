@@ -197,7 +197,9 @@ Page({
       if (error && (error.status === 403 || error.status === 401)) {
         this._reagentSource = [];
         this.setData({ reagentLoading: false, reagentEnabled: true,
-          reagentNoViewPermission: true, reagentItems: [], reagentError: '' });
+          reagentNoViewPermission: true, reagentItems: [], reagentError: '',
+          replaceSheetVisible: false, replaceSheet: emptySheet(),
+          calibrateSheetVisible: false, calibrateSheet: emptySheet() });
       } else {
         this.setData({ reagentLoading: false, reagentEnabled: true,
           reagentNoViewPermission: false,
