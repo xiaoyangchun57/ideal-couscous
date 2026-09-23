@@ -231,7 +231,7 @@ Page({
     if (!item || !item.canCalibrate) return;
     this.setData({ calibrateSheetVisible: true, calibrateSheet: Object.assign(emptySheet(), {
       siteId: item.site_id, reagentId: item.reagent_id, siteName: item.site_name,
-      reagentName: item.reagent_name, unit: item.unit, replaceTime: item.last_replaced_at
+      reagentName: item.reagent_name, replaceTime: item.last_replaced_at
     }) });
   },
 

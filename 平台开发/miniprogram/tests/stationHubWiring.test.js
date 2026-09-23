@@ -54,6 +54,13 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.match(wxml, /catchtap="onCloseReplaceSheet"/);
     assert.match(wxml, /catchtap="onCloseCalibrateSheet"/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
+    assert.match(wxml, /\{\{replaceSheet\.unit\}\}/, 'inventory amount retains its stock unit');
+    assert.doesNotMatch(wxml, /\{\{calibrateSheet\.unit\}\}/,
+      'calibration numbers cannot inherit the inventory unit');
+    assert.match(wxml, /已进入待标定状态，请继续完成标定/);
+    assert.match(wxml, /标定已通过；其他关注项以列表为准/);
+    assert.match(wxml, /已记录需报修/);
+    assert.doesNotMatch(wxml, /试剂状态已恢复正常|已提交报修|标定完成后恢复正常/);
     const siteQueries = [];
     api.stationMonitoringSites = options => {
       siteQueries.push(options);
@@ -160,6 +167,34 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(p.data.calibrateSheet.success, true);
 
     p.onCloseCalibrateSheet();
+    const stillAttention = { items: [reagent(1, 7, ['expired', 'low_volume'],
+      { unit: '盒', qc_status: 'passed' })] };
+    api.reagentOverview = () => Promise.resolve(stillAttention);
+    await p.loadReagents();
+    p.onOpenCalibrateSheet({ currentTarget: { dataset: { id: '1:7' } } });
+    assert.equal(p.data.calibrateSheet.unit, '', 'a stock unit is not a calibration unit');
+    p.onCalibrateStandardInput({ detail: { value: '10' } });
+    p.onCalibrateMeasuredInput({ detail: { value: '10' } });
+    p.onCalibrateResultTap({ currentTarget: { dataset: { result: 'pass' } } });
+    await p.onSubmitCalibrate();
+    await flush();
+    assert.equal(calibration.passed, 1);
+    assert.deepEqual(p.data.reagentItems[0].attention_reasons.map(reason => reason.type),
+      ['expired', 'low_volume'], 'QC pass cannot erase other server attention reasons');
+
+    p.onCloseCalibrateSheet();
+    p.onOpenCalibrateSheet({ currentTarget: { dataset: { id: '1:7' } } });
+    p.onCalibrateStandardInput({ detail: { value: '10' } });
+    p.onCalibrateMeasuredInput({ detail: { value: '12' } });
+    p.onCalibrateResultTap({ currentTarget: { dataset: { result: 'fail' } } });
+    p.onCalibrateFollowUpTap({ currentTarget: { dataset: { follow: 'repair' } } });
+    await p.onSubmitCalibrate();
+    assert.equal(calibration.passed, 0);
+    assert.equal(calibration.fail_action, 'repair', 'record a repair need, not a created workorder');
+    p.onCloseCalibrateSheet();
+    api.reagentOverview = () => Promise.resolve(summary);
+    await p.loadReagents();
+
     p.onOpenReplaceSheet({ currentTarget: { dataset: { id: '1:7' } } });
     assert.equal(p.data.replaceSheetVisible, true);
     api.reagentOverview = () => Promise.reject({ status: 403, error: '禁止访问' });
