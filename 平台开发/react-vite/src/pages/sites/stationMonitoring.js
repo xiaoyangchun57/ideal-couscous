@@ -25,6 +25,7 @@ const MONITORING_FIELDS = [
   'last_received_at',
   'last_communication_at',
   'last_valid_observation_at',
+  'latest_values',
   'published_factor_count',
 ];
 

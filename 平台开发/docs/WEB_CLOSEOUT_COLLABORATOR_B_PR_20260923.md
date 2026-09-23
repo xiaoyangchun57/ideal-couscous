@@ -4,7 +4,7 @@
 > 任务起点 `origin/main` SHA：`e168e1253c43ce02300e0efb01567dfe67bcac75`（建 PR 时 `main` 已前进到 `5b33d5f`，与本次改动文件无重叠）
 > 合同：`平台开发/docs/workstreams/B_CURRENT.md` §7 ｜ 模板：`.github/pull_request_template.md`
 > 停点：完成本 PR 并等待 Review；不部署、不操作生产数据
-> 轮次：本轮为 **② 的追加收口**（返修不新建 PR，按 `workstreams/README.md` §1.4 更新本 PR）
+> 轮次：①②③ 收口校准（返修不新建 PR，按 `workstreams/README.md` §1.4 更新本 PR）
 
 ---
 
@@ -12,7 +12,7 @@
 
 - 结果负责人：协作者 B（`collab/b-web-closeout`）
 - 主责领域：B
-- 变更类型：领域内（前端候选过滤与测试；未跨域、未改公共契约、未改 `backend/app.py`）
+- 变更类型：领域内（前端候选过滤与测试；按用户追加授权补 `backend/app.py` 的批量监测只读契约）
 
 ## 产品判断
 
@@ -39,29 +39,32 @@
   - `平台开发/react-vite/src/pages/weekly-plans/WeeklyPlansPage.jsx`：巡检人候选由「取全量 `/users`、无任何过滤」改为 `/users?status=active` + 统一判定；默认巡检人 `initialValue={1}` 加存在性守卫
   - `平台开发/react-vite/package.json`：`test:api` 纳入上述两个测试文件（其中 `siteManagerCandidates.test.js` 原先**未接入门禁**，本轮一并纳入，否则新增断言不会真正被执行）
   - 随 PR 新增证据：`平台开发/docs/evidence/b-web-closeout/`（本轮 +9 张真实 UI 截图）
-  - **未修改 `backend/app.py`**
+  - ① 追加：`平台开发/backend/app.py` 与 `test_station_monitoring_normalization.py`；`react-vite/src/pages/sites/SitesPage.jsx`、`stationMonitoring.js` 及对应 Node／Edge 测试（包括隔离 Flask 端到端测试）。
 - 受影响领域及 Reviewer：消费方均为 B 自身页面（站点全景、人员与权限、周计划）。新增的 `utils/assignableUsers.js` 是**新的公共工具模块**，若 A/C 或主线后续需要「分配候选」判断，请直接复用而非另写。请求 Reviewer：主线（新增公共工具模块的归属与命名）。
 - 接口、权限、状态、错误和幂等变化：无接口、权限、状态迁移或错误码变化。前端新增的是**客户端二次过滤**，不改变服务端返回内容。唯一可见行为变化：候选下拉中不再出现已注销/已停用账号。
 - 向后兼容或 Mock/样例：
   - 站点负责人候选的**角色约束（仅 operator）不变**，只是额外排除了已注销/已停用。
   - 周计划巡检人候选**不新增角色约束**——该页原可任选任意在用账号（后端 `POST /api/weekly-plans` 只校验 `admin or self`），本轮只剔除已退出账号，不改变其余可选范围，避免越界修改产品行为。
   - 判断口径差异已核实：API 返回的 `roles` 由 `_normalize_user_roles(..., u.role)` 归一化，**必然非空且含主角色**，因此统一判定中「`roles` 为空则回退 `role`」的写法与线上数据完全等价，仅对合成数据更安全。
-- 临时写入权及合并顺序：写入权为 `B_CURRENT.md` §7 授予的三项（`pages/sites/`、`pages/users/`、`hooks/useUrlSyncedSearch.js` 及对应测试）。本轮改动落在 `pages/sites/`、`pages/users/`、`pages/weekly-plans/` 与新增 `utils/`。**范围说明（如实）**：`pages/weekly-plans/` 与 `utils/` 不在 §7 逐字列举的三个路径内，但属于同一「人员退出后不得进入候选列表」收口目标下的必要落点（`utils/` 为收敛重复逻辑所必需，`weekly-plans/` 为同款过滤缺口）。若主线认为已越界，我可将该两处拆出为后续候选。本 PR 可独立合并：`main` 自起点后未改动本 PR 涉及文件，无冲突面。合入 `main` 不代表发布。
+- 临时写入权及合并顺序：`B_CURRENT.md` §7 授予 `pages/sites/`、`pages/users/`、`hooks/useUrlSyncedSearch.js` 和对应测试；用户明确同意保留 `pages/weekly-plans/` 与新增公共工具 `utils/assignableUsers.js`，并追加授权在本 PR 修改 `backend/app.py` 提供可信批量有效观测。合入 `main` 不代表发布。
 
 ## 验证
 
-- 自动测试（本轮**全量重跑**，非引用旧结果）：
-  - `npm run test:api` → **109/109 passed**（基线 101/101；本轮 +8 = 新增 5 条 `assignableUsers` + `siteManagerCandidates` 新增 1 条 + 其原有 2 条首次接入门禁）
-  - ③ 真实浏览器回归（真实 Edge + 隔离 fixture）→ **3/3 passed**（确认本轮改动未回归 ③；仍为零业务写入）
-- 代码自检：`npm run lint` **PASS**（无输出）；`npm run build` **PASS**（`✓ built in 1.60s`，产物输出到 `frontend/v2/`，已在 `.gitignore`；`git status --short` 仅含本 PR 文件）；未新增依赖。
-- 设计静态 Review：N/A（无视觉与信息架构变化，仅候选集合收窄；按 `workstreams/README.md` §8 不强制经设计师）
-- 真实 UI：**PASS（③ T3）／ PASS（② 本轮）／ NOT RUN（① 站点全景）**，分项见附录 B。
+- 自动测试（① 的数值／时间列断言加入后重新运行）：
+  - `npm run test:api` → **109/109 passed**（②/③ 原有测试仍通过；① 覆盖 0 值、失败保留与服务端明确缺失后清除）。
+  - 隔离 SQLite 的 Flask 后端测试 → **54/54 passed**；加上隔离真实 Web 贯通测试，共 **55/55 passed**。覆盖列表与单站有效值一致、站点隔离、绑定身份、无有效值、角色范围和能力关闭；Python 编译通过。
+  - ① 真实 Edge 浏览器 + 隔离 API fixture → **19/19 passed**，包括列表最后数据／关键时间、刷新失败保留与成功响应明确缺失时清除。
+  - ① `python -m unittest test_station_monitoring_web_integration`（设置隔离 Vite URL / Edge 运行时）→ **1/1 passed**：真实 Edge + 临时 SQLite 正规归一化 + 实际 Flask `GET /api/station-monitoring/sites?scope=all`；8.8 degC 正式观测仅显示于所属站点，未接入站缺测，关键时间与数值同屏；不使用生产数据。
+  - ③ 本轮重跑真实 Edge 隔离 API 浏览器回归 → **3/3 passed**；浏览器选词事件为合成事件，真正微软拼音证据见附录 B。
+- 代码自检：当前工作树 `npm run build`（内含 `npm run lint`）**PASS**；依赖仅安装在本地与临时测试运行时，未新增仓库依赖。测试与打包均未触及生产环境。
+- 设计静态 Review：N/A（沿用既有表格增加一列、候选集合收窄；按 `workstreams/README.md` §8 不强制经设计师）
+- 真实 UI：**PASS（① 真实 Edge + 隔离实际 Flask 有效观测）／ PASS（② 既有本地真实后端证据）／ PASS（③ T3）**，分项见附录 B。生产业务数据未验证，也未获部署授权；这不是本 PR 的冻结／发布结论。
 
 ## 残余边界
 
 - 未完成、阻断或后续候选：
-  - **① 站点全景保留「最后数据」与「关键时间」= `NOT RUN`（用户已裁定本轮搁置）**。阻断见附录 D 缺口 A/B：服务端能力开关为 `disabled`，且 `/api/sites` 返回的 235 条站点**不含任何时间字段**（连字段都不存在，不只是值为空）。属契约与数据前置条件，**不是代码缺陷**；本轮不改 `backend/app.py`，是否启用及字段来源请主线裁决。
-  - **后端契约缺口 C：`POST /api/weekly-plans` 不校验被指派人状态**（附录 D）。本轮**未修改** `backend/app.py`，仅在前端收窄候选；建议主线补服务端校验，否则直接调用该端点仍可把新计划派给已注销账号。
+  - **① 已完成隔离真实链路验证**；本地默认关闭监测能力，不在固定库或生产库擅自打开。批量只取和单站详情相同的正式有效观测，列表只暴露因子、数值、单位、业务观测时间；缺测为空，绝不从旧表 `sensor_data` 推断。生产业务数据验证属于后续部署门禁，不冒称已完成。
+  - **后端契约缺口 C：`POST /api/weekly-plans` 不校验被指派人状态**（附录 D）。本轮修改 `backend/app.py` 仅限①的只读投影，未调整周计划写入规则；建议主线裁决，否则直接调用该端点仍可把新计划派给已注销账号。
   - **更正上轮口头判断**：上轮沟通中我曾把 `pages/weekly-plans/WeeklyPlansPage.jsx` 的未过滤 `GET /users` 描述为「线上可触发缺陷」。**该说法不准确**：全仓检索确认 `WeeklyPlansPage` 未被任何模块 import、也未挂路由，是**未接线的页面**。因此它是「未接线代码中的过滤缺口 + 服务端缺校验」，而非当前可经 UI 触发的缺陷。修复仍然必要（防止页面接线后立刻复现），但严重性按此更正。此更正同时写入附录 E。
   - 后续候选：按 `B_CURRENT.md` §8「首轮完成后的领域接管」独立执行，本 PR 不夹带。
 - 是否涉及生产、迁移、冻结或部署：**否**。本轮为取得真实 UI 证据，在**本地开发库** `backend/data/water.db` 上执行了 1 次真实注销与配套业务操作，明细见附录 E 第 3 条。
@@ -83,7 +86,7 @@
 | 起点 `origin/main` | `e168e1253c43ce02300e0efb01567dfe67bcac75` |
 | 建 PR 时远端 `main` | `5b33d5f71a19d44a67d1ce19cc24d4b5d5fd38fe`（与本次改动文件无重叠） |
 | 远端分支 | `collab/b-web-closeout`（单次合成提交，随本 PR 更新） |
-| 本地工作树 | `C:\dev\ideal-couscous`（`git status --short` 干净） |
+| 本地工作树 | `C:\Users\15515\Desktop\test\ideal-couscous-work`（分支 `collab/b-web-closeout`） |
 
 ③ 核心改动（净 +3 行）：
 
@@ -138,9 +141,9 @@ export function isAssignableUser(row) {
 
 补充判定：站点负责人候选**不含系统管理员**（非 operator 角色），说明角色约束未被本轮改动破坏；候选总数在注销前已是 3（已注销样本 id=4 此前即被排除），注销后降为 2，变化只来自本次注销。
 
-### ① 站点全景（T1）= NOT RUN
+### ① 站点全景（T1）= PASS（隔离实际后端 + 真实 Edge）
 
-原因见「残余边界」。不使用单元测试、API 结果或历史截图冒充。
+隔离浏览器回归覆盖站点列表「最后数据／关键时间」、0 值、刷新失败后保留上次成功值，以及成功响应明确缺失时清除。另以临时 SQLite 生成正式业务观测，经实际 Flask 接口在真实 Edge 列表核对“水温：8.8 degC”、观测时点和未接入站空值；生产业务数据不在本次验证范围，也不冒称已验证。
 
 ## 附录 C · ② 服务端实测（本地 5000，真实数据）
 
@@ -181,7 +184,7 @@ export function isAssignableUser(row) {
 
 ## 附录 D · 后端缺口（精确端点 / 请求 / 实际响应 / 预期）
 
-**缺口 A — 能力开关关闭，监测事实不可达（① 的阻断，非代码缺陷）**
+**缺口 A — 当前开发配置的监测能力关闭（① 真实环境验收条件，非代码缺陷）**
 
 | 项 | 内容 |
 |---|---|
@@ -191,14 +194,14 @@ export function isAssignableUser(row) {
 | 预期 | 站点列表携带每站 `last_received_at` / `last_valid_observation_at` 等监测事实，使「保留最后数据 / 关键时间」有可观测对象 |
 | 触发条件 | `STATION_MONITORING_ACCESS_MODE` 未设置时默认 `disabled`（`backend/app.py:182-198`；门禁在 `:5229-5243`） |
 
-**缺口 B — `/api/sites` 无任何时间字段（① 的阻断，契约面）**
+**已补契约 B — 列表可信「最后数据」数值（① 已收口）**
 
 | 项 | 内容 |
 |---|---|
-| 端点 | `GET /api/sites` |
-| 实际响应 | `200`，`count = 235`；站点对象键集合为 `address/code/device_count/district/id/is_pilot/lat/lng/manager/name/operation_frequency/phone/responsible_people/status/type` —— **不含任何时间字段** |
-| 预期 | 明确「关键时间」的字段名与来源（`last_valid_observation_at` 还是 `last_received_at`？取自哪张表？），否则前端无字段可绑 |
-| 备注 | 需同时澄清「保留最后数据」是「最后一次**有效**值」还是「最后一次**收到**的原始值」——监测场景下两者质控口径不同 |
+| 端点 | `GET /api/station-monitoring/sites?scope=all`（已返回每站的 `last_received_at` / `last_valid_observation_at`）；`GET /api/sites` 只返回站点静态档案，不应由它推断监测事实 |
+| 原始响应 | 批量站点监测投影只有关键时间和状态，没有每站最新有效监测值；旧表 `sensor_data` 最新收到值不等于可信有效观测 |
+| 本轮响应 | 用户确认「最后数据」指单站详情中的最新有效值。`items[].latest_values` 复用当前可信端点、已批准因子、正式选定且质量有效的观测和单站详情状态门禁，仅返回 `business_metric`、`factor_name_cn`、`standard_value`、`standard_unit`、`observed_at`；缺测为 `[]`，0 为有效数值 |
+| 本轮处理 | B 在原 PR 内补 `backend/app.py` 一次批量接口，前端直接消费；测试涵盖角色 scope／站点隔离与 1 条真实 Edge + 隔离实际 Flask API 联合验收，不逐站发详情请求 |
 
 **缺口 C — 周计划创建不校验被指派人状态**
 
@@ -209,7 +212,7 @@ export function isAssignableUser(row) {
 | 实际行为 | 仅校验 `_has_any_role(current_user,'admin') or user_id == current_user.id`（`backend/app.py:27190`），**不校验 `user_id` 对应账号是否 active / 是否已注销**，随后直接 `INSERT INTO weekly_inspection_plans` |
 | 预期 | 与 `GET /api/users?status=active` 的口径一致：拒绝向已注销/已停用账号派发新计划（返回 409 或 400 并给业务错误码） |
 | 影响面 | 前端本轮已收窄候选，但直接调用该端点仍可派发；且该页面当前**未被路由接线**（见附录 E 第 1 条） |
-| 本轮处理 | **不改 `backend/app.py`**，按合同写清缺口交主线裁决 |
+| 本轮处理 | 本 PR 的 `backend/app.py` 仅调整①只读监测投影；周计划写接口缺口按合同交主线裁决 |
 
 ## 附录 E · 已知限制（如实标注）
 

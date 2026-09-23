@@ -33624,7 +33624,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
         'responsible_people': responsibility['responsible_people'],
         'monitoring_status_label': '未接入', 'reason_code': 'not_connected', 'monitoring_reason': '未配置启用的监测身份',
         'last_received_at': None, 'last_communication_at': None,
-        'last_valid_observation_at': None, 'published_factor_count': 0,
+        'last_valid_observation_at': None, 'latest_values': [], 'published_factor_count': 0,
         'monitoring_status': 'not_connected',
     }
     if not profile:
@@ -33660,6 +33660,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
     else:
         summary = _station_monitoring_summary_projection(db, site_id, profile, configs, values, last_communication)
         base.update(monitoring_status=summary['status'], monitoring_status_label=summary['status_label'], reason_code=summary['reason_code'], monitoring_reason=summary['reason'])
+    base['latest_values'] = _station_monitoring_published_values(values, base['monitoring_status'], compact=True)
     return base
 
 
@@ -33703,6 +33704,23 @@ def _station_monitoring_presented_value(item):
     value['source_data_time'] = value.get('observed_at')
     value['observed_at'] = value.get('scheduled_at') or value.get('observed_at')
     return value
+
+
+def _station_monitoring_published_values(values, status, *, compact=False):
+    """Expose only the detail-approved effective observations to the site list."""
+    if status not in {'normal', 'attention', 'interval_unconfigured'}:
+        return []
+    result = []
+    for index, item in enumerate(values):
+        presented = dict(
+            _station_monitoring_presented_value(item),
+            factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
+                item.get('business_metric'), f'监测因子{index + 1}'),
+        )
+        result.append({key: presented.get(key) for key in (
+            'business_metric', 'factor_name_cn', 'standard_value', 'standard_unit', 'observed_at'
+        )} if compact else presented)
+    return result
 
 
 def _station_monitoring_factor_states(db, site_id, configs, values):
@@ -33938,12 +33956,7 @@ def _station_monitoring_overview(db, site_id):
     configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    latest = values if projection['monitoring_status'] in {'normal', 'attention', 'interval_unconfigured'} else []
-    latest = [dict(
-        _station_monitoring_presented_value(item),
-        factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
-            item.get('business_metric'), f'监测因子{index + 1}'),
-    ) for index, item in enumerate(latest)]
+    latest = _station_monitoring_published_values(values, projection['monitoring_status'])
     status = projection['monitoring_status']
     communication_freshness = _monitoring_freshness(
         projection['last_communication_at'], dict(profile).get('expected_interval_seconds') if profile else None)

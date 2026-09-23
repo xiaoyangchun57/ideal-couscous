@@ -21,6 +21,7 @@ function overview(status = 'interval_unconfigured', id = 7) {
       monitoring_reason: `服务端主原因:${status}`,
       last_received_at: '2026-09-15T08:00:00+08:00',
       last_valid_observation_at: '2026-09-10T07:00:00+08:00',
+      latest_values: [{ business_metric: 'ph', factor_name_cn: '酸碱度', standard_value: 0, standard_unit: 'pH', observed_at: '2026-09-10T07:00:00+08:00' }],
     },
     monitoring: {
       latest_values: ['normal', 'attention', 'interval_unconfigured'].includes(status)
@@ -361,14 +362,27 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       const tableRow = page.getByRole('row').filter({ hasText: row.name });
       await visible(tableRow.getByText('数据周期未配置', { exact: true }));
+      await visible(page.getByRole('columnheader', { name: '关键时间', exact: true }));
+      await visible(page.getByRole('columnheader', { name: '最后数据', exact: true }));
+      await visible(tableRow.getByText('酸碱度：0 pH', { exact: true }));
+      const received = tableRow.getByText(/^最后收到报文：\d{4}-/);
+      const observed = tableRow.getByText(/^观测：\d{4}-/);
+      await visible(received);
+      await visible(observed);
+      const firstTimes = [await received.textContent(), await observed.textContent()];
       mode = 'failure';
       await page.getByRole('button', { name: /刷新/ }).click();
       await visible(page.getByText('监测状态刷新失败，当前保留上次成功结果', { exact: true }));
       await visible(tableRow.getByText('数据周期未配置', { exact: true }));
+      assert.deepEqual([await received.textContent(), await observed.textContent()], firstTimes);
+      await visible(tableRow.getByText('酸碱度：0 pH', { exact: true }));
       mode = 'missing';
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       await visible(tableRow.getByText('监测状态待确认', { exact: true }));
       assert.equal(await tableRow.getByText('数据周期未配置', { exact: true }).count(), 0);
+      await visible(tableRow.getByText('最后收到报文：暂无记录', { exact: true }));
+      await visible(tableRow.getByText('观测：暂无记录', { exact: true }));
+      await visible(tableRow.getByText('暂无已形成的有效观测', { exact: true }));
       await snapshot(page, 'directory-desktop');
     } finally { await close(); }
   });
@@ -545,7 +559,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     try {
       await page.goto(`${baseURL}/sites`);
       await visible(page.getByRole('columnheader', { name: '站点身份', exact: true }));
-      for (const heading of ['监测状态', '关键时间', '负责人', '操作']) {
+      for (const heading of ['监测状态', '最后数据', '关键时间', '负责人', '操作']) {
         await visible(page.getByRole('columnheader', { name: heading, exact: true }));
       }
       const action = page.getByRole('button', { name: /查看 隔离测试站01 的站点档案/ });

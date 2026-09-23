@@ -577,6 +577,15 @@ export default function SitesPage() {
           return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
         },
       }, {
+        title: '最后数据',
+        key: 'latest_values',
+        width: 190,
+        render: (_, record) => (
+          Array.isArray(record.latest_values) && record.latest_values.length > 0
+            ? <Space direction="vertical" size={0}>{record.latest_values.map((item, index) => <Text key={`${item.business_metric || 'factor'}-${index}`} style={{ fontSize: 12 }}>{item.factor_name_cn || item.business_metric || `监测因子${index + 1}`}：{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}</Text>)}</Space>
+            : <Text type="secondary">暂无已形成的有效观测</Text>
+        ),
+      }, {
         title: '关键时间',
         key: 'monitoring_times',
         width: 235,
