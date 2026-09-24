@@ -59,7 +59,8 @@ C PR #2、A PR #1 已按顺序进入 `main@b6880ac`；A 原 PR 的站点 Tab 导
 
 - 小程序站点 Tab 从 `miniprogram/pages/responsible-sites/` 经 `services/api.js` 读取 `/api/station-monitoring/sites` 与单站 overview；服务端权限与 `station_monitoring_public` 决定是否展示监测字段。
 - Web 站点页的站点/监测入口位于 `react-vite/src/pages/sites/`；驾驶舱 `CockpitPage.jsx` 同时读取 `/sites`、`/devices/monitoring-summary`、`/data/health`，站点图标可受告警、设备离线和设备最近数据时间影响；分析页 `AnalysisPage.jsx` 的到报汇总和趋势分别来自 `/data/arrival/summary`、`/analysis/trends`。
-- **判断**：这些是不同来源、不同问题的信号；当前只证明读取路径不同，尚未证明 Web 与小程序存在实现缺陷。下一步须在隔离环境逐一对应“报文到达/有效观测/设备离线/告警”，并在跨页统一文案或颜色前由 A 给出映射与 B/C 消费边界。不得仅因某站点有最近数据就把设备/仪器健康标为正常。
+- 定向源码核对发现可复现的**口径风险**：`/devices/monitoring-summary` 只要求受管设备有非空 `last_data_time`，不要求最新数据仍有效；驾驶舱站点点位在“有设备、无离线状态且无告警”时直接返回 `normal` 并显示绿色，而其“有数据”筛选另要求最近 24 小时。因而一个只有旧设备时间的站点仍可能显示绿色点位；这不能作为“当前有效监测正常”的证据。尚未做真实 UI 或隔离响应复现，不宣称已确认产品缺陷，不擅改公共驾驶舱。
+- **判断**：这些是不同来源、不同问题的信号；已确认上述代码条件差异，尚未验证该组合在真实数据和 UI 中是否触发、是否构成产品缺陷。下一步须在隔离环境逐一对应“报文到达/有效观测/设备离线/告警”，并在跨页统一文案或颜色前由 A 给出映射与 B/C 消费边界。不得仅因某站点有最近数据就把设备/仪器健康标为正常。
 
 ## 8. 上下游和验证状态
 
