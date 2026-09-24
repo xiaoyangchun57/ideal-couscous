@@ -518,6 +518,39 @@ test('all-workorders entry clears stale targets, reports failure, and stays inde
     'an exact navigation failure clears only the target written by that invocation');
 });
 
+test('home station summaries use one-time targets and switch to the station tab', () => {
+  const page = pageInstance();
+  navigationCalls.length = 0;
+  toastCalls.length = 0;
+  app.globalData.stationHubTarget = null;
+
+  assert.equal(page.goResponsibleSites(), true);
+  const stationTarget = app.globalData.stationHubTarget;
+  assert.deepEqual(stationTarget, { view: 'stations' });
+  assert.equal(navigationCalls[0].method, 'switchTab');
+  assert.equal(navigationCalls[0].options.url, '/pages/responsible-sites/responsible-sites');
+  assert.equal(page.goResponsibleSites(), false, 'duplicate taps share one navigation');
+  navigationCalls[0].options.fail({ errMsg: 'switchTab:fail' });
+  assert.equal(app.globalData.stationHubTarget, null);
+  assert.deepEqual(toastCalls.at(-1), { title: '打开站点列表失败，请重试', icon: 'none' });
+
+  assert.equal(page.goResponsibleSitesReagent(), true);
+  const reagentTarget = app.globalData.stationHubTarget;
+  assert.deepEqual(reagentTarget, { view: 'reagents', filter: '' });
+  assert.equal(navigationCalls[1].method, 'switchTab');
+  navigationCalls[1].options.complete();
+  assert.equal(app.globalData.stationHubTarget, reagentTarget,
+    'a successful switch leaves the target for the station tab to consume');
+
+  assert.equal(page.goResponsibleSites(), true);
+  const failedTarget = app.globalData.stationHubTarget;
+  app.globalData.stationHubTarget = { view: 'reagents', filter: 'expired' };
+  navigationCalls[2].options.fail({ errMsg: 'switchTab:fail' });
+  assert.notEqual(app.globalData.stationHubTarget, failedTarget,
+    'an older failure cannot clear a newer station target');
+  assert.deepEqual(app.globalData.stationHubTarget, { view: 'reagents', filter: 'expired' });
+});
+
 test('home rework action navigates with exact target and clears it on failure', () => {
   const page = pageInstance();
   navigationCalls.length = 0;

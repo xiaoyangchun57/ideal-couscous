@@ -17,19 +17,6 @@
 
   <!-- 功能组1：日常工作 -->
   <view class="list-group">
-    <view class="list-row" bindtap="goResponsibleSites" hover-class="list-row-active">
-      <view class="list-row-left">
-        <view class="row-icon icon-blue">
-          <image class="row-icon-img" src="/images/mine/icon-site.svg" mode="aspectFit"/>
-        </view>
-        <text class="list-row-text">负责站点</text>
-      </view>
-      <view class="list-row-right">
-        <text class="list-row-hint">{{sitesCount}}个站点</text>
-        <text class="row-chevron">›</text>
-      </view>
-    </view>
-
     <view class="list-row" bindtap="goVehicle" hover-class="list-row-active" wx:if="{{canUseVehicle}}">
       <view class="list-row-left">
         <view class="row-icon icon-orange">

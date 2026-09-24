@@ -80,6 +80,8 @@ const api = {
   },
   stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
   reagentOverview: () => request('/api/reagent-overview', 'GET', {}, { queue: false }),
+  reagentReplacement: payload => request('/api/reagent-inventory/replacement', 'POST', payload, { queue: false }),
+  reagentCalibration: payload => request('/api/reagent-qc', 'POST', payload, { queue: false }),
   responsibleSites: (options) => {
     const query = options || {};
     const pairs = [];

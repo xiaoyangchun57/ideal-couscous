@@ -116,6 +116,9 @@ export default function SitesPage() {
   const [reagentModalMode, setReagentModalMode] = useState('edit'); // 'create' | 'edit'
   const [reagentMaster, setReagentMaster] = useState([]); // 试剂主数据目录（用于新增下拉）
   const [reagentSubmitting, setReagentSubmitting] = useState(false);
+  const [reagentDelete, setReagentDelete] = useState(null);
+  const [reagentDeleting, setReagentDeleting] = useState(false);
+  const reagentDeletingRef = useRef(false);
   // 试剂标定（更换后使用标样验证）
   const [qcOpen, setQcOpen] = useState(false);
   const [qcTarget, setQcTarget] = useState(null);
@@ -336,6 +339,7 @@ export default function SitesPage() {
   }, [loadArchive]);
 
   const closeArchive = useCallback(() => {
+    if (reagentDeletingRef.current) return;
     setArchiveModalOpen(false);
     setArchiveData(null);
     setArchiveError('');
@@ -343,6 +347,7 @@ export default function SitesPage() {
     setReagentInventoryError('');
     setReagentUpdOpen(false);
     setReagentUpdTarget(null);
+    setReagentDelete(null);
   }, []);
 
   const openProfileEdit = useCallback(() => {
@@ -455,14 +460,42 @@ export default function SitesPage() {
       message.error(e?.message || '保存失败');
     } finally { setReagentSubmitting(false); }
   };
-  const deleteReagent = async (row) => {
+  const deleteReagent = async () => {
+    const row = reagentDelete?.row;
+    const reason = reagentDelete?.reason.trim();
+    if (!row || reagentDeletingRef.current) return;
+    if (!reason) {
+      setReagentDelete((current) => ({ ...current, error: '请填写删除原因' }));
+      return;
+    }
+    const key = reagentDelete.key || `reagent-delete-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    setReagentDelete((current) => ({ ...current, key, error: '' }));
+    reagentDeletingRef.current = true;
+    setReagentDeleting(true);
     try {
-      await api.delete(`/reagent-inventory/${row.site_id}/${row.reagent_id}`);
+      await api.deleteStrict(`/reagent-inventory/${row.site_id}/${row.reagent_id}`, {
+        reason, _idempotency_key: key,
+      });
+      setReagentDelete(null);
+      setReagentInventory((current) => current.filter((item) =>
+        String(item.site_id) !== String(row.site_id) || String(item.reagent_id) !== String(row.reagent_id)));
       message.success('已删除');
-      const inv = await api.get(`/reagent-inventory/${row.site_id}`);
-      if (Array.isArray(inv)) setReagentInventory(inv);
-    } catch {
-      message.error('删除失败');
+      try {
+        const inv = await api.getStrict(`/reagent-inventory/${row.site_id}`);
+        if (Array.isArray(inv)) {
+          setReagentInventory(inv);
+          setReagentInventoryError('');
+        } else {
+          throw new Error('试剂库存返回格式异常，请重新加载');
+        }
+      } catch (error) {
+        setReagentInventoryError(error?.message || '库存刷新失败，请重新加载');
+      }
+    } catch (error) {
+      setReagentDelete((current) => current && { ...current, error: error?.message || '删除失败，请用原请求重试' });
+    } finally {
+      reagentDeletingRef.current = false;
+      setReagentDeleting(false);
     }
   };
 
@@ -954,15 +987,7 @@ export default function SitesPage() {
               <Button size="small" type="link" onClick={() => openQc(r)}>开展质控</Button>
             )}
             <Button size="small" type="link" onClick={() => openReagentUpd(r)}>编辑</Button>
-            <Popconfirm
-              title="确认删除该试剂库存？"
-              okText="删除"
-              cancelText="取消"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => deleteReagent(r)}
-            >
-              <Button size="small" type="link" danger>删除</Button>
-            </Popconfirm>
+            <Button size="small" type="link" danger onClick={() => setReagentDelete({ row: r, reason: '', key: '', error: '' })}>删除</Button>
           </Space>
         ),
       },
@@ -991,6 +1016,33 @@ export default function SitesPage() {
           ) : (
             <Empty description="该站点暂无试剂库存信息，点「新增试剂」添加" style={{ padding: '32px 0' }} />
           )}
+          <Modal
+            title={`确认删除试剂库存 · ${reagentDelete?.row?.reagent_name || ''}`}
+            open={!!reagentDelete}
+            okText="确认删除"
+            okButtonProps={{ danger: true, disabled: !reagentDelete?.reason.trim() }}
+            cancelText="取消"
+            confirmLoading={reagentDeleting}
+            closable={!reagentDeleting}
+            maskClosable={false}
+            onCancel={() => { if (!reagentDeletingRef.current) setReagentDelete(null); }}
+            onOk={deleteReagent}
+          >
+            <Text type="secondary">此操作会删除该站点的库存记录并保留服务端审计，请确认并填写原因。</Text>
+            <Form layout="vertical" style={{ marginTop: 12 }}>
+              <Form.Item label="删除原因" required validateStatus={reagentDelete?.error ? 'error' : undefined} help={reagentDelete?.error}>
+                <Input.TextArea
+                  aria-label="删除原因"
+                  value={reagentDelete?.reason || ''}
+                  maxLength={200}
+                  showCount
+                  disabled={reagentDeleting}
+                  onChange={(event) => setReagentDelete((current) => ({ ...current, reason: event.target.value, key: '', error: '' }))}
+                  placeholder="请填写删除原因（最多200字）"
+                />
+              </Form.Item>
+            </Form>
+          </Modal>
           <Modal
             title={reagentModalMode === 'create' ? '新增试剂库存' : `编辑试剂 · ${reagentUpdTarget?.reagent_name || ''}`}
             open={reagentUpdOpen}
