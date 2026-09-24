@@ -27645,6 +27645,8 @@ def api_weekly_plans_create():
         user_id = int(data['user_id'])
     except (KeyError, TypeError, ValueError):
         return jsonify({'error': '缺少有效的 user_id'}), 400
+    if user_id <= 0:
+        return jsonify({'error': '缺少有效的 user_id'}), 400
     if not _has_any_role(current_user, 'admin') and user_id != int(current_user['id']):
         return jsonify({'error': '只能为自己创建周计划'}), 403
     week_start = data.get('week_start')
@@ -27671,22 +27673,38 @@ def api_weekly_plans_create():
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as db:
-        cur = db.execute(
-            '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
-               VALUES (?,?,?,?,?,?,?)''',
-            (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
-        db.commit()
-        # 如果勾选了车辆且提交，自动创建用车申请
-        if submit and vehicle_id:
-            for day, site_ids in plan_data.items():
-                if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
-                    # 简单处理：为整周创建一条用车申请
-                    db.execute(
-                        '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
-                           VALUES (?,?,?,?,?,"周巡检用车","approved")''',
-                        (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
-                    break
-        db.commit()
+        try:
+            # 在写事务内读取账号，防止账号停用/注销与本次计划写入交错。
+            db.execute('BEGIN IMMEDIATE')
+            execution_user = db.execute(
+                'SELECT status, deleted_at FROM users WHERE id=?', (user_id,)
+            ).fetchone()
+            if not execution_user:
+                return jsonify({'error': '计划执行人不存在',
+                                'code': 'PLAN_EXECUTION_USER_NOT_FOUND'}), 404
+            if execution_user['status'] != 'active' or execution_user['deleted_at']:
+                return jsonify({'error': '计划执行人账号不可用',
+                                'code': 'PLAN_EXECUTION_USER_INACTIVE'}), 409
+            cur = db.execute(
+                '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
+                   VALUES (?,?,?,?,?,?,?)''',
+                (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
+            # 如果勾选了车辆且提交，自动创建用车申请
+            if submit and vehicle_id:
+                for day, site_ids in plan_data.items():
+                    if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
+                        # 简单处理：为整周创建一条用车申请
+                        db.execute(
+                            '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
+                               VALUES (?,?,?,?,?,"周巡检用车","approved")''',
+                            (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
+                        break
+            db.commit()
+        except sqlite3.Error:
+            db.rollback()
+            app.logger.exception('weekly plan create failed')
+            return jsonify({'error': '周计划保存失败，请稍后重试',
+                            'code': 'WEEKLY_PLAN_RETRYABLE'}), 503
         row = db.execute('SELECT * FROM weekly_inspection_plans WHERE id=?', (cur.lastrowid,)).fetchone()
         r = dict(row)
         try: r['plan_data'] = _json.loads(r['plan_data']) if r.get('plan_data') else {}
