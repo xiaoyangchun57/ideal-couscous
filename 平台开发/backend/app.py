@@ -27641,11 +27641,9 @@ def api_weekly_plans_create():
     """新建/提交周计划"""
     data = request.get_json(silent=True) or {}
     current_user = g.current_user
-    try:
-        user_id = int(data['user_id'])
-    except (KeyError, TypeError, ValueError):
-        return jsonify({'error': '缺少有效的 user_id'}), 400
-    if user_id <= 0:
+    user_id = data.get('user_id')
+    # JSON 整数须严格匹配 SQLite 有符号 64 位主键；bool 是 int 子类，必须显式排除。
+    if type(user_id) is not int or not 0 < user_id <= 2**63 - 1:
         return jsonify({'error': '缺少有效的 user_id'}), 400
     if not _has_any_role(current_user, 'admin') and user_id != int(current_user['id']):
         return jsonify({'error': '只能为自己创建周计划'}), 403

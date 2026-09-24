@@ -125,6 +125,23 @@ class WeeklyPlanAssigneeApiTest(unittest.TestCase):
                 self.assertEqual(response.status_code, status, response.json)
                 self.assertEqual(self.counts(), before)
 
+    def test_user_id_requires_positive_json_integer_in_sqlite_id_range(self):
+        for raw_user_id in (True, False, 2.9, 2.0, '2', '', 0, -1,
+                            None, 2**63, -(2**63) - 1):
+            with self.subTest(raw_user_id=raw_user_id):
+                before = self.counts()
+                response = self.post(raw_user_id, submit=True, vehicle_id=17,
+                                     plan_data={'2026-09-28': [11]})
+                self.assertEqual(response.status_code, 400, response.json)
+                self.assertTrue(response.json.get('error'))
+                self.assertEqual(self.counts(), before)
+        before = self.counts()
+        missing = self.client.post('/api/weekly-plans',
+                                   json={'week_start': '2026-09-28'},
+                                   headers={'Authorization': 'Bearer admin-token'})
+        self.assertEqual(missing.status_code, 400, missing.json)
+        self.assertEqual(self.counts(), before)
+
     def test_historical_plan_stays_readable_after_user_deletion(self):
         response = self.client.get('/api/weekly-plans',
                                    headers={'Authorization': 'Bearer admin-token'})
