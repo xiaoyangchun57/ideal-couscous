@@ -1,9 +1,9 @@
 # A 领域工作台：站点与监测数据
 
 > 负责人：协作者 A
-> 当前状态：`PR #1 / CODE_REVIEW_REWORK_REQUIRED`
+> 当前状态：`PR #1 / CROSS_DOMAIN_REWORK_REVIEW_PENDING / DESIGN_BASELINE_PUBLISHED / REAL_WECHAT_UI_NOT_RUN`
 > 当前分支：`collab/a-station-tab-read`
-> 停点：更新原 PR 并等待复审；不新建 PR、不合并、不部署
+> 停点：门禁返修代码 Review PASS；本轮 C 试剂删除契约的 Web 消费端返修完成，等待原 PR 产品 Code Review；不新建 PR、不合并、不部署
 
 ## 1. 领域使命
 
@@ -49,23 +49,28 @@ A 对本领域承担产品、后端、Web、小程序、数据适配、测试和
 - 涉及公共权限、全局导航、破坏性数据变更或其他领域状态时，先冻结跨域契约。
 - PR 必须说明产品判断、完整链路、兼容性、测试、真实 UI 状态和残余风险。
 
-## 7. 当前事项：站点 Tab 读取链
+## 7. 当前事项：站点 Tab 设计增量与业务接线
 
 目标是把已完成静态结构的“站点”模式接入真实站点目录和监测读取能力。管理员可切换本人/全部并搜索，其他角色只看授权站点；详情沿用既有路由。
 
 当前写入权：
 
 - `平台开发/miniprogram/pages/responsible-sites/`
-- `平台开发/miniprogram/services/api.js` 的站点读取部分
+- `平台开发/miniprogram/services/api.js` 的站点、试剂读取及 C 已确认维护动作的消费部分
 - 对应小程序测试
+- 本轮临时增加 `平台开发/react-vite/src/pages/sites/SitesPage.jsx` 与站点试剂删除的直接测试；不扩大到其他 Web 页面。
 
-本轮不修改首页、`app.json`、“我的”、试剂后端或 `backend/app.py`。
+本轮不修改首页、`app.json`、“我的”、试剂后端或 `backend/app.py`。`main@5b33d5f` 已是 A 分支祖先，保留该版五 Tab 设计基线，勿重复合并。PR #1 原站点页逻辑基线 `1d9f396` 的监测 403 门禁回退代码 Review PASS；微信真实 UI 仍未验收。
 
-### PR #1 唯一返修
+### PR #1 当前接线
 
-监测列表成功展示后，如果监测接口明确返回 `STATION_MONITORING_PUBLIC_DISABLED` 或 `STATION_MONITORING_ADMIN_ONLY`，必须立即关闭 `monitoringEnabled/monitoringPublic`。即使随后目录回退失败，也只能保留旧站点目录和可重试错误，不得继续显示旧监测字段；详情来源切换为档案模式。
+已保留门禁 403 后立即关闭监测字段、目录回退失败时保留可重试旧目录及档案详情来源的定向回归。基于主线 `5b33d5f` 的五 Tab 导航和站点页设计，在原 PR 消费并清理首页 `stationHubTarget`；无目标时保留当前模式、范围和筛选。站点页试剂模式按 C 分支 `collab/c-reagent-contract` 的稳定字段接入跨站摘要、原因并集筛选、服务端动作能力以及更换/标定通用端点；失败保留表单和幂等键，输入改变才生成新键。试剂总览返回 401/403 时同步清除旧列表和已打开的维护 Sheet，阻止失权后沿用旧目标。C 在 PR #2 对 A 消费语义提出三项只读返修：标定数值不套用库存单位、标定通过不冒称全部正常、选择报修不冒称已建工单；A 已按现有契约修正展示及直接测试，C 对 A `8d64a1c` 的三项语义返修定向只读 Review PASS，未独立运行 A 测试，也不代表 PR #1 全量代码 Review PASS。以 C 契约 `9937fe3` 为检查点：C 的 11 项后端契约测试通过；A 的站点页接线与监测定向测试、JS 语法检查通过；隔离临时 SQLite 与回环端口下，A 小程序请求层和页面实际调用 C Flask 接口完成总览、更换和标定，写后读取符合契约。2026-09-23 已核实远端 C 为 `9937fe3`、`main` 为 `5b33d5f`，C 尚未合入；微信实际 UI 为 `NOT RUN`，仍待产品复审。
 
-补一条“先成功、再门禁 403、再目录失败”的回归。只运行 `responsibleSitesMonitoring.test.js`、相关 JS 语法和 `git diff --check`，在原 PR 更新。
+### C 试剂删除契约消费端返修（2026-09-23）
+
+C PR #2 高风险后端代码 Review 已由主线通过；库存删除现在要求 `reason`（非空、最多 200 字），记录操作者及删除前快照并按 `_idempotency_key` 幂等。Web 站点页原无请求体 `api.delete` 会收到 `DELETE_REASON_REQUIRED`。A 在临时授权范围内增加明确二次确认和原因输入，改用 `api.deleteStrict`；一次提交只生成一个键，重复触发被阻止；失败保留弹窗、原因、键和服务端错误，内容变化才换键；确认成功才关闭、移除本地对应记录并重新读取库存，读取失败显示可重试错误。未修改 C 后端或公共 API 契约。
+
+直接证据：`stationReagentDeletion.test.js` 3 项与 `stationMonitoringWiring.test.js` 7 项通过；`stationReagentDeletion.browser.test.js` 在独立 127.0.0.1:4189 Vite + 拦截 API 的 Edge 中 1 项通过（失败原键重试、防重复、成功刷新）；React lint 和 build 通过。真实 C 后端 Web 联调、微信真实 UI 均 `NOT RUN`；夹具 UI PASS 不替代集成验收。
 
 ## 8. 当前跨域结果责任
 
@@ -73,11 +78,14 @@ A 对本领域承担产品、后端、Web、小程序、数据适配、测试和
 
 - 主线提供已通过静态 Review 的五 Tab 资产、导航注册和首页 `stationHubTarget` 发起能力。
 - C 提供试剂跨站读取和维护契约，并直接与 A 对齐接口。
-- A 在 PR #1 通过并取得站点页写入权后，负责消费一次性目标、接入真实试剂契约并完成端到端验证。
+- A 已取得本轮站点页写入权，并在尚待产品 Review 的原 PR #1 消费一次性目标、按 C 的真实契约接线和完成隔离联调；不能据此宣称 PR #1 已通过或已完成最终端到端验收。
+- 合并依赖顺序：A Review C 的站点 Tab 消费契约（读取范围、字段、动作能力、写入、错误及幂等），C Review A 对试剂语义的消费；主线对 C 的高风险后端代码 Review 已通过，但 C 仍未合并。主线决定后续集成与合并，A 不直接合并 C 或扩大到 C 的后端写入权。
+- A 对 C `9937fe3` 的站点 Tab 消费侧契约核对通过：总览去重并集及原因码、`0` 数量和单位、服务端动作能力、角色与站点范围、通用更换/标定字段、403/404/409 和失败回滚均与 A 消费及隔离测试相符。这是消费侧检查结论，不是对整个 C PR 的正式代码 Review PASS。C 在 PR #2 的删除原因、审计、迁移约束由主线完成高风险代码 Review；本轮 Web 消费端已按该契约修正，尚待产品复审与集成。
+- C 后端进入 `main` 且 PR #1 通过所需 Review 后，A 在原分支复核合并版本、完成实际集成环境端到端和微信真实 UI 验证，再交产品最终验收；当前隔离跨分支联调不替代这些步骤。
 
 ## 9. 下一候选
 
-- `READY_AFTER_PR`：接管站点 Tab 最终接线，覆盖首页直达站点/试剂、返回状态保持和失败重试。
+- `IN_REVIEW`：A 已核对 C `9937fe3` 的站点 Tab 契约并完成夹具与隔离跨分支 HTTP 联调；C 对三项试剂消费语义的定向只读复核通过，C 后端高风险代码 Review 已通过；本轮 Web 库存删除补原因、幂等与失败重试，浏览器隔离夹具通过。原 PR #1 待产品 Code Review；C 尚未合并。进入主线后复核集成版本、执行真实后端联调与微信 UI 验收。
 - `WAITING_STATION_MASTER_REFRESH`：恢复全站数据接入匹配和监测展示验证；正式站点名称、MN、有效状态和别名更新前不批量写生产数据。
 - `ASSESS`：核对 Web 站点全景、驾驶舱、趋势与小程序站点页是否使用同一监测语义，提出最短收口方案。
 

@@ -98,7 +98,7 @@
       <view class="mon-neutral-bar" wx:if="{{!monitoringEnabled}}">
         <image class="mon-neutral-ico" src="/images/station-monitoring/empty-offline.svg" mode="aspectFit"/>
         <view class="mon-neutral-content">
-          <text class="mon-neutral-title">监测数据尚未启用</text>
+          <text class="mon-neutral-title">监测能力未启用</text>
           <text class="mon-neutral-sub">站点档案与位置校准正常可用，监测数据请联系管理员开通</text>
         </view>
       </view>
@@ -111,8 +111,8 @@
               <view class="mon-tag mon-tag-info" wx:if="{{scope === 'all' && item.is_responsible}}">
                 <text class="mon-tag-tx">我负责</text>
               </view>
-              <view class="mon-status-chip mon-status-{{item.monitoring_status || 'unknown'}}" wx:if="{{monitoringPublic}}">
-                <text class="mon-status-tx">{{item.monitoring_status_label || '状态未知'}}</text>
+              <view class="mon-status-chip mon-status-{{item.monitoring_status}}" wx:if="{{monitoringPublic}}">
+                <text class="mon-status-tx">{{item.monitoring_status_label}}</text>
               </view>
             </view>
           </view>
@@ -186,7 +186,7 @@
     </view>
 
     <!-- 加载失败 -->
-    <view class="ro-empty" wx:if="{{reagentError && !reagentLoading && reagentEnabled}}">
+    <view class="ro-empty" wx:if="{{reagentError && !reagentLoading && reagentEnabled && !reagentNoViewPermission && !reagentItems.length}}">
       <image class="ro-empty-icon" src="/images/reagent/empty-error.svg" mode="aspectFit" />
       <text class="ro-empty-title">加载失败</text>
       <text class="ro-empty-sub">{{reagentError || '请检查网络后重试'}}</text>
@@ -217,7 +217,7 @@
     </view>
 
     <!-- 试剂列表 -->
-    <view class="ro-list" wx:if="{{reagentItems.length > 0 && !reagentLoading && reagentEnabled}}">
+    <view class="ro-list" wx:if="{{reagentItems.length > 0 && !reagentLoading && reagentEnabled && !reagentNoViewPermission}}">
       <view class="ro-card card" wx:for="{{reagentItems}}" wx:key="key">
         <text class="ro-site-name">{{item.site_name}}</text>
         <view class="ro-reagent-head">
@@ -244,13 +244,17 @@
         </view>
       </view>
     </view>
+    <view class="mon-stale-bar" wx:if="{{reagentError && reagentItems.length && !reagentLoading && !reagentNoViewPermission}}">
+      <text class="mon-stale-tx">{{reagentError}}</text>
+      <button class="btn-ghost btn-sm" bindtap="onReagentRetry">重试</button>
+    </view>
   </block>
 
   <!-- 底部安全区占位 -->
   <view class="stab-bottom-spacer"></view>
 
   <!-- ========== 登记更换 Sheet ========== -->
-  <view class="sheet-mask {{replaceSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{replaceSheetVisible}}" catchtap="{{replaceSheet.submitting ? 'noop' : 'onCloseReplaceSheet'}}">
+  <view class="sheet-mask {{replaceSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{replaceSheetVisible}}" catchtap="onCloseReplaceSheet">
     <view class="sheet-container" catchtap="noop">
       <view class="sheet-handle"></view>
       <view class="sheet-header">
@@ -361,7 +365,7 @@
       <view class="sheet-success" wx:if="{{replaceSheet.success}}">
         <view class="sheet-success-icon"></view>
         <text class="sheet-success-title">更换登记成功</text>
-        <text class="sheet-success-sub">已进入待标定状态，标定完成后恢复正常</text>
+        <text class="sheet-success-sub">已进入待标定状态，请继续完成标定</text>
         <view class="sheet-success-btn" bindtap="onCloseReplaceSheet">
           <text class="sheet-success-btn-tx">我知道了</text>
         </view>
@@ -370,7 +374,7 @@
   </view>
 
   <!-- ========== 完成标定 Sheet ========== -->
-  <view class="sheet-mask {{calibrateSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{calibrateSheetVisible}}" catchtap="{{calibrateSheet.submitting ? 'noop' : 'onCloseCalibrateSheet'}}">
+  <view class="sheet-mask {{calibrateSheet.submitting ? 'sheet-mask--submitting' : ''}}" wx:if="{{calibrateSheetVisible}}" catchtap="onCloseCalibrateSheet">
     <view class="sheet-container" catchtap="noop">
       <view class="sheet-handle"></view>
       <view class="sheet-header">
@@ -412,7 +416,6 @@
             <text class="sheet-field-label">标样值 <text class="sheet-required">*</text></text>
             <view class="sheet-input-wrap">
               <input class="sheet-input" type="digit" value="{{calibrateSheet.standardValue}}" placeholder="请输入标样值" bindinput="onCalibrateStandardInput" />
-              <text class="sheet-input-suffix">{{calibrateSheet.unit}}</text>
             </view>
             <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.standardValue}}">
               <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.standardValue}}
@@ -423,7 +426,6 @@
             <text class="sheet-field-label">实测值 <text class="sheet-required">*</text></text>
             <view class="sheet-input-wrap">
               <input class="sheet-input" type="digit" value="{{calibrateSheet.measuredValue}}" placeholder="请输入实测值" bindinput="onCalibrateMeasuredInput" />
-              <text class="sheet-input-suffix">{{calibrateSheet.unit}}</text>
             </view>
             <text class="sheet-field-error" wx:if="{{calibrateSheet.errors.measuredValue}}">
               <text class="sheet-error-icon">!</text>{{calibrateSheet.errors.measuredValue}}
@@ -489,9 +491,9 @@
       <view class="sheet-success" wx:if="{{calibrateSheet.success}}">
         <view class="sheet-success-icon"></view>
         <text class="sheet-success-title">标定完成</text>
-        <text class="sheet-success-sub" wx:if="{{calibrateSheet.result === 'pass'}}">试剂状态已恢复正常</text>
-        <text class="sheet-success-sub" wx:elif="{{calibrateSheet.followUp === 'recalibrate'}}">已记录为重新标定</text>
-        <text class="sheet-success-sub" wx:else>已提交报修</text>
+        <text class="sheet-success-sub" wx:if="{{calibrateSheet.result === 'pass'}}">标定已通过；其他关注项以列表为准</text>
+        <text class="sheet-success-sub" wx:elif="{{calibrateSheet.followUp === 'recalibrate'}}">已记录需重新标定</text>
+        <text class="sheet-success-sub" wx:else>已记录需报修</text>
         <view class="sheet-success-btn" bindtap="onCloseCalibrateSheet">
           <text class="sheet-success-btn-tx">我知道了</text>
         </view>
