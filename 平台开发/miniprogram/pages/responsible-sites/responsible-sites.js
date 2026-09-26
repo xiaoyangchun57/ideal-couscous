@@ -74,10 +74,16 @@ Page({
     calibrateSheetVisible: false, calibrateSheet: emptySheet()
   },
 
-  onLoad() { this._unloaded = false; },
+  onLoad() {
+    this._unloaded = false;
+    this._nativeTabBarHidden = false;
+  },
 
   onShow() {
     this._inactive = false;
+    if (this.data.replaceSheetVisible || this.data.calibrateSheetVisible) {
+      this._setNativeTabBarHidden(true);
+    }
     const target = app.globalData.stationHubTarget;
     // Consume only the documented one-shot target; direct tab returns keep the current mode/filter.
     if (target != null) {
@@ -139,12 +145,14 @@ Page({
     this._inactive = true;
     this._sitesRequestId = (this._sitesRequestId || 0) + 1;
     this._reagentsRequestId = (this._reagentsRequestId || 0) + 1;
+    this._setNativeTabBarHidden(false);
   },
 
   onUnload() {
     this._unloaded = true;
     this._sitesRequestId = (this._sitesRequestId || 0) + 1;
     this._reagentsRequestId = (this._reagentsRequestId || 0) + 1;
+    this._setNativeTabBarHidden(false);
   },
 
   onPullDownRefresh() {
@@ -200,6 +208,7 @@ Page({
           reagentNoViewPermission: true, reagentItems: [], reagentError: '',
           replaceSheetVisible: false, replaceSheet: emptySheet(),
           calibrateSheetVisible: false, calibrateSheet: emptySheet() });
+        this._syncSheetTabBar();
       } else {
         this.setData({ reagentLoading: false, reagentEnabled: true,
           reagentNoViewPermission: false,
@@ -211,6 +220,20 @@ Page({
   onReagentRetry() { return this.loadReagents(); },
 
   noop() {},
+
+  _setNativeTabBarHidden(hidden) {
+    if (this._nativeTabBarHidden === hidden) return;
+    const method = hidden ? 'hideTabBar' : 'showTabBar';
+    if (typeof wx[method] !== 'function') return;
+    this._nativeTabBarHidden = hidden;
+    wx[method]({ animation: false });
+  },
+
+  _syncSheetTabBar() {
+    this._setNativeTabBarHidden(
+      this.data.replaceSheetVisible || this.data.calibrateSheetVisible
+    );
+  },
 
   _reagentFor(e) {
     const item = (this._reagentSource || []).find(row => row.id === String(e.currentTarget.dataset.id));
@@ -224,6 +247,7 @@ Page({
       siteId: item.site_id, reagentId: item.reagent_id, siteName: item.site_name,
       reagentName: item.reagent_name, currentVolume: item.current_qty, unit: item.unit
     }) });
+    this._syncSheetTabBar();
   },
 
   onOpenCalibrateSheet(e) {
@@ -233,16 +257,19 @@ Page({
       siteId: item.site_id, reagentId: item.reagent_id, siteName: item.site_name,
       reagentName: item.reagent_name, replaceTime: item.last_replaced_at
     }) });
+    this._syncSheetTabBar();
   },
 
   onCloseReplaceSheet() {
     if (this.data.replaceSheet.submitting) return;
     this.setData({ replaceSheetVisible: false, replaceSheet: emptySheet() });
+    this._syncSheetTabBar();
   },
 
   onCloseCalibrateSheet() {
     if (this.data.calibrateSheet.submitting) return;
     this.setData({ calibrateSheetVisible: false, calibrateSheet: emptySheet() });
+    this._syncSheetTabBar();
   },
 
   _editSheet(name, field, value) {
