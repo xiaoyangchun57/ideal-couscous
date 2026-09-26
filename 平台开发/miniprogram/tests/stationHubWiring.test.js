@@ -4,11 +4,14 @@ const path = require('node:path');
 const api = require('../services/api.js');
 
 const app = { globalData: { stationHubTarget: null } };
+const tabBarCalls = [];
 let definition;
 global.getApp = () => app;
 global.Page = page => { definition = page; };
 global.wx = { getStorageSync: key => key === 'user' ? { capabilities: { station_monitoring_public: true } } : null,
-  navigateTo: () => {}, stopPullDownRefresh: () => {} };
+  navigateTo: () => {}, stopPullDownRefresh: () => {},
+  hideTabBar: options => tabBarCalls.push({ action: 'hide', options }),
+  showTabBar: options => tabBarCalls.push({ action: 'show', options }) };
 require('../pages/responsible-sites/responsible-sites.js');
 
 const originals = {
@@ -50,6 +53,8 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(requests[0].data._idempotency_key, 'fixture-replace');
     assert.equal(requests[1].data._idempotency_key, 'fixture-calibrate');
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
+    const wxss = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxss'), 'utf8');
+    const indexWxss = fs.readFileSync(path.join(__dirname, '../pages/index/index.wxss'));
     assert.match(wxml, /custom-navbar/);
     assert.match(wxml, /catchtap="onCloseReplaceSheet"/);
     assert.match(wxml, /catchtap="onCloseCalibrateSheet"/);
@@ -61,6 +66,31 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.match(wxml, /标定已通过；其他关注项以列表为准/);
     assert.match(wxml, /已记录需报修/);
     assert.doesNotMatch(wxml, /试剂状态已恢复正常|已提交报修|标定完成后恢复正常/);
+    assert.match(wxml, /ro-btn ro-btn--secondary/);
+    assert.match(wxml, /ro-btn ro-btn--text/);
+    assert.doesNotMatch(wxml, /ro-btn ro-btn--primary/,
+      'reagent card actions remain secondary or text actions');
+    assert.match(wxss, /\.stab-seg-inner\s*\{[^}]*height:\s*88rpx/s);
+    assert.match(wxss, /\.mon-toolbar\s*\{[^}]*position:\s*sticky[^}]*top:\s*128rpx/s);
+    assert.match(wxss, /\.ro-filter-bar\s*\{[^}]*position:\s*sticky[^}]*top:\s*128rpx/s);
+    assert.match(wxss, /\.ro-btn\s*\{[^}]*min-height:\s*88rpx/s);
+    assert.match(wxss, /\.sheet-container\s*\{[^}]*max-height:\s*75vh/s);
+    assert.match(wxss, /\.sheet-handle\s*\{[^}]*width:\s*72rpx[^}]*height:\s*8rpx/s);
+    assert.match(wxss, /\.sheet-footer\s*\{[^}]*safe-area-inset-bottom/s);
+    assert.match(wxss, /\.sheet-info-value\s*\{[^}]*white-space:\s*normal[^}]*word-break:\s*break-word/s);
+    assert.match(wxss, /\.sheet-server-error-tx\s*\{[^}]*word-break:\s*break-word/s);
+    assert.match(wxss, /\.ro-reason--failed_qc[^}]*var\(--color-error-surface\)/s);
+    assert.match(wxss, /\.ro-reason--pending_qc[^}]*var\(--color-warning-surface\)/s);
+    assert.doesNotMatch(wxss, /#fff\b/i, 'related white values use semantic tokens');
+    assert.notEqual(indexWxss[0], 0xef, 'index stylesheet no longer starts with a UTF-8 BOM');
+    const keyProbe = page();
+    keyProbe.setData({ replaceSheet: Object.assign({}, keyProbe.data.replaceSheet, {
+      newVolume: '1', key: 'failed-attempt', serverError: '未保存'
+    }) });
+    keyProbe.onReplaceVolumeInput({ detail: { value: '2' } });
+    assert.equal(keyProbe.data.replaceSheet.key, null,
+      'editing failed input makes the next submission use a new idempotency key');
+    assert.equal(keyProbe.data.replaceSheet.serverError, '');
     const siteQueries = [];
     api.stationMonitoringSites = options => {
       siteQueries.push(options);
@@ -116,6 +146,12 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(p.data.replaceSheetVisible, false, 'server action capability blocks maintenance');
     p.onOpenReplaceSheet({ currentTarget: { dataset: { id: '1:7' } } });
     assert.equal(p.data.replaceSheetVisible, true);
+    assert.equal(tabBarCalls.at(-1).action, 'hide', 'opening replacement hides the native tab bar');
+    p.onHide();
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'hiding the page restores the native tab bar');
+    p.onShow();
+    assert.equal(tabBarCalls.at(-1).action, 'hide', 'returning to an open sheet hides the native tab bar again');
+    await flush();
     p.onSubmitReplace();
     assert.ok(p.data.replaceSheet.errors.newVolume);
     p.onReplaceVolumeInput({ detail: { value: '4' } });
@@ -132,6 +168,7 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(p.data.replaceSheet.submitting, true);
     p.onCloseReplaceSheet();
     assert.equal(p.data.replaceSheetVisible, true, 'cannot close while saving');
+    assert.equal(tabBarCalls.at(-1).action, 'hide', 'saving sheet keeps the native tab bar hidden');
     p.onSubmitReplace();
     assert.equal(replaceRequests.length, 1, 'double tap does not duplicate request');
     rejectReplace({ status: 503, error: '请重试' });
@@ -142,6 +179,7 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.deepEqual(replaceRequests[1], replaceRequests[0], 'failed retry repeats exact payload');
     assert.equal(p.data.replaceSheet.success, true);
     p.onCloseReplaceSheet();
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'closing replacement restores the native tab bar');
     p.onOpenReplaceSheet({ currentTarget: { dataset: { id: '1:7' } } });
     p.onReplaceVolumeInput({ detail: { value: '4' } });
     p.onReplaceTimeChange({ detail: { value: '2026-09-23' } });
@@ -152,6 +190,7 @@ const summary = { total: 3, concern_count: 3, status_counts: {
       'a new submission uses a new key');
     p.onCloseReplaceSheet();
     p.onOpenCalibrateSheet({ currentTarget: { dataset: { id: '1:7' } } });
+    assert.equal(tabBarCalls.at(-1).action, 'hide', 'opening calibration hides the native tab bar');
     p.onCalibrateStandardInput({ detail: { value: '0' } });
     p.onCalibrateMeasuredInput({ detail: { value: '1.5' } });
     p.onCalibrateResultTap({ currentTarget: { dataset: { result: 'fail' } } });
@@ -159,14 +198,34 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.ok(p.data.calibrateSheet.errors.followUp);
     p.onCalibrateFollowUpTap({ currentTarget: { dataset: { follow: 'recalibrate' } } });
     let calibration;
-    api.reagentCalibration = payload => { calibration = payload; return Promise.resolve({ ok: true }); };
+    let rejectCalibration;
+    const calibrationRequests = [];
+    api.reagentCalibration = payload => {
+      calibration = payload;
+      calibrationRequests.push(payload);
+      return calibrationRequests.length === 1
+        ? new Promise((resolve, reject) => { rejectCalibration = reject; })
+        : Promise.resolve({ ok: true });
+    };
+    const pendingCalibration = p.onSubmitCalibrate();
+    rejectCalibration({ status: 503, error: '标定暂未保存' });
+    await pendingCalibration;
+    assert.equal(p.data.calibrateSheet.standardValue, '0');
+    assert.equal(p.data.calibrateSheet.measuredValue, '1.5');
+    assert.equal(p.data.calibrateSheet.result, 'fail');
+    assert.equal(p.data.calibrateSheet.followUp, 'recalibrate');
+    assert.equal(p.data.calibrateSheet.serverError, '标定暂未保存');
     await p.onSubmitCalibrate();
+    assert.equal(calibrationRequests[1]._idempotency_key, calibrationRequests[0]._idempotency_key);
+    assert.deepEqual(calibrationRequests[1], calibrationRequests[0],
+      'failed calibration retry preserves inputs and repeats the exact payload');
     assert.equal(calibration.passed, 0);
     assert.equal(calibration.fail_action, 'calibrate');
     assert.equal(calibration.standard_value, 0);
     assert.equal(p.data.calibrateSheet.success, true);
 
     p.onCloseCalibrateSheet();
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'closing calibration restores the native tab bar');
     const stillAttention = { items: [reagent(1, 7, ['expired', 'low_volume'],
       { unit: '盒', qc_status: 'passed' })] };
     api.reagentOverview = () => Promise.resolve(stillAttention);
@@ -203,6 +262,7 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     assert.equal(p.data.reagentItems.length, 0, 'permission loss removes stale data');
     assert.equal(p.data.replaceSheetVisible, false, 'permission loss closes stale maintenance form');
     assert.equal(p.data.replaceSheet.siteId, null, 'permission loss removes stale form target');
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'permission loss restores the native tab bar');
     p.onSubmitReplace();
     assert.equal(replaceRequests.length, 3, 'stale maintenance form cannot submit after permission loss');
     api.reagentOverview = () => Promise.reject({ status: 0, error: '网络断开' });
@@ -220,6 +280,7 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     await p.loadReagents();
     assert.equal(p.data.calibrateSheetVisible, false, 'expired session closes stale calibration form');
     assert.equal(p.data.calibrateSheet.siteId, null);
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'session expiry restores the native tab bar');
     assert.equal(p.data.reagentItems.length, 0);
     api.reagentOverview = () => Promise.resolve(summary);
     await p.onReagentRetry();
@@ -236,6 +297,11 @@ const summary = { total: 3, concern_count: 3, status_counts: {
     resolveOld({ items: [] });
     await flush();
     assert.equal(p.data.reagentItems.length, 3, 'hidden page ignores stale overview');
+    const unloadProbe = page();
+    unloadProbe.setData({ calibrateSheetVisible: true });
+    unloadProbe._syncSheetTabBar();
+    unloadProbe.onUnload();
+    assert.equal(tabBarCalls.at(-1).action, 'show', 'unloading the page restores the native tab bar');
     console.log('station hub navigation and reagent contract tests passed');
   } finally {
     Object.assign(api, originals);

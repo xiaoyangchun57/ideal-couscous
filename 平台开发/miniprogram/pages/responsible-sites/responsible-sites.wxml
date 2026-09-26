@@ -238,7 +238,7 @@
           <view class="ro-btn ro-btn--secondary" wx:if="{{item.canReplace}}" data-id="{{item.id}}" catchtap="onOpenReplaceSheet">
             <text class="ro-btn-tx">登记更换</text>
           </view>
-          <view class="ro-btn ro-btn--primary" wx:if="{{item.canCalibrate}}" data-id="{{item.id}}" catchtap="onOpenCalibrateSheet">
+          <view class="ro-btn ro-btn--text" wx:if="{{item.canCalibrate}}" data-id="{{item.id}}" catchtap="onOpenCalibrateSheet">
             <text class="ro-btn-tx">完成标定</text>
           </view>
         </view>
