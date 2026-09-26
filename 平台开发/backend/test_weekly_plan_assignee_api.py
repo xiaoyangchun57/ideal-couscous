@@ -142,6 +142,16 @@ class WeeklyPlanAssigneeApiTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 400, missing.json)
         self.assertEqual(self.counts(), before)
 
+    def test_non_object_json_body_is_rejected_without_writes(self):
+        for payload in ([2], '2', True):
+            with self.subTest(payload=payload):
+                before = self.counts()
+                response = self.client.post('/api/weekly-plans', json=payload,
+                                            headers={'Authorization': 'Bearer admin-token'})
+                self.assertEqual(response.status_code, 400, response.json)
+                self.assertTrue(response.json.get('error'))
+                self.assertEqual(self.counts(), before)
+
     def test_historical_plan_stays_readable_after_user_deletion(self):
         response = self.client.get('/api/weekly-plans',
                                    headers={'Authorization': 'Bearer admin-token'})

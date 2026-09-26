@@ -27640,6 +27640,8 @@ def api_weekly_plans():
 def api_weekly_plans_create():
     """新建/提交周计划"""
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体格式无效'}), 400
     current_user = g.current_user
     user_id = data.get('user_id')
     # JSON 整数须严格匹配 SQLite 有符号 64 位主键；bool 是 int 子类，必须显式排除。
