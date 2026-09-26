@@ -1,9 +1,10 @@
 # A 领域工作台：站点与监测数据
 
 > 负责人：协作者 A
-> 当前状态：`PR #1 / CROSS_DOMAIN_REWORK_REVIEW_PENDING / DESIGN_BASELINE_PUBLISHED / REAL_WECHAT_UI_NOT_RUN`
-> 当前分支：`collab/a-station-tab-read`
-> 停点：门禁返修代码 Review PASS；本轮 C 试剂删除契约的 Web 消费端返修完成，等待原 PR 产品 Code Review；不新建 PR、不合并、不部署
+> 当前状态：`INTEGRATION_REWORK_READY_FOR_REVIEW / REAL_WECHAT_UI_NOT_RUN`
+> 当前分支：`collab/a-station-reagent-integration`
+> 当前基线：`origin/integration@b6880accbeca94b85113bdeae05de89f61949946`
+> 停点：A 设计师静态方案已由 A 结果负责人完成边界审查，开发接线及定向测试通过；待提交 integration PR 并交主线 Review，不合并、不部署
 
 ## 1. 领域使命
 
@@ -65,6 +66,16 @@ A 对本领域承担产品、后端、Web、小程序、数据适配、测试和
 ### PR #1 当前接线
 
 已保留门禁 403 后立即关闭监测字段、目录回退失败时保留可重试旧目录及档案详情来源的定向回归。基于主线 `5b33d5f` 的五 Tab 导航和站点页设计，在原 PR 消费并清理首页 `stationHubTarget`；无目标时保留当前模式、范围和筛选。站点页试剂模式按 C 分支 `collab/c-reagent-contract` 的稳定字段接入跨站摘要、原因并集筛选、服务端动作能力以及更换/标定通用端点；失败保留表单和幂等键，输入改变才生成新键。试剂总览返回 401/403 时同步清除旧列表和已打开的维护 Sheet，阻止失权后沿用旧目标。C 在 PR #2 对 A 消费语义提出三项只读返修：标定数值不套用库存单位、标定通过不冒称全部正常、选择报修不冒称已建工单；A 已按现有契约修正展示及直接测试，C 对 A `8d64a1c` 的三项语义返修定向只读 Review PASS，未独立运行 A 测试，也不代表 PR #1 全量代码 Review PASS。以 C 契约 `9937fe3` 为检查点：C 的 11 项后端契约测试通过；A 的站点页接线与监测定向测试、JS 语法检查通过；隔离临时 SQLite 与回环端口下，A 小程序请求层和页面实际调用 C Flask 接口完成总览、更换和标定，写后读取符合契约。2026-09-23 已核实远端 C 为 `9937fe3`、`main` 为 `5b33d5f`，C 尚未合入；微信实际 UI 为 `NOT RUN`，仍待产品复审。
+
+### integration 设计接线（2026-09-26）
+
+按主线更正后的协作基线，从 `origin/integration@b6880acc` 建立独立分支 `collab/a-station-reagent-integration`。A 领域设计师先提交静态方案，A 结果负责人依据当前小程序契约、仓库设计规范和现有设计系统完成边界审查，再由 A 开发接线；没有迁移旧工作树未提交改动，也没有修改共享 `AGENTS.md`、`README.md`、后端、API、权限或公共导航。
+
+本轮仅吸收移动端可落地部分：保留“站点 / 试剂”一级分段；站点继续使用服务端范围和名称/编号搜索；试剂只保留已有关注原因筛选；卡片继续消费现有契约字段与服务端动作能力；更换、标定继续使用既有 Bottom Sheet。统一使用仓库语义 Token，状态使用语义色而非类型色；补齐长文案换行、88rpx 点击热区、128rpx sticky 偏移、75vh Sheet、72×8rpx 把手与底部安全区。Sheet 打开时隐藏原生 TabBar，正常关闭、失权自动关闭、页面隐藏和卸载均恢复；提交失败继续保留输入与幂等键，只有输入改变才清除旧键。
+
+明确不接入桌面稿中的四级筛选、区域/厂家/类型/虚构运行状态、桌面 Drawer/Hover/ESC、额外 Token/深色主题声明、类型绑定颜色、趋势/采购建议/安全库存推算、四 Tab 详情及编辑/删除/采购/盘点/调拨动作。`pages/index/index.wxss` 只正式移除文件头 BOM；不承担首页设计修改。
+
+定向证据：`stationHubWiring.test.js`、`responsibleSitesMonitoring.test.js` 通过；`responsible-sites.js` 与测试文件 `node --check` 通过；`git diff --check` 通过。微信开发者工具和真机 UI 均 `NOT RUN`，不能以静态检查和 Node 测试替代；下一责任人为主线产品 Review。
 
 ### C 试剂删除契约消费端返修（2026-09-23）
 
