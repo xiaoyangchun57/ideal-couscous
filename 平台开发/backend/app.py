@@ -27640,10 +27640,12 @@ def api_weekly_plans():
 def api_weekly_plans_create():
     """新建/提交周计划"""
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体格式无效'}), 400
     current_user = g.current_user
-    try:
-        user_id = int(data['user_id'])
-    except (KeyError, TypeError, ValueError):
+    user_id = data.get('user_id')
+    # JSON 整数须严格匹配 SQLite 有符号 64 位主键；bool 是 int 子类，必须显式排除。
+    if type(user_id) is not int or not 0 < user_id <= 2**63 - 1:
         return jsonify({'error': '缺少有效的 user_id'}), 400
     if not _has_any_role(current_user, 'admin') and user_id != int(current_user['id']):
         return jsonify({'error': '只能为自己创建周计划'}), 403
@@ -27671,22 +27673,38 @@ def api_weekly_plans_create():
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as db:
-        cur = db.execute(
-            '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
-               VALUES (?,?,?,?,?,?,?)''',
-            (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
-        db.commit()
-        # 如果勾选了车辆且提交，自动创建用车申请
-        if submit and vehicle_id:
-            for day, site_ids in plan_data.items():
-                if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
-                    # 简单处理：为整周创建一条用车申请
-                    db.execute(
-                        '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
-                           VALUES (?,?,?,?,?,"周巡检用车","approved")''',
-                        (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
-                    break
-        db.commit()
+        try:
+            # 在写事务内读取账号，防止账号停用/注销与本次计划写入交错。
+            db.execute('BEGIN IMMEDIATE')
+            execution_user = db.execute(
+                'SELECT status, deleted_at FROM users WHERE id=?', (user_id,)
+            ).fetchone()
+            if not execution_user:
+                return jsonify({'error': '计划执行人不存在',
+                                'code': 'PLAN_EXECUTION_USER_NOT_FOUND'}), 404
+            if execution_user['status'] != 'active' or execution_user['deleted_at']:
+                return jsonify({'error': '计划执行人账号不可用',
+                                'code': 'PLAN_EXECUTION_USER_INACTIVE'}), 409
+            cur = db.execute(
+                '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
+                   VALUES (?,?,?,?,?,?,?)''',
+                (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
+            # 如果勾选了车辆且提交，自动创建用车申请
+            if submit and vehicle_id:
+                for day, site_ids in plan_data.items():
+                    if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
+                        # 简单处理：为整周创建一条用车申请
+                        db.execute(
+                            '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
+                               VALUES (?,?,?,?,?,"周巡检用车","approved")''',
+                            (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
+                        break
+            db.commit()
+        except sqlite3.Error:
+            db.rollback()
+            app.logger.exception('weekly plan create failed')
+            return jsonify({'error': '周计划保存失败，请稍后重试',
+                            'code': 'WEEKLY_PLAN_RETRYABLE'}), 503
         row = db.execute('SELECT * FROM weekly_inspection_plans WHERE id=?', (cur.lastrowid,)).fetchone()
         r = dict(row)
         try: r['plan_data'] = _json.loads(r['plan_data']) if r.get('plan_data') else {}
@@ -34095,7 +34113,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
         'responsible_people': responsibility['responsible_people'],
         'monitoring_status_label': '未接入', 'reason_code': 'not_connected', 'monitoring_reason': '未配置启用的监测身份',
         'last_received_at': None, 'last_communication_at': None,
-        'last_valid_observation_at': None, 'published_factor_count': 0,
+        'last_valid_observation_at': None, 'latest_values': [], 'published_factor_count': 0,
         'monitoring_status': 'not_connected',
     }
     if not profile:
@@ -34131,6 +34149,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
     else:
         summary = _station_monitoring_summary_projection(db, site_id, profile, configs, values, last_communication)
         base.update(monitoring_status=summary['status'], monitoring_status_label=summary['status_label'], reason_code=summary['reason_code'], monitoring_reason=summary['reason'])
+    base['latest_values'] = _station_monitoring_published_values(values, base['monitoring_status'], compact=True)
     return base
 
 
@@ -34174,6 +34193,23 @@ def _station_monitoring_presented_value(item):
     value['source_data_time'] = value.get('observed_at')
     value['observed_at'] = value.get('scheduled_at') or value.get('observed_at')
     return value
+
+
+def _station_monitoring_published_values(values, status, *, compact=False):
+    """Expose only the detail-approved effective observations to the site list."""
+    if status not in {'normal', 'attention', 'interval_unconfigured'}:
+        return []
+    result = []
+    for index, item in enumerate(values):
+        presented = dict(
+            _station_monitoring_presented_value(item),
+            factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
+                item.get('business_metric'), f'监测因子{index + 1}'),
+        )
+        result.append({key: presented.get(key) for key in (
+            'business_metric', 'factor_name_cn', 'standard_value', 'standard_unit', 'observed_at'
+        )} if compact else presented)
+    return result
 
 
 def _station_monitoring_factor_states(db, site_id, configs, values):
@@ -34409,12 +34445,7 @@ def _station_monitoring_overview(db, site_id):
     configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    latest = values if projection['monitoring_status'] in {'normal', 'attention', 'interval_unconfigured'} else []
-    latest = [dict(
-        _station_monitoring_presented_value(item),
-        factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
-            item.get('business_metric'), f'监测因子{index + 1}'),
-    ) for index, item in enumerate(latest)]
+    latest = _station_monitoring_published_values(values, projection['monitoring_status'])
     status = projection['monitoring_status']
     communication_freshness = _monitoring_freshness(
         projection['last_communication_at'], dict(profile).get('expected_interval_seconds') if profile else None)

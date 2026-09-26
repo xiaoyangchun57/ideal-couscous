@@ -21,6 +21,7 @@ function overview(status = 'interval_unconfigured', id = 7) {
       monitoring_reason: `服务端主原因:${status}`,
       last_received_at: '2026-09-15T08:00:00+08:00',
       last_valid_observation_at: '2026-09-10T07:00:00+08:00',
+      latest_values: [{ business_metric: 'ph', factor_name_cn: '酸碱度', standard_value: 0, standard_unit: 'pH', observed_at: '2026-09-10T07:00:00+08:00' }],
     },
     monitoring: {
       latest_values: ['normal', 'attention', 'interval_unconfigured'].includes(status)
@@ -361,14 +362,27 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       const tableRow = page.getByRole('row').filter({ hasText: row.name });
       await visible(tableRow.getByText('数据周期未配置', { exact: true }));
+      await visible(page.getByRole('columnheader', { name: '关键时间', exact: true }));
+      await visible(page.getByRole('columnheader', { name: '最后数据', exact: true }));
+      await visible(tableRow.getByText('酸碱度：0 pH', { exact: true }));
+      const received = tableRow.getByText(/^最后收到报文：\d{4}-/);
+      const observed = tableRow.getByText(/^观测：\d{4}-/);
+      await visible(received);
+      await visible(observed);
+      const firstTimes = [await received.textContent(), await observed.textContent()];
       mode = 'failure';
       await page.getByRole('button', { name: /刷新/ }).click();
       await visible(page.getByText('监测状态刷新失败，当前保留上次成功结果', { exact: true }));
       await visible(tableRow.getByText('数据周期未配置', { exact: true }));
+      assert.deepEqual([await received.textContent(), await observed.textContent()], firstTimes);
+      await visible(tableRow.getByText('酸碱度：0 pH', { exact: true }));
       mode = 'missing';
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
       await visible(tableRow.getByText('监测状态待确认', { exact: true }));
       assert.equal(await tableRow.getByText('数据周期未配置', { exact: true }).count(), 0);
+      await visible(tableRow.getByText('最后收到报文：暂无记录', { exact: true }));
+      await visible(tableRow.getByText('观测：暂无记录', { exact: true }));
+      await visible(tableRow.getByText('暂无已形成的有效观测', { exact: true }));
       await snapshot(page, 'directory-desktop');
     } finally { await close(); }
   });
@@ -545,7 +559,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     try {
       await page.goto(`${baseURL}/sites`);
       await visible(page.getByRole('columnheader', { name: '站点身份', exact: true }));
-      for (const heading of ['监测状态', '关键时间', '负责人', '操作']) {
+      for (const heading of ['监测状态', '最后数据', '关键时间', '负责人', '操作']) {
         await visible(page.getByRole('columnheader', { name: heading, exact: true }));
       }
       const action = page.getByRole('button', { name: /查看 隔离测试站01 的站点档案/ });
@@ -564,6 +578,53 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await snapshot(page, 'sites-desktop-table-filter');
     } finally { await close(); }
   });
+
+  for (const width of [1366, 390]) {
+    await t.test(`six-factor summary stays bounded and horizontally reachable at ${width}px`, async () => {
+      const factors = Array.from({ length: 6 }, (_, index) => ({
+        business_metric: `factor_${index + 1}`, factor_name_cn: `因子${index + 1}`,
+        standard_value: index, standard_unit: 'mg/L', observed_at: '2026-09-10T07:00:00+08:00',
+      }));
+      const { page, close } = await session(['admin'], { width, height: 760 }, async (route, url) => {
+        if (url.pathname === '/api/station-monitoring/sites') {
+          await route.fulfill({ json: { scope: 'all', available_scopes: ['all', 'mine'],
+            items: [{ ...overview().site, latest_values: factors }, { ...overview('not_connected', 8).site, latest_values: [] }],
+            summary: { interval_unconfigured: 1, not_connected: 1 } } });
+          return true;
+        }
+        if (url.pathname === '/api/station-monitoring/sites/7/overview') {
+          const detail = overview();
+          detail.monitoring.latest_values = factors;
+          await route.fulfill({ json: detail });
+          return true;
+        }
+        return false;
+      });
+      try {
+        await page.goto(`${baseURL}/sites`);
+        const station = page.getByRole('row').filter({ hasText: row.name });
+        await visible(station.getByText('因子1：0 mg/L', { exact: true }));
+        await visible(station.getByText('因子2：1 mg/L', { exact: true }));
+        await visible(station.getByRole('button', { name: '还有 4 项 · 查看全部' }));
+        assert.equal(await station.getByText('因子6：5 mg/L', { exact: true }).count(), 0);
+        const bounds = await station.boundingBox();
+        assert.ok(bounds && bounds.height <= 115, `six-factor row height: ${bounds?.height}`);
+        const tableBody = page.locator('.workspace-table .ant-table-body');
+        const horizontal = await tableBody.evaluate((element) => {
+          const before = element.scrollLeft;
+          element.scrollLeft = element.scrollWidth;
+          return { viewport: element.clientWidth, content: element.scrollWidth,
+            before, after: element.scrollLeft };
+        });
+        assert.ok(horizontal.content >= 1215, JSON.stringify(horizontal));
+        assert.ok(horizontal.after > horizontal.before, JSON.stringify(horizontal));
+        const action = await station.getByRole('button', { name: /查看 隔离测试站甲 的站点档案/ }).boundingBox();
+        assert.ok(action && action.x >= 0 && action.x + action.width <= width + 1, `action: ${JSON.stringify(action)}`);
+        await station.getByRole('button', { name: '还有 4 项 · 查看全部' }).click();
+        await visible(page.getByText('因子6', { exact: true }));
+      } finally { await close(); }
+    });
+  }
 
   await t.test('short desktop monitoring body scroll reaches the final section', async () => {
     const { page, close } = await session(['admin'], { width: 1280, height: 600 });

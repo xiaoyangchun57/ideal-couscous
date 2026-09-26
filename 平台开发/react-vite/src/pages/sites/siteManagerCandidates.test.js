@@ -18,3 +18,13 @@ test('legacy role fallback is used when roles is absent', () => {
     [7],
   );
 });
+
+test('已注销或已停用的运维人员不再进入站点负责人候选', () => {
+  const result = filterSiteManagerCandidates([
+    { id: 1, status: 'active', role: 'operator', deleted_at: null },
+    { id: 2, status: 'inactive', role: 'operator', deleted_at: '2026-09-22 10:45:41' },
+    { id: 3, status: 'inactive', role: 'operator', deleted_at: null },
+    { id: 4, status: 'active', role: 'operator', deleted_at: '2026-09-22 10:45:41' },
+  ]);
+  assert.deepEqual(result.map((row) => row.id), [1]);
+});

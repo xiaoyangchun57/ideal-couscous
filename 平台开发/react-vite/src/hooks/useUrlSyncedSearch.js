@@ -52,6 +52,9 @@ export function createUrlSearchDraftController({
       commit(value);
     },
     syncExternal(value) {
+      // 输入法选词（composition）进行中：外部 URL 回写不得覆盖正在选词的草稿，
+      // 最终值由 compositionEnd 时的用户输入决定（中文搜索不被打断）。
+      if (composing) return;
       compositionCommitValue = null;
       cancelPending();
       onDraft(value);

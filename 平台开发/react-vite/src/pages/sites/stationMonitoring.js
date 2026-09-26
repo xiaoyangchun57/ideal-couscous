@@ -25,6 +25,7 @@ const MONITORING_FIELDS = [
   'last_received_at',
   'last_communication_at',
   'last_valid_observation_at',
+  'latest_values',
   'published_factor_count',
 ];
 
@@ -77,6 +78,11 @@ export function mergeMonitoringSites(siteRows, monitoringPayload, previousRows =
     const previous = monitoringPayload == null ? previousById.get(key) : null;
     return previous ? mergeMonitoringSite(site, previous) : mergeMonitoringSite(site);
   });
+}
+
+export function monitoringLatestSummary(values, limit = 2) {
+  const items = Array.isArray(values) ? values : [];
+  return { visible: items.slice(0, limit), remaining: Math.max(0, items.length - limit), total: items.length };
 }
 
 export function monitoringSummaryItems(summary = {}) {
