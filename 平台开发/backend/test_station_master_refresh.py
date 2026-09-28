@@ -81,6 +81,7 @@ class StationMasterRefreshTest(unittest.TestCase):
                    VALUES (?,?,?,?,?)""",
                 (("MN001", "h1", 1, 1, "bound"),
                  ("OLDMN", "h2", 2, 1, "bound"),
+                 ("OLD003MN", "h-old3", 3, 1, "bound"),
                  ("62305550", "h3", None, 0, "disabled")),
             )
             connection.commit()
@@ -102,7 +103,7 @@ class StationMasterRefreshTest(unittest.TestCase):
             )},
             {"accepted_rows": 3, "exact_mn_count": 1, "alias_match_count": 1,
              "created_count": 1, "retired_count": 1, "rebound_endpoint_count": 1,
-             "disabled_endpoint_count": 1},
+             "disabled_endpoint_count": 2},
         )
         self.assertEqual(plan["conflicts"], [])
 
@@ -115,14 +116,18 @@ class StationMasterRefreshTest(unittest.TestCase):
         self.assertEqual(result["result"], "applied")
         self.assertTrue(Path(result["backup"]).is_file())
         with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(connection.execute(
+            sites = connection.execute(
                 "SELECT id,code,name,master_status FROM sites ORDER BY id"
-            ).fetchall(), [
-                (1, "MN001", "新一厂", "active"),
+            ).fetchall()
+            self.assertEqual(sites[:3], [
+                (1, "OLD001", "新一厂", "active"),
                 (2, "OLD002", "蛇山", "retired"),
-                (3, "62305550", "坝上", "active"),
-                (4, "MN300", "新增站", "active"),
+                (3, "OLD003", "坝上", "active"),
             ])
+            self.assertEqual((sites[3][0], sites[3][2], sites[3][3]),
+                             (4, "新增站", "active"))
+            self.assertTrue(sites[3][1].startswith("SITE-"))
+            self.assertNotEqual(sites[3][1], "MN300")
             self.assertEqual(connection.execute(
                 "SELECT site_id,note FROM historical_site_links ORDER BY id"
             ).fetchall(), [(1, "kept"), (2, "retired kept")])
@@ -135,6 +140,12 @@ class StationMasterRefreshTest(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT enabled,endpoint_state FROM trusted_endpoints WHERE station_code='OLDMN'"
             ).fetchone(), (0, "disabled"))
+            self.assertEqual(connection.execute(
+                "SELECT enabled,endpoint_state FROM trusted_endpoints WHERE station_code='OLD003MN'"
+            ).fetchone(), (0, "disabled"))
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM trusted_endpoints WHERE station_code='MN300'"
+            ).fetchone())
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM station_master_refresh_audits"
             ).fetchone()[0], 1)
@@ -151,6 +162,25 @@ class StationMasterRefreshTest(unittest.TestCase):
         )
         self.assertEqual(repeated["result"], "already_applied")
         self.assertIsNone(repeated["backup"])
+
+    def test_verify_rejects_a_reenabled_obsolete_mn(self):
+        plan = refresh.preview_station_master_refresh(self.database, self.workbook)
+        refresh.apply_station_master_refresh(
+            self.database, self.workbook, backup_dir=self.backups,
+            expected_fingerprint=plan["preview_fingerprint"], expected_row_count=3,
+            offline_confirmed=True, retirement_confirmed=True,
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE trusted_endpoints SET enabled=1,endpoint_state='bound' "
+                "WHERE station_code='OLD003MN'"
+            )
+            connection.commit()
+        with self.assertRaisesRegex(refresh.StationMasterRefreshError, "obsolete enabled endpoint"):
+            refresh.verify_station_master_refresh(
+                self.database, self.workbook,
+                expected_source_fingerprint=plan["source_fingerprint"],
+            )
 
     def test_apply_requires_confirmations_and_current_preview(self):
         plan = refresh.preview_station_master_refresh(self.database, self.workbook)
@@ -215,6 +245,30 @@ class StationMasterRefreshTest(unittest.TestCase):
             refresh.apply_station_master_refresh(
                 self.database, self.workbook, backup_dir=self.backups,
                 expected_fingerprint=plan["preview_fingerprint"], expected_row_count=3,
+                offline_confirmed=True, retirement_confirmed=True,
+            )
+
+    def test_business_site_code_is_not_treated_as_an_ingestion_mn(self):
+        workbook = self.root / "business-code-is-not-mn.xlsx"
+        write_workbook(workbook, (("新增站", "OLD002"),))
+        plan = refresh.preview_station_master_refresh(self.database, workbook)
+        self.assertEqual(plan["conflicts"], [])
+        self.assertEqual(plan["exact_mn_count"], 0)
+        self.assertEqual(plan["alias_match_count"], 0)
+        self.assertEqual(plan["created_count"], 1)
+
+    def test_mn_and_name_pointing_to_different_sites_blocks_apply(self):
+        workbook = self.root / "mn-name-mismatch.xlsx"
+        write_workbook(workbook, (("坝上", "MN001"),))
+        plan = refresh.preview_station_master_refresh(self.database, workbook)
+        self.assertIn(
+            "mn_name_site_mismatch",
+            {item["category"] for item in plan["conflicts"]},
+        )
+        with self.assertRaisesRegex(refresh.StationMasterRefreshError, "unresolved conflicts"):
+            refresh.apply_station_master_refresh(
+                self.database, workbook, backup_dir=self.backups,
+                expected_fingerprint=plan["preview_fingerprint"], expected_row_count=1,
                 offline_confirmed=True, retirement_confirmed=True,
             )
 

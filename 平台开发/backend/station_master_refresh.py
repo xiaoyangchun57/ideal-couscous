@@ -31,6 +31,18 @@ def _normalize_name(value: object) -> str:
     return "".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
 
 
+def _allocate_site_code(connection: sqlite3.Connection, name: object) -> str:
+    """Allocate a stable internal business code without reusing the ingestion MN."""
+    digest = hashlib.sha256(_normalize_name(name).encode("utf-8")).hexdigest()[:12].upper()
+    base = f"SITE-{digest}"
+    candidate = base
+    suffix = 2
+    while connection.execute("SELECT 1 FROM sites WHERE code=?", (candidate,)).fetchone():
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 def _cell_text(cell: ElementTree.Element, shared_strings: list[str], *, opaque_mn: bool) -> str | None:
     cell_type = cell.attrib.get("t")
     if cell_type == "s":
@@ -162,14 +174,12 @@ def _plan_from_connection(connection: sqlite3.Connection, records: list[dict[str
            WHERE enabled=1 AND effective_to IS NULL ORDER BY endpoint_id,id"""
     )]
     site_by_id = {int(row["id"]): row for row in sites}
-    ids_by_code: dict[str, set[int]] = {}
     ids_by_endpoint_mn: dict[str, set[int]] = {}
     ids_by_name: dict[str, set[int]] = {}
     ids_by_alias: dict[str, set[int]] = {}
     endpoints_by_mn: dict[str, dict[str, object]] = {}
     profile_site_ids_by_endpoint: dict[int, set[int]] = {}
     for site in sites:
-        ids_by_code.setdefault(str(site["code"] or "").strip(), set()).add(int(site["id"]))
         ids_by_name.setdefault(_normalize_name(site["name"]), set()).add(int(site["id"]))
     for alias in aliases:
         ids_by_alias.setdefault(str(alias["normalized_alias"]), set()).add(int(alias["site_id"]))
@@ -188,7 +198,11 @@ def _plan_from_connection(connection: sqlite3.Connection, records: list[dict[str
     for record in records:
         mn = str(record["mn"])
         normalized_name = _normalize_name(record["name"])
-        mn_candidates = set(ids_by_endpoint_mn.get(mn, set())) | set(ids_by_code.get(mn, set()))
+        mn_candidates = set(ids_by_endpoint_mn.get(mn, set()))
+        name_candidates = (
+            set(ids_by_name.get(normalized_name, set()))
+            | set(ids_by_alias.get(normalized_name, set()))
+        )
         site_id: int | None = None
         match_method = "create"
         if len(mn_candidates) > 1:
@@ -196,8 +210,14 @@ def _plan_from_connection(connection: sqlite3.Connection, records: list[dict[str
         elif mn_candidates:
             site_id = next(iter(mn_candidates))
             match_method = "exact_mn"
+            if len(name_candidates) > 1:
+                conflicts.append({"row": record["row"], "mn": mn, "category": "name_ambiguous"})
+            elif name_candidates and site_id not in name_candidates:
+                conflicts.append({
+                    "row": record["row"], "mn": mn,
+                    "category": "mn_name_site_mismatch",
+                })
         else:
-            name_candidates = set(ids_by_name.get(normalized_name, set())) | set(ids_by_alias.get(normalized_name, set()))
             if len(name_candidates) > 1:
                 conflicts.append({"row": record["row"], "mn": mn, "category": "name_ambiguous"})
             elif name_candidates:
@@ -239,12 +259,24 @@ def _plan_from_connection(connection: sqlite3.Connection, records: list[dict[str
             continue
         if existing_site_id is None or not endpoint["enabled"] or endpoint["endpoint_state"] != "bound":
             endpoint_actions.append({"endpoint_id": int(endpoint["id"]), "mn": item["mn"]})
-    disabled_endpoint_ids = [
+    current_mn_by_site = {
+        int(item["site_id"]): str(item["mn"])
+        for item in planned if item["site_id"] is not None
+    }
+    disabled_endpoint_ids = sorted({
         int(endpoint["id"]) for endpoint in endpoints
-        if endpoint["business_site_id"] in retire_ids
+        if endpoint["business_site_id"] is not None
         and (endpoint["enabled"] or endpoint["endpoint_state"] != "disabled")
-        and str(endpoint["station_code"]) not in source_mn
-    ]
+        and (
+            (int(endpoint["business_site_id"]) in retire_ids
+             and str(endpoint["station_code"]) not in source_mn)
+            or (
+                int(endpoint["business_site_id"]) in current_mn_by_site
+                and str(endpoint["station_code"])
+                != current_mn_by_site[int(endpoint["business_site_id"])]
+            )
+        )
+    })
     state = {
         "source": _source_fingerprint(records),
         "sites": sites,
@@ -322,7 +354,7 @@ def _apply_plan(connection: sqlite3.Connection, plan: dict[str, object]) -> None
         if site_id is None:
             site_id = connection.execute(
                 "INSERT INTO sites(code,name,type,master_status) VALUES (?,?,?,'active')",
-                (item["mn"], item["name"], "water_quality"),
+                (_allocate_site_code(connection, item["name"]), item["name"], "water_quality"),
             ).lastrowid
         else:
             if _normalize_name(item["old_name"]) != _normalize_name(item["name"]):
@@ -332,8 +364,8 @@ def _apply_plan(connection: sqlite3.Connection, plan: dict[str, object]) -> None
                     (site_id, item["old_name"], _normalize_name(item["old_name"])),
                 )
             connection.execute(
-                "UPDATE sites SET code=?,name=?,master_status='active' WHERE id=?",
-                (item["mn"], item["name"], site_id),
+                "UPDATE sites SET name=?,master_status='active' WHERE id=?",
+                (item["name"], site_id),
             )
         site_by_mn[str(item["mn"])] = int(site_id)
     if plan["retire_ids"]:
@@ -358,12 +390,10 @@ def _apply_plan(connection: sqlite3.Connection, plan: dict[str, object]) -> None
 
 
 def _verify_applied(connection: sqlite3.Connection, records: list[dict[str, object]]) -> None:
-    expected = {(str(item["mn"]), str(item["name"])) for item in records}
-    actual = {
-        (str(row["code"]), str(row["name"])) for row in connection.execute(
-            "SELECT code,name FROM sites WHERE master_status='active'"
-        )
-    }
+    expected = sorted(str(item["name"]) for item in records)
+    actual = sorted(str(row["name"]) for row in connection.execute(
+        "SELECT name FROM sites WHERE master_status='active'"
+    ))
     if actual != expected:
         raise StationMasterRefreshError("active station catalogue does not match the approved workbook")
     active_ids = {
@@ -377,6 +407,18 @@ def _verify_applied(connection: sqlite3.Connection, records: list[dict[str, obje
     ).fetchone()
     if invalid_endpoint:
         raise StationMasterRefreshError("retired station still has an enabled bound endpoint")
+    source_mn = [str(record["mn"]) for record in records]
+    marks = ",".join("?" * len(source_mn))
+    stale_active_endpoint = connection.execute(
+        f"""SELECT 1 FROM trusted_endpoints endpoint
+            JOIN sites site ON site.id=endpoint.business_site_id
+            WHERE site.master_status='active' AND endpoint.enabled=1
+              AND endpoint.endpoint_state='bound'
+              AND endpoint.station_code NOT IN ({marks}) LIMIT 1""",
+        source_mn,
+    ).fetchone()
+    if stale_active_endpoint:
+        raise StationMasterRefreshError("active station still has an obsolete enabled endpoint")
     for record in records:
         endpoint = connection.execute(
             "SELECT business_site_id,enabled,endpoint_state FROM trusted_endpoints WHERE station_code=?",
@@ -388,8 +430,6 @@ def _verify_applied(connection: sqlite3.Connection, records: list[dict[str, obje
                     or not endpoint["enabled"] or endpoint["endpoint_state"] != "bound"):
                 raise StationMasterRefreshError("active station endpoint binding is inconsistent")
 
-    source_mn = [str(record["mn"]) for record in records]
-    marks = ",".join("?" * len(source_mn))
     invalid_profile = connection.execute(
         f"""SELECT 1 FROM monitoring_endpoint_profiles profile
             JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
