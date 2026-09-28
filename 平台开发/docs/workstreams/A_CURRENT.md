@@ -2,9 +2,6 @@
 
 > 负责人：协作者 A
 > 当前状态：`INTEGRATION_REWORK_READY_FOR_REVIEW / REAL_WECHAT_UI_NOT_RUN`
-> 当前分支：`collab/a-station-reagent-integration`
-> 当前基线：`origin/integration@b6880accbeca94b85113bdeae05de89f61949946`
-> 停点：A 设计师静态方案已由 A 结果负责人完成边界审查，开发接线及定向测试通过；待提交 integration PR 并交主线 Review，不合并、不部署
 
 ## 1. 领域使命
 
