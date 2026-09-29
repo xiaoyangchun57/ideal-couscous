@@ -279,6 +279,23 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         with app_module.get_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], 0)
 
+    def test_labelled_latitude_longitude_watermark_is_not_misrejected(self):
+        now = datetime.now().strftime('%Y.%m.%d %H:%M')
+        app_module._recognize_watermark = lambda _: {
+            'text': (f'时间:{now}\n纬度:28.071303 N\n经度:115.539684 E\n'
+                     '防伪LABELLEDGPS123'),
+            'confidence': 0.99,
+            'status': 'recognized',
+        }
+        response = self.upload(
+            jpeg_bytes('purple'), capture_source='watermark_album',
+            _idempotency_key='labelled-watermark',
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['accepted_for_review'], response.json)
+        self.assertAlmostEqual(response.json['gps_lat'], 28.071303)
+        self.assertAlmostEqual(response.json['gps_lng'], 115.539684)
+
     def test_duplicate_and_idempotent_replay_do_not_create_more_formal_rows(self):
         self.set_valid_watermark()
         image = jpeg_bytes('green')

@@ -16913,11 +16913,26 @@ def _parse_watermark_fields(text):
             result['taken_at'] = datetime(*values).strftime('%Y-%m-%d %H:%M:%S')
         except ValueError:
             pass
-    gps_match = re.search(
-        r'(\d{1,2}\.\d{4,})\s*[^\dA-Z]{0,3}[NS]?\s*[,，、 ]+\s*(\d{2,3}\.\d{4,})', raw, re.I)
-    if gps_match:
-        result['gps_lat'] = float(gps_match.group(1))
-        result['gps_lng'] = float(gps_match.group(2))
+    def coordinate(value, direction):
+        parsed = float(value)
+        if str(direction or '').upper() in ('S', 'W'):
+            parsed = -abs(parsed)
+        return parsed
+
+    labelled_lat = re.search(
+        r'(?:纬度|LAT(?:ITUDE)?)\s*[:：=]?\s*([+-]?\d{1,2}(?:\.\d+)?)\s*([NS])?', raw, re.I)
+    labelled_lng = re.search(
+        r'(?:经度|LON(?:GITUDE)?|LNG)\s*[:：=]?\s*([+-]?\d{1,3}(?:\.\d+)?)\s*([EW])?', raw, re.I)
+    if labelled_lat and labelled_lng:
+        result['gps_lat'] = coordinate(labelled_lat.group(1), labelled_lat.group(2))
+        result['gps_lng'] = coordinate(labelled_lng.group(1), labelled_lng.group(2))
+    else:
+        gps_match = re.search(
+            r'([+-]?\d{1,2}\.\d{4,})\s*([NS])?\s*[,，、 ]+\s*'
+            r'([+-]?\d{2,3}\.\d{4,})\s*([EW])?', raw, re.I)
+        if gps_match:
+            result['gps_lat'] = coordinate(gps_match.group(1), gps_match.group(2))
+            result['gps_lng'] = coordinate(gps_match.group(3), gps_match.group(4))
     codes = re.findall(
         r'(?<![A-Z0-9])(?=[A-Z0-9]{10,24}(?![A-Z0-9]))(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]+(?![A-Z0-9])',
         raw.upper())
@@ -23128,6 +23143,226 @@ def _mobile_execution_site_access(db, plan_id, site_id, user):
     return bool(resource_ready)
 
 
+def _mobile_photo_query_error(message):
+    return jsonify({
+        'error': message,
+        'code': 'INVALID_PHOTO_QUERY',
+        'next_action': '请恢复默认筛选后重试',
+    }), 400
+
+
+@app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/photos')
+@login_required
+def mobile_execution_site_photos(plan_id, site_id):
+    """Read inspection photos through the plan/site business boundary."""
+    user = g.current_user
+    roles = set(_normalize_user_roles(user.get('roles') or [user.get('role')]))
+    if not roles.intersection({'operator', 'reviewer'}):
+        return jsonify({
+            'error': '当前账号没有巡检照片查看权限',
+            'code': 'PHOTO_READ_ROLE_REQUIRED',
+            'next_action': '请返回任务列表或联系管理员配置业务角色',
+        }), 403
+
+    scope = str(request.args.get('scope') or 'current').strip().lower()
+    review_status = str(request.args.get('review_status') or 'all').strip().lower()
+    qualification = str(request.args.get('evidence_qualification') or 'all').strip().lower()
+    material_role = str(request.args.get('material_role') or 'all').strip().lower()
+    if scope not in ('current', 'history'):
+        return _mobile_photo_query_error('scope 仅支持 current 或 history')
+    if review_status not in ('all', 'pending', 'approved', 'rejected', 'voided', 'superseded'):
+        return _mobile_photo_query_error('review_status 参数无效')
+    if qualification not in ('all', 'qualified', 'review', 'ineligible'):
+        return _mobile_photo_query_error('evidence_qualification 参数无效')
+    if material_role not in ('all', 'formal', 'supplement'):
+        return _mobile_photo_query_error('material_role 参数无效')
+
+    def positive_int(name, default, maximum=None):
+        raw = request.args.get(name)
+        if raw in (None, ''):
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0 or (maximum is not None and value > maximum):
+            return None
+        return value
+
+    item_id = positive_int('item_id', None)
+    if request.args.get('item_id') not in (None, '') and item_id is None:
+        return _mobile_photo_query_error('item_id 必须是正整数')
+    page = positive_int('page', 1)
+    limit = positive_int('limit', 20, maximum=50)
+    if page is None or limit is None:
+        return _mobile_photo_query_error('page 必须为正整数，limit 必须在 1 到 50 之间')
+
+    not_found = ({
+        'error': '该执行站点不存在或不在你的业务范围内',
+        'code': 'EXECUTION_SITE_NOT_FOUND',
+        'next_action': '请返回巡检任务列表刷新',
+    }, 404)
+    try:
+        with get_db() as db:
+            target = db.execute("""SELECT ip.id,ip.assignee_id,s.name AS site_name
+                FROM insp_plans ip JOIN sites s ON s.id=?
+                WHERE ip.id=? AND EXISTS (
+                    SELECT 1 FROM insp_plan_items i
+                    WHERE i.plan_id=ip.id AND i.site_id=?
+                )""", (site_id, plan_id, site_id)).fetchone()
+            if not target:
+                return jsonify(not_found[0]), not_found[1]
+            assigned_site = bool(db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+                (user['id'], site_id)).fetchone())
+            operator_allowed = ('operator' in roles and assigned_site
+                                and int(target['assignee_id'] or 0) == int(user['id']))
+            reviewer_allowed = 'reviewer' in roles and assigned_site
+            if not (operator_allowed or reviewer_allowed):
+                return jsonify(not_found[0]), not_found[1]
+            if item_id is not None:
+                item_sql = 'SELECT 1 FROM insp_plan_items WHERE id=? AND plan_id=? AND site_id=?'
+                if scope == 'current':
+                    item_sql += " AND COALESCE(execution_status,'active')='active'"
+                if not db.execute(item_sql, (item_id, plan_id, site_id)).fetchone():
+                    return jsonify(not_found[0]), not_found[1]
+
+            safe_extra = "CASE WHEN json_valid(oa.extra_json) THEN oa.extra_json ELSE '{}' END"
+            linked_item = (
+                "COALESCE(NULLIF(oa.item_id,0),"
+                "CASE WHEN oa.source_type='inspection' THEN NULLIF(oa.source_id,0) END,"
+                f"CAST(json_extract({safe_extra},'$.item_id') AS INTEGER))"
+            )
+            stored_material_role = (
+                f"CASE WHEN json_extract({safe_extra},'$.material_role')='supplement' "
+                "THEN 'supplement' ELSE 'formal' END"
+            )
+            clauses = [
+                "oa.source_type IN ('inspection','site_photo')",
+                'i.plan_id=?', 'i.site_id=?',
+            ]
+            params = [plan_id, site_id]
+            if item_id is not None:
+                clauses.append('i.id=?')
+                params.append(item_id)
+            if scope == 'current':
+                clauses.extend([
+                    "COALESCE(i.execution_status,'active')='active'",
+                    'COALESCE(oa.is_deleted,0)=0',
+                    "COALESCE(oa.review_status,'pending') NOT IN ('voided','superseded')",
+                    "(COALESCE(i.rework_required_at,'')='' OR "
+                    "COALESCE(NULLIF(oa.taken_at,''),oa.created_at)>=i.rework_required_at)",
+                ])
+            if review_status != 'all':
+                clauses.append("LOWER(COALESCE(oa.review_status,'pending'))=?")
+                params.append(review_status)
+            if qualification != 'all':
+                clauses.append("LOWER(COALESCE(oa.evidence_qualification,'review'))=?")
+                params.append(qualification)
+            if material_role != 'all':
+                clauses.append(f'{stored_material_role}=?')
+                params.append(material_role)
+
+            from_sql = (f' FROM operation_attachments oa '
+                        f'JOIN insp_plan_items i ON i.id={linked_item} '
+                        f"WHERE {' AND '.join(clauses)}")
+            total = int(db.execute('SELECT COUNT(*)' + from_sql, params).fetchone()[0] or 0)
+            rows = db.execute(f"""SELECT oa.*,i.id AS linked_item_id,i.item_name AS linked_item_name,
+                    i.category AS linked_category,i.execution_status AS item_execution_status,
+                    i.rework_required_at AS item_rework_required_at,
+                    {stored_material_role} AS material_role
+                {from_sql}
+                ORDER BY CASE WHEN oa.taken_at IS NULL OR oa.taken_at='' THEN 1 ELSE 0 END,
+                         oa.taken_at DESC,
+                         CASE WHEN oa.taken_at IS NULL OR oa.taken_at='' THEN oa.created_at END DESC,
+                         oa.id DESC
+                LIMIT ? OFFSET ?""", params + [limit, (page - 1) * limit]).fetchall()
+
+            items = []
+            for row in rows:
+                attachment = dict(row)
+                status = _attachment_status_payload(attachment)
+                current_status = status['review_status']
+                deleted = bool(attachment.get('is_deleted'))
+                raw_url = str(attachment.get('stored_path') or '').strip()
+                normalized_url = _attachment_storage_path(raw_url)
+                safe_url = normalized_url if (
+                    normalized_url.startswith('/uploads/')
+                    and '\\' not in normalized_url
+                    and '..' not in normalized_url.split('/')
+                ) else ''
+                pending_upload = (
+                    attachment.get('source_type') == 'site_photo'
+                    and int(attachment.get('source_id') or 0) == 0
+                    and attachment.get('material_role') == 'formal'
+                )
+                items.append({
+                    'id': attachment['id'],
+                    'item_id': attachment.get('linked_item_id'),
+                    'item_name': attachment.get('linked_item_name') or attachment.get('item_name') or '',
+                    'category': attachment.get('linked_category') or attachment.get('category') or '',
+                    'url': safe_url,
+                    'material_role': attachment.get('material_role') or 'formal',
+                    'capture_source': attachment.get('capture_source') or '',
+                    'taken_at': attachment.get('taken_at'),
+                    'created_at': attachment.get('created_at'),
+                    'uploader': {
+                        'id': attachment.get('uploader_id'),
+                        'name': attachment.get('uploader_name') or '',
+                    },
+                    'review_status': current_status,
+                    'review_status_label': status['review_status_label'],
+                    'evidence_qualification': status['evidence_qualification'],
+                    'evidence_qualification_label': status['evidence_qualification_label'],
+                    'is_effective_evidence': bool(status['is_effective_evidence']),
+                    'risk_notice': attachment.get('flag_reason') or status['risk_notice'],
+                    'reject_reason': attachment.get('reject_reason') or '',
+                    'evidence_reason': attachment.get('evidence_reason') or '',
+                    'evidence_next_action': attachment.get('evidence_next_action') or '',
+                    'rework_required_at': attachment.get('item_rework_required_at') or '',
+                    'deleted': deleted,
+                    'capabilities': {
+                        'can_review': bool(scope == 'current' and reviewer_allowed and not deleted
+                                           and (attachment.get('item_execution_status') or 'active') == 'active'
+                                           and current_status == 'pending'
+                                           and attachment.get('material_role') == 'formal'),
+                        'can_retake': bool(scope == 'current' and operator_allowed
+                                           and (attachment.get('item_execution_status') or 'active') == 'active' and (
+                            current_status == 'rejected'
+                            or attachment.get('item_rework_required_at'))),
+                        'can_delete_pending': bool(scope == 'current' and operator_allowed and not deleted
+                                                   and pending_upload
+                                                   and int(attachment.get('uploader_id') or 0) == int(user['id'])
+                                                   and current_status == 'pending'),
+                        'can_view_original': bool(safe_url),
+                    },
+                })
+            return jsonify({
+                'plan_id': plan_id,
+                'site': {'id': site_id, 'name': target['site_name']},
+                'scope': scope,
+                'filters': {
+                    'item_id': item_id,
+                    'review_status': review_status,
+                    'evidence_qualification': qualification,
+                    'material_role': material_role,
+                },
+                'items': items,
+                'pagination': {
+                    'page': page,
+                    'limit': limit,
+                    'total': total,
+                    'has_more': page * limit < total,
+                },
+            })
+    except sqlite3.Error:
+        return jsonify({
+            'error': '照片归档暂时不可用',
+            'code': 'PHOTO_ARCHIVE_UNAVAILABLE',
+            'next_action': '请保留当前筛选并稍后重试',
+        }), 503
+
+
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagents')
 @login_required
 def mobile_execution_site_reagents(plan_id, site_id):
@@ -28433,16 +28668,16 @@ def _ps_next_favorite_start(db, user_id, snapshot):
     return today.strftime('%Y-%m-%d')
 
 
-def _require_plan_favorite_operator():
-    if not _has_any_role(g.current_user, 'operator'):
-        return jsonify({'error': '常用计划仅供承担现场巡检职责的运维人员使用'}), 403
+def _require_plan_favorite_manager():
+    if not _has_any_role(g.current_user, 'admin', 'operator'):
+        return jsonify({'error': '常用计划仅供管理员或运维人员管理本人模板'}), 403
     return None
 
 
 @app.route('/api/plan-schedule-favorites', methods=['GET'])
 @login_required
 def api_plan_schedule_favorites_list():
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     with get_db() as db:
@@ -28463,7 +28698,7 @@ def api_plan_schedule_favorites_list():
 @app.route('/api/plan-schedule-favorites', methods=['POST'])
 @login_required
 def api_plan_schedule_favorites_create():
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     data = request.get_json(silent=True) or {}
@@ -28516,7 +28751,7 @@ def api_plan_schedule_favorites_create():
 @app.route('/api/plan-schedule-favorites/<int:favorite_id>', methods=['DELETE'])
 @login_required
 def api_plan_schedule_favorites_delete(favorite_id):
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     with get_db() as db:
@@ -28531,7 +28766,7 @@ def api_plan_schedule_favorites_delete(favorite_id):
 @app.route('/api/plan-schedule-favorites/<int:favorite_id>/draft', methods=['POST'])
 @login_required
 def api_plan_schedule_favorite_create_draft(favorite_id):
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     data = request.get_json(silent=True) or {}
