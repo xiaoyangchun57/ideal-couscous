@@ -23387,10 +23387,16 @@ def mobile_execution_site_reagents(plan_id, site_id):
 @login_required
 def mobile_execution_reagent_replacement(plan_id, site_id):
     """现场试剂更换：只允许写入当前执行包站点，并留下执行包关联。"""
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        _, access_error = _reagent_transaction_access(db, site_id, write=True)
+        if access_error:
+            return access_error
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
     reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
     if error: return error
     new_qty, error = _reagent_number_field(
@@ -23403,7 +23409,7 @@ def mobile_execution_reagent_replacement(plan_id, site_id):
     replaced_at, error = _reagent_business_time(
         raw_replaced_at, 'replaced_at', default_now=True)
     if error: return error
-    idempotency_key, error = _reagent_idempotency_key(data)
+    idempotency_key, error = _reagent_idempotency_key(data, required=True)
     if error: return error
     new_batch_no = str(data.get('new_batch_no') or '').strip()[:100]
     remark = str(data.get('remark') or '').strip()[:500]
@@ -23485,10 +23491,16 @@ def mobile_execution_reagent_replacement(plan_id, site_id):
 @login_required
 def mobile_execution_reagent_qc(plan_id, site_id):
     """现场试剂标定：结果归属执行包；不通过仅改变标定状态并通知跟进。"""
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        _, access_error = _reagent_transaction_access(db, site_id, write=True)
+        if access_error:
+            return access_error
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
     reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
     if error: return error
     standard_value, error = _reagent_number_field(
@@ -23505,14 +23517,25 @@ def mobile_execution_reagent_qc(plan_id, site_id):
     else:
         return jsonify({'error': 'passed 必须明确为通过或不通过',
                         'code': 'REAGENT_INVALID_INPUT'}), 400
-    fail_action = (data.get('fail_action') or '').strip()
+    raw_fail_action = data.get('fail_action')
+    if raw_fail_action is None:
+        fail_action = ''
+    elif not isinstance(raw_fail_action, str):
+        return jsonify({'error': 'fail_action 必须是字符串',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    else:
+        fail_action = raw_fail_action.strip()
+        if fail_action and fail_action not in ('calibrate', 'repair'):
+            return jsonify({'error': 'fail_action 必须是 calibrate 或 repair',
+                            'code': 'REAGENT_INVALID_INPUT'}), 400
     if not passed and fail_action not in ('calibrate', 'repair'):
-        return jsonify({'error': '标定不通过时请选择重新标定或报修'}), 400
+        return jsonify({'error': '标定不通过时请选择重新标定或报修',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
     deviation = round(measured_value - standard_value, 4)
     raw_qc_time = data.get('qc_time')
     qc_time, error = _reagent_business_time(raw_qc_time, 'qc_time', default_now=True)
     if error: return error
-    idempotency_key, error = _reagent_idempotency_key(data)
+    idempotency_key, error = _reagent_idempotency_key(data, required=True)
     if error: return error
     remark = str(data.get('remark') or '').strip()[:500]
     normalized = {
@@ -25420,8 +25443,11 @@ def _reagent_business_time(value, field, *, default_now=False):
                            'code': 'REAGENT_INVALID_TIME'}), 400)
 
 
-def _reagent_idempotency_key(data):
+def _reagent_idempotency_key(data, *, required=False):
     key = str(data.get('_idempotency_key') or '').strip()
+    if required and not key:
+        return None, (jsonify({'error': '必须提供有效的幂等键',
+                               'code': 'REAGENT_IDEMPOTENCY_KEY_INVALID'}), 400)
     if len(key) > 160:
         return None, (jsonify({'error': '幂等键不能超过 160 个字符',
                                'code': 'REAGENT_IDEMPOTENCY_KEY_INVALID'}), 400)

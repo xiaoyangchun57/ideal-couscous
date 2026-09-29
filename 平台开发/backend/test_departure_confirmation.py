@@ -158,6 +158,18 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
         finally:
             db.close()
 
+    def reagent_write_state(self):
+        return {
+            'inventory': self.db_row('''SELECT current_qty,qc_status,batch_no,
+                last_replaced_at,expected_duration_days,updated_at
+                FROM reagent_inventory WHERE site_id=1 AND reagent_id=3'''),
+            'records': self.db_value('SELECT COUNT(*) FROM reagent_records'),
+            'qc_records': self.db_value('SELECT COUNT(*) FROM reagent_qc_records'),
+            'alerts': self.db_value('SELECT COUNT(*) FROM reagent_alerts'),
+            'notifications': self.db_value('SELECT COUNT(*) FROM notifications'),
+            'idempotency': self.db_value('SELECT COUNT(*) FROM reagent_idempotency'),
+        }
+
     def test_confirmation_is_idempotent_and_does_not_change_resources_or_execution(self):
         url = '/api/mobile/execution-plans/42/departure-confirmation'
         first = self.client.post(url, headers=self.owner_headers, json={
@@ -301,6 +313,61 @@ class DepartureConfirmationRouteTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 400, response.json)
         self.assertEqual(self.db_value('SELECT COUNT(*) FROM reagent_records'), 0)
         self.assertEqual(self.db_value('SELECT current_qty FROM reagent_inventory'), 2)
+
+    def test_reagent_writes_require_nonblank_idempotency_key(self):
+        base = '/api/mobile/execution-plans/42/sites/1'
+        baseline = self.reagent_write_state()
+        replacement = {
+            'reagent_id': 3, 'new_qty': 5, 'expected_duration_days': 30,
+            'new_batch_no': 'REQUIRED-KEY', 'replaced_at': '2026-09-29 10:00:00',
+        }
+        qc = {
+            'reagent_id': 3, 'standard_value': 10, 'measured_value': 12,
+            'passed': False, 'fail_action': 'repair',
+            'qc_time': '2026-09-29 10:10:00',
+        }
+        for path, payload in (
+            ('/reagent-replacements', replacement),
+            ('/reagent-qc', qc),
+        ):
+            for key in (None, '   '):
+                with self.subTest(path=path, key=key):
+                    body = dict(payload)
+                    if key is not None:
+                        body['_idempotency_key'] = key
+                    response = self.client.post(
+                        base + path, headers=self.owner_headers, json=body)
+                    self.assertEqual(
+                        (response.status_code, response.json['code']),
+                        (400, 'REAGENT_IDEMPOTENCY_KEY_INVALID'))
+                    self.assertEqual(self.reagent_write_state(), baseline)
+
+    def test_reagent_writes_reject_non_object_json_without_side_effects(self):
+        base = '/api/mobile/execution-plans/42/sites/1'
+        baseline = self.reagent_write_state()
+        for path in ('/reagent-replacements', '/reagent-qc'):
+            with self.subTest(path=path):
+                response = self.client.post(
+                    base + path, headers=self.owner_headers, json=['invalid-root'])
+                self.assertEqual(
+                    (response.status_code, response.json['code']),
+                    (400, 'REAGENT_INVALID_INPUT'))
+                self.assertEqual(self.reagent_write_state(), baseline)
+
+    def test_reagent_qc_rejects_invalid_fail_action_without_side_effects(self):
+        url = '/api/mobile/execution-plans/42/sites/1/reagent-qc'
+        baseline = self.reagent_write_state()
+        for fail_action in (123, 'ignore'):
+            with self.subTest(fail_action=fail_action):
+                response = self.client.post(url, headers=self.owner_headers, json={
+                    'reagent_id': 3, 'standard_value': 10, 'measured_value': 12,
+                    'passed': False, 'fail_action': fail_action,
+                    '_idempotency_key': 'invalid-fail-action',
+                })
+                self.assertEqual(
+                    (response.status_code, response.json['code']),
+                    (400, 'REAGENT_INVALID_INPUT'))
+                self.assertEqual(self.reagent_write_state(), baseline)
 
     def test_reagent_replacement_is_stable_idempotent_and_rejects_key_reuse(self):
         url = '/api/mobile/execution-plans/42/sites/1/reagent-replacements'
