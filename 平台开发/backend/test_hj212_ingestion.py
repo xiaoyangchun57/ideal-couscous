@@ -254,6 +254,13 @@ class HJ212IngestionContractTest(unittest.TestCase):
         raw = make_real_shape_hj212(
             command="2061", cp="DataTime=20260911130000;w01001-Avg=7.1;w01001-Flag=N")
         self.assertIsNone(self.server._process_raw(raw, "2026-09-11T07:02:00+00:00"))
+        with closing(sqlite3.connect(self.database)) as connection:
+            receipt = connection.execute(
+                "SELECT authentication_status,disposition,persistence_state FROM ingest_raw_frames"
+            ).fetchone()
+            errors = connection.execute("SELECT error_type FROM ingest_errors").fetchall()
+        self.assertEqual(receipt, ("authenticated", "pending_parse", "pending_parse"))
+        self.assertNotIn(("hj212_non_data_command",), errors)
         self.assertEqual(normalize_raw_frame(self.database, self._raw_ids()[0]), "partial")
         with closing(sqlite3.connect(self.database)) as connection:
             issue = connection.execute(
