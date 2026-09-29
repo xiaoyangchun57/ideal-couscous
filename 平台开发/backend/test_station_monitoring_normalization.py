@@ -1058,6 +1058,17 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         item = next(row for row in listed['items'] if row['site_id'] == self.site_id)
         self.assertEqual(item['last_valid_observation_at'], '2020-06-11T20:00:00+00:00')
         self.assertEqual(item['last_valid_observation_at'], detail['site']['last_valid_observation_at'])
+        self.assertEqual(item['latest_values'], [{key: value.get(key) for key in (
+            'business_metric', 'factor_name_cn', 'standard_value', 'standard_unit', 'observed_at'
+        )} for value in detail['monitoring']['latest_values']])
+        self.assertEqual(item['latest_values'][0]['standard_value'], 8.8)
+        self.assertEqual(item['latest_values'][0]['factor_name_cn'], '水温')
+        self.assertNotIn('endpoint_id', item['latest_values'][0])
+        self.assertEqual(next(row for row in listed['items'] if row['site_id'] == self.other_site_id)['latest_values'], [])
+        mine = web_app.app.test_client().get('/api/station-monitoring/sites?scope=mine',
+                                             headers=self._headers('monitor-operator')).get_json()
+        self.assertEqual([row['site_id'] for row in mine['items']], [self.site_id])
+        self.assertEqual(mine['items'][0]['latest_values'], item['latest_values'])
         self.assertEqual(item['monitoring_status'], detail['site']['monitoring_status'])
         self.assertEqual(item['reason_code'], detail['site']['reason_code'])
 
@@ -1076,6 +1087,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(item['monitoring_status'], 'interval_unconfigured')
         self.assertEqual(detail['site']['monitoring_status'], 'interval_unconfigured')
         self.assertIsNone(item['last_valid_observation_at'])
+        self.assertEqual(item['latest_values'], [])
         self.assertEqual(detail['monitoring']['latest_values'], [])
         trend = web_app.app.test_client().get(
             f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
@@ -1102,6 +1114,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         item = next(item for item in listed['items'] if item['site_id'] == self.site_id)
         detail = web_app.app.test_client().get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers).get_json()
         self.assertEqual(item['monitoring_status'], 'not_connected')
+        self.assertEqual(item['latest_values'], [])
         self.assertEqual(detail['site']['monitoring_status'], 'not_connected')
         self.assertEqual(item['published_factor_count'], 0)
         summary = web_app.app.test_client().get('/api/station-monitoring/access-summary', headers=headers).get_json()

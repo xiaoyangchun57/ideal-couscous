@@ -37,6 +37,7 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
             'other-token': {'id': 3, 'role': 'operator', 'real_name': '其他运维', 'username': 'other'},
             'admin-token': {'id': 4, 'role': 'admin', 'roles': ['admin'], 'real_name': '纯管理员', 'username': 'admin'},
             'dual-token': {'id': 2, 'role': 'admin', 'roles': ['admin', 'operator'], 'real_name': '双角色', 'username': 'dual'},
+            'reviewer-token': {'id': 5, 'role': 'reviewer', 'roles': ['reviewer'], 'real_name': '纯审核员', 'username': 'reviewer'},
         })
         with temporary_db() as db:
             db.executescript('''
@@ -54,6 +55,7 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                     start_at TEXT, end_at TEXT, status TEXT
                 );
                 CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vehicle_id INTEGER, document_type TEXT, valid_until TEXT
                 );
                 CREATE TABLE plan_schedules (
@@ -85,8 +87,12 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                 );
                 INSERT INTO users VALUES (2, '固定运维', 'operator');
                 INSERT INTO users VALUES (3, '其他运维', 'operator');
+                INSERT INTO users VALUES (4, '纯管理员', 'admin');
+                INSERT INTO users VALUES (5, '纯审核员', 'reviewer');
                 INSERT INTO user_sites VALUES (2, 10);
                 INSERT INTO user_sites VALUES (2, 11);
+                INSERT INTO user_sites VALUES (4, 10);
+                INSERT INTO user_sites VALUES (5, 10);
                 INSERT INTO sites VALUES (10, '一号站', 28.1, 115.1, 'water_quality');
                 INSERT INTO sites VALUES (11, '二号站', 28.2, 115.2, 'water_quality');
                 INSERT INTO vehicles VALUES (7, '赣A00007', 'available', NULL, NULL);
@@ -119,7 +125,13 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                  spare_parts,work_order_ids,status,remarks,tasks_generated,vehicle_id)
                 VALUES (2,2,'weekly','2026-07-27','2026-08-02',?,?,?,?, 'approved',?,1,7)''',
                 (json.dumps(second_plan_data), json.dumps({'2026-07-28': 7}),
-                 json.dumps([]), json.dumps([]), '另一条固定路线'))
+                  json.dumps([]), json.dumps([]), '另一条固定路线'))
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,period_start,period_end,plan_data,vehicle_days,
+                 spare_parts,work_order_ids,status,remarks,tasks_generated,vehicle_id)
+                VALUES (4,4,'weekly','2026-07-06','2026-07-12',?,?,?,?, 'approved',?,1,7)''',
+                (json.dumps({'2026-07-07': {'sites': [10], 'notes': '管理员本人计划'}}),
+                 json.dumps({'2026-07-07': 7}), json.dumps([]), json.dumps([]), '管理员本人模板'))
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -196,20 +208,37 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
         self.assertEqual(second.status_code, 201, second.json)
         self.assertEqual(other.status_code, 403, other.json)
 
-    def test_pure_admin_cannot_use_operator_favorites_but_dual_role_can(self):
+    def test_admin_and_operator_manage_only_their_own_favorites_while_reviewer_is_denied(self):
         created = self.client.post('/api/plan-schedule-favorites', headers=self.headers(),
                                    json={'schedule_id': 1})
-        favorite_id = created.json['id']
+        owner_favorite_id = created.json['id']
 
-        responses = [
-            self.client.get('/api/plan-schedule-favorites', headers=self.headers('admin-token')),
-            self.client.post('/api/plan-schedule-favorites', headers=self.headers('admin-token'),
-                             json={'schedule_id': 1}),
-            self.client.delete(f'/api/plan-schedule-favorites/{favorite_id}', headers=self.headers('admin-token')),
-            self.client.post(f'/api/plan-schedule-favorites/{favorite_id}/draft',
-                             headers=self.headers('admin-token'), json={'period_start': '2026-08-03'}),
+        admin_list = self.client.get('/api/plan-schedule-favorites', headers=self.headers('admin-token'))
+        admin_create = self.client.post('/api/plan-schedule-favorites', headers=self.headers('admin-token'),
+                                        json={'schedule_id': 4, 'name': '管理员常用计划'})
+        self.assertEqual(admin_list.status_code, 200, admin_list.json)
+        self.assertEqual(admin_list.json, [])
+        self.assertEqual(admin_create.status_code, 201, admin_create.json)
+        admin_favorite_id = admin_create.json['id']
+        self.assertEqual(self.client.delete(
+            f'/api/plan-schedule-favorites/{owner_favorite_id}',
+            headers=self.headers('admin-token')).status_code, 404)
+        drafted = self.client.post(
+            f'/api/plan-schedule-favorites/{admin_favorite_id}/draft',
+            headers=self.headers('admin-token'), json={'period_start': '2026-08-10'})
+        self.assertEqual(drafted.status_code, 201, drafted.json)
+        self.assertEqual(drafted.json['schedule']['user_id'], 4)
+
+        reviewer_responses = [
+            self.client.get('/api/plan-schedule-favorites', headers=self.headers('reviewer-token')),
+            self.client.post('/api/plan-schedule-favorites', headers=self.headers('reviewer-token'),
+                             json={'schedule_id': 4}),
+            self.client.delete(f'/api/plan-schedule-favorites/{admin_favorite_id}',
+                               headers=self.headers('reviewer-token')),
+            self.client.post(f'/api/plan-schedule-favorites/{admin_favorite_id}/draft',
+                             headers=self.headers('reviewer-token'), json={'period_start': '2026-08-17'}),
         ]
-        self.assertTrue(all(response.status_code == 403 for response in responses))
+        self.assertTrue(all(response.status_code == 403 for response in reviewer_responses))
         self.assertEqual(self.client.get('/api/plan-schedule-favorites',
                                          headers=self.headers('dual-token')).status_code, 200)
 

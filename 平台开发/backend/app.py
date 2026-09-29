@@ -16913,11 +16913,26 @@ def _parse_watermark_fields(text):
             result['taken_at'] = datetime(*values).strftime('%Y-%m-%d %H:%M:%S')
         except ValueError:
             pass
-    gps_match = re.search(
-        r'(\d{1,2}\.\d{4,})\s*[^\dA-Z]{0,3}[NS]?\s*[,，、 ]+\s*(\d{2,3}\.\d{4,})', raw, re.I)
-    if gps_match:
-        result['gps_lat'] = float(gps_match.group(1))
-        result['gps_lng'] = float(gps_match.group(2))
+    def coordinate(value, direction):
+        parsed = float(value)
+        if str(direction or '').upper() in ('S', 'W'):
+            parsed = -abs(parsed)
+        return parsed
+
+    labelled_lat = re.search(
+        r'(?:纬度|LAT(?:ITUDE)?)\s*[:：=]?\s*([+-]?\d{1,2}(?:\.\d+)?)\s*([NS])?', raw, re.I)
+    labelled_lng = re.search(
+        r'(?:经度|LON(?:GITUDE)?|LNG)\s*[:：=]?\s*([+-]?\d{1,3}(?:\.\d+)?)\s*([EW])?', raw, re.I)
+    if labelled_lat and labelled_lng:
+        result['gps_lat'] = coordinate(labelled_lat.group(1), labelled_lat.group(2))
+        result['gps_lng'] = coordinate(labelled_lng.group(1), labelled_lng.group(2))
+    else:
+        gps_match = re.search(
+            r'([+-]?\d{1,2}\.\d{4,})\s*([NS])?\s*[,，、 ]+\s*'
+            r'([+-]?\d{2,3}\.\d{4,})\s*([EW])?', raw, re.I)
+        if gps_match:
+            result['gps_lat'] = coordinate(gps_match.group(1), gps_match.group(2))
+            result['gps_lng'] = coordinate(gps_match.group(3), gps_match.group(4))
     codes = re.findall(
         r'(?<![A-Z0-9])(?=[A-Z0-9]{10,24}(?![A-Z0-9]))(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]+(?![A-Z0-9])',
         raw.upper())
@@ -23128,6 +23143,226 @@ def _mobile_execution_site_access(db, plan_id, site_id, user):
     return bool(resource_ready)
 
 
+def _mobile_photo_query_error(message):
+    return jsonify({
+        'error': message,
+        'code': 'INVALID_PHOTO_QUERY',
+        'next_action': '请恢复默认筛选后重试',
+    }), 400
+
+
+@app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/photos')
+@login_required
+def mobile_execution_site_photos(plan_id, site_id):
+    """Read inspection photos through the plan/site business boundary."""
+    user = g.current_user
+    roles = set(_normalize_user_roles(user.get('roles') or [user.get('role')]))
+    if not roles.intersection({'operator', 'reviewer'}):
+        return jsonify({
+            'error': '当前账号没有巡检照片查看权限',
+            'code': 'PHOTO_READ_ROLE_REQUIRED',
+            'next_action': '请返回任务列表或联系管理员配置业务角色',
+        }), 403
+
+    scope = str(request.args.get('scope') or 'current').strip().lower()
+    review_status = str(request.args.get('review_status') or 'all').strip().lower()
+    qualification = str(request.args.get('evidence_qualification') or 'all').strip().lower()
+    material_role = str(request.args.get('material_role') or 'all').strip().lower()
+    if scope not in ('current', 'history'):
+        return _mobile_photo_query_error('scope 仅支持 current 或 history')
+    if review_status not in ('all', 'pending', 'approved', 'rejected', 'voided', 'superseded'):
+        return _mobile_photo_query_error('review_status 参数无效')
+    if qualification not in ('all', 'qualified', 'review', 'ineligible'):
+        return _mobile_photo_query_error('evidence_qualification 参数无效')
+    if material_role not in ('all', 'formal', 'supplement'):
+        return _mobile_photo_query_error('material_role 参数无效')
+
+    def positive_int(name, default, maximum=None):
+        raw = request.args.get(name)
+        if raw in (None, ''):
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0 or (maximum is not None and value > maximum):
+            return None
+        return value
+
+    item_id = positive_int('item_id', None)
+    if request.args.get('item_id') not in (None, '') and item_id is None:
+        return _mobile_photo_query_error('item_id 必须是正整数')
+    page = positive_int('page', 1)
+    limit = positive_int('limit', 20, maximum=50)
+    if page is None or limit is None:
+        return _mobile_photo_query_error('page 必须为正整数，limit 必须在 1 到 50 之间')
+
+    not_found = ({
+        'error': '该执行站点不存在或不在你的业务范围内',
+        'code': 'EXECUTION_SITE_NOT_FOUND',
+        'next_action': '请返回巡检任务列表刷新',
+    }, 404)
+    try:
+        with get_db() as db:
+            target = db.execute("""SELECT ip.id,ip.assignee_id,s.name AS site_name
+                FROM insp_plans ip JOIN sites s ON s.id=?
+                WHERE ip.id=? AND EXISTS (
+                    SELECT 1 FROM insp_plan_items i
+                    WHERE i.plan_id=ip.id AND i.site_id=?
+                )""", (site_id, plan_id, site_id)).fetchone()
+            if not target:
+                return jsonify(not_found[0]), not_found[1]
+            assigned_site = bool(db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+                (user['id'], site_id)).fetchone())
+            operator_allowed = ('operator' in roles and assigned_site
+                                and int(target['assignee_id'] or 0) == int(user['id']))
+            reviewer_allowed = 'reviewer' in roles and assigned_site
+            if not (operator_allowed or reviewer_allowed):
+                return jsonify(not_found[0]), not_found[1]
+            if item_id is not None:
+                item_sql = 'SELECT 1 FROM insp_plan_items WHERE id=? AND plan_id=? AND site_id=?'
+                if scope == 'current':
+                    item_sql += " AND COALESCE(execution_status,'active')='active'"
+                if not db.execute(item_sql, (item_id, plan_id, site_id)).fetchone():
+                    return jsonify(not_found[0]), not_found[1]
+
+            safe_extra = "CASE WHEN json_valid(oa.extra_json) THEN oa.extra_json ELSE '{}' END"
+            linked_item = (
+                "COALESCE(NULLIF(oa.item_id,0),"
+                "CASE WHEN oa.source_type='inspection' THEN NULLIF(oa.source_id,0) END,"
+                f"CAST(json_extract({safe_extra},'$.item_id') AS INTEGER))"
+            )
+            stored_material_role = (
+                f"CASE WHEN json_extract({safe_extra},'$.material_role')='supplement' "
+                "THEN 'supplement' ELSE 'formal' END"
+            )
+            clauses = [
+                "oa.source_type IN ('inspection','site_photo')",
+                'i.plan_id=?', 'i.site_id=?',
+            ]
+            params = [plan_id, site_id]
+            if item_id is not None:
+                clauses.append('i.id=?')
+                params.append(item_id)
+            if scope == 'current':
+                clauses.extend([
+                    "COALESCE(i.execution_status,'active')='active'",
+                    'COALESCE(oa.is_deleted,0)=0',
+                    "COALESCE(oa.review_status,'pending') NOT IN ('voided','superseded')",
+                    "(COALESCE(i.rework_required_at,'')='' OR "
+                    "COALESCE(NULLIF(oa.taken_at,''),oa.created_at)>=i.rework_required_at)",
+                ])
+            if review_status != 'all':
+                clauses.append("LOWER(COALESCE(oa.review_status,'pending'))=?")
+                params.append(review_status)
+            if qualification != 'all':
+                clauses.append("LOWER(COALESCE(oa.evidence_qualification,'review'))=?")
+                params.append(qualification)
+            if material_role != 'all':
+                clauses.append(f'{stored_material_role}=?')
+                params.append(material_role)
+
+            from_sql = (f' FROM operation_attachments oa '
+                        f'JOIN insp_plan_items i ON i.id={linked_item} '
+                        f"WHERE {' AND '.join(clauses)}")
+            total = int(db.execute('SELECT COUNT(*)' + from_sql, params).fetchone()[0] or 0)
+            rows = db.execute(f"""SELECT oa.*,i.id AS linked_item_id,i.item_name AS linked_item_name,
+                    i.category AS linked_category,i.execution_status AS item_execution_status,
+                    i.rework_required_at AS item_rework_required_at,
+                    {stored_material_role} AS material_role
+                {from_sql}
+                ORDER BY CASE WHEN oa.taken_at IS NULL OR oa.taken_at='' THEN 1 ELSE 0 END,
+                         oa.taken_at DESC,
+                         CASE WHEN oa.taken_at IS NULL OR oa.taken_at='' THEN oa.created_at END DESC,
+                         oa.id DESC
+                LIMIT ? OFFSET ?""", params + [limit, (page - 1) * limit]).fetchall()
+
+            items = []
+            for row in rows:
+                attachment = dict(row)
+                status = _attachment_status_payload(attachment)
+                current_status = status['review_status']
+                deleted = bool(attachment.get('is_deleted'))
+                raw_url = str(attachment.get('stored_path') or '').strip()
+                normalized_url = _attachment_storage_path(raw_url)
+                safe_url = normalized_url if (
+                    normalized_url.startswith('/uploads/')
+                    and '\\' not in normalized_url
+                    and '..' not in normalized_url.split('/')
+                ) else ''
+                pending_upload = (
+                    attachment.get('source_type') == 'site_photo'
+                    and int(attachment.get('source_id') or 0) == 0
+                    and attachment.get('material_role') == 'formal'
+                )
+                items.append({
+                    'id': attachment['id'],
+                    'item_id': attachment.get('linked_item_id'),
+                    'item_name': attachment.get('linked_item_name') or attachment.get('item_name') or '',
+                    'category': attachment.get('linked_category') or attachment.get('category') or '',
+                    'url': safe_url,
+                    'material_role': attachment.get('material_role') or 'formal',
+                    'capture_source': attachment.get('capture_source') or '',
+                    'taken_at': attachment.get('taken_at'),
+                    'created_at': attachment.get('created_at'),
+                    'uploader': {
+                        'id': attachment.get('uploader_id'),
+                        'name': attachment.get('uploader_name') or '',
+                    },
+                    'review_status': current_status,
+                    'review_status_label': status['review_status_label'],
+                    'evidence_qualification': status['evidence_qualification'],
+                    'evidence_qualification_label': status['evidence_qualification_label'],
+                    'is_effective_evidence': bool(status['is_effective_evidence']),
+                    'risk_notice': attachment.get('flag_reason') or status['risk_notice'],
+                    'reject_reason': attachment.get('reject_reason') or '',
+                    'evidence_reason': attachment.get('evidence_reason') or '',
+                    'evidence_next_action': attachment.get('evidence_next_action') or '',
+                    'rework_required_at': attachment.get('item_rework_required_at') or '',
+                    'deleted': deleted,
+                    'capabilities': {
+                        'can_review': bool(scope == 'current' and reviewer_allowed and not deleted
+                                           and (attachment.get('item_execution_status') or 'active') == 'active'
+                                           and current_status == 'pending'
+                                           and attachment.get('material_role') == 'formal'),
+                        'can_retake': bool(scope == 'current' and operator_allowed
+                                           and (attachment.get('item_execution_status') or 'active') == 'active' and (
+                            current_status == 'rejected'
+                            or attachment.get('item_rework_required_at'))),
+                        'can_delete_pending': bool(scope == 'current' and operator_allowed and not deleted
+                                                   and pending_upload
+                                                   and int(attachment.get('uploader_id') or 0) == int(user['id'])
+                                                   and current_status == 'pending'),
+                        'can_view_original': bool(safe_url),
+                    },
+                })
+            return jsonify({
+                'plan_id': plan_id,
+                'site': {'id': site_id, 'name': target['site_name']},
+                'scope': scope,
+                'filters': {
+                    'item_id': item_id,
+                    'review_status': review_status,
+                    'evidence_qualification': qualification,
+                    'material_role': material_role,
+                },
+                'items': items,
+                'pagination': {
+                    'page': page,
+                    'limit': limit,
+                    'total': total,
+                    'has_more': page * limit < total,
+                },
+            })
+    except sqlite3.Error:
+        return jsonify({
+            'error': '照片归档暂时不可用',
+            'code': 'PHOTO_ARCHIVE_UNAVAILABLE',
+            'next_action': '请保留当前筛选并稍后重试',
+        }), 503
+
+
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagents')
 @login_required
 def mobile_execution_site_reagents(plan_id, site_id):
@@ -23135,91 +23370,245 @@ def mobile_execution_site_reagents(plan_id, site_id):
     with get_db() as db:
         if not _mobile_execution_site_read_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        can_maintain = _mobile_execution_site_access(
+            db, plan_id, site_id, g.current_user)
+        if can_maintain:
+            access, _ = _reagent_transaction_access(db, site_id, write=True)
+            can_maintain = bool(access)
         rows = db.execute("""SELECT ri.*, r.name AS reagent_name, r.unit
             FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
             WHERE ri.site_id=? ORDER BY r.name""", (site_id,)).fetchall()
-    return jsonify({'items': [dict(row) for row in rows]})
+        items = [_reagent_project_inventory(row, can_maintain=can_maintain)
+                 for row in rows]
+    return jsonify({'items': items})
 
 
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-replacements', methods=['POST'])
 @login_required
 def mobile_execution_reagent_replacement(plan_id, site_id):
     """现场试剂更换：只允许写入当前执行包站点，并留下执行包关联。"""
-    data = request.get_json(silent=True) or {}
-    reagent_id = data.get('reagent_id')
-    try:
-        new_qty = float(data.get('new_qty'))
-    except (TypeError, ValueError):
-        return jsonify({'error': '请填写有效的更换后余量'}), 400
-    if not reagent_id or new_qty < 0:
-        return jsonify({'error': '试剂和更换后余量不能为空'}), 400
+    data = request.get_json(silent=True)
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
-        inv = db.execute("SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
-                         (site_id, reagent_id)).fetchone()
-        reagent = db.execute("SELECT name FROM reagents WHERE id=?", (reagent_id,)).fetchone()
-        if not inv or not reagent:
-            return jsonify({'error': '该站点无此试剂库存记录'}), 404
-        duration = data.get('expected_duration_days')
+        _, access_error = _reagent_transaction_access(db, site_id, write=True)
+        if access_error:
+            return access_error
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    new_qty, error = _reagent_number_field(
+        data.get('new_qty'), 'new_qty', strictly_positive=True)
+    if error: return error
+    expected_duration_days, error = _reagent_int_field(
+        data.get('expected_duration_days'), 'expected_duration_days')
+    if error: return error
+    raw_replaced_at = data.get('replaced_at')
+    replaced_at, error = _reagent_business_time(
+        raw_replaced_at, 'replaced_at', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data, required=True)
+    if error: return error
+    new_batch_no = str(data.get('new_batch_no') or '').strip()[:100]
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'plan_id': plan_id, 'site_id': site_id, 'reagent_id': reagent_id,
+        'new_qty': new_qty, 'new_batch_no': new_batch_no,
+        'expected_duration_days': expected_duration_days,
+        'replaced_at': replaced_at if raw_replaced_at not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
+    with get_db() as db:
         try:
-            duration = int(duration) if duration not in (None, '') else inv['expected_duration_days']
-        except (TypeError, ValueError):
-            return jsonify({'error': '预计使用天数必须是整数'}), 400
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db.execute("""INSERT INTO reagent_records
-            (site_id, reagent_name, usage_date, replacement_date, operator, notes,
-             old_qty, new_qty, plan_id)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
-            (site_id, reagent['name'], now, now, g.current_user.get('real_name', ''),
-             (data.get('remark') or '').strip()[:200] or '移动端现场更换',
-             inv['current_qty'], new_qty, plan_id))
-        db.execute("""UPDATE reagent_inventory SET current_qty=?, last_replaced_at=?,
-            expected_duration_days=?, qc_status='pending', updated_at=?
-            WHERE site_id=? AND reagent_id=?""",
-            (new_qty, now, duration, now, site_id, reagent_id))
-        db.commit()
-    return jsonify({'ok': True, 'qc_status': 'pending'})
+            db.execute('BEGIN IMMEDIATE')
+            if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+                db.rollback()
+                return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'mobile-execution:reagent-replacement',
+                idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            inventory_data = dict(inventory)
+            operator = (access['user'].get('real_name')
+                        or access['user'].get('username') or '未知用户')
+            db.execute("""INSERT INTO reagent_records
+                (site_id,reagent_name,reagent_type,usage_date,replacement_date,operator,
+                 operator_id,notes,old_batch_no,new_batch_no,old_qty,new_qty,plan_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, inventory['reagent_name'], '', replaced_at, replaced_at,
+                operator, access['user_id'], remark or '移动端现场更换',
+                inventory_data.get('batch_no') or '', new_batch_no,
+                inventory['current_qty'], new_qty, plan_id,
+            ))
+            db.execute("""UPDATE reagent_inventory SET current_qty=?,batch_no=?,
+                last_replaced_at=?,expected_duration_days=?,
+                updated_at=datetime('now','localtime'),qc_status='pending'
+                WHERE site_id=? AND reagent_id=?""", (
+                new_qty, new_batch_no, replaced_at, expected_duration_days,
+                site_id, reagent_id,
+            ))
+            refreshed = dict(db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone())
+            projected = _reagent_project_inventory(refreshed, can_maintain=True)
+            _reagent_refresh_inventory_alerts(db, refreshed, projected['attention_reasons'])
+            response = {
+                'ok': True, 'plan_id': plan_id, 'qc_status': 'pending',
+                'current_qty': new_qty, 'unit': inventory['unit'],
+                'batch_no': new_batch_no, 'replaced_at': replaced_at,
+                'expected_duration_days': expected_duration_days,
+                'inventory': projected,
+            }
+            _reagent_idempotency_store(
+                db, access['user_id'], 'mobile-execution:reagent-replacement',
+                idempotency_key, request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] mobile replacement failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂更换暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-qc', methods=['POST'])
 @login_required
 def mobile_execution_reagent_qc(plan_id, site_id):
     """现场试剂标定：结果归属执行包；不通过仅改变标定状态并通知跟进。"""
-    data = request.get_json(silent=True) or {}
-    reagent_id = data.get('reagent_id')
-    if not reagent_id:
-        return jsonify({'error': '请选择试剂'}), 400
-    try:
-        standard_value = float(data.get('standard_value'))
-        measured_value = float(data.get('measured_value'))
-    except (TypeError, ValueError):
-        return jsonify({'error': '请填写标样值和实测值'}), 400
-    passed = 1 if data.get('passed') in (1, True, '1', 'true') else 0
-    fail_action = (data.get('fail_action') or '').strip()
-    if not passed and fail_action not in ('calibrate', 'repair'):
-        return jsonify({'error': '标定不通过时请选择重新标定或报修'}), 400
+    data = request.get_json(silent=True)
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
-        inv = db.execute("SELECT 1 FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
-                         (site_id, reagent_id)).fetchone()
-        if not inv:
-            return jsonify({'error': '该站点无此试剂库存记录'}), 404
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        deviation = round(measured_value - standard_value, 4)
-        db.execute("""INSERT INTO reagent_qc_records
-            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-             fail_action, operator, operator_id, qc_time, remark, plan_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-             fail_action if not passed else '', g.current_user.get('real_name', ''),
-             g.current_user['id'], now, (data.get('remark') or '').strip()[:200], plan_id))
-        status = 'passed' if passed else 'failed'
-        db.execute("UPDATE reagent_inventory SET qc_status=?, updated_at=? WHERE site_id=? AND reagent_id=?",
-                   (status, now, site_id, reagent_id))
-        db.commit()
-    return jsonify({'ok': True, 'qc_status': status, 'deviation': deviation})
+        _, access_error = _reagent_transaction_access(db, site_id, write=True)
+        if access_error:
+            return access_error
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    standard_value, error = _reagent_number_field(
+        data.get('standard_value'), 'standard_value')
+    if error: return error
+    measured_value, error = _reagent_number_field(
+        data.get('measured_value'), 'measured_value')
+    if error: return error
+    raw_passed = data.get('passed')
+    if raw_passed in (1, True, '1', 'true'):
+        passed = 1
+    elif raw_passed in (0, False, '0', 'false'):
+        passed = 0
+    else:
+        return jsonify({'error': 'passed 必须明确为通过或不通过',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    raw_fail_action = data.get('fail_action')
+    if raw_fail_action is None:
+        fail_action = ''
+    elif not isinstance(raw_fail_action, str):
+        return jsonify({'error': 'fail_action 必须是字符串',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    else:
+        fail_action = raw_fail_action.strip()
+        if fail_action and fail_action not in ('calibrate', 'repair'):
+            return jsonify({'error': 'fail_action 必须是 calibrate 或 repair',
+                            'code': 'REAGENT_INVALID_INPUT'}), 400
+    if not passed and fail_action not in ('calibrate', 'repair'):
+        return jsonify({'error': '标定不通过时请选择重新标定或报修',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    deviation = round(measured_value - standard_value, 4)
+    raw_qc_time = data.get('qc_time')
+    qc_time, error = _reagent_business_time(raw_qc_time, 'qc_time', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data, required=True)
+    if error: return error
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'plan_id': plan_id, 'site_id': site_id, 'reagent_id': reagent_id,
+        'standard_value': standard_value, 'measured_value': measured_value,
+        'passed': passed, 'fail_action': fail_action if not passed else '',
+        'qc_time': qc_time if raw_qc_time not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
+    with get_db() as db:
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+                db.rollback()
+                return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'mobile-execution:reagent-qc',
+                idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            operator = (access['user'].get('real_name')
+                        or access['user'].get('username') or '未知用户')
+            db.execute("""INSERT INTO reagent_qc_records
+                (site_id,reagent_id,standard_value,measured_value,deviation,passed,
+                 fail_action,operator,operator_id,qc_time,remark,plan_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, reagent_id, standard_value, measured_value, deviation, passed,
+                fail_action if not passed else '', operator, access['user_id'],
+                qc_time, remark, plan_id,
+            ))
+            status = 'passed' if passed else 'failed'
+            db.execute("""UPDATE reagent_inventory SET qc_status=?,
+                updated_at=datetime('now','localtime') WHERE site_id=? AND reagent_id=?""",
+                (status, site_id, reagent_id))
+            if not passed:
+                action_cn = '重新标定' if fail_action == 'calibrate' else '报修'
+                content = (f'{access["site"]["name"]} 的 {inventory["reagent_name"]} '
+                           f'标定不通过（偏差 {deviation}），需{action_cn}。')
+                for admin_id in _reagent_active_admin_ids(db):
+                    _create_notification(admin_id, 'reagent_qc', site_id,
+                                         '试剂标定不通过', content, db=db)
+            refreshed = dict(db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone())
+            projected = _reagent_project_inventory(refreshed, can_maintain=True)
+            response = {
+                'ok': True, 'plan_id': plan_id, 'qc_status': status,
+                'deviation': deviation, 'qc_time': qc_time,
+                'inventory': projected,
+            }
+            _reagent_idempotency_store(
+                db, access['user_id'], 'mobile-execution:reagent-qc',
+                idempotency_key, request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] mobile qc failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂标定暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 def _parse_gps_pair(lat, lng):
@@ -25054,8 +25443,11 @@ def _reagent_business_time(value, field, *, default_now=False):
                            'code': 'REAGENT_INVALID_TIME'}), 400)
 
 
-def _reagent_idempotency_key(data):
+def _reagent_idempotency_key(data, *, required=False):
     key = str(data.get('_idempotency_key') or '').strip()
+    if required and not key:
+        return None, (jsonify({'error': '必须提供有效的幂等键',
+                               'code': 'REAGENT_IDEMPOTENCY_KEY_INVALID'}), 400)
     if len(key) > 160:
         return None, (jsonify({'error': '幂等键不能超过 160 个字符',
                                'code': 'REAGENT_IDEMPOTENCY_KEY_INVALID'}), 400)
@@ -27641,10 +28033,12 @@ def api_weekly_plans():
 def api_weekly_plans_create():
     """新建/提交周计划"""
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体格式无效'}), 400
     current_user = g.current_user
-    try:
-        user_id = int(data['user_id'])
-    except (KeyError, TypeError, ValueError):
+    user_id = data.get('user_id')
+    # JSON 整数须严格匹配 SQLite 有符号 64 位主键；bool 是 int 子类，必须显式排除。
+    if type(user_id) is not int or not 0 < user_id <= 2**63 - 1:
         return jsonify({'error': '缺少有效的 user_id'}), 400
     if not _has_any_role(current_user, 'admin') and user_id != int(current_user['id']):
         return jsonify({'error': '只能为自己创建周计划'}), 403
@@ -27672,22 +28066,38 @@ def api_weekly_plans_create():
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as db:
-        cur = db.execute(
-            '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
-               VALUES (?,?,?,?,?,?,?)''',
-            (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
-        db.commit()
-        # 如果勾选了车辆且提交，自动创建用车申请
-        if submit and vehicle_id:
-            for day, site_ids in plan_data.items():
-                if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
-                    # 简单处理：为整周创建一条用车申请
-                    db.execute(
-                        '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
-                           VALUES (?,?,?,?,?,"周巡检用车","approved")''',
-                        (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
-                    break
-        db.commit()
+        try:
+            # 在写事务内读取账号，防止账号停用/注销与本次计划写入交错。
+            db.execute('BEGIN IMMEDIATE')
+            execution_user = db.execute(
+                'SELECT status, deleted_at FROM users WHERE id=?', (user_id,)
+            ).fetchone()
+            if not execution_user:
+                return jsonify({'error': '计划执行人不存在',
+                                'code': 'PLAN_EXECUTION_USER_NOT_FOUND'}), 404
+            if execution_user['status'] != 'active' or execution_user['deleted_at']:
+                return jsonify({'error': '计划执行人账号不可用',
+                                'code': 'PLAN_EXECUTION_USER_INACTIVE'}), 409
+            cur = db.execute(
+                '''INSERT INTO weekly_inspection_plans (user_id, week_start, plan_data, vehicle_id, status, remarks, submitted_at)
+                   VALUES (?,?,?,?,?,?,?)''',
+                (user_id, week_start, plan_json, vehicle_id, status, remarks, now if submit else None))
+            # 如果勾选了车辆且提交，自动创建用车申请
+            if submit and vehicle_id:
+                for day, site_ids in plan_data.items():
+                    if site_ids and isinstance(site_ids, list) and len(site_ids) > 0:
+                        # 简单处理：为整周创建一条用车申请
+                        db.execute(
+                            '''INSERT INTO vehicle_applications (vehicle_id, applicant_id, start_at, end_at, destination, reason, status)
+                               VALUES (?,?,?,?,?,"周巡检用车","approved")''',
+                            (vehicle_id, user_id, week_start + ' 08:00:00', week_start + ' 18:00:00', '巡检'))
+                        break
+            db.commit()
+        except sqlite3.Error:
+            db.rollback()
+            app.logger.exception('weekly plan create failed')
+            return jsonify({'error': '周计划保存失败，请稍后重试',
+                            'code': 'WEEKLY_PLAN_RETRYABLE'}), 503
         row = db.execute('SELECT * FROM weekly_inspection_plans WHERE id=?', (cur.lastrowid,)).fetchone()
         r = dict(row)
         try: r['plan_data'] = _json.loads(r['plan_data']) if r.get('plan_data') else {}
@@ -28415,16 +28825,16 @@ def _ps_next_favorite_start(db, user_id, snapshot):
     return today.strftime('%Y-%m-%d')
 
 
-def _require_plan_favorite_operator():
-    if not _has_any_role(g.current_user, 'operator'):
-        return jsonify({'error': '常用计划仅供承担现场巡检职责的运维人员使用'}), 403
+def _require_plan_favorite_manager():
+    if not _has_any_role(g.current_user, 'admin', 'operator'):
+        return jsonify({'error': '常用计划仅供管理员或运维人员管理本人模板'}), 403
     return None
 
 
 @app.route('/api/plan-schedule-favorites', methods=['GET'])
 @login_required
 def api_plan_schedule_favorites_list():
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     with get_db() as db:
@@ -28445,7 +28855,7 @@ def api_plan_schedule_favorites_list():
 @app.route('/api/plan-schedule-favorites', methods=['POST'])
 @login_required
 def api_plan_schedule_favorites_create():
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     data = request.get_json(silent=True) or {}
@@ -28498,7 +28908,7 @@ def api_plan_schedule_favorites_create():
 @app.route('/api/plan-schedule-favorites/<int:favorite_id>', methods=['DELETE'])
 @login_required
 def api_plan_schedule_favorites_delete(favorite_id):
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     with get_db() as db:
@@ -28513,7 +28923,7 @@ def api_plan_schedule_favorites_delete(favorite_id):
 @app.route('/api/plan-schedule-favorites/<int:favorite_id>/draft', methods=['POST'])
 @login_required
 def api_plan_schedule_favorite_create_draft(favorite_id):
-    denied = _require_plan_favorite_operator()
+    denied = _require_plan_favorite_manager()
     if denied:
         return denied
     data = request.get_json(silent=True) or {}
@@ -34096,7 +34506,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
         'responsible_people': responsibility['responsible_people'],
         'monitoring_status_label': '未接入', 'reason_code': 'not_connected', 'monitoring_reason': '未配置启用的监测身份',
         'last_received_at': None, 'last_communication_at': None,
-        'last_valid_observation_at': None, 'published_factor_count': 0,
+        'last_valid_observation_at': None, 'latest_values': [], 'published_factor_count': 0,
         'monitoring_status': 'not_connected',
     }
     if not profile:
@@ -34132,6 +34542,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=None, raw=
     else:
         summary = _station_monitoring_summary_projection(db, site_id, profile, configs, values, last_communication)
         base.update(monitoring_status=summary['status'], monitoring_status_label=summary['status_label'], reason_code=summary['reason_code'], monitoring_reason=summary['reason'])
+    base['latest_values'] = _station_monitoring_published_values(values, base['monitoring_status'], compact=True)
     return base
 
 
@@ -34175,6 +34586,23 @@ def _station_monitoring_presented_value(item):
     value['source_data_time'] = value.get('observed_at')
     value['observed_at'] = value.get('scheduled_at') or value.get('observed_at')
     return value
+
+
+def _station_monitoring_published_values(values, status, *, compact=False):
+    """Expose only the detail-approved effective observations to the site list."""
+    if status not in {'normal', 'attention', 'interval_unconfigured'}:
+        return []
+    result = []
+    for index, item in enumerate(values):
+        presented = dict(
+            _station_monitoring_presented_value(item),
+            factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
+                item.get('business_metric'), f'监测因子{index + 1}'),
+        )
+        result.append({key: presented.get(key) for key in (
+            'business_metric', 'factor_name_cn', 'standard_value', 'standard_unit', 'observed_at'
+        )} if compact else presented)
+    return result
 
 
 def _station_monitoring_factor_states(db, site_id, configs, values):
@@ -34430,12 +34858,7 @@ def _station_monitoring_overview(db, site_id):
     configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    latest = values if projection['monitoring_status'] in {'normal', 'attention', 'interval_unconfigured'} else []
-    latest = [dict(
-        _station_monitoring_presented_value(item),
-        factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
-            item.get('business_metric'), f'监测因子{index + 1}'),
-    ) for index, item in enumerate(latest)]
+    latest = _station_monitoring_published_values(values, projection['monitoring_status'])
     status = projection['monitoring_status']
     communication_freshness = _monitoring_freshness(
         projection['last_communication_at'], dict(profile).get('expected_interval_seconds') if profile else None)
