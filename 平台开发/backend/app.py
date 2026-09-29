@@ -23370,10 +23370,17 @@ def mobile_execution_site_reagents(plan_id, site_id):
     with get_db() as db:
         if not _mobile_execution_site_read_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+        can_maintain = _mobile_execution_site_access(
+            db, plan_id, site_id, g.current_user)
+        if can_maintain:
+            access, _ = _reagent_transaction_access(db, site_id, write=True)
+            can_maintain = bool(access)
         rows = db.execute("""SELECT ri.*, r.name AS reagent_name, r.unit
             FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
             WHERE ri.site_id=? ORDER BY r.name""", (site_id,)).fetchall()
-    return jsonify({'items': [dict(row) for row in rows]})
+        items = [_reagent_project_inventory(row, can_maintain=can_maintain)
+                 for row in rows]
+    return jsonify({'items': items})
 
 
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-replacements', methods=['POST'])
@@ -23381,40 +23388,97 @@ def mobile_execution_site_reagents(plan_id, site_id):
 def mobile_execution_reagent_replacement(plan_id, site_id):
     """现场试剂更换：只允许写入当前执行包站点，并留下执行包关联。"""
     data = request.get_json(silent=True) or {}
-    reagent_id = data.get('reagent_id')
-    try:
-        new_qty = float(data.get('new_qty'))
-    except (TypeError, ValueError):
-        return jsonify({'error': '请填写有效的更换后余量'}), 400
-    if not reagent_id or new_qty < 0:
-        return jsonify({'error': '试剂和更换后余量不能为空'}), 400
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
-        inv = db.execute("SELECT * FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
-                         (site_id, reagent_id)).fetchone()
-        reagent = db.execute("SELECT name FROM reagents WHERE id=?", (reagent_id,)).fetchone()
-        if not inv or not reagent:
-            return jsonify({'error': '该站点无此试剂库存记录'}), 404
-        duration = data.get('expected_duration_days')
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    new_qty, error = _reagent_number_field(
+        data.get('new_qty'), 'new_qty', strictly_positive=True)
+    if error: return error
+    expected_duration_days, error = _reagent_int_field(
+        data.get('expected_duration_days'), 'expected_duration_days')
+    if error: return error
+    raw_replaced_at = data.get('replaced_at')
+    replaced_at, error = _reagent_business_time(
+        raw_replaced_at, 'replaced_at', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    new_batch_no = str(data.get('new_batch_no') or '').strip()[:100]
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'plan_id': plan_id, 'site_id': site_id, 'reagent_id': reagent_id,
+        'new_qty': new_qty, 'new_batch_no': new_batch_no,
+        'expected_duration_days': expected_duration_days,
+        'replaced_at': replaced_at if raw_replaced_at not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
+    with get_db() as db:
         try:
-            duration = int(duration) if duration not in (None, '') else inv['expected_duration_days']
-        except (TypeError, ValueError):
-            return jsonify({'error': '预计使用天数必须是整数'}), 400
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db.execute("""INSERT INTO reagent_records
-            (site_id, reagent_name, usage_date, replacement_date, operator, notes,
-             old_qty, new_qty, plan_id)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
-            (site_id, reagent['name'], now, now, g.current_user.get('real_name', ''),
-             (data.get('remark') or '').strip()[:200] or '移动端现场更换',
-             inv['current_qty'], new_qty, plan_id))
-        db.execute("""UPDATE reagent_inventory SET current_qty=?, last_replaced_at=?,
-            expected_duration_days=?, qc_status='pending', updated_at=?
-            WHERE site_id=? AND reagent_id=?""",
-            (new_qty, now, duration, now, site_id, reagent_id))
-        db.commit()
-    return jsonify({'ok': True, 'qc_status': 'pending'})
+            db.execute('BEGIN IMMEDIATE')
+            if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+                db.rollback()
+                return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'mobile-execution:reagent-replacement',
+                idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            inventory_data = dict(inventory)
+            operator = (access['user'].get('real_name')
+                        or access['user'].get('username') or '未知用户')
+            db.execute("""INSERT INTO reagent_records
+                (site_id,reagent_name,reagent_type,usage_date,replacement_date,operator,
+                 operator_id,notes,old_batch_no,new_batch_no,old_qty,new_qty,plan_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, inventory['reagent_name'], '', replaced_at, replaced_at,
+                operator, access['user_id'], remark or '移动端现场更换',
+                inventory_data.get('batch_no') or '', new_batch_no,
+                inventory['current_qty'], new_qty, plan_id,
+            ))
+            db.execute("""UPDATE reagent_inventory SET current_qty=?,batch_no=?,
+                last_replaced_at=?,expected_duration_days=?,
+                updated_at=datetime('now','localtime'),qc_status='pending'
+                WHERE site_id=? AND reagent_id=?""", (
+                new_qty, new_batch_no, replaced_at, expected_duration_days,
+                site_id, reagent_id,
+            ))
+            refreshed = dict(db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone())
+            projected = _reagent_project_inventory(refreshed, can_maintain=True)
+            _reagent_refresh_inventory_alerts(db, refreshed, projected['attention_reasons'])
+            response = {
+                'ok': True, 'plan_id': plan_id, 'qc_status': 'pending',
+                'current_qty': new_qty, 'unit': inventory['unit'],
+                'batch_no': new_batch_no, 'replaced_at': replaced_at,
+                'expected_duration_days': expected_duration_days,
+                'inventory': projected,
+            }
+            _reagent_idempotency_store(
+                db, access['user_id'], 'mobile-execution:reagent-replacement',
+                idempotency_key, request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] mobile replacement failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂更换暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 @app.route('/api/mobile/execution-plans/<int:plan_id>/sites/<int:site_id>/reagent-qc', methods=['POST'])
@@ -23422,39 +23486,106 @@ def mobile_execution_reagent_replacement(plan_id, site_id):
 def mobile_execution_reagent_qc(plan_id, site_id):
     """现场试剂标定：结果归属执行包；不通过仅改变标定状态并通知跟进。"""
     data = request.get_json(silent=True) or {}
-    reagent_id = data.get('reagent_id')
-    if not reagent_id:
-        return jsonify({'error': '请选择试剂'}), 400
-    try:
-        standard_value = float(data.get('standard_value'))
-        measured_value = float(data.get('measured_value'))
-    except (TypeError, ValueError):
-        return jsonify({'error': '请填写标样值和实测值'}), 400
-    passed = 1 if data.get('passed') in (1, True, '1', 'true') else 0
-    fail_action = (data.get('fail_action') or '').strip()
-    if not passed and fail_action not in ('calibrate', 'repair'):
-        return jsonify({'error': '标定不通过时请选择重新标定或报修'}), 400
     with get_db() as db:
         if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
             return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
-        inv = db.execute("SELECT 1 FROM reagent_inventory WHERE site_id=? AND reagent_id=?",
-                         (site_id, reagent_id)).fetchone()
-        if not inv:
-            return jsonify({'error': '该站点无此试剂库存记录'}), 404
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        deviation = round(measured_value - standard_value, 4)
-        db.execute("""INSERT INTO reagent_qc_records
-            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-             fail_action, operator, operator_id, qc_time, remark, plan_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (site_id, reagent_id, standard_value, measured_value, deviation, passed,
-             fail_action if not passed else '', g.current_user.get('real_name', ''),
-             g.current_user['id'], now, (data.get('remark') or '').strip()[:200], plan_id))
-        status = 'passed' if passed else 'failed'
-        db.execute("UPDATE reagent_inventory SET qc_status=?, updated_at=? WHERE site_id=? AND reagent_id=?",
-                   (status, now, site_id, reagent_id))
-        db.commit()
-    return jsonify({'ok': True, 'qc_status': status, 'deviation': deviation})
+    reagent_id, error = _reagent_int_field(data.get('reagent_id'), 'reagent_id')
+    if error: return error
+    standard_value, error = _reagent_number_field(
+        data.get('standard_value'), 'standard_value')
+    if error: return error
+    measured_value, error = _reagent_number_field(
+        data.get('measured_value'), 'measured_value')
+    if error: return error
+    raw_passed = data.get('passed')
+    if raw_passed in (1, True, '1', 'true'):
+        passed = 1
+    elif raw_passed in (0, False, '0', 'false'):
+        passed = 0
+    else:
+        return jsonify({'error': 'passed 必须明确为通过或不通过',
+                        'code': 'REAGENT_INVALID_INPUT'}), 400
+    fail_action = (data.get('fail_action') or '').strip()
+    if not passed and fail_action not in ('calibrate', 'repair'):
+        return jsonify({'error': '标定不通过时请选择重新标定或报修'}), 400
+    deviation = round(measured_value - standard_value, 4)
+    raw_qc_time = data.get('qc_time')
+    qc_time, error = _reagent_business_time(raw_qc_time, 'qc_time', default_now=True)
+    if error: return error
+    idempotency_key, error = _reagent_idempotency_key(data)
+    if error: return error
+    remark = str(data.get('remark') or '').strip()[:500]
+    normalized = {
+        'plan_id': plan_id, 'site_id': site_id, 'reagent_id': reagent_id,
+        'standard_value': standard_value, 'measured_value': measured_value,
+        'passed': passed, 'fail_action': fail_action if not passed else '',
+        'qc_time': qc_time if raw_qc_time not in (None, '') else None,
+        'remark': remark,
+    }
+    request_hash = _reagent_request_hash(normalized)
+    with get_db() as db:
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            if not _mobile_execution_site_access(db, plan_id, site_id, g.current_user):
+                db.rollback()
+                return jsonify({'error': '该站点不在当前已批准执行包中'}), 404
+            access, access_error = _reagent_transaction_access(db, site_id, write=True)
+            if access_error:
+                db.rollback(); return access_error
+            replay = _reagent_idempotency_replay(
+                db, access['user_id'], 'mobile-execution:reagent-qc',
+                idempotency_key, request_hash)
+            if replay:
+                db.rollback(); return jsonify(replay[0]), replay[1]
+            inventory = db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone()
+            if not inventory:
+                db.rollback()
+                return jsonify({'error': '该站点无此试剂库存记录',
+                                'code': 'REAGENT_INVENTORY_NOT_FOUND'}), 404
+            operator = (access['user'].get('real_name')
+                        or access['user'].get('username') or '未知用户')
+            db.execute("""INSERT INTO reagent_qc_records
+                (site_id,reagent_id,standard_value,measured_value,deviation,passed,
+                 fail_action,operator,operator_id,qc_time,remark,plan_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                site_id, reagent_id, standard_value, measured_value, deviation, passed,
+                fail_action if not passed else '', operator, access['user_id'],
+                qc_time, remark, plan_id,
+            ))
+            status = 'passed' if passed else 'failed'
+            db.execute("""UPDATE reagent_inventory SET qc_status=?,
+                updated_at=datetime('now','localtime') WHERE site_id=? AND reagent_id=?""",
+                (status, site_id, reagent_id))
+            if not passed:
+                action_cn = '重新标定' if fail_action == 'calibrate' else '报修'
+                content = (f'{access["site"]["name"]} 的 {inventory["reagent_name"]} '
+                           f'标定不通过（偏差 {deviation}），需{action_cn}。')
+                for admin_id in _reagent_active_admin_ids(db):
+                    _create_notification(admin_id, 'reagent_qc', site_id,
+                                         '试剂标定不通过', content, db=db)
+            refreshed = dict(db.execute("""SELECT ri.*,r.name AS reagent_name,r.unit
+                FROM reagent_inventory ri JOIN reagents r ON r.id=ri.reagent_id
+                WHERE ri.site_id=? AND ri.reagent_id=?""",
+                (site_id, reagent_id)).fetchone())
+            projected = _reagent_project_inventory(refreshed, can_maintain=True)
+            response = {
+                'ok': True, 'plan_id': plan_id, 'qc_status': status,
+                'deviation': deviation, 'qc_time': qc_time,
+                'inventory': projected,
+            }
+            _reagent_idempotency_store(
+                db, access['user_id'], 'mobile-execution:reagent-qc',
+                idempotency_key, request_hash, response, 200)
+            db.commit()
+            return jsonify(response)
+        except Exception as exc:
+            db.rollback()
+            print('[Reagent] mobile qc failed safely: %s' % type(exc).__name__)
+            return jsonify({'error': '试剂标定暂未保存，请稍后重试',
+                            'code': 'REAGENT_RETRYABLE'}), 503
 
 
 def _parse_gps_pair(lat, lng):
