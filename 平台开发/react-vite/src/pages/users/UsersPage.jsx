@@ -244,7 +244,7 @@ export default function UsersPage() {
     modal.confirm({
       title: `永久删除“${record.real_name}”？`,
       content: <Space direction="vertical" style={{ width: '100%' }}>
-        <Text type="secondary">仅从未形成任何业务历史的误建账号可以删除。服务端会在提交时重新核验全部引用。</Text>
+        <Text type="secondary">永久删除只移除人员账号及活动关系；已有巡检、工单、影像和时间线等业务历史将继续保留。服务端会在提交时重新核验账号状态并保存删除审计。</Text>
         <Input.TextArea rows={3} placeholder="请输入永久删除原因" onChange={(event) => { reason = event.target.value; }} />
       </Space>,
       okText: '确认永久删除', cancelText: '取消', okButtonProps: { danger: true },
