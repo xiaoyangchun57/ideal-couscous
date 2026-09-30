@@ -5408,6 +5408,7 @@ def get_sites_simple():
         site_clause = f' AND s.id IN ({",".join("?" * len(allowed))})'
         params = list(allowed)
     with get_db() as db:
+        master_filter = _active_master_site_predicate(db, 's')
         rows = db.execute(f"""
             SELECT s.id, s.code, s.name, s.type, s.gps_lat as lat, s.gps_lng as lng, s.district, s.address, s.river,
                    s.manager, s.phone, s.last_heartbeat, s.created_at, s.is_pilot, s.operation_frequency,
@@ -5415,7 +5416,7 @@ def get_sites_simple():
                    SUM(CASE WHEN d.status='offline' THEN 1 ELSE 0 END) as offline_count,
                    CASE WHEN SUM(CASE WHEN d.status='offline' THEN 1 ELSE 0 END) > 0 THEN 'offline' ELSE 'online' END as status
             FROM sites s LEFT JOIN device_shadows d ON s.id=d.site_id
-            WHERE s.id >= 0{site_clause}
+            WHERE s.id >= 0 AND {master_filter}{site_clause}
             GROUP BY s.id ORDER BY s.id
         """, params).fetchall()
         result = []
@@ -14186,6 +14187,13 @@ def _active_operator_rows(db, user_id=None):
     return db.execute(f"""SELECT DISTINCT u.id, u.real_name, 'operator' AS role
         FROM users u LEFT JOIN user_roles ur ON ur.user_id=u.id
         WHERE {where} ORDER BY u.real_name""", params).fetchall()
+
+
+def _active_operator_site_ids(db, user_id):
+    if not _active_operator_rows(db, user_id):
+        return []
+    return [row['site_id'] for row in db.execute(
+        'SELECT site_id FROM user_sites WHERE user_id=? ORDER BY site_id', (user_id,)).fetchall()]
 
 
 def _report_scope_context(db):
@@ -33218,8 +33226,25 @@ def _mobile_static_site_payload(site, *, can_calibrate=False, is_responsible=Fal
     }
 
 
+def _active_master_site_predicate(db, alias=''):
+    if not _table_has_column(db, 'sites', 'master_status'):
+        return '1=1'
+    prefix = f'{alias}.' if alias else ''
+    return f"COALESCE({prefix}master_status,'active')='active'"
+
+
+def _active_master_site_ids(db, site_ids):
+    if not site_ids or not _table_has_column(db, 'sites', 'master_status'):
+        return list(site_ids)
+    marks = ','.join('?' * len(site_ids))
+    return [row['id'] for row in db.execute(
+        f"SELECT id FROM sites WHERE master_status='active' AND id IN ({marks}) ORDER BY id",
+        list(site_ids),
+    ).fetchall()]
+
+
 def _mobile_responsible_site_rows(db, scope, keyword, responsible_ids):
-    where = []
+    where = [_active_master_site_predicate(db)]
     params = []
     if scope == 'mine':
         if not responsible_ids:
@@ -33253,9 +33278,8 @@ def mobile_responsible_sites():
         return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_SITE_SCOPE'}), 403
     keyword = (request.args.get('keyword') or '').strip()
     with get_db() as db:
-        responsible_ids = [row['site_id'] for row in db.execute(
-            'SELECT site_id FROM user_sites WHERE user_id=? ORDER BY site_id',
-            (g.current_user['id'],)).fetchall()]
+        responsible_ids = _active_master_site_ids(
+            db, _active_operator_site_ids(db, g.current_user['id']))
         rows = _mobile_responsible_site_rows(db, scope, keyword, responsible_ids)
         responsible_set = set(responsible_ids)
         items = [_mobile_static_site_payload(
@@ -33265,7 +33289,9 @@ def mobile_responsible_sites():
             'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
             'scope_counts': {
                 'mine': len(responsible_ids),
-                'all': db.execute('SELECT COUNT(*) FROM sites').fetchone()[0] if is_admin else None,
+                'all': db.execute(
+                    'SELECT COUNT(*) FROM sites WHERE ' + _active_master_site_predicate(db)
+                ).fetchone()[0] if is_admin else None,
             },
             'items': items,
         })
@@ -33381,12 +33407,13 @@ def station_monitoring_sites():
         return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_MONITORING_SCOPE'}), 403
     keyword = (request.args.get('keyword') or '').strip()
     with get_db() as db:
-        responsible_ids = [row['site_id'] for row in db.execute(
-            'SELECT site_id FROM user_sites WHERE user_id=? ORDER BY site_id', (g.current_user['id'],)
-        ).fetchall()]
+        responsible_ids = _active_master_site_ids(
+            db, _active_operator_site_ids(db, g.current_user['id']))
         mine_count = len(responsible_ids)
-        all_count = db.execute('SELECT COUNT(*) FROM sites').fetchone()[0] if is_admin else None
-        where = []
+        all_count = db.execute(
+            'SELECT COUNT(*) FROM sites WHERE ' + _active_master_site_predicate(db)
+        ).fetchone()[0] if is_admin else None
+        where = [_active_master_site_predicate(db)]
         params = []
         if scope == 'mine':
             if not responsible_ids:

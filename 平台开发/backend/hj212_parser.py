@@ -17,7 +17,7 @@ _LENGTH_BYTES = 4
 _TRAILER_BYTES = 6  # Four ASCII CRC digits followed by CRLF.
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _PASSWORD = re.compile(r"^[ -~]{1,128}$")
-_FACTOR_KEY = re.compile(r"^(?P<code>[A-Za-z0-9]+)-Rtd$")
+_FACTOR_VALUE_KEY = re.compile(r"^(?P<code>[A-Za-z0-9]+)-(?P<kind>Rtd|Avg)$", re.IGNORECASE)
 _FACTOR_FLAG_KEY = re.compile(r"^(?P<code>[A-Za-z0-9]+)-Flag$", re.IGNORECASE)
 _NUMERIC = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _PERMANGANATE_FIELD = re.compile(r"^w01019-", re.IGNORECASE)
@@ -115,7 +115,7 @@ def _parse_cp_fields(content: str) -> tuple[dict[str, str], dict[str, str]]:
             continue
         token_fields = _parse_pairs(token.replace(",", ";"), error_code="hj212_invalid_factor")
         factor_code = next(
-            (match.group("code") for key in token_fields if (match := _FACTOR_KEY.match(key))),
+            (match.group("code") for key in token_fields if (match := _FACTOR_VALUE_KEY.match(key))),
             None,
         )
         for key, value in token_fields.items():
@@ -132,7 +132,7 @@ def _parse_cp_fields(content: str) -> tuple[dict[str, str], dict[str, str]]:
     return fields, legacy_flags
 
 
-def _parse_factors(content: str) -> list[HJ212Factor]:
+def _parse_factors(content: str, command: str) -> list[HJ212Factor]:
     """Read CP fields as one record.
 
     HJ212 devices in the field send ``DataTime`` inside CP and put quality in
@@ -141,11 +141,21 @@ def _parse_factors(content: str) -> list[HJ212Factor]:
     """
     factors: list[HJ212Factor] = []
     fields, legacy_flags = _parse_cp_fields(content)
+    preferred_kind = "avg" if command == "2061" else "rtd"
+    available_kinds: dict[str, set[str]] = {}
+    for key in fields:
+        match = _FACTOR_VALUE_KEY.match(key)
+        if match:
+            available_kinds.setdefault(match.group("code").lower(), set()).add(match.group("kind").lower())
     for key, value in fields.items():
-        match = _FACTOR_KEY.match(key)
+        match = _FACTOR_VALUE_KEY.match(key)
         if match is None:
             continue
         code = match.group("code")
+        kind = match.group("kind").lower()
+        selected_kind = preferred_kind if preferred_kind in available_kinds[code.lower()] else "rtd"
+        if kind != selected_kind:
+            continue
         flag = fields.get(f"{code}-Flag", legacy_flags.get(code, fields.get("Flag")))
         # D is a device diagnostic state and F is a fault state. Neither is a
         # publishable measurement, but retaining the Rtd in the raw receipt lets
@@ -210,6 +220,6 @@ def parse_hj212_frame(raw: bytes) -> ParsedHJ212Frame:
         command=fields["CN"],
         qn=qn,
         data_time=_parse_data_time(cp_data_time if cp_data_time is not None else header_data_time),
-        factors=_parse_factors(cp[:-2]),
+        factors=_parse_factors(cp[:-2], fields["CN"]),
         body_length=len(body),
     )

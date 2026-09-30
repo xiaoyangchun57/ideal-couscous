@@ -670,7 +670,7 @@ class StationIngestServer:
             if frame.command == "3020":
                 self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(build_hj212_9011_response(frame), True) if auth.may_acknowledge else ProcessingResult(None, False)
-            if frame.command != "2011":
+            if frame.command not in {"2011", "2061"}:
                 self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(None, False)
             configuration_pending = (
@@ -683,7 +683,7 @@ class StationIngestServer:
             if auth.status == "authenticated" and not duplicate:
                 if not configuration_pending:
                     self._schedule_normalization(raw_id)
-            # CN=2011 has no confirmed application reply, but a durable receipt is
+            # CN=2011/CN=2061 have no confirmed application reply, but a durable receipt is
             # successful and must not discard later sticky frames on this TCP stream.
             return ProcessingResult(None, auth.status in {"authenticated", "unbound_authenticated"})
         if frame.direction != "up":

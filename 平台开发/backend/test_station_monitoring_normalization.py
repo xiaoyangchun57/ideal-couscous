@@ -759,6 +759,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
     def test_station_monitoring_list_uses_explicit_server_scopes_and_responsibility(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute('INSERT INTO user_sites(user_id,site_id) VALUES (?,?)', (self.admin_id, self.site_id))
+            connection.execute("INSERT INTO user_roles(user_id,role) VALUES (?,?)", (self.admin_id, 'operator'))
             connection.execute("UPDATE sites SET name='本人水站', code='MINE-001' WHERE id=?", (self.site_id,))
             connection.execute("UPDATE sites SET name='其他水站', code='OTHER-002' WHERE id=?", (self.other_site_id,))
             connection.commit()
