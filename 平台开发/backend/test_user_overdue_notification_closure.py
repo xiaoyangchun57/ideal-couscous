@@ -45,6 +45,14 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 );
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT, UNIQUE(user_id, role));
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER, UNIQUE(user_id, site_id));
+                CREATE TABLE user_sessions (id INTEGER PRIMARY KEY, user_id INTEGER);
+                CREATE TABLE auth_sessions (
+                    id INTEGER PRIMARY KEY, token_hash TEXT UNIQUE, user_id INTEGER,
+                    auth_version INTEGER, issued_at TEXT, expires_at TEXT,
+                    revoked_at TEXT, revoke_reason TEXT, last_seen_at TEXT
+                );
+                CREATE TABLE wechat_bindings (id INTEGER PRIMARY KEY, user_id INTEGER, openid TEXT);
+                CREATE TABLE user_wechat_bindings (id INTEGER PRIMARY KEY, user_id INTEGER, openid TEXT);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT);
                 CREATE TABLE insp_plans (
                     id INTEGER PRIMARY KEY, assignee_id INTEGER, assignee TEXT, plan_name TEXT,
@@ -56,6 +64,10 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 );
                 CREATE TABLE plan_schedules (
                     id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, period_start TEXT, period_end TEXT
+                );
+                CREATE TABLE weekly_inspection_plans (
+                    id INTEGER PRIMARY KEY, user_id INTEGER, approver_id INTEGER,
+                    week_start TEXT, status TEXT, plan_data TEXT
                 );
                 CREATE TABLE work_orders (id INTEGER PRIMARY KEY, assignee TEXT, status TEXT);
                 CREATE TABLE vehicle_applications (id INTEGER PRIMARY KEY, applicant_id INTEGER, status TEXT);
@@ -78,7 +90,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, site_id INTEGER, is_deleted INTEGER DEFAULT 0,
                     review_required INTEGER DEFAULT 1, review_status TEXT DEFAULT 'pending',
                     source_type TEXT DEFAULT 'inspection', source_id INTEGER DEFAULT 0,
-                    uploader_id INTEGER
+                    uploader_id INTEGER, uploader_name TEXT DEFAULT ''
                 );
                 INSERT INTO users VALUES (1,'admin','管理员','x','admin','管理员','','active',1,NULL,CURRENT_TIMESTAMP);
                 INSERT INTO users VALUES (2,'source','原运维','x','operator','原运维','','active',1,NULL,CURRENT_TIMESTAMP);
@@ -89,6 +101,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 INSERT INTO users VALUES (7,'closed_history','关闭工单人员','x','operator','关闭工单人员','','inactive',1,'2026-09-20 10:00:00',CURRENT_TIMESTAMP);
                 INSERT INTO users VALUES (8,'timeline_history','时间线人员','x','operator','时间线人员','','inactive',1,'2026-09-20 10:00:00',CURRENT_TIMESTAMP);
                 INSERT INTO users VALUES (9,'concurrent_history','并发历史人员','x','operator','并发历史人员','','inactive',1,'2026-09-20 10:00:00',CURRENT_TIMESTAMP);
+                INSERT INTO users VALUES (10,'rollback_user','回滚人员','x','operator','回滚人员','','inactive',1,'2026-09-20 10:00:00',CURRENT_TIMESTAMP);
                 INSERT INTO user_roles VALUES (1,'admin');
                 INSERT INTO user_roles VALUES (2,'operator');
                 INSERT INTO user_roles VALUES (3,'operator');
@@ -98,20 +111,34 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 INSERT INTO user_roles VALUES (7,'operator');
                 INSERT INTO user_roles VALUES (8,'operator');
                 INSERT INTO user_roles VALUES (9,'operator');
+                INSERT INTO user_roles VALUES (10,'operator');
                 INSERT INTO sites VALUES (1,'测试站');
                 INSERT INTO sites VALUES (2,'第二站');
                 INSERT INTO user_sites VALUES (2,1);
                 INSERT INTO user_sites VALUES (3,2);
                 INSERT INTO user_sites VALUES (4,2);
+                INSERT INTO user_sites VALUES (7,1);
+                INSERT INTO user_sites VALUES (8,1);
+                INSERT INTO user_sites VALUES (9,1);
+                INSERT INTO user_sites VALUES (10,1);
                 INSERT INTO insp_plans VALUES (10,2,'原运维','逾期巡检','2026-01-01','active',20);
                 INSERT INTO insp_plan_items VALUES (100,10,NULL,'active',1);
                 INSERT INTO insp_plan_items VALUES (101,10,'已完成','active',1);
                 INSERT INTO insp_plan_items VALUES (102,10,NULL,'active',1);
                 INSERT INTO plan_schedules VALUES (20,2,'approved','2026-01-01','2026-01-07');
+                INSERT INTO weekly_inspection_plans VALUES (21,2,1,'2026-01-05','approved','{}');
                 INSERT INTO work_orders VALUES (30,'原运维','in_progress');
                 INSERT INTO notifications (user_id,source_type,source_id,title,content)
                     VALUES (1,'plan_schedule',20,'有新的巡检计划待审批','历史通知');
             ''')
+            db.executemany('''INSERT INTO auth_sessions
+                (id,token_hash,user_id,auth_version,issued_at,expires_at,revoked_at,revoke_reason,last_seen_at)
+                VALUES (?,?,?,?,?,?,?,?,?)''', [
+                (1, app_module._hash_token('admin-token'), 1, 1,
+                 '2026-09-29 00:00:00', '2099-01-01 00:00:00', None, '', '2026-09-29 00:00:00'),
+                (2, app_module._hash_token('source-token'), 2, 1,
+                 '2026-09-29 00:00:00', '2099-01-01 00:00:00', None, '', '2026-09-29 00:00:00'),
+            ])
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -160,7 +187,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT status FROM users WHERE id=2').fetchone()[0], 'active')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM user_sites WHERE user_id=2').fetchone()[0], 1)
 
-    def test_permanent_delete_only_removes_unused_deactivated_identity(self):
+    def test_permanent_delete_removes_identity_and_preserves_business_history(self):
         missing_reason = self.client.delete('/api/users/4/permanent', headers=self.headers(), json={})
         self.assertEqual(missing_reason.status_code, 400, missing_reason.json)
         forbidden = self.client.delete('/api/users/4/permanent', headers=self.headers('source-token'),
@@ -169,62 +196,117 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         current = self.client.delete('/api/users/1/permanent', headers=self.headers(),
                                      json={'reason': '不能删除自己'})
         self.assertEqual(current.status_code, 409, current.json)
+        active = self.client.delete('/api/users/4/permanent', headers=self.headers(),
+                                    json={'reason': '活动账号不能删除'})
+        self.assertEqual((active.status_code, active.json['code']),
+                         (409, 'USER_NOT_DEACTIVATED'))
 
         deactivated = self.client.delete('/api/users/4', headers=self.headers())
         self.assertEqual(deactivated.status_code, 200, deactivated.json)
 
         with app_module.get_db() as db:
             db.execute("""INSERT INTO operation_attachments
-                (id,site_id,source_type,source_id,uploader_id) VALUES (1,1,'inspection',10,4)""")
-        protected = self.client.delete('/api/users/4/permanent', headers=self.headers(),
-                                       json={'reason': '不应删除有影像历史账号'})
-        self.assertEqual(protected.status_code, 409, protected.json)
-        self.assertEqual(protected.json['references']['operation_attachments'], 1)
-        with app_module.get_db() as db:
-            db.execute('DELETE FROM operation_attachments WHERE id=1')
+                (id,site_id,source_type,source_id,uploader_id,uploader_name)
+                VALUES (1,1,'inspection',10,4,'误建账号')""")
+            db.execute('INSERT INTO user_sessions VALUES (1,4)')
+            db.execute("INSERT INTO wechat_bindings VALUES (1,4,'openid-4')")
 
         deleted = self.client.delete('/api/users/4/permanent', headers=self.headers(),
-                                     json={'reason': '录入错误且从未使用'})
+                                     json={'reason': '录入错误，保留影像历史'})
         replay = self.client.delete('/api/users/4/permanent', headers=self.headers(),
                                     json={'reason': '重复请求'})
         self.assertEqual(deleted.status_code, 200, deleted.json)
+        self.assertEqual(deleted.json['preserved_references']['operation_attachments'], 1)
         self.assertEqual(replay.status_code, 200, replay.json)
         self.assertTrue(replay.json['already_deleted'])
         with app_module.get_db() as db:
             self.assertIsNone(db.execute('SELECT 1 FROM users WHERE id=4').fetchone())
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_roles WHERE user_id=4').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_sites WHERE user_id=4').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_sessions WHERE user_id=4').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM wechat_bindings WHERE user_id=4').fetchone()[0], 0)
             audit = db.execute('''SELECT reason,real_name,roles_json,site_ids_json
                 FROM user_deletion_audits WHERE user_id=4''').fetchone()
-            self.assertEqual((audit['reason'], audit['real_name']), ('录入错误且从未使用', '误建账号'))
+            self.assertEqual((audit['reason'], audit['real_name']), ('录入错误，保留影像历史', '误建账号'))
             self.assertEqual(json.loads(audit['roles_json']), ['operator'])
             self.assertEqual(json.loads(audit['site_ids_json']), [2])
+            attachment = db.execute('SELECT * FROM operation_attachments WHERE id=1').fetchone()
+            self.assertEqual((attachment['uploader_id'], attachment['uploader_name']), (4, '误建账号'))
 
         with app_module.get_db() as db:
+            db.execute("UPDATE insp_plans SET status='completed' WHERE id=10")
+            db.execute("UPDATE plan_schedules SET status='archived' WHERE id=20")
+            db.execute("UPDATE work_orders SET status='closed' WHERE id=30")
             db.execute("UPDATE users SET status='inactive',deleted_at='2026-09-20 11:00:00' WHERE id=2")
+            db.execute("""INSERT INTO operation_attachments
+                (id,site_id,source_type,source_id,uploader_id,uploader_name)
+                VALUES (2,1,'inspection',10,2,'原运维')""")
+            db.execute("""INSERT INTO timeline_events
+                (source_type,source_id,event_type,operator,remark)
+                VALUES ('inspection',10,'completed','原运维','历史完成记录')""")
+            db.execute('INSERT INTO user_sessions VALUES (2,2)')
+            db.execute("INSERT INTO wechat_bindings VALUES (2,2,'openid-2')")
+            db.execute("INSERT INTO user_wechat_bindings VALUES (2,2,'openid-legacy-2')")
+            history_before = {
+                'plan': tuple(db.execute('SELECT * FROM insp_plans WHERE id=10').fetchone()),
+                'schedule': tuple(db.execute('SELECT * FROM plan_schedules WHERE id=20').fetchone()),
+                'work_order': tuple(db.execute('SELECT * FROM work_orders WHERE id=30').fetchone()),
+                'attachment': tuple(db.execute('SELECT * FROM operation_attachments WHERE id=2').fetchone()),
+                'timeline': tuple(db.execute("SELECT * FROM timeline_events WHERE remark='历史完成记录'").fetchone()),
+            }
         historical = self.client.delete('/api/users/2/permanent', headers=self.headers(),
-                                        json={'reason': '不应删除有历史账号'})
-        self.assertEqual(historical.status_code, 409, historical.json)
-        self.assertEqual(historical.json['code'], 'USER_HISTORY_EXISTS')
-        self.assertIn('insp_plans', historical.json['references'])
+                                        json={'reason': '人员离岗，保留全部业务历史'})
+        self.assertEqual(historical.status_code, 200, historical.json)
+        for table in ('insp_plans', 'plan_schedules', 'work_orders',
+                      'operation_attachments', 'timeline_events'):
+            self.assertIn(table, historical.json['preserved_references'])
+        with app_module.get_db() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM users WHERE id=2').fetchone())
+            for table in ('user_roles', 'user_sites', 'user_sessions', 'auth_sessions',
+                          'wechat_bindings', 'user_wechat_bindings'):
+                self.assertEqual(db.execute(
+                    f'SELECT COUNT(*) FROM {table} WHERE user_id=2').fetchone()[0], 0)
+            history_after = {
+                'plan': tuple(db.execute('SELECT * FROM insp_plans WHERE id=10').fetchone()),
+                'schedule': tuple(db.execute('SELECT * FROM plan_schedules WHERE id=20').fetchone()),
+                'work_order': tuple(db.execute('SELECT * FROM work_orders WHERE id=30').fetchone()),
+                'attachment': tuple(db.execute('SELECT * FROM operation_attachments WHERE id=2').fetchone()),
+                'timeline': tuple(db.execute("SELECT * FROM timeline_events WHERE remark='历史完成记录'").fetchone()),
+            }
+            self.assertEqual(history_after, history_before)
+            self.assertEqual(app_module._actor_display_name(db, actor_id=2), '原运维')
+        weekly = self.client.get('/api/weekly-plans?user_id=2', headers=self.headers())
+        self.assertEqual(weekly.status_code, 200, weekly.json)
+        self.assertEqual(weekly.json[0]['user_name'], '原运维')
+        assignees = self.client.get('/api/assignees', headers=self.headers())
+        self.assertEqual(assignees.status_code, 200, assignees.json)
+        self.assertNotIn(2, [item['id'] for item in assignees.json])
+        self.assertEqual(self.client.get('/api/auth/me', headers=self.headers('source-token')).status_code, 401)
 
-    def test_permanent_delete_blocks_closed_text_only_history(self):
+    def test_permanent_delete_preserves_closed_text_only_history(self):
         with app_module.get_db() as db:
             db.execute("INSERT INTO work_orders VALUES (71,'关闭工单人员','closed')")
             db.execute("""INSERT INTO timeline_events
                 (source_type,source_id,event_type,operator,remark)
                 VALUES ('workorder',72,'closed','时间线人员','已关闭')""")
         work_order = self.client.delete('/api/users/7/permanent', headers=self.headers(),
-                                        json={'reason': '不应删除文本工单历史'})
+                                        json={'reason': '删除身份并保留文本工单历史'})
         timeline = self.client.delete('/api/users/8/permanent', headers=self.headers(),
-                                      json={'reason': '不应删除文本时间线历史'})
-        self.assertEqual(work_order.status_code, 409, work_order.json)
-        self.assertEqual(timeline.status_code, 409, timeline.json)
-        self.assertEqual(work_order.json['references']['work_orders'], 1)
-        self.assertEqual(timeline.json['references']['timeline_events'], 1)
+                                      json={'reason': '删除身份并保留文本时间线历史'})
+        self.assertEqual(work_order.status_code, 200, work_order.json)
+        self.assertEqual(timeline.status_code, 200, timeline.json)
+        self.assertEqual(work_order.json['preserved_references']['work_orders'], 1)
+        self.assertEqual(timeline.json['preserved_references']['timeline_events'], 1)
         with app_module.get_db() as db:
-            self.assertIsNotNone(db.execute('SELECT 1 FROM users WHERE id=7').fetchone())
-            self.assertIsNotNone(db.execute('SELECT 1 FROM users WHERE id=8').fetchone())
+            self.assertIsNone(db.execute('SELECT 1 FROM users WHERE id=7').fetchone())
+            self.assertIsNone(db.execute('SELECT 1 FROM users WHERE id=8').fetchone())
+            self.assertEqual(db.execute('SELECT assignee FROM work_orders WHERE id=71').fetchone()[0],
+                             '关闭工单人员')
+            self.assertEqual(db.execute('SELECT operator FROM timeline_events WHERE source_id=72').fetchone()[0],
+                             '时间线人员')
+            self.assertEqual(app_module._actor_display_name(db, actor_id=8), '时间线人员')
 
-    def test_permanent_delete_rechecks_reference_after_concurrent_writer_commits(self):
+    def test_permanent_delete_preserves_reference_from_concurrent_writer(self):
         writer = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
         writer.execute('BEGIN IMMEDIATE')
         writer.execute("""INSERT INTO timeline_events
@@ -248,10 +330,39 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         worker.join(5)
         self.assertFalse(worker.is_alive())
         response = result['response']
-        self.assertEqual(response.status_code, 409, response.json)
-        self.assertEqual(response.json['references']['timeline_events'], 1)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['preserved_references']['timeline_events'], 1)
         with app_module.get_db() as db:
-            self.assertIsNotNone(db.execute('SELECT 1 FROM users WHERE id=9').fetchone())
+            self.assertIsNone(db.execute('SELECT 1 FROM users WHERE id=9').fetchone())
+            self.assertEqual(db.execute(
+                "SELECT operator FROM timeline_events WHERE source_id=73").fetchone()[0],
+                '并发历史人员')
+
+    def test_permanent_delete_failure_rolls_back_identity_audit_and_history(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO timeline_events
+                (source_type,source_id,event_type,operator,remark)
+                VALUES ('workorder',74,'closed','回滚人员','必须保留')""")
+            db.execute('INSERT INTO user_sessions VALUES (10,10)')
+            db.execute("INSERT INTO wechat_bindings VALUES (10,10,'openid-10')")
+            db.execute("""CREATE TRIGGER fail_user_identity_delete BEFORE DELETE ON users
+                WHEN OLD.id=10 BEGIN SELECT RAISE(ABORT, 'forced user delete failure'); END""")
+        response = self.client.delete('/api/users/10/permanent', headers=self.headers(),
+                                      json={'reason': '强制失败回滚'})
+        self.assertEqual((response.status_code, response.json['code']),
+                         (503, 'USER_PERMANENT_DELETE_FAILED'))
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute('SELECT 1 FROM users WHERE id=10').fetchone())
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_roles WHERE user_id=10').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_sites WHERE user_id=10').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM user_sessions WHERE user_id=10').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM wechat_bindings WHERE user_id=10').fetchone()[0], 1)
+            audit_count = (db.execute(
+                'SELECT COUNT(*) FROM user_deletion_audits WHERE user_id=10').fetchone()[0]
+                if app_module._table_exists(db, 'user_deletion_audits') else 0)
+            self.assertEqual(audit_count, 0)
+            self.assertEqual(db.execute("SELECT operator FROM timeline_events WHERE source_id=74").fetchone()[0],
+                             '回滚人员')
 
     def test_generic_user_update_cannot_bypass_status_transition(self):
         response = self.client.put('/api/users/2', headers=self.headers(), json={

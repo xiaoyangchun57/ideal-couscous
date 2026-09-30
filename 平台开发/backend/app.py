@@ -4822,12 +4822,31 @@ def _current_actor_name(fallback='系统'):
     return user.get('real_name') or user.get('username') or fallback
 
 
+def _deleted_user_display_name(db, user_id):
+    if not user_id or not _table_exists(db, 'user_deletion_audits'):
+        return ''
+    row = db.execute("""SELECT real_name,username FROM user_deletion_audits
+        WHERE user_id=? ORDER BY id DESC LIMIT 1""", (user_id,)).fetchone()
+    if not row:
+        return ''
+    return str(row['real_name'] or row['username'] or '').strip()
+
+
+def _restore_deleted_user_name(db, item, user_id_key, name_key):
+    if not str(item.get(name_key) or '').strip():
+        item[name_key] = _deleted_user_display_name(db, item.get(user_id_key))
+    return item
+
+
 def _actor_display_name(db, actor='', actor_id=None, fallback='系统'):
     """Return a business-facing name while preserving legacy account-based records."""
     if actor_id:
         row = db.execute("SELECT real_name FROM users WHERE id=?", (actor_id,)).fetchone()
         if row and (row['real_name'] or '').strip():
             return row['real_name'].strip()
+        deleted_name = _deleted_user_display_name(db, actor_id)
+        if deleted_name:
+            return deleted_name
     raw_actor = (actor or '').strip()
     if raw_actor:
         row = db.execute(
@@ -9429,6 +9448,7 @@ def _decorate_attachment(db, attachment):
     result = dict(attachment)
     if result.get('uploader_real_name'):
         result['uploader_name'] = result['uploader_real_name']
+    _restore_deleted_user_name(db, result, 'uploader_id', 'uploader_name')
     result.update(_attachment_presentation(db, result))
     result.pop('uploader_real_name', None)
     return result
@@ -19701,10 +19721,6 @@ def api_user_permanent_delete(uid):
                 return jsonify({'error': '仅可永久删除已注销账号',
                                 'code': 'USER_NOT_DEACTIVATED'}), 409
             references = _user_business_reference_counts(db, uid)
-            if references:
-                db.rollback()
-                return jsonify({'error': '该账号已有业务历史，只能保留为注销状态',
-                                'code': 'USER_HISTORY_EXISTS', 'references': references}), 409
             roles = [row['role'] for row in db.execute(
                 'SELECT role FROM user_roles WHERE user_id=? ORDER BY role', (uid,)).fetchall()]
             sites = [row['site_id'] for row in db.execute(
@@ -19743,11 +19759,16 @@ def api_user_permanent_delete(uid):
                     db.execute(f'DELETE FROM {table} WHERE user_id=?', (uid,))
             db.execute('DELETE FROM users WHERE id=?', (uid,))
             db.commit()
+        except sqlite3.DatabaseError:
+            db.rollback()
+            return jsonify({'error': '永久删除暂未完成，身份和历史数据均未改变，请重试',
+                            'code': 'USER_PERMANENT_DELETE_FAILED'}), 503
         except Exception:
             db.rollback()
             raise
-    _clear_user_site_cache(uid)
-    return jsonify({'success': True, 'deleted': True})
+    _evict_user_tokens(uid)
+    return jsonify({'success': True, 'deleted': True,
+                    'preserved_references': references})
 
 
 # ===================== 设备管理 API =====================
@@ -26987,7 +27008,9 @@ def api_vehicle_applications():
         rows = db.execute(q, params).fetchall()
         result = []
         for row in rows:
-            item = _vehicle_plan_application_state(db, row)
+            item = dict(row)
+            _restore_deleted_user_name(db, item, 'applicant_id', 'applicant_name')
+            item = _vehicle_plan_application_state(db, item)
             _notify_vehicle_expiry(db, item)
             result.append(item)
         db.commit()
@@ -27503,6 +27526,7 @@ def api_vehicle_use_records():
             result = []
             for row in rows:
                 item = dict(row)
+                _restore_deleted_user_name(db, item, 'applicant_id', 'applicant_name')
                 match = re.search(r'巡检计划#(\d+)', str(item.get('reason') or ''))
                 item['plan_schedule_id'] = int(match.group(1)) if match else None
                 item = _vehicle_plan_use_state(db, item)
@@ -28020,6 +28044,8 @@ def api_weekly_plans():
         rows = []
         for row in db.execute(q, params).fetchall():
             item = dict(row)
+            _restore_deleted_user_name(db, item, 'user_id', 'user_name')
+            _restore_deleted_user_name(db, item, 'approver_id', 'approver_name')
             try:
                 import json as _json
                 item['plan_data'] = _json.loads(item['plan_data']) if item.get('plan_data') else {}
@@ -30139,6 +30165,8 @@ def api_plan_schedules_list():
         rows = []
         for raw in db.execute(q, params).fetchall():
             item = _ps_parse_row(raw)
+            _restore_deleted_user_name(db, item, 'user_id', 'user_name')
+            _restore_deleted_user_name(db, item, 'approver_id', 'approver_name')
             if (item.get('vehicle_adjustment_required')
                     and not _refresh_plan_vehicle_adjustment(db, item['id'])):
                 item['vehicle_adjustment_required'] = False
@@ -30371,6 +30399,8 @@ def api_plan_schedules_detail(sid):
         if not row:
             return jsonify({'error': '计划不存在'}), 404
         r = _ps_parse_row(row)
+        _restore_deleted_user_name(db, r, 'user_id', 'user_name')
+        _restore_deleted_user_name(db, r, 'approver_id', 'approver_name')
         if (r.get('vehicle_adjustment_required')
                 and not _refresh_plan_vehicle_adjustment(db, sid)):
             r['vehicle_adjustment_required'] = False
@@ -30385,6 +30415,8 @@ def api_plan_schedules_detail(sid):
                 FROM plan_schedule_events e LEFT JOIN users u ON u.id=e.operator_id
                 WHERE e.schedule_id=? AND e.event_type='cancelled' ORDER BY e.id DESC LIMIT 1""", (sid,)).fetchone()
             if event:
+                event = dict(event)
+                _restore_deleted_user_name(db, event, 'operator_id', 'operator_name')
                 try:
                     payload = json.loads(event['payload'] or '{}')
                 except (TypeError, ValueError):
