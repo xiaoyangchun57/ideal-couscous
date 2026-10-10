@@ -41,8 +41,9 @@ def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=No
     return prefix + crc16_modbus(prefix).to_bytes(2, "big")
 
 
-def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001"):
-    cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
+def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001", cp=None):
+    if cp is None:
+        cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
     body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
     return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
@@ -339,6 +340,126 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending, 0)
         self.assertEqual(batches, 7)
         self.assertFalse(self.server._normalization_scanner.done())
+
+    async def test_hj212_tcp_auto_normalization_reaches_v3_public_api(self):
+        station = "TESTHJ01"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ212-E2E','HJ212 end to end','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',60,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01001',60,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',900,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        frames = (
+            make_hj212(
+                station=station, password=password, command="2061", qn="20260911140200001",
+                cp="DataTime=20260911120000;w01001-Avg=7.1;w01001-Rtd=7.2;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2061", qn="20260911180200001",
+                cp="DataTime=20260911160000;w01001-Rtd=8.8;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2011", qn="20260911180300001",
+                cp="DataTime=20260911160100;w01001-Rtd=9.1;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2091", qn="20260911180400001",
+                cp="DataTime=20260911160200;w01001-Rtd=9.2;w01001-Flag=N",
+            ),
+        )
+        reader, writer = await self.connect()
+        writer.write(b"".join(frames))
+        await writer.drain()
+        self.assertEqual(await asyncio.wait_for(reader.read(), timeout=4), b"")
+        writer.close()
+        await writer.wait_closed()
+
+        for _ in range(100):
+            with closing(sqlite3.connect(self.database)) as connection:
+                raw_count = connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0]
+                pending_count = connection.execute(
+                    """SELECT COUNT(*) FROM ingest_raw_frames
+                       WHERE persistence_state IN ('pending_parse','pending_reparse')"""
+                ).fetchone()[0]
+                batch_count = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
+            if raw_count == 4 and pending_count == 0 and batch_count == 3:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual((raw_count, pending_count, batch_count), (4, 0, 3))
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            batches = connection.execute(
+                "SELECT function_code FROM observation_batches ORDER BY raw_frame_id"
+            ).fetchall()
+            business_rows = connection.execute(
+                """SELECT batch.function_code,business.standard_value,business.projection_version
+                   FROM monitoring_business_observations business
+                   JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                   ORDER BY batch.raw_frame_id"""
+            ).fetchall()
+            non_data_errors = connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE error_type='hj212_non_data_command'"
+            ).fetchone()[0]
+        self.assertEqual(batches, [(2061,), (2061,), (2011,)])
+        self.assertEqual(business_rows, [
+            (2061, 7.1, "station-monitoring-business-v3"),
+            (2011, 9.1, "station-monitoring-business-v3"),
+        ])
+        self.assertEqual(non_data_errors, 1)
+        self.assertFalse(self.server._normalizer.done())
+
+        _, token = self._create_l1_web_credentials()
+        headers = {"Authorization": f"Bearer {token}"}
+        client = web_app.app.test_client()
+        with mock.patch.object(web_app, "STATION_MONITORING_ACCESS_MODE", "public"):
+            latest = client.get(f"/api/station-monitoring/sites/{site_id}/latest", headers=headers)
+            self.assertEqual(latest.status_code, 200, latest.get_json())
+            self.assertEqual(len(latest.get_json()["items"]), 1)
+            latest_item = latest.get_json()["items"][0]
+            self.assertEqual(
+                (latest_item["business_metric"], latest_item["standard_value"],
+                 latest_item["function_code"], latest_item["projection_version"]),
+                ("ph", 7.1, 2061, "station-monitoring-business-v3"),
+            )
+            trend = client.get(
+                f"/api/station-monitoring/sites/{site_id}/trend"
+                "?metric=ph&start=2026-09-11T04:00:00%2B00:00&end=2026-09-11T08:00:00%2B00:00",
+                headers=headers,
+            )
+            self.assertEqual(trend.status_code, 200, trend.get_json())
+            self.assertEqual(
+                [point["value"] for point in trend.get_json()["points"] if point["status"] == "value"],
+                [7.1],
+            )
 
     def _create_l1_web_credentials(self) -> tuple[int, str]:
         with closing(sqlite3.connect(self.database)) as connection:
