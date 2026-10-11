@@ -87,6 +87,7 @@ App({
     selSiteId: null,   // 首页/巡检站间跳转的临时选中站点
     executionTarget: null, // 巡检入口的精确执行包/日期/站点/检查项快照
     vehicleTarget: null, // “我的用车”一次性精确申请/动作目标
+    stationHubTarget: null, // 首页进入站点 Tab 的一次性模式/筛选目标
     baseUrl: ''        // 运行时可由开发者工具注入，缺省读 config
   },
 

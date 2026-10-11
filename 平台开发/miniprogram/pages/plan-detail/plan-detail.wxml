@@ -1,4 +1,4 @@
-﻿<view class="plan-detail-page">
+<view class="plan-detail-page">
 
   <!-- ===== 状态头部区 ===== -->
   <view class="status-header" wx:if="{{loaded && detail}}">
@@ -48,6 +48,15 @@
     </view>
   </view>
 
+  <view class="reject-banner" wx:if="{{loaded && detail && vehicleAdjustmentRequired}}">
+    <view class="reject-icon">!</view>
+    <view class="reject-content">
+      <text class="reject-title">车辆需调整</text>
+      <text class="reject-text">当前车辆安排与前序延期占用冲突，请更换车辆并确认变更。</text>
+      <button class="btn-secondary-outline" bindtap="onChangeRequest" wx:if="{{canChange}}">调整车辆</button>
+    </view>
+  </view>
+
   <!-- ===== 卡片1：作业路线 ===== -->
   <view class="info-card" wx:if="{{loaded && detail.cancellation}}">
     <view class="card-header">取消记录</view>
@@ -67,7 +76,10 @@
     <view class="site-list">
       <!-- site-task 模式：时间线站点行 -->
       <block wx:if="{{generatedTaskMode === 'site'}}">
-        <view class="site-list-row" wx:for="{{generatedPlans}}" wx:key="key">
+        <view class="site-list-row {{item.can_view_result ? 'site-list-row-actionable' : ''}}"
+              wx:for="{{generatedPlans}}" wx:key="key"
+              data-plan-id="{{item.plan_id || item.id}}" data-site-id="{{item.site_id}}"
+              bindtap="{{item.can_view_result ? 'onViewSiteResult' : ''}}">
           <view class="site-list-left">
             <view class="site-list-name">{{item.site_name || '站点'}}</view>
             <view class="site-list-date">{{item.execution_date || ''}}</view>
@@ -75,6 +87,7 @@
           <view class="site-list-right">
             <view class="site-list-status sstat-{{item.status_cls}}">{{item.status_cn || '状态未知'}}</view>
             <view class="site-list-items">{{item.item_counts_text}}</view>
+            <view class="site-list-result-action" wx:if="{{item.can_view_result}}">{{item.result_action_text}}</view>
           </view>
         </view>
       </block>
@@ -140,6 +153,14 @@
     </view>
   </view>
 
+  <view class="info-card" wx:if="{{canAbandonChange}}">
+    <view class="card-header">计划变更中</view>
+    <view class="info-row">
+      <text class="info-value info-value-secondary info-value-multiline">尚未提交审批。可以继续编辑，或放弃本次修改并恢复变更前已审批计划。</text>
+    </view>
+    <button class="btn-secondary-outline btn-destructive-outline" loading="{{abandoningChange}}" bindtap="onAbandonChange">放弃变更并恢复原计划</button>
+  </view>
+
   <!-- 底部安全区占位 -->
   <view class="bottom-spacer"></view>
 
@@ -155,6 +176,10 @@
       <button class="btn-primary-main" bindtap="onGoExecution">{{executionActionText}}</button>
       <button class="btn-secondary-outline" bindtap="onChangeRequest" wx:if="{{canChange}}">变更</button>
     </block>
+    <!-- 单站完成计划：主动作直接打开只读现场记录，不重走准备或到站流程 -->
+    <block wx:elif="{{canViewCompletedResult}}">
+      <button class="btn-primary-main" bindtap="onViewPrimaryResult">查看现场记录</button>
+    </block>
     <!-- 已批准不可执行：主=发起变更，次=收藏 -->
     <block wx:elif="{{canChange}}">
       <button class="btn-primary-main" bindtap="onChangeRequest">发起变更</button>
@@ -164,7 +189,7 @@
     <block wx:else>
       <button class="btn-primary-main" bindtap="onFavoriteAction" wx:if="{{canFavorite}}">{{favorite ? '复用计划' : '收藏为常用'}}</button>
     </block>
-    <button class="btn-secondary-outline btn-destructive-outline" bindtap="onOpenCancel" wx:if="{{canCancel}}">取消</button>
+    <button class="btn-secondary-outline btn-destructive-outline" bindtap="onOpenCancel" wx:if="{{canCancel}}">取消计划</button>
   </view>
 
   <!-- 取消原因弹层 -->
@@ -174,11 +199,21 @@
       <text class="sheet-title">取消计划</text>
       <view class="sheet-close" bindtap="onCloseCancel"></view>
     </view>
+    <!-- 后果说明：破坏性操作必须明确告知影响 -->
+    <view class="cancel-warning">
+      <text class="cancel-warning-title">取消后将产生以下影响</text>
+      <view class="cancel-warning-list">
+        <text class="cancel-warning-item">· 计划状态变更为"已取消"，不可恢复</text>
+        <text class="cancel-warning-item">· 已排期的巡检任务将同步作废</text>
+        <text class="cancel-warning-item">· 取消操作需填写原因并留痕</text>
+      </view>
+    </view>
+    <text class="field-label">取消原因 <text class="required">*</text></text>
     <textarea class="form-textarea" placeholder="请填写取消原因（必填，最多500字）" value="{{cancelSheet.reason}}" bindinput="onCancelReasonInput" maxlength="500"></textarea>
     <text class="form-error" wx:if="{{cancelSheet.error}}">{{cancelSheet.error}}</text>
     <view class="sheet-actions">
       <button class="btn-secondary-outline" bindtap="onCloseCancel">返回</button>
-      <button class="btn-primary-main btn-destructive-fill" loading="{{cancelSheet.submitting}}" bindtap="onConfirmCancel">确认取消</button>
+      <button class="btn-primary-main btn-destructive-outline" loading="{{cancelSheet.submitting}}" bindtap="onConfirmCancel">确认取消</button>
     </view>
   </view>
 

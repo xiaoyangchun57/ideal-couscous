@@ -11,6 +11,69 @@ export const MONITORING_STATUS_META = {
 
 export const MONITORING_STATUS_ORDER = Object.keys(MONITORING_STATUS_META);
 
+const SITE_DIRECTORY_SNAPSHOT_LIMIT = 8;
+const siteDirectorySnapshots = new Map();
+
+function normalizedRoles(user = {}) {
+  const roles = Array.isArray(user.roles) && user.roles.length ? user.roles : [user.role];
+  return [...new Set(roles.filter(Boolean).map(String))].sort();
+}
+
+function normalizedCapabilities(user = {}) {
+  return Object.entries(user.capabilities || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [key, value]);
+}
+
+export function stationDirectorySnapshotKey(user = {}, scope, sessionKey = '') {
+  const identity = user.id ?? user.username;
+  if (identity == null || !scope || !sessionKey) return null;
+  return JSON.stringify({
+    sessionKey,
+    identity: String(identity),
+    username: String(user.username || ''),
+    roles: normalizedRoles(user),
+    capabilities: normalizedCapabilities(user),
+    scope,
+  });
+}
+
+function copySiteDirectorySnapshot(snapshot) {
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    rows: Array.isArray(snapshot.rows) ? [...snapshot.rows] : [],
+    summary: { ...(snapshot.summary || {}) },
+    scopeFacts: snapshot.scopeFacts ? {
+      ...snapshot.scopeFacts,
+      availableScopes: [...(snapshot.scopeFacts.availableScopes || [])],
+    } : null,
+  };
+}
+
+export function readSiteDirectorySnapshot(key) {
+  return key ? copySiteDirectorySnapshot(siteDirectorySnapshots.get(key)) : null;
+}
+
+export function writeSiteDirectorySnapshot(key, snapshot) {
+  if (!key || !snapshot?.ready) return null;
+  const stored = copySiteDirectorySnapshot({ ...snapshot, key, savedAt: Date.now() });
+  siteDirectorySnapshots.delete(key);
+  siteDirectorySnapshots.set(key, stored);
+  while (siteDirectorySnapshots.size > SITE_DIRECTORY_SNAPSHOT_LIMIT) {
+    siteDirectorySnapshots.delete(siteDirectorySnapshots.keys().next().value);
+  }
+  return copySiteDirectorySnapshot(stored);
+}
+
+export function clearSiteDirectorySnapshots() {
+  siteDirectorySnapshots.clear();
+}
+
+export function siteDirectoryLoadMode(snapshot) {
+  return snapshot?.ready ? 'refresh' : 'initial';
+}
+
 export const AXIS_META = {
   communication: '数据接收',
   data: '观测数据',
@@ -26,7 +89,33 @@ const MONITORING_FIELDS = [
   'last_communication_at',
   'last_valid_observation_at',
   'published_factor_count',
+  'monitoring_load_state',
+  'communication',
+  'latest_cycle',
 ];
+
+export const CYCLE_STATUS_META = {
+  pending: { label: '结果形成中', color: 'blue' },
+  complete: { label: '结果完整', color: 'green' },
+  incomplete: { label: '结果不完整', color: 'orange' },
+  review_required: { label: '结果待核对', color: 'red' },
+  not_configured: { label: '周期未配置', color: 'default' },
+};
+
+export const COMMUNICATION_STATUS_META = {
+  normal: { label: '接收正常', color: 'green' },
+  stale: { label: '接收中断', color: 'red' },
+  awaiting: { label: '等待首帧', color: 'blue' },
+  not_connected: { label: '未接入', color: 'default' },
+};
+
+export function cycleStatusView(cycle = {}) {
+  return CYCLE_STATUS_META[cycle.status] || { label: '周期状态待确认', color: 'default' };
+}
+
+export function communicationStatusView(communication = {}) {
+  return COMMUNICATION_STATUS_META[communication.status] || { label: '接收状态待确认', color: 'default' };
+}
 
 export function monitoringStatusView(record = {}) {
   const key = record.monitoring_status;
@@ -166,7 +255,7 @@ export function monitoringTrendView(payload, { loading = false, error = '' } = {
     suspectPoints: Number.isFinite(coverage.suspect_points) ? coverage.suspect_points : 0,
     duplicateRecords: Number.isFinite(coverage.duplicate_records) ? coverage.duplicate_records : 0,
     conflictSlots: Number.isFinite(coverage.conflict_slots) ? coverage.conflict_slots : 0,
-    emptyReason: '当前因子在最近24小时内暂无有效观测',
+    emptyReason: '当前因子尚无可展示的检测周期',
   };
 }
 
@@ -184,17 +273,19 @@ export function monitoringTrendChartOption(trend) {
     tooltip: { trigger: 'axis', valueFormatter: (value) => `${value}${trend.unit ? ` ${trend.unit}` : ''}` },
     xAxis: {
       type: 'time', name: '正式业务时点', nameLocation: 'middle', nameGap: 32,
-      axisLabel: { hideOverlap: true },
+      axisLabel: { hideOverlap: true, formatter: '{MM}-{dd} {HH}:{mm}' },
     },
-    yAxis: { type: 'value', name: trend.unit || '数值', scale: true },
+    yAxis: { type: 'value', name: trend.unit || '数值', scale: false },
     series: [{
       type: 'line', name: trend.factorName || '有效观测', showSymbol: trend.items.length < 80,
-      connectNulls: false, data: trend.items.map((item) => [item.scheduled_at || item.observed_at, item.value]),
+      connectNulls: false, data: trend.items.map((item) => [
+        item.scheduled_at || item.observed_at,
+        !item.status || item.status === 'value' ? item.value : null,
+      ]),
     }],
   };
 }
 
 export function hasAdminRole(user = {}) {
-  const roles = Array.isArray(user.roles) && user.roles.length ? user.roles : [user.role];
-  return roles.includes('admin');
+  return normalizedRoles(user).includes('admin');
 }

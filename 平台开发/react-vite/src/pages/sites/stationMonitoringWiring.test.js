@@ -52,6 +52,17 @@ test('monitoring pages cancel superseded requests and ignore stale responses', (
   );
 });
 
+test('site directory reuses an identity-scoped snapshot and keeps refresh non-blocking', () => {
+  const sites = source('./SitesPage.jsx');
+  assert.match(sites, /stationDirectorySnapshotKey\(user, monitoringScope, token\)/);
+  assert.match(sites, /readSiteDirectorySnapshot\(monitoringRequestKey\)/);
+  assert.match(sites, /writeSiteDirectorySnapshot\(\s*monitoringRequestKey/);
+  assert.match(sites, /setRefreshing\(loadMode === 'refresh'\)/);
+  assert.match(sites, /loading=\{directoryLoading\}/);
+  assert.match(sites, /正在后台核对最新站点与监测状态/);
+  assert.match(sites, /previousSnapshot\?\.rows \|\| \[\]/);
+});
+
 test('closed monitoring capability hides entries and makes the site ledger skip monitoring requests', () => {
   const sites = source('./SitesPage.jsx');
   const layout = source('../../layouts/MainLayout.jsx');

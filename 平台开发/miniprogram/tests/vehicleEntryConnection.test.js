@@ -633,6 +633,46 @@ test('all four submitting sheets refuse close and preserve their retry context',
   assert.equal(toasts.slice(-4).every(item => /正在处理中，请稍候/.test(item.title)), true);
 });
 
+test('vehicle extension asks before downstream conflict and reuses one idempotency key', async () => {
+  const calls = [];
+  api.extendVehicleApplication = (id, endDate, options) => {
+    calls.push({ id, endDate, options });
+    if (!options.confirmConflicts) {
+      return Promise.reject({
+        code: 'VEHICLE_EXTENSION_CONFIRM_REQUIRED',
+        conflicts: [{ responsible_name: '接收人' }],
+      });
+    }
+    return Promise.resolve({ end_at: '2026-09-12 18:00:00' });
+  };
+  modals = [];
+  const page = pageInstance();
+  page.setData({
+    authorityFresh: true,
+    applications: [application(8, { needs_extension: true })],
+  });
+  page._openExtensionFor(8);
+  page.setData({ 'extensionSheet.endDate': '2026-09-12' });
+  page.onSubmitExtension();
+  await flush();
+  assert.equal(modals.length, 1);
+  assert.match(modals[0].content, /接收人/);
+  modals[0].success({ confirm: true });
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.confirmConflicts, false);
+  assert.equal(calls[1].options.confirmConflicts, true);
+  assert.ok(calls[0].options.idempotencyKey);
+  assert.equal(calls[0].options.idempotencyKey, calls[1].options.idempotencyKey);
+  assert.equal(page.data.extensionSheet.open, false);
+});
+
+test('future plan vehicle choices use intrinsic schedulable state instead of current dispatch state', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../pages/plan-edit/plan-edit.js'), 'utf8');
+  assert.match(source, /disabled:\s*v\.schedulable === false/);
+  assert.doesNotMatch(source, /disabled:\s*!v\.dispatchable/);
+});
+
 test('fault and extension failures release submitting state and retry the same context', async () => {
   const faultKeys = [];
   const extensionCalls = [];

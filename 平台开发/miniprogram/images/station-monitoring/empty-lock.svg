@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <!-- 盾牌外轮廓 -->
+  <path d="M24 4L8 10v14c0 11 7.5 19 16 22 8.5-3 16-11 16-22V10L24 4z" fill="#E5E5EA" fill-opacity="0.6"/>
+  <path d="M24 4L8 10v14c0 11 7.5 19 16 22 8.5-3 16-11 16-22V10L24 4z" stroke="#8E8E93" stroke-width="1.5" stroke-linejoin="round"/>
+  <!-- 锁孔 -->
+  <circle cx="24" cy="22" r="5" fill="none" stroke="#8E8E93" stroke-width="1.5"/>
+  <path d="M24 27v10" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

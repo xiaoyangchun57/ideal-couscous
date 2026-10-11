@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,7 +15,9 @@ from sl651_parser import (FrameError, UP_FLOW_CONTROL, crc16_modbus, encode_bcd_
                           encode_bcd_time, encode_station_code, parse_frame, parse_water_quality_payload,
                           parse_water_quality_report)
 from sl651_server import IngestionStorage, credential_hmac
-from station_monitoring import _project_business_observation, expected_business_slots, normalize_raw_frame
+from station_monitoring import (_project_business_observation, _scheduled_at,
+                                business_slot_deadline, expected_business_slots,
+                                latest_cycle, normalize_raw_frame)
 
 
 def bcd_number(value, digits, precision=0):
@@ -101,6 +104,29 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertFalse(duplicate)
         return raw_id
 
+    def test_delayed_result_window_is_half_open_and_crosses_midnight(self):
+        schedule = {
+            'timezone': 'Asia/Shanghai', 'anchor_local_time': '00:00:00',
+            'interval_seconds': 14400, 'result_delay_seconds': 7200,
+        }
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T17:59:59+00:00', 2011),
+            '2026-09-11T12:00:00+00:00',
+        )
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T18:00:00+00:00', 2011),
+            '2026-09-11T16:00:00+00:00',
+        )
+        self.assertEqual(
+            _scheduled_at(schedule, '2026-09-11T04:00:00+00:00', 2061),
+            '2026-09-11T04:00:00+00:00',
+        )
+        self.assertIsNone(_scheduled_at(schedule, '2026-09-11T05:00:00+00:00', 2061))
+        self.assertEqual(business_slot_deadline({
+            'result_delay_seconds': 7200, 'tolerance_seconds': 900,
+            'expected_interval_seconds': 14400,
+        }, '2026-09-11T04:00:00+00:00'), '2026-09-11T06:15:00+00:00')
+
     def test_32h_golden_factor_payload_covers_current_water_quality_and_status_definitions(self):
         payload = (
             bytes.fromhex('0311') + bcd_number(12.3, 3, 1) + bytes.fromhex('4612') + bcd_number(7.12, 4, 2)
@@ -160,7 +186,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             headers=operator,
         )
         self.assertEqual(trend.status_code, 200, trend.get_json())
-        self.assertEqual(trend.get_json()['points'][0]['value'], 0.0)
+        self.assertEqual(
+            next(point['value'] for point in trend.get_json()['points'] if point['status'] == 'value'),
+            0.0,
+        )
         self.assertEqual(trend.get_json()['standard_unit'], 'mg/L')
 
     def test_partial_unmapped_evidence_and_read_permission_boundaries(self):
@@ -465,7 +494,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         coverage = response.get_json()['coverage']
         self.assertEqual(coverage['expected_points'], 6)
         self.assertEqual(coverage['valid_points'], 0)
-        self.assertEqual(coverage['displayed_points'], 1)
+        self.assertEqual(coverage['displayed_points'], 0)
         self.assertEqual(coverage['missing_points'], 6)
         self.assertEqual(coverage['gap_count'], 1)
         self.assertEqual(coverage['coverage_rate'], 0)
@@ -555,8 +584,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&start=2020-06-11T20:00:00%2B00:00&end=2020-06-11T20:10:00%2B00:00',
             headers=self._headers('monitor-admin'),
         ).get_json()
-        self.assertEqual(conflicted['points'], [])
-        self.assertEqual(conflicted['coverage']['missing_points'], 1)
+        self.assertEqual(conflicted['points'][0]['status'], 'review_required')
+        self.assertIsNone(conflicted['points'][0]['value'])
+        self.assertEqual(conflicted['coverage']['missing_points'], 0)
         self.assertEqual(conflicted['coverage']['conflict_slots'], 1)
 
     def test_exact_slot_nearby_minute_and_receipt_tolerance_remain_distinct(self):
@@ -710,8 +740,37 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(response.get_json()['coverage']['expected_points'], 6)
+        self.assertEqual(len(response.get_json()['points']), 6)
+        self.assertTrue(all(point['status'] in {'value', 'pending', 'missing', 'review_required'}
+                            for point in response.get_json()['points']))
         self.assertNotIn('2020-06-12T16:00:00+00:00', [
             point['scheduled_at'] for point in response.get_json()['points']])
+
+    def test_unfinished_result_window_is_pending_not_missing_coverage(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                'UPDATE monitoring_business_schedules SET result_delay_seconds=7200,tolerance_seconds=0'
+            )
+            connection.commit()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2020, 6, 12, 1, 0, 0, tzinfo=timezone.utc)
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+        with mock.patch.object(web_app, 'datetime', FixedDateTime):
+            response = web_app.app.test_client().get(
+                f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+                '&start=2020-06-12T00:00:00%2B00:00&end=2020-06-12T04:00:00%2B00:00',
+                headers=self._headers('monitor-admin'),
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        coverage = response.get_json()['coverage']
+        self.assertEqual(coverage['expected_points'], 0)
+        self.assertEqual(coverage['pending_points'], 1)
+        self.assertEqual(coverage['missing_points'], 0)
+        self.assertEqual(coverage['gap_count'], 0)
 
     def test_instrument_route_exposes_factor_configuration_without_health_projection(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -736,6 +795,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('status', water)
 
     def test_station_monitoring_overview_uses_independent_monitoring_fields(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE sites SET manager='旧负责人文本' WHERE id=?", (self.site_id,))
+            connection.commit()
         response = web_app.app.test_client().get(
             f'/api/station-monitoring/sites/{self.site_id}/overview', headers=self._headers('monitor-admin'))
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -748,6 +810,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertNotIn('reason', body['site'])
         self.assertTrue(body['site']['can_calibrate'])
         self.assertEqual(body['site']['type_cn'], '其他站点')
+        self.assertEqual(body['site']['manager'], 'Operator')
+        self.assertEqual([person['id'] for person in body['site']['responsible_people']], [self.operator_id])
         self.assertEqual(set(body['axes']), {'communication', 'data'})
         self.assertNotIn('instruments', body)
         self.assertNotIn('recent_items', body)
@@ -836,9 +900,54 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(body['axes']['communication']['status_label'], '最近未收到报文')
         self.assertEqual(body['axes']['communication']['reason'], '最后收到报文时间已超出配置周期')
         self.assertEqual(body['axes']['data']['state'], 'no_valid_observation')
-        self.assertEqual(body['axes']['data']['reason'], '当前配置因子中仍有因子尚未形成正式业务观测')
+        self.assertEqual(body['axes']['data']['reason'], '完整结果窗口结束后仍有配置因子缺测')
         self.assertNotEqual(body['axes']['data']['reason'], body['axes']['communication']['reason'])
         self.assertTrue(all(item['standard_unit'] for item in body['monitoring']['factors']))
+
+    def test_presented_value_uses_business_slot_and_retains_source_data_time(self):
+        presented = web_app._station_monitoring_presented_value({
+            'scheduled_at': '2026-09-21T04:00:00+00:00',
+            'observed_at': '2026-09-21T06:01:00+00:00',
+            'received_at': '2026-09-21T06:01:05+00:00',
+        })
+        self.assertEqual(presented['observed_at'], '2026-09-21T04:00:00+00:00')
+        self.assertEqual(presented['source_data_time'], '2026-09-21T06:01:00+00:00')
+        self.assertEqual(presented['received_at'], '2026-09-21T06:01:05+00:00')
+
+    def test_factor_projection_exposes_each_fault_reason_independently(self):
+        now = '2026-09-21T06:01:00+00:00'
+        with closing(sqlite3.connect(self.database)) as connection:
+            raw = connection.execute(
+                """INSERT INTO ingest_raw_frames(
+                       endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                       crc_status,authentication_status,disposition,persistence_state)
+                   VALUES (?,?,?,?,?,?,'valid','authenticated','accepted','persisted')""",
+                (self.endpoint_id, '0012345678', now, 'four-faults', b'isolated', 8),
+            )
+            batch = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,'device_reported',?,?,'partial','completed',?)""",
+                (raw.lastrowid, self.endpoint_id, self.site_id, 2011, 1, now, now, now,
+                 'realtime', 'four-faults', 'isolated', now),
+            )
+            connection.executemany(
+                """INSERT INTO monitoring_quality_issues(
+                       raw_frame_id,observation_batch_id,business_site_id,issue_type,object_summary,
+                       first_seen_at,last_seen_at)
+                   VALUES (?,?,?,'hj212_flag_fault',?,?,?)""",
+                [(raw.lastrowid, batch.lastrowid, self.site_id, code, now, now)
+                 for code in ('0311', '4612', '4A11', '4C1A')],
+            )
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            configs = web_app.monitoring_factor_configurations(connection, self.site_id)
+            states = web_app._station_monitoring_factor_states(connection, self.site_id, configs, [])
+        self.assertEqual(len(states), 4)
+        self.assertEqual({item['state'] for item in states}, {'fault'})
+        self.assertEqual({item['reason_code'] for item in states}, {'hj212_flag_fault'})
 
     def test_station_monitoring_normal_requires_every_configured_factor_fresh(self):
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -1010,6 +1119,242 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         summary = web_app.app.test_client().get('/api/station-monitoring/access-summary', headers=headers).get_json()
         self.assertEqual(summary['configuration']['configured_sites'], 0)
         self.assertEqual(summary['observation']['valid_sites'], 0)
+
+    def test_hj212_minute_candidates_never_compete_with_formal_2061_avg(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                       expected_interval_seconds,tolerance_seconds,effective_from)
+                   VALUES (?,'HJ212:w01001','ph','INST-A',14400,900,'2020-01-01T00:00:00+00:00')""",
+                (self.endpoint_id,),
+            )
+            connection.execute(
+                "UPDATE monitoring_business_schedules SET result_delay_seconds=7200,tolerance_seconds=900"
+            )
+
+            def project(function_code, value, serial):
+                observed_at = ('2020-06-11T22:00:00+00:00' if function_code == 2011
+                               else '2020-06-11T20:00:00+00:00')
+                raw = connection.execute(
+                    """INSERT INTO ingest_raw_frames(
+                           endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                           crc_status,authentication_status,disposition,persistence_state)
+                       VALUES (?,?,?,?,?,8,'valid','authenticated','accepted','persisted')""",
+                    (self.endpoint_id, '0012345678', observed_at, f'hj-semantic-{serial}', b'isolated'),
+                )
+                batch = connection.execute(
+                    """INSERT INTO observation_batches(
+                           raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                           reported_at,observed_at,received_at,granularity,aggregation_source,
+                           idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,'device_reported',?,?,'accepted','completed',?)""",
+                    (raw.lastrowid, self.endpoint_id, self.site_id, function_code, serial,
+                     observed_at, observed_at, observed_at, 'realtime', f'hj-semantic-{serial}',
+                     'station-monitoring-normalizer-v3', observed_at),
+                )
+                item = connection.execute(
+                    """INSERT INTO observation_values(
+                           observation_batch_id,protocol_code,business_metric,raw_value,raw_unit,
+                           standard_value,standard_unit,quality,instrument_asset_code,parser_version)
+                       VALUES (?,'HJ212:w01001','ph',?,'pH',?,'pH','valid','INST-A','isolated')""",
+                    (batch.lastrowid, value, value),
+                )
+                self.assertTrue(_project_business_observation(
+                    connection, value_id=item.lastrowid, batch_id=batch.lastrowid,
+                    endpoint_id=self.endpoint_id, site_id=self.site_id,
+                    protocol_code='HJ212:w01001', business_metric='ph',
+                    instrument_asset_code='INST-A', observed_at=observed_at,
+                    received_at=observed_at, standard_value=value, standard_unit='pH',
+                    quality='valid', function_code=function_code,
+                    source_value_kind='avg' if function_code == 2061 else 'rtd',
+                ))
+
+            project(2011, 7.1, 1)
+            project(2011, 7.2, 2)
+            cycle = latest_cycle(connection, self.site_id, at_time='2020-06-11T21:00:00+00:00')
+            ph = next(item for item in cycle['factors'] if item['business_metric'] == 'ph')
+            self.assertEqual(ph['status'], 'pending')
+            self.assertEqual(ph['process_candidate_count'], 2)
+            self.assertEqual(ph['formal_candidate_count'], 0)
+            connection.commit()
+            process_only_summary = web_app.app.test_client().get(
+                '/api/station-monitoring/access-summary',
+                headers=self._headers('monitor-admin'),
+            ).get_json()
+            self.assertEqual(process_only_summary['observation']['valid_sites'], 0)
+
+            project(2061, 7.3, 3)
+            cycle = latest_cycle(connection, self.site_id, at_time='2020-06-11T21:00:00+00:00')
+            ph = next(item for item in cycle['factors'] if item['business_metric'] == 'ph')
+            self.assertEqual((ph['status'], ph['value'], ph['source_type']),
+                             ('value', 7.3, 'hj212_2061_avg'))
+            connection.commit()
+            formal_summary = web_app.app.test_client().get(
+                '/api/station-monitoring/access-summary',
+                headers=self._headers('monitor-admin'),
+            ).get_json()
+            self.assertEqual(formal_summary['observation']['valid_sites'], 1)
+
+            project(2061, 7.4, 4)
+            cycle = latest_cycle(connection, self.site_id, at_time='2020-06-11T21:00:00+00:00')
+            ph = next(item for item in cycle['factors'] if item['business_metric'] == 'ph')
+            self.assertEqual(ph['status'], 'review_required')
+            self.assertIsNone(ph['value'])
+
+    def test_batch_last_receipt_query_uses_endpoint_received_index(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT endpoint_id,MAX(received_at) FROM ingest_raw_frames
+                   INDEXED BY idx_ingest_raw_endpoint_received
+                   WHERE authentication_status='authenticated' AND endpoint_id IN (?)
+                   GROUP BY endpoint_id""",
+                (self.endpoint_id,),
+            ).fetchall()
+        detail = ' '.join(str(row[3]) for row in plan)
+        self.assertIn('idx_ingest_raw_endpoint_received', detail)
+
+    def test_batch_projection_query_count_is_constant_for_one_ten_and_fifty_sites(self):
+        def ensure_sites(connection, target):
+            current = connection.execute(
+                "SELECT COUNT(*) FROM sites WHERE code LIKE 'PERF-%'"
+            ).fetchone()[0]
+            base_mappings = connection.execute(
+                """SELECT protocol_code,business_metric,expected_interval_seconds,tolerance_seconds
+                   FROM monitoring_factor_mappings WHERE endpoint_id=? ORDER BY id""",
+                (self.endpoint_id,),
+            ).fetchall()
+            for index in range(current + 1, target + 1):
+                site_id = connection.execute(
+                    "INSERT INTO sites(code,name,type) VALUES (?,?,?)",
+                    (f'PERF-{index:03}', f'性能隔离站{index}', 'water'),
+                ).lastrowid
+                endpoint_id = connection.execute(
+                    """INSERT INTO trusted_endpoints(
+                           station_code,credential_hmac,business_site_id,endpoint_state)
+                       VALUES (?,?,?,'bound')""",
+                    (f'PERF-MN-{index:03}', f'isolated-hmac-{index}', site_id),
+                ).lastrowid
+                instrument = f'PERF-INST-{index}'
+                connection.execute(
+                    """INSERT INTO monitoring_endpoint_profiles(
+                           endpoint_id,business_site_id,instrument_asset_code,
+                           expected_granularity,expected_interval_seconds,effective_from)
+                       VALUES (?,?,?,'realtime',60,'2020-01-01T00:00:00+00:00')""",
+                    (endpoint_id, site_id, instrument),
+                )
+                connection.executemany(
+                    """INSERT INTO monitoring_factor_mappings(
+                           endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                           expected_interval_seconds,tolerance_seconds,effective_from)
+                       VALUES (?,?,?,?,?,?,'2020-01-01T00:00:00+00:00')""",
+                    [(endpoint_id, row[0], row[1], instrument, row[2], row[3])
+                     for row in base_mappings],
+                )
+                connection.execute(
+                    """INSERT INTO monitoring_business_schedules(
+                           endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                           tolerance_seconds,effective_from)
+                       VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',600,
+                               '2020-01-01T00:00:00+00:00')""",
+                    (endpoint_id,),
+                )
+            connection.commit()
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            counts = {}
+            for size in (1, 10, 50):
+                ensure_sites(connection, size)
+                site_rows = connection.execute(
+                    """SELECT id,code,name,type,district,address,river,basin,
+                              gps_lat AS lat,gps_lng AS lng,manager,phone
+                       FROM sites WHERE code LIKE 'PERF-%' ORDER BY id LIMIT ?""",
+                    (size,),
+                ).fetchall()
+                statements = []
+                connection.set_trace_callback(
+                    lambda sql: statements.append(sql)
+                    if sql.lstrip().upper().startswith(('SELECT', 'WITH')) else None)
+                try:
+                    items = web_app._station_monitoring_batch_projections(connection, site_rows)
+                finally:
+                    connection.set_trace_callback(None)
+                counts[size] = len(statements)
+                self.assertEqual(len(items), size)
+                self.assertTrue(all(item['published_factor_count'] == 4 for item in items))
+        self.assertEqual(counts, {1: 8, 10: 8, 50: 8})
+
+    def test_latest_cycle_keeps_thirteen_configured_factors_and_reports_nine_of_thirteen(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            definitions = connection.execute(
+                """SELECT protocol_code,business_metric,standard_unit
+                   FROM monitoring_factor_definitions
+                   WHERE is_published=1 AND business_metric IS NOT NULL
+                   GROUP BY business_metric ORDER BY business_metric LIMIT 13"""
+            ).fetchall()
+            self.assertEqual(len(definitions), 13)
+            connection.execute('DELETE FROM monitoring_factor_mappings WHERE endpoint_id=?', (self.endpoint_id,))
+            connection.execute(
+                'UPDATE monitoring_business_schedules SET result_delay_seconds=7200,tolerance_seconds=900'
+            )
+            connection.executemany(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                       expected_interval_seconds,tolerance_seconds,effective_from)
+                   VALUES (?,?,?,?,14400,900,'2020-01-01T00:00:00+00:00')""",
+                [(self.endpoint_id, row['protocol_code'], row['business_metric'], 'INST-A')
+                 for row in definitions],
+            )
+            def project_cycle(definition, index, observed_at, prefix):
+                raw = connection.execute(
+                    """INSERT INTO ingest_raw_frames(
+                           endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                           crc_status,authentication_status,disposition,persistence_state)
+                       VALUES (?,?,?,?,?,8,'valid','authenticated','accepted','persisted')""",
+                    (self.endpoint_id, '0012345678', observed_at, f'{prefix}-{index}', b'isolated'),
+                )
+                batch = connection.execute(
+                    """INSERT INTO observation_batches(
+                           raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                           reported_at,observed_at,received_at,granularity,aggregation_source,
+                           idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,'device_reported',?,?,'accepted','completed',?)""",
+                    (raw.lastrowid, self.endpoint_id, self.site_id, 2061, index, observed_at,
+                     observed_at, observed_at, 'periodic', f'{prefix}-{index}',
+                     'station-monitoring-normalizer-v3', observed_at),
+                )
+                value = connection.execute(
+                    """INSERT INTO observation_values(
+                           observation_batch_id,protocol_code,business_metric,raw_value,raw_unit,
+                           standard_value,standard_unit,quality,instrument_asset_code,parser_version)
+                       VALUES (?,?,?,?,?,?,?,?,?,'isolated')""",
+                    (batch.lastrowid, definition['protocol_code'], definition['business_metric'],
+                     index + 0.5, definition['standard_unit'], index + 0.5,
+                     definition['standard_unit'], 'valid', 'INST-A'),
+                )
+                self.assertTrue(_project_business_observation(
+                    connection, value_id=value.lastrowid, batch_id=batch.lastrowid,
+                    endpoint_id=self.endpoint_id, site_id=self.site_id,
+                    protocol_code=definition['protocol_code'],
+                    business_metric=definition['business_metric'], instrument_asset_code='INST-A',
+                    observed_at=observed_at, received_at=observed_at,
+                    standard_value=index + 0.5, standard_unit=definition['standard_unit'],
+                    quality='valid', function_code=2061, source_value_kind='avg',
+                ))
+            for index, definition in enumerate(definitions):
+                project_cycle(definition, index, '2020-06-11T16:00:00+00:00', 'cycle-complete')
+            for index, definition in enumerate(definitions[:9]):
+                project_cycle(definition, index, '2020-06-11T20:00:00+00:00', 'cycle-latest')
+            cycle = latest_cycle(connection, self.site_id, at_time='2020-06-11T23:00:00+00:00')
+        self.assertEqual(cycle['status'], 'incomplete')
+        self.assertEqual((cycle['formed_count'], cycle['expected_count'], cycle['missing_count']),
+                         (9, 13, 4))
+        self.assertEqual(len([item for item in cycle['factors'] if item['status'] == 'missing']), 4)
+        self.assertEqual(cycle['latest_complete_cycle_at'], '2020-06-11T16:00:00+00:00')
 
     def test_retry_exhaustion_is_bounded_and_stable(self):
         raw_id = self._persist(bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=51)

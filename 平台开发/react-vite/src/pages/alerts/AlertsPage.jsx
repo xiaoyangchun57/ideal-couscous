@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert, Table, Card, Input, Select, Button, Space, Tag, Badge, Dropdown,
@@ -14,11 +14,11 @@ import {
   SettingOutlined,
   ReloadOutlined,
   ExperimentOutlined,
-  EditOutlined,
   UserOutlined,
   LinkOutlined,
   MoreOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import {
   alertLevelColor, alertLevelLabel, alertStatusMap, alertStatusBadge,
@@ -36,6 +36,7 @@ import ThresholdRulesTab from './components/ThresholdRulesTab';
 import { StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
 
@@ -328,7 +329,7 @@ function AlertRuleEngineTab({ tokens, isDark, canManage }) {
       width: 80,
       align: 'center',
       render: (_, r) => (
-        <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(r)} disabled={!canManage} aria-label={`编辑${r.metricLabel}规则`}>
+        <Button type="link" size="small" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => handleEdit(r)} disabled={!canManage} aria-label={`编辑${r.metricLabel}规则`}>
           编辑
         </Button>
       ),
@@ -664,7 +665,7 @@ export default function AlertsPage() {
   const canManage = roles.includes('admin');
   const requestedTab = searchParams.get('tab') || 'alerts';
   const activeTab = ALERT_TABS.some((tab) => tab.key === requestedTab) ? requestedTab : 'alerts';
-  const searchText = searchParams.get('search') || '';
+  const urlSearchText = searchParams.get('search') || '';
   const statusFilter = searchParams.get('status') || null;
   const levelFilter = searchParams.get('level') || null;
   const requestedRange = searchParams.get('range') || 'today';
@@ -678,6 +679,13 @@ export default function AlertsPage() {
     });
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+  const commitSearchText = useCallback(
+    (value) => updateQuery({ search: value.trim() }),
+    [updateQuery],
+  );
+  const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
+    urlSearchText, commitSearchText,
+  );
   // ---- State ---------------------------------------------------------------
   const [allAlerts, setAllAlerts] = useState([]);       // full list from backend
   const [counts, setCounts] = useState({ total: 0, pending: 0, acknowledged: 0, resolved: 0 });
@@ -1225,8 +1233,7 @@ export default function AlertsPage() {
                 placeholder="搜索站点名称或告警内容..."
                 prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
                 allowClear
-                value={searchText}
-                onChange={(e) => updateQuery({ search: e.target.value })}
+                {...searchInputProps}
                 onPressEnter={fetchAlerts}
                 style={{ width: filterInputWidth, borderRadius: 8 }}
                 aria-label="搜索站点名称或告警内容"

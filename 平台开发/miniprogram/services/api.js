@@ -79,6 +79,12 @@ const api = {
     return request('/api/station-monitoring/sites' + (pairs.length ? '?' + pairs.join('&') : ''), 'GET', {}, { queue: false });
   },
   stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
+  reagentOverview: (options) => {
+    const scope = options && options.scope ? '?scope=' + encodeURIComponent(options.scope) : '';
+    return request('/api/reagent-overview' + scope, 'GET', {}, { queue: false });
+  },
+  replaceReagentInventory: payload => request('/api/reagent-inventory/replacement', 'POST', payload, { queue: false }),
+  submitReagentQc: payload => request('/api/reagent-qc', 'POST', payload, { queue: false }),
   responsibleSites: (options) => {
     const query = options || {};
     const pairs = [];
@@ -96,9 +102,12 @@ const api = {
 
   // 今日已批准巡检执行包（巡检 Tab 的唯一入口）
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
-  executionSiteTasks: (planId, siteId, options) =>
-    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId
-      + (options && options.reworkOnly ? '?scope=rework' : ''), 'GET'),
+  executionSiteTasks: (planId, siteId, options) => {
+    const scope = options && options.reviewOnly ? 'review'
+      : (options && options.resultOnly ? 'result' : (options && options.reworkOnly ? 'rework' : ''));
+    return request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId
+      + (scope ? '?scope=' + scope : ''), 'GET');
+  },
   checkOutExecutionSite: (planId, siteId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}),
   executionSiteReagents: (planId, siteId) =>
@@ -124,8 +133,14 @@ const api = {
   vehicleApplications: (options) => request('/api/vehicle/applications' + vehicleListQuery(options), 'GET'),
   requestReworkResource: (planId, payload) =>
     request('/api/inspection-v2/rework-plans/' + planId + '/resource-request', 'POST', payload),
-  extendVehicleApplication: (applicationId, endDate) =>
-    request('/api/vehicle/applications/' + applicationId + '/extend', 'POST', { end_date: endDate }),
+  extendVehicleApplication: (applicationId, endDate, options) => {
+    const value = options || {};
+    return request('/api/vehicle/applications/' + applicationId + '/extend', 'POST', {
+      end_date: endDate,
+      confirm_conflicts: value.confirmConflicts === true,
+      _idempotency_key: value.idempotencyKey || '',
+    }, { queue: false });
+  },
 
   // 站点任务（含已完成）
   siteTasks: (siteId) => request('/api/mobile/site-tasks/' + siteId, 'GET'),
@@ -139,7 +154,8 @@ const api = {
 
   // 位置校准
   calibrate: (siteId, lat, lng, extra) =>
-    request('/api/sites/' + siteId + '/calibrate', 'PUT', Object.assign({ lat, lng }, extra || {})),
+    request('/api/sites/' + siteId + '/calibrate', 'PUT',
+      Object.assign({ lat, lng }, extra || {}), { queue: false }),
 
   // 上传站点影像（base64）；弱网失败自动进入失败队列待重传
   uploadSitePhoto: (siteId, image, idempotencyKey, metadata) =>
@@ -149,9 +165,12 @@ const api = {
     }, { queue: false, timeout: 30000, retry: 1 }),
   createPhotoCaptureSession: (payload) =>
     request('/api/mobile/photo-capture-session', 'POST', payload, { queue: false, retry: 0 }),
+  bindPhotoCaptureSessionLocation: (payload) =>
+    request('/api/mobile/photo-capture-session/location', 'POST', payload, { queue: false, retry: 0 }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
-  deletePendingSitePhoto: (url) => request(
-    '/api/mobile/site-photos/delete', 'POST', { url }, { queue: false }
+  deletePendingSitePhoto: (target) => request(
+    '/api/mobile/site-photos/delete', 'POST',
+    typeof target === 'object' ? target : { url: target }, { queue: false }
   ),
   purgeRejectedInspectionPhoto: (attachmentId) => request(
     '/api/attachments/' + attachmentId + '/purge-rejected', 'POST', {}, { queue: false }
@@ -333,6 +352,9 @@ const api = {
   // 发起变更（已通过的计划，approved → modifying）
   requestPlanScheduleChange: (id, changeReason) =>
     request('/api/plan-schedules/' + id + '/request-change', 'POST', { change_reason: changeReason }),
+
+  abandonPlanScheduleChange: (id, version) =>
+    request('/api/plan-schedules/' + id + '/abandon-change', 'POST', { version }, { queue: false }),
 
   cancelPlanSchedule: (id, reason, version) =>
     request('/api/plan-schedules/' + id + '/cancel', 'POST', {

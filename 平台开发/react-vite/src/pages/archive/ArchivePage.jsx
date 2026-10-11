@@ -365,7 +365,7 @@ export default function ArchivePage() {
 
   const columns = useMemo(() => [
     {
-      title: '影像', dataIndex: 'stored_path', width: 68,
+      title: '影像', dataIndex: 'display_url', width: 68,
       render: (path, item) => <Image src={path} width={44} height={44}
         alt={displayTitle(item)} style={{ objectFit: 'cover', borderRadius: 4 }} />,
     },
@@ -394,7 +394,8 @@ export default function ArchivePage() {
     {
       title: '操作', width: 120,
       render: (_, item) => <Space><Button type="link" size="small" onClick={() => setDetail(item)}>详情</Button>
-        <Button type="link" size="small" onClick={() => window.open(item.stored_path, '_blank')}>下载</Button></Space>,
+        <Button type="link" size="small" disabled={!item.display_url}
+          onClick={() => window.open(item.display_url, '_blank')}>下载</Button></Space>,
     },
   ], [archiveMode]);
 
@@ -472,10 +473,11 @@ export default function ArchivePage() {
                   ? [...current, item.id] : current.filter(id => id !== item.id))} /> : null}
               cover={<button type="button" onClick={() => setDetail(item)}
               style={{ width: '100%', height: 170, padding: 0, border: 0, overflow: 'hidden', cursor: 'pointer' }}>
-              <img src={item.stored_path} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <img src={item.display_url} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </button>} actions={[
               <Button key="detail" type="text" icon={<PictureOutlined />} onClick={() => setDetail(item)}>详情</Button>,
-              <Button key="download" type="text" icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')}>下载</Button>,
+              <Button key="download" type="text" icon={<DownloadOutlined />} disabled={!item.display_url}
+                onClick={() => window.open(item.display_url, '_blank')}>下载</Button>,
             ]}>
               <Card.Meta title={displayTitle(item)} description={<Space direction="vertical" size={2}>
                 <span>{item.site_name || '未关联站点'} · {item.taken_at || '-'}</span>
@@ -497,12 +499,13 @@ export default function ArchivePage() {
           <Button danger onClick={openRejectedPurge}>彻底清理历史影像</Button>}
           <Button onClick={() => setDetail(null)}>关闭</Button>
           <Button type="primary" icon={<DownloadOutlined />} onClick={() => {
-            if (!detail?.stored_path) return message.error('文件地址不可用');
-            window.open(detail.stored_path, '_blank');
+            if (!detail?.display_url) return message.error('展示副本地址已失效，请刷新后重试');
+            window.open(detail.display_url, '_blank');
           }}>下载文件</Button></Space>}>
         {detail && <>
-          <div style={{ textAlign: 'center', marginBottom: 16 }}><Image src={detail.stored_path}
-            alt={displayTitle(detail)} style={{ maxHeight: 420, maxWidth: '100%' }} /></div>
+          <div style={{ textAlign: 'center', marginBottom: 16 }}><Image src={detail.display_url}
+            alt={displayTitle(detail)} width="100%"
+            style={{ maxHeight: 420, width: '100%', objectFit: 'contain' }} /></div>
           <Descriptions bordered size="small" column={2}>
             <Descriptions.Item label="拍摄时间">{detail.taken_at || '-'}</Descriptions.Item>
             <Descriptions.Item label="上传时间">{detail.created_at || '-'}</Descriptions.Item>
@@ -522,7 +525,7 @@ export default function ArchivePage() {
                 ? `${purgePreview.qualification_reason || '服务端已确认可清理'}；${purgePreview.impact || '删除前仍会重新核验'}`
                 : purgePreview?.block_reason || '当前记录不可彻底清理')}
             </Descriptions.Item>}
-            <Descriptions.Item label="原始文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
+            <Descriptions.Item label="展示副本文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
           </Descriptions>
         </>}
       </Modal>

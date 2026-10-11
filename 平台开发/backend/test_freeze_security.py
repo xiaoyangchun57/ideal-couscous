@@ -62,7 +62,8 @@ class FreezeSecurityTest(unittest.TestCase):
                     review_status TEXT, reviewer_id INTEGER, reviewed_at TEXT,
                     reject_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     evidence_qualification TEXT DEFAULT 'qualified',
-                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT ''
+                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT '',
+                    extra_json TEXT DEFAULT ''
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER,

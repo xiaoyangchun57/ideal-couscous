@@ -32,7 +32,8 @@ npm.cmd run dev
 微信开发者工具唯一导入本 README 所在的 `平台开发` 根目录，不要直接导入 `miniprogram` 子目录。
 根 `project.config.json` 通过 `miniprogramRoot` 指向源码，是模拟器、真机调试、体验版和上传的唯一入口。
 
-- `develop`：固定 `http://192.168.2.103:5000`，`API_PROFILE=local`，供模拟器和真机调试。
+- `develop`：开发者工具固定访问 `http://127.0.0.1:5000`；真机调试先运行
+  `dev_scripts/prepare-miniprogram-local-api.ps1` 临时写入当前私网地址，候选基线不保留该地址；档位为 `local`。
 - `trial` / `release`：固定 `https://ops.hhyc-tec.cn`，`API_PROFILE=online`。
 
 不使用存储覆盖、24 小时过期或静默回线上机制。

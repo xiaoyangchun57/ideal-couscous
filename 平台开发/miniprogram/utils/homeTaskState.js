@@ -193,6 +193,47 @@ function projectReview(rows) {
   };
 }
 
+function projectStationSummary(response) {
+  const summary = response && response.summary && typeof response.summary === 'object'
+    ? response.summary : {};
+  const normal = optionalCount(summary, 'normal') || 0;
+  const attention = optionalCount(summary, 'attention') || 0;
+  const total = optionalCount(summary, 'total') || 0;
+  return {
+    total,
+    normal,
+    attention,
+    unavailable: Math.max(0, total - normal - attention),
+  };
+}
+
+function projectReagentSummary(response) {
+  const rows = response && Array.isArray(response.items) ? response.items : [];
+  const count = optionalCount(response, 'concern_count');
+  const concernCount = count === null ? rows.length : count;
+  const counts = response && response.status_counts && typeof response.status_counts === 'object'
+    ? response.status_counts : null;
+  const statusCount = key => {
+    if (!counts || !Object.prototype.hasOwnProperty.call(counts, key)) return null;
+    const value = Number(counts[key]);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  return {
+    concernCount,
+    expiredCount: statusCount('expired'),
+    expiringCount: statusCount('expiring'),
+    lowVolumeCount: statusCount('low_volume'),
+    pendingQcCount: statusCount('pending_qc'),
+    failedQcCount: statusCount('failed_qc'),
+    display: concernCount > 0 ? `${concernCount}项需关注` : '暂无需处理',
+    items: rows.slice(0, 2).map(item => ({
+      key: `${item.site_id || ''}-${item.id || item.reagent_id || ''}`,
+      text: [item.site_name, item.reagent_name, item.status].map(value => String(value || '').trim()).filter(Boolean).join(' · '),
+    })).filter(item => item.text),
+    remainingCount: Math.max(0, concernCount - 2),
+  };
+}
+
 function errorMessage(error, fallback) {
   const value = error || {};
   return String(value.error || value.message || fallback);
@@ -205,6 +246,8 @@ module.exports = {
   homePackage,
   projectHome,
   projectIdentity,
+  projectReagentSummary,
   projectReview,
+  projectStationSummary,
   projectUnread
 };

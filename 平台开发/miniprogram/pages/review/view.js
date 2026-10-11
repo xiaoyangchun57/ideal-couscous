@@ -3,6 +3,7 @@ const { getUser } = require('../../utils/auth.js');
 const { resolveUploadUrl } = require('../../utils/url.js');
 const { approveItemIdsForPhotoSelection, groupReviewPhotosByItem } = require('../../utils/inspectionReviewDecision.js');
 const { findReviewItem } = require('../../utils/notificationTarget.js');
+const { reviewExecutionProjection } = require('../../utils/round1Wiring.js');
 const {
   getSubmissionGuard,
   getRetryErrorMessage
@@ -183,7 +184,7 @@ function reviewCapability(sourceType) {
 function decorateItem(item) {
   const capability = reviewCapability(item.source_type);
   const details = Array.isArray(item.attachment_details) ? item.attachment_details : [];
-  const paths = details.map(row => row.stored_path).concat(parsePhotoUrls(item.photo_urls));
+  const paths = details.map(row => row.display_url).concat(parsePhotoUrls(item.photo_urls));
   const photoUrls = paths.filter((path, index) => path && paths.indexOf(path) === index).map(resolveUploadUrl);
   const itemDetails = (Array.isArray(item.item_details) ? item.item_details : []).map(detail => {
     const detailPaths = parsePhotoUrls(detail.photo_urls);
@@ -221,18 +222,26 @@ function decorateItem(item) {
     photo_review: '驳回影像',
     data_review: '驳回数据'
   }[item.source_type] || '驳回';
-  const reviewPhotos = details.map(detail => Object.assign({}, detail, {
-    url: resolveUploadUrl(detail.stored_path),
-    itemLabel: detail.item_name || '',
-    archiveName: detail.archive_name || '',
-    originalFilename: detail.original_filename || detail.filename || '',
-    primaryStatusLabel: detail.review_status_label || '待审核',
-    takenAt: detail.taken_at || '',
-    selectedForReject: false
-  }));
+  const reviewPhotos = details.map((detail, index) => {
+    const sourceUrl = detail.display_url ? resolveUploadUrl(detail.display_url) : '';
+    return Object.assign({}, detail, {
+      mediaKey: detail.id !== undefined && detail.id !== null
+        ? 'attachment:' + String(detail.id) : 'attachment-index:' + index,
+      sourceUrl,
+      localPath: '',
+      mediaStatus: sourceUrl ? 'loading' : 'error',
+      mediaError: sourceUrl ? '' : '照片加载失败，点击重试',
+      itemLabel: detail.item_name || '',
+      archiveName: detail.archive_name || '',
+      originalFilename: detail.original_filename || detail.filename || '',
+      primaryStatusLabel: detail.review_status_label || '待审核',
+      takenAt: detail.taken_at || '',
+      selectedForReject: false
+    });
+  });
   const requesterName = item.requester_name || item.applicant_name || '';
   const executorName = item.executor_name || item.assignee || '';
-  return Object.assign({}, item, {
+  return Object.assign({}, item, reviewExecutionProjection(item), {
     detailOpen: false, photoUrls, itemDetails, reviewPhotos,
     reviewPhotoGroups: groupReviewPhotosByItem(reviewPhotos),
     reviewItemGroups: groupReviewItems(itemDetails, reviewPhotos),
@@ -264,6 +273,10 @@ Page({
 
   onLoad(options) {
     this._alive = true;
+    this._reviewMediaEpoch = 0;
+    this._reviewMediaTasks = {};
+    this._reviewMediaTempFiles = {};
+    this._reviewMediaRefreshUsed = {};
     const targetType = String(options && options.target_type || '').trim();
     const targetId = String(options && options.target_id || '').trim();
     const attachmentIds = String(options && options.target_attachment_ids || '')
@@ -282,20 +295,30 @@ Page({
     this.load();
   },
 
-  onHide() { this._alive = false; },
+  onHide() {
+    this._alive = false;
+    this._disposeProtectedReviewMedia(false);
+  },
 
-  onUnload() { this._alive = false; },
+  onUnload() {
+    this._alive = false;
+    this._disposeProtectedReviewMedia(false);
+  },
 
   onPullDownRefresh() { this.load(() => wx.stopPullDownRefresh()); },
 
   load(done) {
+    this._disposeProtectedReviewMedia(false);
+    this._reviewMediaRefreshUsed = {};
     const requestId = (this._loadRequestId || 0) + 1;
     this._loadRequestId = requestId;
     const hasRetainedList = this.data.groups.length > 0;
+    const retainedGroups = hasRetainedList ? this._resetReviewPhotoMedia(this.data.groups) : this.data.groups;
     this.setData({
       loading: true,
       loadState: hasRetainedList ? 'data' : 'loading',
-      loadError: ''
+      loadError: '',
+      groups: retainedGroups
     });
     api.auditPending()
       .then(res => {
@@ -339,22 +362,291 @@ Page({
           showGroupHeaders: presentation.showGroupHeaders,
           loadState: list.length ? 'data' : 'empty',
           loadError: ''
-        }, () => this._focusReviewTarget());
+        }, () => {
+          this._focusReviewTarget();
+          this._restartProtectedReviewMedia(this.data.groups, true);
+        });
         if (done) done();
       })
       .catch(err => {
         if (!this._isCurrentLoad(requestId)) return;
+        if (err && err.status === 403) {
+          this.setData({
+            loading: false, loadState: 'no_permission', loadError: '',
+            groups: [], total: 0, showGroupHeaders: false,
+          });
+          if (done) done();
+          return;
+        }
         const hasRetainedList = this.data.groups.length > 0;
         this.setData({
           loading: false,
           loadState: hasRetainedList ? 'stale' : 'error',
           loadError: hasRetainedList ? '当前审核可能不是最新，请重试' : '审核列表加载失败，请重试'
         });
+        if (hasRetainedList) this._markAllProtectedReviewMediaFailed();
         if (done) done();
       });
   },
 
   onRetry() { this.load(); },
+
+  _disposeProtectedReviewMedia(clearState) {
+    this._reviewMediaEpoch = (this._reviewMediaEpoch || 0) + 1;
+    const tasks = this._reviewMediaTasks || {};
+    Object.keys(tasks).forEach(key => {
+      const task = tasks[key];
+      if (task && typeof task.abort === 'function') task.abort();
+    });
+    this._reviewMediaTasks = {};
+    const files = this._reviewMediaTempFiles || {};
+    Object.keys(files).forEach(filePath => this._removeProtectedReviewTempFile(filePath));
+    this._reviewMediaTempFiles = {};
+    if (clearState && this._alive !== false) this.setData({ groups: [] });
+  },
+
+  _removeProtectedReviewTempFile(filePath) {
+    if (!filePath) return;
+    const manager = wx.getFileSystemManager && wx.getFileSystemManager();
+    if (manager && typeof manager.unlink === 'function') {
+      manager.unlink({ filePath, fail() {} });
+    } else if (wx.removeSavedFile) {
+      wx.removeSavedFile({ filePath, fail() {} });
+    }
+  },
+
+  _resetReviewPhotoMedia(groups) {
+    return (groups || []).map(group => Object.assign({}, group, {
+      items: (group.items || []).map(item => {
+        const currentPhotos = item.reviewPhotos || [];
+        if (!currentPhotos.some(photo => Object.prototype.hasOwnProperty.call(photo, 'sourceUrl'))) return item;
+        const reviewPhotos = currentPhotos.map(photo => Object.assign({}, photo, {
+          localPath: '',
+          mediaStatus: photo.sourceUrl ? 'loading' : 'error',
+          mediaError: photo.sourceUrl ? '' : '照片加载失败，点击重试'
+        }));
+        return Object.assign({}, item, {
+          reviewPhotos,
+          reviewPhotoGroups: groupReviewPhotosByItem(reviewPhotos),
+          reviewItemGroups: groupReviewItems(item.itemDetails, reviewPhotos)
+        });
+      })
+    }));
+  },
+
+  _restartProtectedReviewMedia(groups, includeCollapsed) {
+    this._disposeProtectedReviewMedia(false);
+    const epoch = this._reviewMediaEpoch;
+    const nextGroups = this._resetReviewPhotoMedia(groups || this.data.groups);
+    this.setData({ groups: nextGroups }, () => {
+      nextGroups.forEach(group => (group.items || []).forEach(item => {
+        if (!includeCollapsed && !item.detailOpen) return;
+        (item.reviewPhotos || []).forEach(photo => {
+          if (photo.mediaStatus === 'loading') {
+            this._downloadProtectedReviewPhoto(item.id, photo.mediaKey, photo.sourceUrl, epoch);
+          }
+        });
+      }));
+    });
+  },
+
+  _setProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch, patch) {
+    if (this._alive === false || epoch !== this._reviewMediaEpoch) return false;
+    let changed = false;
+    const groups = this.data.groups.map(group => Object.assign({}, group, {
+      items: group.items.map(item => {
+        if (String(item.id) !== String(itemId)) return item;
+        const reviewPhotos = (item.reviewPhotos || []).map(photo => {
+          if (photo.mediaKey !== mediaKey || photo.sourceUrl !== sourceUrl) return photo;
+          changed = true;
+          return Object.assign({}, photo, patch);
+        });
+        if (!changed) return item;
+        return Object.assign({}, item, {
+          reviewPhotos,
+          reviewPhotoGroups: groupReviewPhotosByItem(reviewPhotos),
+          reviewItemGroups: groupReviewItems(item.itemDetails, reviewPhotos)
+        });
+      })
+    }));
+    if (changed) this.setData({ groups });
+    return changed;
+  },
+
+  _downloadProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch) {
+    if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl) || typeof wx.downloadFile !== 'function') {
+      this._setProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch, {
+        mediaStatus: 'error', localPath: '', mediaError: '照片加载失败，点击重试'
+      });
+      return;
+    }
+    this._setProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch, {
+      mediaStatus: 'loading', localPath: '', mediaError: ''
+    });
+    const taskKey = [epoch, itemId, mediaKey].join(':');
+    const finish = () => { delete (this._reviewMediaTasks || {})[taskKey]; };
+    const markFailed = () => {
+      this._setProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch, {
+        mediaStatus: 'error', localPath: '', mediaError: '照片加载失败，点击重试'
+      });
+    };
+    const refreshExpiredTicket = () => {
+      const refreshKey = String(itemId);
+      if (!this._reviewMediaRefreshUsed[refreshKey]) {
+        this._reviewMediaRefreshUsed[refreshKey] = true;
+        this._refreshProtectedReviewTickets(itemId, epoch);
+        return true;
+      }
+      return false;
+    };
+    const fail = error => {
+      finish();
+      if (this._alive === false || epoch !== this._reviewMediaEpoch) return;
+      const statusCode = Number(error && error.statusCode);
+      if ((statusCode === 401 || statusCode === 403) && refreshExpiredTicket()) return;
+      markFailed();
+    };
+    const verifyLocalImage = (localPath, attempt) => {
+      if (typeof wx.getImageInfo !== 'function') return Promise.resolve(localPath);
+      return new Promise((resolve, reject) => wx.getImageInfo({
+        src: localPath,
+        success: () => resolve(localPath),
+        fail: reject,
+      })).catch(error => {
+        if (attempt >= 1) return Promise.reject(error);
+        return new Promise(resolve => setTimeout(resolve, 80))
+          .then(() => verifyLocalImage(localPath, attempt + 1));
+      });
+    };
+    const task = wx.downloadFile({
+      url: sourceUrl,
+      success: response => {
+        finish();
+        const statusCode = Number(response && response.statusCode);
+        const localPath = response && response.tempFilePath;
+        if (statusCode < 200 || statusCode >= 300 || !localPath) {
+          fail({ statusCode });
+          return;
+        }
+        verifyLocalImage(localPath, 0).then(() => {
+          if (this._setProtectedReviewPhoto(itemId, mediaKey, sourceUrl, epoch, {
+            mediaStatus: 'ready', localPath, mediaError: ''
+          })) {
+            this._reviewMediaTempFiles[localPath] = true;
+          } else this._removeProtectedReviewTempFile(localPath);
+        }).catch(() => {
+          this._removeProtectedReviewTempFile(localPath);
+          if (this._alive !== false && epoch === this._reviewMediaEpoch) markFailed();
+        });
+      },
+      fail
+    });
+    this._reviewMediaTasks[taskKey] = task;
+  },
+
+  _markProtectedReviewItemFailed(itemId, epoch) {
+    if (this._alive === false || epoch !== this._reviewMediaEpoch) return;
+    const item = this._findItem(itemId);
+    (item && item.reviewPhotos || []).forEach(photo => {
+      if (photo.mediaStatus !== 'ready') {
+        this._setProtectedReviewPhoto(itemId, photo.mediaKey, photo.sourceUrl, epoch, {
+          mediaStatus: 'error', localPath: '', mediaError: '照片加载失败，点击重试'
+        });
+      }
+    });
+  },
+
+  _markAllProtectedReviewMediaFailed() {
+    const groups = this.data.groups.map(group => Object.assign({}, group, {
+      items: group.items.map(item => {
+        if (!(item.reviewPhotos || []).some(photo => Object.prototype.hasOwnProperty.call(photo, 'sourceUrl'))) {
+          return item;
+        }
+        const reviewPhotos = item.reviewPhotos.map(photo => Object.assign({}, photo, {
+          mediaStatus: 'error', localPath: '', mediaError: '照片加载失败，点击重试'
+        }));
+        return Object.assign({}, item, {
+          reviewPhotos,
+          reviewPhotoGroups: groupReviewPhotosByItem(reviewPhotos),
+          reviewItemGroups: groupReviewItems(item.itemDetails, reviewPhotos)
+        });
+      })
+    }));
+    this.setData({ groups });
+  },
+
+  _refreshProtectedReviewTickets(itemId, epoch) {
+    api.auditPending().then(rows => {
+      if (this._alive === false || epoch !== this._reviewMediaEpoch) return;
+      const current = this._findItem(itemId);
+      const raw = (Array.isArray(rows) ? rows : []).find(row => String(row.id) === String(itemId)
+        && (!current || row.source_type === current.source_type));
+      if (!raw) throw new Error('review item unavailable');
+      const refreshed = decorateItem(raw);
+      if (!current) throw new Error('review item unavailable');
+      const selected = {};
+      (current.reviewPhotos || []).forEach(photo => { selected[String(photo.id)] = !!photo.selectedForReject; });
+      const reviewPhotos = refreshed.reviewPhotos.map(photo => Object.assign({}, photo, {
+        selectedForReject: !!selected[String(photo.id)]
+      }));
+      const replacement = Object.assign({}, current, refreshed, {
+        detailOpen: current.detailOpen,
+        targeted: current.targeted,
+        reviewPhotos,
+        reviewPhotoGroups: groupReviewPhotosByItem(reviewPhotos),
+        reviewItemGroups: groupReviewItems(refreshed.itemDetails, reviewPhotos),
+        selectedRejectCount: reviewPhotos.filter(photo => photo.selectedForReject).length
+      });
+      const groups = this.data.groups.map(group => Object.assign({}, group, {
+        items: group.items.map(item => String(item.id) === String(itemId) ? replacement : item)
+      }));
+      this._restartProtectedReviewMedia(groups, false);
+    }).catch(() => this._markProtectedReviewItemFailed(itemId, epoch));
+  },
+
+  onRetryProtectedReviewPhoto(e) {
+    const item = this._findItem(e.currentTarget.dataset.id);
+    const mediaKey = e.currentTarget.dataset.photoKey;
+    const photo = item && (item.reviewPhotos || []).find(row => row.mediaKey === mediaKey);
+    if (!photo) return;
+    this._downloadProtectedReviewPhoto(item.id, mediaKey, photo.sourceUrl, this._reviewMediaEpoch);
+  },
+
+  onProtectedReviewPhotoRenderError(e) {
+    const item = this._findItem(e.currentTarget.dataset.id);
+    const mediaKey = e.currentTarget.dataset.photoKey;
+    const photo = item && (item.reviewPhotos || []).find(row => row.mediaKey === mediaKey);
+    if (!photo) return;
+    if (photo.localPath) {
+      this._removeProtectedReviewTempFile(photo.localPath);
+      delete this._reviewMediaTempFiles[photo.localPath];
+    }
+    this._setProtectedReviewPhoto(item.id, mediaKey, photo.sourceUrl, this._reviewMediaEpoch, {
+      mediaStatus: 'error', localPath: '', mediaError: '照片加载失败，点击重试'
+    });
+  },
+
+  onViewSiteInspection(event) {
+    const item = this._findItem(event.currentTarget.dataset.id);
+    if (!item || !item.canViewInspection || this._navigationInFlight) return false;
+    const target = {
+      executionPlanId: item.executionPlanId,
+      siteId: item.executionSiteId,
+      source: 'review_execution_record',
+      viewMode: 'review',
+      readOnly: true,
+    };
+    this._navigationInFlight = true;
+    app.globalData.executionTarget = target;
+    const release = () => { this._navigationInFlight = false; };
+    const fail = () => {
+      if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+      release();
+      wx.showToast({ title: '打开现场记录失败，请重试', icon: 'none' });
+    };
+    wx.navigateTo({ url: '/pages/inspection/inspection?view_mode=review', fail, complete: release });
+    return true;
+  },
 
   _isCurrentLoad(requestId) {
     return this._alive !== false && requestId === this._loadRequestId;
@@ -518,15 +810,24 @@ Page({
       items: group.items.map(item => item.id === id
         ? Object.assign({}, item, { detailOpen: !item.detailOpen }) : item)
     }));
-    this.setData({ groups });
+    this._restartProtectedReviewMedia(groups, false);
   },
 
   onPreviewPhoto(e) {
     const id = e.currentTarget.dataset.id;
     const item = this._findItem(id);
-    if (item && item.photoUrls && item.photoUrls.length) {
+    const mediaKey = e.currentTarget.dataset.photoKey;
+    if (!mediaKey && item && item.photoUrls && item.photoUrls.length) {
       wx.previewImage({ urls: item.photoUrls, current: e.currentTarget.dataset.url });
+      return;
     }
+    const photo = item && (item.reviewPhotos || []).find(row => row.mediaKey === mediaKey);
+    const readyPhotos = item ? (item.reviewPhotos || []).filter(row => row.mediaStatus === 'ready' && row.localPath) : [];
+    if (!photo || photo.mediaStatus !== 'ready' || !photo.localPath) {
+      wx.showToast({ title: '照片尚未加载完成，请稍后重试', icon: 'none' });
+      return;
+    }
+    wx.previewImage({ urls: readyPhotos.map(row => row.localPath), current: photo.localPath });
   },
 
   _guardSubmission(id, allowSameItem) {

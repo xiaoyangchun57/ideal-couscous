@@ -54,6 +54,7 @@ class PlanScheduleFavoritesTest(unittest.TestCase):
                     start_at TEXT, end_at TEXT, status TEXT
                 );
                 CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vehicle_id INTEGER, document_type TEXT, valid_until TEXT
                 );
                 CREATE TABLE plan_schedules (

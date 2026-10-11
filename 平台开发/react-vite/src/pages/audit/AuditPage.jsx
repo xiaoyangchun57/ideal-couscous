@@ -984,7 +984,7 @@ export default function AuditPage() {
                   const itemLabel = photo.item_name || '检查项';
                   const failed = failedReviewPhotoIds.includes(photo.id);
                   return <div key={photo.id} style={{ border: `1px solid ${selected ? tokens.colorError : tokens.colorBorder}`, borderRadius: 6, padding: 8, minWidth: 0 }}>
-                    {!failed ? <Image src={photo.stored_path} width="100%"
+                    {!failed ? <Image src={photo.display_url} width="100%"
                       style={{ aspectRatio: '16 / 10', objectFit: 'cover', borderRadius: 4 }} preview={{ mask: '预览' }}
                       onError={() => setFailedReviewPhotoIds(ids => ids.includes(photo.id) ? ids : [...ids, photo.id])} />
                       : <div style={{ aspectRatio: '16 / 10', display: 'grid', placeItems: 'center', background: tokens.colorFillAlter }}><Space direction="vertical" align="center"><Text type="danger">影像加载失败，无法审核</Text><Button size="small" onClick={() => setFailedReviewPhotoIds(ids => ids.filter(id => id !== photo.id))}>重新加载</Button></Space></div>}
@@ -996,13 +996,17 @@ export default function AuditPage() {
                     <Text strong style={{ display: 'block', fontSize: 13, marginTop: 6 }}>{itemLabel}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄时间：{photo.taken_at || '未记录'}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄者：{photo.uploader_name || '未记录'}</Text>
+                    {photo.capture_source === 'camera' && <Tag color="blue" style={{ marginTop: 6 }}>系统现场取证</Tag>}
                   </div>;
                 })}
               </div>
             </Image.PreviewGroup>
           </div>
         )}
-        {['inspection', 'inspection_batch'].includes(item.source_type) && !item.attachment_details?.length && item.photo_urls && (() => {
+        {item.source_type === 'inspection_batch' && !item.attachment_details?.length && (
+          <Text type="secondary">本审核单元无正式现场照片</Text>
+        )}
+        {item.source_type === 'inspection' && !item.attachment_details?.length && item.photo_urls && (() => {
           try {
             const urls = typeof item.photo_urls === 'string' ? JSON.parse(item.photo_urls) : item.photo_urls;
             if (!Array.isArray(urls) || !urls.length) return <Text type="secondary">本项未附现场照片</Text>;
@@ -1026,7 +1030,7 @@ export default function AuditPage() {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {item.attachment_details.map((photo) => (
                   <div key={photo.id} style={{ width: 112 }}>
-                    <Image src={photo.stored_path} width={100} height={100}
+                    <Image src={photo.display_url} width={100} height={100}
                       style={{ objectFit: 'cover', borderRadius: 6 }} preview={{ mask: '预览' }} />
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>主状态：{photo.review_status_label || '待审核'}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>

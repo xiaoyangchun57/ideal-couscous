@@ -20,10 +20,16 @@ test('upload URLs are displayed absolutely but mutations use trusted storage pat
   assert.equal(uploadStoragePath(storedPath), storedPath);
 });
 
-test('storage path conversion rejects external and unrelated URLs', () => {
+test('storage path conversion accepts only signed media queries from the configured service', () => {
   assert.equal(uploadStoragePath('https://example.com/uploads/evidence.jpg'), '');
   assert.equal(uploadStoragePath('https://ops.hhyc-tec.cn/not-uploads/evidence.jpg'), '');
+  assert.equal(uploadStoragePath('/uploads/evidence.jpg?ticket=signed.token_123'), '/uploads/evidence.jpg');
+  assert.equal(uploadStoragePath(
+    'https://ops.hhyc-tec.cn/uploads/evidence.jpg?ticket=signed.token_123'
+  ), '/uploads/evidence.jpg');
   assert.equal(uploadStoragePath('/uploads/evidence.jpg?token=secret'), '');
+  assert.equal(uploadStoragePath('/uploads/evidence.jpg?ticket='), '');
+  assert.equal(uploadStoragePath('/uploads/evidence.jpg?ticket=signed&extra=1'), '');
   assert.equal(uploadStoragePath('/uploads/evidence.jpg#preview'), '');
   assert.equal(uploadStoragePath('https://ops.hhyc-tec.cn/uploads/evidence.jpg?token=secret'), '');
   assert.equal(uploadStoragePath('https://ops.hhyc-tec.cn/uploads/evidence.jpg#preview'), '');

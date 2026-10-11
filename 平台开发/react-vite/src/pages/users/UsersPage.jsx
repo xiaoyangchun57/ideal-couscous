@@ -1,14 +1,15 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   App, Input, Select, Button, Space, Tag, Badge, Modal,
   Typography, Empty, Form, Checkbox, Alert, Dropdown, Tooltip,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, PlusOutlined, EditOutlined,
-  LockOutlined, StopOutlined, PlayCircleOutlined, DeleteOutlined,
+  SearchOutlined, ReloadOutlined, PlusOutlined,
+  LockOutlined, StopOutlined, PlayCircleOutlined,
   UserOutlined, SafetyOutlined, MoreOutlined, ClearOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
@@ -19,6 +20,7 @@ import {
 } from '../../services/pageStyles';
 import { finishWechatBindingUnbind } from './wechatBindingActions';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -45,7 +47,7 @@ export default function UsersPage() {
   const [sitesError, setSitesError] = useState('');
 
   // Filter state
-  const search = searchParams.get('q') || '';
+  const urlSearch = searchParams.get('q') || '';
   const roleFilter = searchParams.get('role') || undefined;
   const statusFilter = searchParams.get('status') || undefined;
   const showTestAccounts = searchParams.get('tests') === '1';
@@ -94,6 +96,8 @@ export default function UsersPage() {
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  const commitSearch = useCallback((value) => updateFilters({ q: value.trim() || null }), [updateFilters]);
+  const { draft: search, inputProps: searchInputProps } = useUrlSyncedSearch(urlSearch, commitSearch);
 
   const handleReset = () => {
     updateFilters({ q: null, role: null, status: null });
@@ -228,6 +232,33 @@ export default function UsersPage() {
           });
         } catch (error) {
           message.error(error.message || '密码重置失败');
+          throw error;
+        }
+      },
+    });
+  };
+
+  const handlePermanentDelete = (record) => {
+    let reason = '';
+    modal.confirm({
+      title: `永久删除“${record.real_name}”？`,
+      content: <Space direction="vertical" style={{ width: '100%' }}>
+        <Text type="secondary">仅从未形成任何业务历史的误建账号可以删除。服务端会在提交时重新核验全部引用。</Text>
+        <Input.TextArea rows={3} placeholder="请输入永久删除原因" onChange={(event) => { reason = event.target.value; }} />
+      </Space>,
+      okText: '确认永久删除', cancelText: '取消', okButtonProps: { danger: true },
+      onOk: async () => {
+        const trimmed = reason.trim();
+        if (!trimmed) {
+          message.error('请填写永久删除原因');
+          throw new Error('delete reason required');
+        }
+        try {
+          await api.deleteStrict(`/users/${record.id}/permanent`, { reason: trimmed });
+          message.success(`“${record.real_name}”已永久删除`);
+          await fetchUsers();
+        } catch (error) {
+          message.error(error.message || '永久删除失败');
           throw error;
         }
       },
@@ -407,7 +438,10 @@ export default function UsersPage() {
       width: 150,
       fixed: 'right',
       render: (_, record) => {
-        if (record.deleted_at) return <Text type="secondary">已注销</Text>;
+        if (record.deleted_at) return (
+          <Button type="link" size="small" danger icon={<HoverGifIcon name="trash-bin" size={14} />}
+            onClick={() => handlePermanentDelete(record)}>永久删除</Button>
+        );
         const isCurrent = Number(record.id) === Number(currentUser?.id);
         const menuItems = [
           { key: 'set-password', icon: <LockOutlined />, label: '设置自定义密码' },
@@ -422,7 +456,7 @@ export default function UsersPage() {
             disabled: isCurrent && record.status === 'active',
           },
           { type: 'divider' },
-          { key: 'delete', icon: <DeleteOutlined />, label: isCurrent ? '注销（当前账号）' : '注销账号', danger: true, disabled: isCurrent },
+          { key: 'delete', icon: <HoverGifIcon name="trash-bin" size={14} />, label: isCurrent ? '注销（当前账号）' : '注销账号', danger: true, disabled: isCurrent },
         ];
         const handleMenu = ({ key }) => {
           if (key === 'set-password') handleSetPassword(record);
@@ -433,7 +467,7 @@ export default function UsersPage() {
         };
         return (
           <Space size={0}>
-            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
+            <Button type="link" size="small" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => handleEdit(record)}>
               编辑
             </Button>
             <Dropdown menu={{ items: menuItems, onClick: handleMenu }} trigger={['click']}>
@@ -499,8 +533,7 @@ export default function UsersPage() {
             placeholder="搜索登录名、姓名、手机号..."
             prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
             allowClear
-            value={search}
-            onChange={(event) => updateFilters({ q: event.target.value })}
+            {...searchInputProps}
             style={{ width: filterInputWidth, borderRadius: 8 }}
           />
           <Select

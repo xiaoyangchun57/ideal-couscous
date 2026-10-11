@@ -13,9 +13,20 @@ const PARTS_FULFILLMENT_OPTIONS = [
   { key: 'vendor_order', label: '厂家订购' }
 ];
 
+function withoutMonitoringFacts(site) {
+  if (!site) return site;
+  return Object.assign({}, site, {
+    monitoring_status: '', monitoring_status_label: '', monitoring_reason: '',
+    last_received_at: '', last_communication_at: '', last_valid_observation_at: '',
+    monitoring: { latest_values: [] },
+  });
+}
+
 Page({
   data: {
-    siteId: null, site: null, readOnlySource: false, monitoringSource: false, monitoringPublic: false, monitoringLoading: false, monitoringError: '', checkingIn: false, online: true, syncCount: 0,
+    siteId: null, site: null, readOnlySource: false, monitoringIntent: false, monitoringSource: false,
+    monitoringPublic: false, monitoringUnavailable: false, monitoringLoading: false, monitoringError: '',
+    checkingIn: false, online: true, syncCount: 0,
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
     partsFulfillmentOptions: PARTS_FULFILLMENT_OPTIONS,
@@ -33,10 +44,14 @@ Page({
     const id = options.site_id || app.globalData.selSiteId;
     const monitoringPublic = getUser()?.capabilities?.station_monitoring_public === true;
     const requestedMonitoring = options.source === 'responsible_sites_monitoring';
+    this._calibrateOnLoad = options.action === 'calibrate';
     const readOnlySource = options.source === 'inspection_readonly'
       || options.source === 'responsible_sites_profile' || requestedMonitoring;
     const monitoringSource = monitoringPublic && requestedMonitoring;
-    this.setData({ siteId: id, readOnlySource, monitoringSource, monitoringPublic });
+    this.setData({
+      siteId: id, readOnlySource, monitoringIntent: requestedMonitoring, monitoringSource, monitoringPublic,
+      monitoringUnavailable: requestedMonitoring && !monitoringPublic,
+    });
     if (id) this.loadSite(id);
   },
 
@@ -87,11 +102,57 @@ Page({
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
         const source = this.data.readOnlySource ? (res.site || {}) : (res.site || {});
         const checkedIn = !!source.checked_in;
-        this.setData({ site: Object.assign({}, source, { checked_in: checkedIn, can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn), checkin_sync_pending: false, monitoring: res.monitoring || { latest_values: [] } }), monitoringLoading: false, monitoringError: '' });
+        this.setData({
+          site: Object.assign({}, source, {
+            checked_in: checkedIn,
+            can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn),
+            checkin_sync_pending: false,
+            monitoring: this.data.monitoringSource ? (res.monitoring || { latest_cycle: {}, latest_values: [] }) : { latest_cycle: {}, latest_values: [] },
+          }),
+          monitoringLoading: false,
+          monitoringError: '',
+          monitoringUnavailable: this.data.monitoringIntent && !this.data.monitoringPublic,
+        }, () => {
+          if (this._calibrateOnLoad && this.data.site && this.data.site.can_calibrate) {
+            this._calibrateOnLoad = false;
+            this.onCalibrate();
+          }
+        });
       })
-      .catch(() => {
+      .catch(error => {
         if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
-        if (this.data.readOnlySource) this.setData({ monitoringLoading: false, monitoringError: this.data.monitoringSource ? '监测信息加载失败，请重试' : '站点资料加载失败，请重试' });
+        if (this.data.monitoringIntent && error && error.status === 403) {
+          this.setData({
+            monitoringLoading: true,
+            monitoringError: '',
+            monitoringUnavailable: true,
+            monitoringSource: false,
+            site: withoutMonitoringFacts(this.data.site),
+          });
+          api.siteProfile(id).then(profile => {
+            if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
+            const source = profile && profile.site || {};
+            this.setData({
+              site: Object.assign({}, source, { monitoring: { latest_cycle: {}, latest_values: [] }, can_check_in: false }),
+              monitoringLoading: false,
+            });
+          }).catch(() => {
+            if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
+            this.setData({ monitoringLoading: false });
+          });
+          return;
+        }
+        if (this.data.readOnlySource) this.setData({
+          monitoringLoading: false,
+          monitoringError: this.data.monitoringIntent ? '监测信息加载失败，请重试' : '站点资料加载失败，请重试',
+        });
+        if (this.data.monitoringIntent && !this.data.site) {
+          api.siteProfile(id).then(profile => {
+            if (this._unloaded || this._inactive || this._siteRequestId !== requestId) return;
+            const source = profile && profile.site || {};
+            this.setData({ site: Object.assign({}, source, { monitoring: { latest_values: [] }, can_check_in: false }) });
+          }).catch(() => {});
+        }
         wx.showToast({ title: '加载失败', icon: 'none' });
       });
     if (!this.data.readOnlySource) this.loadPartsInventory();
@@ -190,13 +251,34 @@ Page({
         cancelText: '取消',
         success: (modal) => {
           if (!modal.confirm) return;
-          api.calibrate(s.id, gps.lat, gps.lng, { confirm: true, site_name: s.name })
+          const expectedOldLat = s.lat == null ? null : Number(s.lat);
+          const expectedOldLng = s.lng == null ? null : Number(s.lng);
+          const calibrationKey = [
+            'site-calibration', s.id,
+            expectedOldLat == null ? 'none' : expectedOldLat.toFixed(7),
+            expectedOldLng == null ? 'none' : expectedOldLng.toFixed(7),
+            Number(gps.lat).toFixed(7), Number(gps.lng).toFixed(7),
+          ].join(':');
+          api.calibrate(s.id, gps.lat, gps.lng, {
+            confirm: true, site_name: s.name,
+            expected_old_lat: expectedOldLat, expected_old_lng: expectedOldLng,
+            _idempotency_key: calibrationKey,
+          })
             .then(res => {
+              if (!res || Number(res.site_id) !== Number(s.id)) {
+                throw { error: '校准响应站点不一致，请刷新后重试', code: 'SITE_CALIBRATION_RESPONSE_MISMATCH' };
+              }
               const d = (res && res.distance_m != null) ? res.distance_m : 0;
+              this.setData({ site: Object.assign({}, this.data.site, {
+                lat: res.new_lat, lng: res.new_lng,
+              }) });
               wx.showToast({ title: '已校准 偏移' + d + 'm', icon: 'none' });
               this.loadSite(s.id);
             })
-            .catch(error => wx.showModal({ title: '校准失败', content: (error && error.error) || '位置未修改，请重试', showCancel: false }));
+            .catch(error => {
+              if (error && error.code === 'SITE_LOCATION_CHANGED') this.loadSite(s.id);
+              wx.showModal({ title: '校准失败', content: (error && error.error) || '位置未修改，请重试', showCancel: false });
+            });
         }
       });
     }).catch(error => {

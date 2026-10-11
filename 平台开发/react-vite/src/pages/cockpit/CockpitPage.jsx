@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Card,
@@ -38,8 +38,8 @@ import {
   PushpinOutlined,
   PushpinFilled,
   MinusCircleOutlined,
-  EyeOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import { divIcon } from 'leaflet';
@@ -1033,7 +1033,7 @@ function SiteMonitoringView() {
                     <Button
                       type="primary"
                       size="small"
-                      icon={<EyeOutlined />}
+                      icon={<HoverGifIcon name="eye" size={14} />}
                       onClick={() => navigate(`/sites/${site.id}`)}
                     >
                       查看监测

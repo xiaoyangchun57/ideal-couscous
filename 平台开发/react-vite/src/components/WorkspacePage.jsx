@@ -5,6 +5,28 @@ import './WorkspacePage.css';
 
 const { Title, Text } = Typography;
 
+// 空状态动态图标映射（outline 风格，常动）
+const emptyIconMap = {
+  empty: 'inbox',
+  filtered: 'magnifier',
+  sample: 'bar-chart',
+  error: 'warning-triangle',
+  'no-permission': 'arrow-out-square',
+  success: 'confetti',
+};
+
+const EmptyGif = ({ type, size = 72 }) => {
+  const name = emptyIconMap[type] || 'inbox';
+  return (
+    <img
+      src={`/icons/empty/${name}.gif`}
+      alt=""
+      style={{ width: size, height: size, objectFit: 'contain' }}
+      draggable={false}
+    />
+  );
+};
+
 export function TableLongText({ value, lines = 2, empty = '-' }) {
   const content = value == null || value === '' ? empty : String(value);
   if (content === empty) return <Text type="secondary">{empty}</Text>;
@@ -26,10 +48,12 @@ export function WorkspaceEmpty({ type = 'empty', onRefresh, description, childre
     filtered: '没有符合当前条件的记录',
     sample: '本周期尚无可用统计样本',
     error: '数据加载失败，请稍后重试',
+    'no-permission': '当前账号没有可查看内容',
+    success: '操作成功',
   };
   return (
     <div className="workspace-empty" style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
-      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description || descriptions[type]}>
+      <Empty image={<EmptyGif type={type} />} description={description || descriptions[type]}>
         {(children || onRefresh) && <Space wrap>{children}{onRefresh && <Button icon={<ReloadOutlined />} onClick={onRefresh}>刷新</Button>}</Space>}
       </Empty>
     </div>

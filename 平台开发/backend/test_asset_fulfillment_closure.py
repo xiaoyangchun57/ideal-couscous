@@ -158,6 +158,31 @@ class AssetFulfillmentClosureTest(unittest.TestCase):
         self.assertEqual(recycle_log['target_id'], 1)
         self.assertIn('DEV-001', recycle_log['details'])
 
+    def test_device_operation_log_scope_excludes_other_business_modules(self):
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO operation_logs
+                (module,action,target_type,target_id,operator,operator_id,details)
+                VALUES (?,?,?,?,?,?,?)""", (
+                ('device', 'update', 'device', 1, '管理员', 1, '更新设备「分析仪」'),
+                ('user', 'unbind_wechat', 'user', 2, '管理员', 1, '解除微信绑定'),
+                ('vehicle', 'update', 'vehicle', 1, '管理员', 1, '更新车辆'),
+            ))
+            db.execute("""INSERT INTO device_recycle
+                (device_id,device_code,device_name,device_type,site_id,site_name,recycle_date,
+                 reason,destination,operator,status)
+                VALUES (2,'DEV-002','离线分析仪','analyzer',1,'测试站','2026-08-05',
+                        '历史回收','repair','管理员','recycled')""")
+
+        response = self.client.get(
+            '/api/operation-logs?module=device&limit=50', headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual({row['module'] for row in response.json}, {'device'})
+        self.assertEqual(
+            [row['action'] for row in response.json].count('recycle'), 1)
+        self.assertTrue(any(row['action'] == 'update' for row in response.json))
+        self.assertFalse(any('微信' in row['details'] or '车辆' in row['details']
+                             for row in response.json))
+
     def test_offline_managed_device_is_not_treated_as_retired(self):
         app_module.migrate_workorder_flow_columns()
         updated = self.client.put('/api/devices/2', headers=self.headers(), json={'site_id': 1})

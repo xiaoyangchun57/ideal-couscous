@@ -35,9 +35,12 @@ def write_workbook(path: Path, rows):
         archive.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData>' + "".join(sheet_rows) + "</sheetData></worksheet>")
 
 
-def make_hj212(*, station="IDENTITY-MN", password="synthetic-password", qn="20260911164900001"):
-    cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N;005-Rtd=3.0;005-Flag=N"
-    body = f"QN={qn};ST=91;CN=2011;PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
+def make_hj212(*, station="IDENTITY-MN", password="synthetic-password", qn="20260911164900001",
+               command="2011", data_time="20260911164900"):
+    value_field = "Avg" if command == "2061" else "Rtd"
+    cp = (f"DataTime={data_time};w01001-{value_field}=7.0;w01001-Flag=N;"
+          f"005-{value_field}=3.0;005-Flag=N")
+    body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
     return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
 
@@ -741,6 +744,153 @@ class StationIdentityAndDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(self.storage, "persist_parsed", side_effect=StorageError("capacity")):
             with self.assertRaises(StorageError):
                 self.server._process_raw_result(make_hj212(qn="20260911165100003"), "2026-09-11T08:51:05+00:00")
+
+    async def test_2061_is_discovered_and_replayed_but_unapproved_commands_stay_excluded(self):
+        password = b"synthetic-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,1,'bound')""",
+                ("IDENTITY-MN", credential_hmac(password, self.pepper)),
+            ).lastrowid
+            connection.commit()
+        self.server._process_raw_result(
+            make_hj212(command="2061", data_time="20260911120000"),
+            "2026-09-11T06:02:00+00:00",
+        )
+        self.server._process_raw_result(
+            make_hj212(command="2081", qn="20260911140300001", data_time="20260911120000"),
+            "2026-09-11T06:03:00+00:00",
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            raw_ids = [row[0] for row in connection.execute("SELECT id FROM ingest_raw_frames ORDER BY id")]
+        report, summary = discovery.discover_hj212(
+            self.database, start_id=raw_ids[0], end_id=raw_ids[-1])
+        station = report["stations"][0]
+        self.assertEqual(summary["raw_frame_count"], 2)
+        self.assertEqual(station["valid_cn2011_count"], 0)
+        self.assertEqual(station["valid_cn2061_count"], 1)
+        self.assertEqual(station["valid_observation_count"], 1)
+        self.assertEqual(station["parse_results"], {
+            "not_approved_data_command": 1, "valid_cn2061": 1,
+        })
+        self.assertEqual(station["protocol_codes"], ["HJ212:005", "HJ212:w01001"])
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,1,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,business_metric,expected_interval_seconds,
+                       tolerance_seconds,effective_from,enabled)
+                   VALUES (?,'HJ212:w01001','ph',14400,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,'HJ212:w01001','Asia/Shanghai',14400,'00:00:00',0,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+        replayed = discovery.replay_hj212(
+            self.database, endpoint_id=endpoint_id, start_id=raw_ids[0], end_id=raw_ids[-1])
+        self.assertEqual(replayed["selected_raw_frames"], 1)
+        self.assertEqual(replayed["result"], "replayed")
+        with closing(sqlite3.connect(self.database)) as connection:
+            batch = connection.execute(
+                "SELECT function_code FROM observation_batches"
+            ).fetchone()
+            business = connection.execute(
+                "SELECT scheduled_at,observed_at FROM monitoring_business_observations"
+            ).fetchone()
+        self.assertEqual(batch, (2061,))
+        self.assertEqual(business, (
+            "2026-09-11T04:00:00+00:00", "2026-09-11T04:00:00+00:00",
+        ))
+
+    async def test_unknown_history_is_reauthenticated_atomically_before_replay(self):
+        raw = make_hj212(station="LATE-IDENTITY-MN", qn="20260911164900999")
+        self.server._process_raw_result(raw, "2026-09-11T08:49:05+00:00")
+        self.server._process_raw_result(raw, "2026-09-11T08:49:06+00:00")
+        with closing(sqlite3.connect(self.database)) as connection:
+            raw_ids = [row[0] for row in connection.execute("SELECT id FROM ingest_raw_frames ORDER BY id")]
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,1,'bound')""",
+                ("LATE-IDENTITY-MN", credential_hmac(b"synthetic-password", self.pepper)),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,1,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,business_metric,expected_interval_seconds,
+                       tolerance_seconds,effective_from,enabled)
+                   VALUES (?,'HJ212:w01001','ph',14400,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,'HJ212:w01001','Asia/Shanghai',14400,'00:00:00',0,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+        preview = discovery.preview_unknown_hj212_reauthentication(
+            self.database, endpoint_id=endpoint_id, start_id=raw_ids[0], end_id=raw_ids[-1])
+        self.assertEqual(preview["result"], "ready", preview)
+        self.assertEqual(preview["eligible_count"], 2)
+
+        before = self.endpoint_rows()
+        with mock.patch.dict(os.environ, {"SL651_CREDENTIAL_PEPPER": self.pepper}, clear=False):
+            with self.assertRaisesRegex(discovery.DiscoveryError, "credential differs"):
+                discovery.apply_unknown_hj212_reauthentication(
+                    self.database, endpoint_id=endpoint_id, credential=b"wrong-password",
+                    expected_fingerprint=preview["fingerprint"], offline_confirmed=True,
+                    start_id=raw_ids[0], end_id=raw_ids[-1],
+                )
+        self.assertEqual(self.endpoint_rows(), before)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT DISTINCT authentication_status FROM ingest_raw_frames"
+            ).fetchall(), [("unknown_endpoint",)])
+
+        with mock.patch.dict(os.environ, {"SL651_CREDENTIAL_PEPPER": self.pepper}, clear=False):
+            applied = discovery.apply_unknown_hj212_reauthentication(
+                self.database, endpoint_id=endpoint_id, credential=b"synthetic-password",
+                expected_fingerprint=preview["fingerprint"], offline_confirmed=True,
+                start_id=raw_ids[0], end_id=raw_ids[-1],
+            )
+        self.assertEqual((applied["authenticated_count"], applied["duplicate_count"]), (2, 1))
+        verified = discovery.verify_unknown_hj212_reauthentication(
+            self.database, endpoint_id=endpoint_id, start_id=raw_ids[0], end_id=raw_ids[-1])
+        self.assertEqual(verified["authenticated_count"], 2)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT disposition,duplicate_of_raw_frame_id FROM ingest_raw_frames ORDER BY id"
+            ).fetchall(), [("quarantined", None), ("duplicate", raw_ids[0])])
+            self.assertEqual(connection.execute(
+                "SELECT DISTINCT status FROM ingest_errors WHERE error_type='unknown_endpoint'"
+            ).fetchall(), [("resolved",)])
+        replayed = discovery.replay_hj212(
+            self.database, endpoint_id=endpoint_id, start_id=raw_ids[0], end_id=raw_ids[-1])
+        self.assertEqual(replayed["outcomes"], {"not_projectable": 1, "partial": 1})
 
 
 if __name__ == "__main__":

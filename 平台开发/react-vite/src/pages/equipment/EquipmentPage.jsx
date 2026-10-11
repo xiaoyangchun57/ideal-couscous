@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
@@ -7,12 +7,12 @@ import {
   Row, Col, Descriptions, Drawer, Divider, DatePicker, Upload,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, PlusOutlined, EyeOutlined,
-  EditOutlined, DeleteOutlined,
+  SearchOutlined, ReloadOutlined, PlusOutlined,
   InboxOutlined, SwapOutlined,
   ArrowUpOutlined, ArrowDownOutlined, MoreOutlined,
   DownloadOutlined, UploadOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
@@ -22,6 +22,7 @@ import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { StatusStrip, TableLongText, ToolbarMeta, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Title, Text } = Typography;
 
@@ -152,7 +153,8 @@ function DeviceLedgerTab() {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState('');
-  const search = searchParams.get('q') || '';
+  const deviceRequestRef = useRef({ id: 0, controller: null });
+  const urlSearch = searchParams.get('q') || '';
   const typeFilter = searchParams.get('type') || undefined;
   const siteFilterValue = searchParams.get('site');
   const siteFilter = siteFilterValue ? Number(siteFilterValue) : undefined;
@@ -170,24 +172,69 @@ function DeviceLedgerTab() {
   const [sitesError, setSitesError] = useState('');
   const [form] = Form.useForm();
 
+  const commitSearch = useCallback((value) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      const normalized = value.trim();
+      if (normalized) next.set('q', normalized);
+      else next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+  const { draft: search, inputProps: searchInputProps } = useUrlSyncedSearch(urlSearch, commitSearch);
+  const cancelDeviceRequest = useCallback(() => {
+    deviceRequestRef.current.id += 1;
+    deviceRequestRef.current.controller?.abort();
+    setLoading(false);
+  }, []);
+  const handleSearchChange = useCallback((event) => {
+    cancelDeviceRequest();
+    searchInputProps.onChange(event);
+  }, [cancelDeviceRequest, searchInputProps]);
+  const handleCompositionStart = useCallback((event) => {
+    cancelDeviceRequest();
+    searchInputProps.onCompositionStart(event);
+  }, [cancelDeviceRequest, searchInputProps]);
+
   const fetchDevices = useCallback(async () => {
+    deviceRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = deviceRequestRef.current.id + 1;
+    deviceRequestRef.current = { id: requestId, controller };
     setLoading(true);
     setFetchError('');
     try {
       const params = new URLSearchParams();
-      if (search) params.set('search', search);
+      if (urlSearch) params.set('search', urlSearch);
       if (typeFilter) params.set('type', typeFilter);
       if (siteFilter) params.set('site_id', siteFilter);
-      const data = await api.getStrict(`/devices?${params.toString()}`);
+      const data = await api.getStrict(`/devices?${params.toString()}`, { signal: controller.signal });
+      if (deviceRequestRef.current.id !== requestId) return;
       setDevices(Array.isArray(data) ? data : (data?.devices || []));
     } catch (error) {
+      if (deviceRequestRef.current.id !== requestId || error?.code === 'REQUEST_ABORTED') return;
       setFetchError(error?.message || '设备列表加载失败，请稍后重试');
     } finally {
-      setLoading(false);
+      if (deviceRequestRef.current.id === requestId) setLoading(false);
     }
-  }, [search, typeFilter, siteFilter]);
+  }, [urlSearch, typeFilter, siteFilter]);
 
-  useEffect(() => { fetchDevices(); }, [fetchDevices]);
+  useEffect(() => {
+    fetchDevices();
+    return () => {
+      deviceRequestRef.current.id += 1;
+      deviceRequestRef.current.controller?.abort();
+    };
+  }, [fetchDevices]);
+
+  const filteredDevices = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    if (!keyword) return devices;
+    return devices.filter((device) =>
+      [device.device_code, device.device_name].some(
+        (value) => value && String(value).toLowerCase().includes(keyword),
+      ));
+  }, [devices, search]);
 
   // Fetch sites for form dropdown
   useEffect(() => {
@@ -379,33 +426,6 @@ function DeviceLedgerTab() {
       render: (text) => <span title={text}>{text || '-'}</span>,
     },
     {
-      title: '最后数据',
-      dataIndex: 'last_data_time',
-      key: 'last_data_time',
-      width: 150,
-      render: (text, record) => Number(record.monitoring_enabled) !== 1
-        ? <Tag>非采集设备</Tag>
-        : text ? (
-          <Text style={{ color: tokens.colorTextSecondary, fontSize: 13 }}>{text}</Text>
-        ) : <Tag color="default">采集尚未接入</Tag>,
-    },
-    {
-      title: '运行状态',
-      key: 'operational_status',
-      width: 120,
-      render: (_, record) => {
-        if (Number(record.monitoring_enabled) !== 1) return <Text type="secondary">不适用</Text>;
-        const statusMap = {
-          online: { color: 'green', text: '在线' },
-          normal: { color: 'green', text: '在线' },
-          offline: { color: 'red', text: '离线' },
-          maintenance: { color: 'orange', text: '维护中' },
-        };
-        const status = statusMap[record.status] || { color: 'default', text: record.status || '未知' };
-        return <Tag color={status.color}>{status.text}</Tag>;
-      },
-    },
-    {
       title: '生命周期',
       key: 'lifecycle',
       width: 120,
@@ -421,11 +441,11 @@ function DeviceLedgerTab() {
       render: (_, record) => {
         const retired = isRetired(record);
         const managementItems = canWrite ? [
-          { key: 'edit', label: '移站/编辑', icon: <EditOutlined />, disabled: retired, onClick: () => handleEdit(record) },
+          { key: 'edit', label: '移站/编辑', icon: <HoverGifIcon name="pencil" size={14} />, disabled: retired, onClick: () => handleEdit(record) },
           { key: 'recycle', label: retired ? '已登记回收' : '登记回收处置', icon: <SwapOutlined />, disabled: retired, onClick: () => handleRecycleOpen(record) },
           { type: 'divider' },
           {
-            key: 'delete', label: retired ? '退役档案不可删除' : '删除设备', danger: true, disabled: retired, icon: <DeleteOutlined />,
+            key: 'delete', label: retired ? '退役档案不可删除' : '删除设备', danger: true, disabled: retired, icon: <HoverGifIcon name="trash-bin" size={14} />,
             onClick: () => {
               Modal.confirm({ title: '确定删除该设备吗？', content: `设备「${record.device_name || record.device_code}」将被永久删除。`, okText: '删除', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => {
                 const result = await api.delete(`/devices/${record.id}`);
@@ -437,7 +457,7 @@ function DeviceLedgerTab() {
         ] : [];
         return (
         <Space size={2}>
-          <Button type="link" size="small" icon={<EyeOutlined />} aria-label={`查看 ${record.device_name || record.device_code} 的设备详情`} onClick={() => handleView(record)}>
+          <Button type="link" size="small" icon={<HoverGifIcon name="eye" size={14} />} aria-label={`查看 ${record.device_name || record.device_code} 的设备详情`} onClick={() => handleView(record)}>
             详情
           </Button>
           {managementItems.length > 0 && <Dropdown menu={{ items: managementItems }}><Button type="link" size="small" icon={<MoreOutlined />} aria-label={`管理 ${record.device_name || record.device_code}`}>管理</Button></Dropdown>}
@@ -470,8 +490,9 @@ function DeviceLedgerTab() {
           placeholder="搜索设备编码、名称..."
           prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
           allowClear
-          value={search}
-          onChange={(e) => updateFilter('q', e.target.value)}
+          {...searchInputProps}
+          onChange={handleSearchChange}
+          onCompositionStart={handleCompositionStart}
           style={{ width: filterInputWidth, borderRadius: 8 }}
         />
         <Select aria-label="设备类型" placeholder="全部设备类型" allowClear value={typeFilter} onChange={(value) => updateFilter('type', listFilterValue(value))}
@@ -480,7 +501,7 @@ function DeviceLedgerTab() {
         <Select aria-label="所属站点" placeholder="全部站点" allowClear value={siteFilter} onChange={(value) => updateFilter('site', listFilterValue(value))}
           style={{ width: filterSelectWidth }} options={listFilterOptions('全部站点', siteOptions)} showSearch
           filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
-        {(search || typeFilter || siteFilter) && <ToolbarMeta label="当前结果">已筛选 {devices.length} 条</ToolbarMeta>}
+        {(search || typeFilter || siteFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredDevices.length} 条</ToolbarMeta>}
       </WorkspaceToolbar>
       {sitesError ? (
         <Alert type="warning" showIcon message="站点选项暂未加载" description={sitesError} style={{ marginBottom: 12 }} />
@@ -497,7 +518,7 @@ function DeviceLedgerTab() {
       ) : null}
       <WorkspaceTable
         columns={columns}
-        dataSource={devices}
+        dataSource={filteredDevices}
         rowKey={(r) => r.id || r.code || r.device_code}
         loading={loading}
         emptyType={search || typeFilter || siteFilter ? 'filtered' : 'empty'}
@@ -568,7 +589,7 @@ function DeviceLedgerTab() {
               });
               const displayLogs = allLogs.slice(0, 30);
               if (displayLogs.length === 0) return <Empty description="暂无操作记录" style={{ margin: '16px 0' }} />;
-              const actionLabel = { create: '注册', update: '更新', delete: '删除', recycle: '回收处置' };
+              const actionLabel = { create: '注册', update: '更新', delete: '删除', recycle: '回收处置', batch_import: '批量导入' };
               return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {displayLogs.map((log, i) => (
@@ -1016,13 +1037,13 @@ function SparePartsTab() {
     { title: '操作', key: 'actions', width: 210,
       render: (_, r) => (
         <Space size={0}>
-          <Button type="link" size="small" icon={<EyeOutlined />} aria-label={`查看 ${r.part_name || r.part_code} 的备件详情`} onClick={() => handleView(r)}>详情</Button>
+          <Button type="link" size="small" icon={<HoverGifIcon name="eye" size={14} />} aria-label={`查看 ${r.part_name || r.part_code} 的备件详情`} onClick={() => handleView(r)}>详情</Button>
           {canWrite && <Button type="link" size="small" style={{ color: successColor }} icon={<ArrowUpOutlined />} onClick={() => handleStockOpen(r, 'in')}>入库</Button>}
           {canWrite && <Button type="link" size="small" style={{ color: warningColor }} icon={<ArrowDownOutlined />} onClick={() => handleStockOpen(r, 'out')}>出库</Button>}
           {canWrite && <Dropdown
             trigger={['click']}
             menu={{ items: [
-              { key: 'edit', label: '编辑备件', icon: <EditOutlined />, onClick: () => handleEdit(r) },
+              { key: 'edit', label: '编辑备件', icon: <HoverGifIcon name="pencil" size={14} />, onClick: () => handleEdit(r) },
               { key: 'recover', label: '旧件回收', icon: <SwapOutlined />, onClick: () => handleRecoverOpen(r) },
             ] }}
           >
@@ -1446,12 +1467,12 @@ function OperationLogsTab() {
     setFetchError('');
     try {
       const [opLogs, dash] = await Promise.all([
-        api.getStrict('/operation-logs?limit=50'),
+        api.getStrict('/operation-logs?module=device&limit=50'),
         api.getStrict('/parts/dashboard'),
       ]);
       const opRows = Array.isArray(opLogs) ? opLogs : [];
       const invRows = (dash?.latest_operations || []).map(o => ({
-        id: `inv-${o.created_at}-${o.part_id}-${o.type}`,
+        id: `inv-${o.id}`,
         created_at: o.created_at,
         operator: o.operator || '系统',
         action: o.type === 'in' ? '入库' : '出库',
@@ -1459,8 +1480,16 @@ function OperationLogsTab() {
         details: `${o.part_name || o.part_code || '备件'} ${o.type === 'in' ? '+' : '-'}${o.quantity}`,
         _type: 'inventory',
       }));
-      const merged = [...opRows.map(r => ({...r, _type: 'operation'})), ...invRows];
-      merged.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      const mergedByKey = new Map();
+      [...opRows.map(r => ({...r, _type: 'operation'})), ...invRows].forEach((row) => {
+        const key = `${row._type}:${row.id}`;
+        if (!mergedByKey.has(key)) mergedByKey.set(key, row);
+      });
+      const merged = [...mergedByKey.values()];
+      merged.sort((a, b) => (
+        (b.created_at || '').localeCompare(a.created_at || '')
+        || String(b.id).localeCompare(String(a.id))
+      ));
       setLogs(merged.slice(0, 100));
     } catch (error) {
       setFetchError(error?.message || '操作日志加载失败');
@@ -1471,7 +1500,7 @@ function OperationLogsTab() {
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
-  const actionLabel = { create: '注册', update: '更新', delete: '删除', recycle: '回收处置', approve: '审批通过', reject: '驳回', '入库': '入库', '出库': '出库' };
+  const actionLabel = { create: '注册', update: '更新', delete: '删除', recycle: '回收处置', batch_import: '批量导入', approve: '审批通过', reject: '驳回', '入库': '入库', '出库': '出库' };
 
   const columns = [
     { title: '时间', dataIndex: 'created_at', key: 'created_at', width: 150 },

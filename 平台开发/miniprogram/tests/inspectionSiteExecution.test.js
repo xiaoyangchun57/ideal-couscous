@@ -31,6 +31,7 @@ let toasts = [];
 let modals = [];
 let scrollCalls = [];
 let switchTabs = 0;
+let navigationUrls = [];
 
 global.getApp = () => app;
 global.Page = page => { definition = page; };
@@ -48,7 +49,7 @@ global.wx = {
   authorize: ({ success }) => success(),
   getLocation: ({ success }) => success({ latitude: 28.6, longitude: 115.7 }),
   switchTab: options => { switchTabs += 1; if (options.success) options.success(); },
-  navigateTo: () => {}, reLaunch: () => {}, stopPullDownRefresh: () => {},
+  navigateTo: options => { navigationUrls.push(options.url); }, reLaunch: () => {}, stopPullDownRefresh: () => {},
   setNavigationBarTitle: () => {}, pageScrollTo: options => { scrollCalls.push(options); },
   removeSavedFile: () => {},
 };
@@ -75,6 +76,7 @@ function resetStorage() {
   modals = [];
   scrollCalls = [];
   switchTabs = 0;
+  navigationUrls = [];
 }
 
 function seedStation(page, overrides) {
@@ -119,7 +121,8 @@ const originals = {
     assert.doesNotMatch(wxml, /stationStage\.code === 'local_pending'[\s\S]{0,320}bindtap="onCheckOut"/);
     assert.match(wxml, /<!-- 校准信息 -->\s*<view class="ip-fp-section" wx:if="\{\{sheet\.requiresCalibration\}\}">/);
     assert.match(wxml, /本次补拍[\s\S]{0,120}sheet\.photoInfo\.required/);
-    assert.match(wxml, /原照片待审核/);
+    assert.doesNotMatch(wxml, /原照片待审核/);
+    assert.doesNotMatch(wxml, /replacementPhotoStatus\s*!==\s*'pending_review'/);
     assert.doesNotMatch(wxml, /整改要求：\{\{sheet\.item\.supplement_reason/);
 
     resetStorage();
@@ -216,6 +219,32 @@ const originals = {
     assert.equal(postCheckinRefreshes, 1, 'successful arrival refreshes the exact site from server facts');
 
     resetStorage();
+    const remoteCheckin = createPage();
+    seedStation(remoteCheckin, { checked_in: false });
+    remoteCheckin.refreshStationStage = () => {};
+    api.trackEvent = () => {};
+    api.checkIn = () => Promise.reject({
+      code: 'SITE_GEOFENCE_EXCEEDED',
+      error: '距站点约 900m，超出 300m 到场范围，无法打卡',
+    });
+    remoteCheckin.onCheckIn();
+    await flush();
+    await flush();
+    assert.equal(modals.at(-1).confirmText, '去校准');
+    assert.equal(modals.at(-1).cancelText, '暂不校准');
+    assert.match(modals.at(-1).content, /定位不准？去校准/);
+    assert.equal(navigationUrls.at(-1),
+      '/pages/site/site?site_id=20&source=inspection_calibration&action=calibrate');
+
+    navigationUrls = [];
+    api.checkIn = () => Promise.reject({ code: 'PLAN_NOT_EXECUTABLE', error: '任务状态已变化' });
+    remoteCheckin.onCheckIn();
+    await flush();
+    await flush();
+    assert.equal(modals.at(-1).showCancel, false);
+    assert.equal(navigationUrls.length, 0, 'non-geofence failures never offer calibration navigation');
+
+    resetStorage();
     const itemPage = createPage();
     seedStation(itemPage);
     itemPage.data.categories = [{ items: [{
@@ -256,25 +285,63 @@ const originals = {
       { required: 1, captured: 1, missing: 0, ready: true });
 
     resetStorage();
-    const pendingReviewPage = createPage();
-    seedStation(pendingReviewPage);
-    pendingReviewPage.data.categories = [{ items: [{
+    const legacyPendingReviewPage = createPage();
+    seedStation(legacyPendingReviewPage);
+    legacyPendingReviewPage.data.categories = [{ items: [{
       item_id: 306, plan_id: 10, item_name: '待审核照片', result: 'normal', review_status: 3,
       evidence_status: 'supplement_required', replacement_photo_status: 'pending_review',
+      replacement_submission_allowed: false,
       replacement_block_reason: '原照片待审核，审核完成后才能补拍',
       replacement_required_photos: null, current_photo_urls: [], evidence_attachments: [],
       requiresCalibration: false,
     }] }];
-    pendingReviewPage.onOpenItem({ currentTarget: { dataset: { id: 306 } } });
-    assert.equal(pendingReviewPage.data.sheet.replacementPhotoStatus, 'pending_review');
-    assert.equal(pendingReviewPage.data.sheet.photoInfo.blocked, true);
+    legacyPendingReviewPage.onOpenItem({ currentTarget: { dataset: { id: 306 } } });
+    assert.equal(legacyPendingReviewPage.data.sheet.replacementPhotoStatus, 'pending_review');
+    assert.equal(legacyPendingReviewPage.data.sheet.photoInfo.blocked === true, false,
+      'legacy pending-review data no longer blocks replacement capture');
     let pendingReviewWrites = 0;
     api.submitItem = () => { pendingReviewWrites += 1; return Promise.resolve({}); };
-    pendingReviewPage.onSubmitItem();
-    assert.equal(pendingReviewWrites, 0, 'pending original review cannot submit a replacement');
-    assert.equal(toasts.at(-1).title, '原照片待审核，审核完成后才能补拍');
-    pendingReviewPage.onAddPhoto({ currentTarget: { dataset: { source: 'camera' } } });
-    assert.equal(toasts.at(-1).title, '原照片待审核，审核完成后才能补拍');
+    legacyPendingReviewPage.onSubmitItem();
+    assert.equal(pendingReviewWrites, 0, 'replacement still requires a newly accepted photo');
+    assert.equal(toasts.at(-1).title, '请先补充新的现场照片');
+    let photoPickerCalls = 0;
+    wx.chooseMedia = options => {
+      photoPickerCalls += 1;
+      options.fail({ errMsg: 'chooseMedia:fail cancel' });
+    };
+    await legacyPendingReviewPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
+    delete wx.chooseMedia;
+    assert.equal(photoPickerCalls, 1, 'legacy pending-review data permits a new photo selection');
+    assert.equal(toasts.some(item => /原照片待审核/.test(item.title || '')), false);
+
+    resetStorage();
+    const replacementSubmittedPage = createPage();
+    seedStation(replacementSubmittedPage);
+    replacementSubmittedPage.data.categories = [{ items: [{
+      item_id: 307, plan_id: 10, item_name: '补拍已提交', result: 'normal', review_status: 1,
+      evidence_status: 'replacement_submitted', replacement_photo_status: 'replacement_pending_review',
+      replacement_submission_allowed: false,
+      replacement_block_reason: '补拍照片已提交业务审核，审核完成前不能重复编辑',
+      replacement_required_photos: null, current_photo_urls: ['/uploads/replacement.jpg'],
+      pending_photo_urls: ['/uploads/replacement.jpg'], evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    replacementSubmittedPage.onOpenItem({ currentTarget: { dataset: { id: 307 } } });
+    assert.equal(replacementSubmittedPage.data.sheet.photoInfo.blocked, true);
+    let lockedPickerCalls = 0;
+    wx.chooseMedia = () => { lockedPickerCalls += 1; };
+    replacementSubmittedPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
+    delete wx.chooseMedia;
+    assert.equal(lockedPickerCalls, 0, 'submitted replacement cannot start another photo selection');
+    assert.equal(toasts.at(-1).title, '补拍照片已提交业务审核，审核完成前不能重复编辑');
+    const lockedPhotos = replacementSubmittedPage.data.sheet.photos.slice();
+    replacementSubmittedPage.onDelPhoto({ currentTarget: { dataset: { idx: 0 } } });
+    assert.deepEqual(replacementSubmittedPage.data.sheet.photos, lockedPhotos,
+      'submitted replacement cannot delete photos while business review is pending');
+    let replacementSubmitWrites = 0;
+    api.submitItem = () => { replacementSubmitWrites += 1; return Promise.resolve({}); };
+    replacementSubmittedPage.onSubmitItem();
+    assert.equal(replacementSubmitWrites, 0, 'submitted replacement cannot be submitted twice');
 
     resetStorage();
     const normalWithRemark = createPage();

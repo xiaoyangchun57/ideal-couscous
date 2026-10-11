@@ -18,12 +18,15 @@ global.wx = {
 };
 
 const api = require('../services/api.js');
-const originals = { siteTasks: api.siteTasks, siteProfile: api.siteProfile, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory };
+const originals = { siteTasks: api.siteTasks, siteProfile: api.siteProfile, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory, calibrate: api.calibrate };
 require('../pages/site/site.js');
 
 function createPage() {
   const page = Object.assign({}, definition, { data: JSON.parse(JSON.stringify(definition.data)) });
-  page.setData = patch => Object.assign(page.data, patch);
+  page.setData = (patch, done) => {
+    Object.assign(page.data, patch);
+    if (done) done();
+  };
   return page;
 }
 
@@ -33,7 +36,12 @@ function createPage() {
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="task-status/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-primary checkin-btn/);
     assert.match(wxml, /wx:if="\{\{site\.can_calibrate\}\}"/);
-    assert.match(wxml, /wx:if="\{\{monitoringPublic && monitoringSource\}\}"/);
+    assert.match(wxml, /wx:if="\{\{monitoringIntent\}\}"/);
+    assert.match(wxml, /wx:elif="\{\{monitoringUnavailable\}\}"/);
+    assert.match(wxml, /wx:elif="\{\{monitoringPublic && monitoringSource\}\}"/);
+    assert.match(wxml, /最近检测周期/);
+    assert.match(wxml, /各因子最近可用值/);
+    assert.match(wxml, /各项可能来自不同检测周期，不代表同一次完整检测/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
     assert.match(wxml, /!site && monitoringError/);
@@ -55,7 +63,7 @@ function createPage() {
     let inventoryCalls = 0;
     api.siteTasks = id => {
       siteTaskCalls += 1;
-      return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01' } });
+      return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', can_calibrate: true } });
     };
     api.siteProfile = id => {
       profileCalls += 1;
@@ -78,9 +86,19 @@ function createPage() {
     assert.equal(monitoringCalls, 0, 'inspection source must not request monitoring');
     assert.equal(inventoryCalls, 0, 'inspection source does not load parts-application data');
 
+    const calibrationPage = createPage();
+    let calibrationCalls = 0;
+    calibrationPage.onCalibrate = () => { calibrationCalls += 1; };
+    calibrationPage.onLoad({ site_id: '20', source: 'inspection_calibration', action: 'calibrate' });
+    await flush();
+    assert.equal(calibrationPage.data.readOnlySource, false);
+    assert.equal(calibrationCalls, 1, 'check-in calibration route opens the existing calibration action once');
+
     const staleSourcePage = createPage();
     staleSourcePage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
     await flush();
+    assert.equal(staleSourcePage.data.monitoringIntent, true);
+    assert.equal(staleSourcePage.data.monitoringUnavailable, true);
     assert.equal(staleSourcePage.data.monitoringSource, false);
     assert.equal(profileCalls, 2);
     assert.equal(monitoringCalls, 0, 'old source without an enabled capability cannot bypass the gate');
@@ -92,6 +110,14 @@ function createPage() {
     assert.equal(monitoringPage.data.readOnlySource, true);
     assert.equal(monitoringPage.data.monitoringSource, true);
     assert.equal(monitoringPage.data.site.can_calibrate, true);
+    assert.equal(monitoringPage.data.monitoringIntent, true);
+
+    api.stationMonitoringOverview = () => Promise.reject({ status: 403, error: 'forbidden' });
+    const gatedPage = createPage();
+    gatedPage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    await flush(); await flush();
+    assert.equal(gatedPage.data.monitoringUnavailable, true);
+    assert.deepEqual(gatedPage.data.site.monitoring.latest_values, []);
 
     const pending = [];
     api.stationMonitoringOverview = () => new Promise(resolve => pending.push(resolve));
@@ -127,8 +153,8 @@ function createPage() {
     await flush();
     assert.equal(standardPage.data.readOnlySource, false);
     assert.equal(standardPage.data.site.id, 20);
-    assert.equal(siteTaskCalls, 1);
-    assert.equal(inventoryCalls, 1, 'existing site entry preserves parts-application loading');
+    assert.equal(siteTaskCalls, 2);
+    assert.equal(inventoryCalls, 2, 'calibration and existing site entries preserve normal site loading');
 
     const standardPending = [];
     api.siteTasks = () => new Promise(resolve => standardPending.push(resolve));
@@ -146,6 +172,15 @@ function createPage() {
 
     const inspection = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.js'), 'utf8');
     assert.match(inspection, /\/pages\/site\/site\?site_id=' \+ this\.data\.selSiteId \+ '&source=inspection_readonly'/);
+    const siteSource = fs.readFileSync(path.join(__dirname, '../pages/site/site.js'), 'utf8');
+    const serviceSource = fs.readFileSync(path.join(__dirname, '../services/api.js'), 'utf8');
+    assert.match(siteSource, /expected_old_lat:\s*expectedOldLat/);
+    assert.match(siteSource, /expected_old_lng:\s*expectedOldLng/);
+    assert.match(siteSource, /_idempotency_key:\s*calibrationKey/);
+    assert.match(siteSource, /SITE_LOCATION_CHANGED[\s\S]{0,120}loadSite\(s\.id\)/);
+    assert.match(serviceSource,
+      /calibrate:[\s\S]{0,180}\/calibrate'[\s\S]{0,180}\{ queue: false \}/,
+      '位置校准失败必须留在当前操作，不得进入后台失败队列后迟到执行');
     console.log('siteReadonlySource tests passed');
   } finally {
     Object.assign(api, originals);

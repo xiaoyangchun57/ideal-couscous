@@ -153,7 +153,7 @@ test('departure WXML handlers are reachable and legacy aggregate copy is absent'
   assert.ok(maskZ > footerZ, 'vehicle check mask must cover the fixed departure footer');
   assert.ok(sheetZ > maskZ, 'vehicle check sheet must stay above its mask');
   const inspectionBlock = matchingBlockRange(
-    wxml, '<block wx:if="{{viewPhase === \'inspection\'}}">'
+    wxml, '<block wx:if="{{viewMode === \'review\' || viewMode === \'readonly\' || viewPhase === \'inspection\'}}">'
   );
   const maskIndex = wxml.indexOf('class="sheet-mask vehicle-check-mask"');
   const sheetIndex = wxml.indexOf('class="sheet vehicle-check-sheet"');

@@ -718,7 +718,7 @@ test('change submit retries the same saved payload without another PUT after res
   assert.equal(page.data.version, 8);
   assert.equal(submitCount, 2);
   assert.equal(navigations, 1);
-  assert.equal(toasts.some(item => item.title === '已提交审批'), true);
+  assert.equal(toasts.some(item => item.title === '变更已提交审核'), true);
 
   api.validatePlanSchedule = originals.validate;
   api.updatePlanSchedule = originals.update;

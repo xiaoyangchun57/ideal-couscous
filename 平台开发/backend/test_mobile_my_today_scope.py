@@ -1,3 +1,4 @@
+import base64
 import os
 import json
 import sqlite3
@@ -39,6 +40,14 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         app_module._tokens['admin-operator-token'] = {
             'id': 2, 'role': 'admin', 'roles': ['admin', 'operator'],
             'real_name': '甲运维', 'username': 'operator-a'
+        }
+        app_module._tokens['reviewer-token'] = {
+            'id': 4, 'role': 'reviewer', 'roles': ['reviewer'],
+            'real_name': '甲审核', 'username': 'reviewer-a'
+        }
+        app_module._tokens['other-reviewer-token'] = {
+            'id': 5, 'role': 'reviewer', 'roles': ['reviewer'],
+            'real_name': '乙审核', 'username': 'reviewer-b'
         }
         today = datetime.now().strftime('%Y-%m-%d')
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -109,10 +118,28 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                     review_status TEXT DEFAULT 'pending', evidence_qualification TEXT DEFAULT 'qualified',
                     extra_json TEXT DEFAULT '{}'
                 );
+                CREATE TABLE mobile_idempotency (
+                    idempotency_key TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
+                    response_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE photo_capture_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT, user_id INTEGER,
+                    site_id INTEGER, plan_id INTEGER, item_id INTEGER, work_order_id INTEGER,
+                    issued_at TEXT, expires_at TEXT
+                );
+                CREATE TABLE notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+                    source_type TEXT, source_id TEXT, title TEXT, content TEXT
+                );
             ''')
-            db.executemany('INSERT INTO users VALUES (?,?,?)', [(2, '甲运维', 'operator'), (3, '乙运维', 'operator')])
+            db.executemany('INSERT INTO users VALUES (?,?,?)', [
+                (2, '甲运维', 'operator'), (3, '乙运维', 'operator'),
+                (4, '甲审核', 'reviewer'), (5, '乙审核', 'reviewer')
+            ])
             db.execute('INSERT INTO user_sites VALUES (2, 1)')
             db.execute('INSERT INTO user_sites VALUES (2, 2)')
+            db.execute('INSERT INTO user_sites VALUES (4, 1)')
+            db.execute('INSERT INTO user_sites VALUES (5, 2)')
             db.executemany('INSERT INTO sites VALUES (?,?,?,?,?,?)', [
                 (1, '测试站', 'S-01', 28.6, 115.7, 'water_quality'),
                 (2, '昨日遗留站', 'S-02', 28.7, 115.8, 'water_quality'),
@@ -895,7 +922,7 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(item['retained_photo_count'], 1)
         self.assertEqual(item['replacement_required_photos'], 3)
 
-    def test_execution_site_blocks_retake_until_current_photo_review_finishes(self):
+    def test_execution_site_allows_retake_despite_legacy_pending_original(self):
         with app_module.get_db() as db:
             db.execute("ALTER TABLE insp_plan_items ADD COLUMN required_photos INTEGER DEFAULT 0")
             db.execute("ALTER TABLE insp_plan_items ADD COLUMN actual_photos INTEGER DEFAULT 0")
@@ -915,11 +942,11 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                                    headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(response.status_code, 200, response.json)
         item = response.json['categories'][0]['items'][0]
-        self.assertEqual(item['replacement_photo_status'], 'pending_review')
-        self.assertFalse(item['replacement_submission_allowed'])
-        self.assertIsNone(item['replacement_required_photos'])
-        self.assertEqual(item['replacement_block_reason'], '原照片待审核，审核完成后才能补拍')
-        self.assertEqual(item['supplement_display_message'], '原照片待审核，审核完成后才能补拍')
+        self.assertEqual(item['replacement_photo_status'], 'ready')
+        self.assertTrue(item['replacement_submission_allowed'])
+        self.assertEqual(item['replacement_required_photos'], 4)
+        self.assertEqual(item['replacement_block_reason'], '')
+        self.assertEqual(item['supplement_display_message'], '审核说明不完整，请联系审核人')
 
         with app_module.get_db() as db:
             db.execute("UPDATE operation_attachments SET review_status='approved' WHERE id=409")
@@ -949,6 +976,79 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         item = response.json['categories'][0]['items'][0]
         self.assertEqual(item['retained_photo_count'], 0)
         self.assertEqual(item['replacement_required_photos'], 4)
+
+    def test_replacement_submitted_rejects_direct_upload_and_repeat_submit_without_side_effects(self):
+        required_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items SET result='normal', review_status=1,
+                evidence_status='replacement_submitted', rework_required_at=?,
+                photo_urls='["/uploads/replacement.jpg"]' WHERE id=1001""", (required_at,))
+
+        def snapshot():
+            with app_module.get_db() as db:
+                item = db.execute("""SELECT result,review_status,evidence_status,rework_required_at,
+                    photo_urls FROM insp_plan_items WHERE id=1001""").fetchone()
+                return (
+                    tuple(item),
+                    db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0],
+                    db.execute('SELECT COUNT(*) FROM mobile_idempotency').fetchone()[0],
+                    db.execute('SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0],
+                    db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0],
+                )
+
+        before = snapshot()
+        projection = app_module._mobile_inspection_photo_state({
+            'id': 1001, 'plan_id': 101, 'required_photos': 1,
+            'photo_urls': '["/uploads/replacement.jpg"]',
+            'evidence_status': 'replacement_submitted', 'review_status': 1,
+            'rework_required_at': required_at,
+        }, [])
+        self.assertEqual(projection['replacement_photo_status'], 'replacement_pending_review')
+        self.assertFalse(projection['replacement_submission_allowed'])
+        self.assertIsNone(projection['replacement_required_photos'])
+
+        capture = self.client.post('/api/mobile/photo-capture-session',
+            headers={'Authorization': 'Bearer operator-token'}, json={
+                'site_id': 1, 'plan_id': 101, 'item_id': 1001,
+                'capture_source': 'camera', 'gps_lat': 28.6, 'gps_lng': 115.7,
+            })
+        self.assertEqual((capture.status_code, capture.json['code']),
+                         (409, 'INSPECTION_REPLACEMENT_REVIEW_PENDING'))
+
+        upload = self.client.post('/api/mobile/upload-site-photo',
+            headers={'Authorization': 'Bearer operator-token'}, json={
+                'site_id': 1, 'plan_id': 101, 'item_id': 1001,
+                'capture_source': 'watermark_album', 'image': 'ignored',
+                '_idempotency_key': 'locked-upload',
+            })
+        self.assertEqual((upload.status_code, upload.json['code']),
+                         (409, 'INSPECTION_REPLACEMENT_REVIEW_PENDING'))
+
+        repeated = self.client.post('/api/mobile/submit-item',
+            headers={'Authorization': 'Bearer operator-token'}, json={
+                'item_id': 1001, 'plan_id': 101, 'result': 'normal', 'supplement': True,
+                'photo_urls': '["/uploads/replacement.jpg","/uploads/another.jpg"]',
+                '_idempotency_key': 'locked-submit',
+            })
+        self.assertEqual((repeated.status_code, repeated.json['code']),
+                         (409, 'INSPECTION_REPLACEMENT_REVIEW_PENDING'))
+        self.assertEqual(snapshot(), before)
+
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items SET review_status=3,
+                evidence_status='supplement_required' WHERE id=1001""")
+            item, error = app_module._inspection_photo_upload_context(
+                db, 1001, 1, 101, app_module._tokens['operator-token'])
+        self.assertIsNone(error)
+        self.assertEqual(item['evidence_status'], 'supplement_required')
+        allowed = self.client.post('/api/mobile/upload-site-photo',
+            headers={'Authorization': 'Bearer operator-token'}, json={
+                'site_id': 1, 'plan_id': 101, 'item_id': 1001,
+                'capture_source': 'watermark_album',
+                'image': 'data:image/jpeg;base64,' + base64.b64encode(b'x' * 300).decode('ascii'),
+                '_idempotency_key': 'allowed-retake',
+            })
+        self.assertEqual((allowed.status_code, allowed.json['code']), (400, 'PHOTO_DECODE_FAILED'))
 
     def test_execution_site_ignores_historical_pending_outside_current_snapshot(self):
         with app_module.get_db() as db:
@@ -1012,6 +1112,149 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         item = response.json['categories'][0]['items'][0]
         self.assertEqual(item['pending_photo_urls'], ['/uploads/site_photos/current.jpg'])
+
+    def test_review_scope_reads_only_exact_visible_pending_site_without_changing_executor_access(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal', review_status=1, check_time=datetime('now','localtime')
+                WHERE id=1001""")
+
+        reviewer = self.client.get('/api/mobile/execution-plans/101/sites/1?scope=review',
+                                   headers={'Authorization': 'Bearer reviewer-token'})
+        self.assertEqual(reviewer.status_code, 200, reviewer.json)
+        self.assertEqual(reviewer.json['plan_id'], 101)
+        self.assertEqual(reviewer.json['site']['id'], 1)
+
+        operator_review = self.client.get('/api/mobile/execution-plans/101/sites/1?scope=review',
+                                          headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(operator_review.status_code, 403, operator_review.json)
+
+        other_site_reviewer = self.client.get('/api/mobile/execution-plans/101/sites/1?scope=review',
+                                              headers={'Authorization': 'Bearer other-reviewer-token'})
+        self.assertEqual(other_site_reviewer.status_code, 404, other_site_reviewer.json)
+
+        admin = self.client.get('/api/mobile/execution-plans/101/sites/1?scope=review',
+                                headers={'Authorization': 'Bearer admin-operator-token'})
+        self.assertEqual(admin.status_code, 200, admin.json)
+
+        executor = self.client.get('/api/mobile/execution-plans/101/sites/1',
+                                   headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(executor.status_code, 200, executor.json)
+
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET review_status=2 WHERE id=1001')
+        no_longer_pending = self.client.get('/api/mobile/execution-plans/101/sites/1?scope=review',
+                                            headers={'Authorization': 'Bearer reviewer-token'})
+        self.assertEqual(no_longer_pending.status_code, 404, no_longer_pending.json)
+
+    def test_result_scope_reopens_owned_completed_site_without_reopening_execution_access(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plans SET status='completed', completion_rate=100
+                WHERE id=103""")
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal', remark='历史结果', check_time=datetime('now','localtime'),
+                    check_out_time=datetime('now','localtime'), review_status=2,
+                    photo_urls='["/uploads/site_photos/result.jpg"]'
+                WHERE id=1003""")
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,source_type,source_id,site_id,uploader_id,item_id,
+                 is_deleted,review_status,evidence_qualification,extra_json)
+                VALUES (300,'/uploads/site_photos/result.jpg','inspection',1003,2,2,1003,
+                        0,'approved','qualified','{"material_role":"formal","plan_id":103,"item_id":1003}')""")
+
+        normal = self.client.get('/api/mobile/execution-plans/103/sites/2',
+                                 headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(normal.status_code, 404, normal.json)
+
+        result = self.client.get('/api/mobile/execution-plans/103/sites/2?scope=result',
+                                 headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['plan_id'], 103)
+        self.assertEqual(result.json['site']['id'], 2)
+        result_item = result.json['categories'][0]['items'][0]
+        self.assertEqual(result_item['remark'], '历史结果')
+        self.assertEqual(json.loads(result_item['photo_urls']), ['/uploads/site_photos/result.jpg'])
+        self.assertEqual(result_item['evidence_attachments'][0]['stored_path'],
+                         '/uploads/site_photos/result.jpg')
+        self.assertIn('?ticket=', result_item['evidence_attachments'][0]['display_url'])
+
+        cross_owner = self.client.get('/api/mobile/execution-plans/102/sites/1?scope=result',
+                                      headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(cross_owner.status_code, 404, cross_owner.json)
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=2')
+        cross_site = self.client.get('/api/mobile/execution-plans/103/sites/2?scope=result',
+                                     headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(cross_site.status_code, 404, cross_site.json)
+
+    def test_result_scope_survives_parent_schedule_change_without_reopening_writes(self):
+        headers = {'Authorization': 'Bearer operator-token'}
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plans SET status='completed', completion_rate=100 WHERE id=103")
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal', remark='排程变更后的历史结果',
+                    check_time=datetime('now','localtime'), check_out_time=datetime('now','localtime')
+                WHERE id=1003""")
+            db.execute("UPDATE plan_schedules SET status='modifying' WHERE id=13")
+            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=1002")
+
+        result = self.client.get('/api/mobile/execution-plans/103/sites/2?scope=result',
+                                 headers=headers)
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['categories'][0]['items'][0]['remark'],
+                         '排程变更后的历史结果')
+
+        active_read = self.client.get('/api/mobile/execution-plans/103/sites/2', headers=headers)
+        self.assertEqual(active_read.status_code, 404, active_read.json)
+
+        write = self.client.post('/api/mobile/submit-item', headers=headers, json={
+            'item_id': 1003,
+            'plan_id': 103,
+            'result': 'normal',
+        })
+        self.assertEqual(write.status_code, 403, write.json)
+        self.assertIn('当前已批准执行任务', write.json['error'])
+
+        cross_owner = self.client.get('/api/mobile/execution-plans/102/sites/1?scope=result',
+                                      headers=headers)
+        self.assertEqual(cross_owner.status_code, 404, cross_owner.json)
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=2')
+        cross_site = self.client.get('/api/mobile/execution-plans/103/sites/2?scope=result',
+                                     headers=headers)
+        self.assertEqual(cross_site.status_code, 404, cross_site.json)
+
+    def test_result_scope_preserves_pending_approved_and_supplement_required_states(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plans SET status='completed', completion_rate=100
+                WHERE id=103""")
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal', remark='历史结果', check_time=datetime('now','localtime'),
+                    check_out_time=datetime('now','localtime')
+                WHERE id=1003""")
+
+        states = (
+            (1, '', '待审核'),
+            (2, '', '已通过'),
+            (3, 'supplement_required', '已驳回、需补拍'),
+        )
+        for review_status, evidence_status, label in states:
+            with self.subTest(label=label):
+                with app_module.get_db() as db:
+                    db.execute("""UPDATE insp_plan_items
+                        SET review_status=?, evidence_status=? WHERE id=1003""",
+                               (review_status, evidence_status))
+
+                response = self.client.get(
+                    '/api/mobile/execution-plans/103/sites/2?scope=result',
+                    headers={'Authorization': 'Bearer operator-token'},
+                )
+                self.assertEqual(response.status_code, 200, response.json)
+                item = response.json['categories'][0]['items'][0]
+                self.assertEqual(item['review_status'], review_status)
+                self.assertEqual(item['evidence_status'], evidence_status)
 
     def test_plan_vehicle_cannot_return_before_trip_end(self):
         records = self.client.get('/api/vehicle/use-records', headers={'Authorization': 'Bearer operator-token'})

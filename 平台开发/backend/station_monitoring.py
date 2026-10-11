@@ -14,9 +14,9 @@ except ImportError:  # pragma: no cover
     from sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
 
-NORMALIZATION_VERSION = "station-monitoring-normalizer-v3"
-BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v2"
-HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v2"
+NORMALIZATION_VERSION = "station-monitoring-normalizer-v4"
+BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v3"
+HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v3"
 
 
 def _utc_now() -> str:
@@ -132,7 +132,7 @@ def business_slot_deadline(configuration: dict, scheduled_at: str) -> str:
     scheduled = datetime.fromisoformat(scheduled_at)
     delay = int(configuration.get("result_delay_seconds") or 0)
     if delay:
-        seconds = delay + int(configuration.get("expected_interval_seconds") or 0)
+        seconds = delay + int(configuration.get("tolerance_seconds") or 0)
     else:
         seconds = int(configuration.get("tolerance_seconds") or 0)
     return (scheduled + timedelta(seconds=seconds)).isoformat()
@@ -174,6 +174,28 @@ def _reconcile_business_slot(connection, endpoint_id: int, business_metric: str,
             "UPDATE monitoring_business_observations SET slot_state='selected' WHERE id=?", (selected["id"],))
 
 
+def _slot_rows(connection, site_id: int, configuration: dict, scheduled_at: str):
+    protocol_codes = configuration.get("protocol_codes") or [configuration["protocol_code"]]
+    marks = ",".join("?" * len(protocol_codes))
+    return connection.execute(
+        f"""SELECT business.business_metric,business.protocol_code,business.standard_value,
+                   business.standard_unit,business.quality,business.instrument_asset_code,
+                   business.endpoint_id,business.scheduled_at,business.observed_at,
+                   business.received_at,business.timeliness,business.slot_state,
+                   business.projection_version,
+                   batch.function_code
+            FROM monitoring_business_observations business
+            JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            WHERE business.business_site_id=? AND business.endpoint_id=?
+              AND business.is_current=1 AND batch.is_current=1
+              AND business.protocol_code IN ({marks}) AND business.business_metric=?
+              AND business.instrument_asset_code IS ? AND business.scheduled_at=?
+            ORDER BY business.id""",
+        (site_id, configuration["endpoint_id"], *protocol_codes,
+         configuration["business_metric"], configuration["instrument_asset_code"], scheduled_at),
+    ).fetchall()
+
+
 def _deactivate_business_observations(connection, batch_id: int) -> None:
     slots = connection.execute(
         """SELECT DISTINCT endpoint_id,protocol_code,business_metric,instrument_asset_code,scheduled_at
@@ -191,7 +213,11 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
                                   site_id: int, protocol_code: str, business_metric: str,
                                   instrument_asset_code: str | None, observed_at: str,
                                   received_at: str, standard_value: float, standard_unit: str,
-                                  quality: str, function_code: int | None = None) -> bool:
+                                  quality: str, function_code: int | None = None,
+                                  source_value_kind: str | None = None) -> bool:
+    if (str(protocol_code).startswith("HJ212:") and function_code == 2061
+            and source_value_kind != "avg"):
+        return False
     schedule = _business_schedule_for(connection, endpoint_id, protocol_code, observed_at)
     if not schedule:
         return False
@@ -202,8 +228,10 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
     observed = datetime.fromisoformat(observed_at)
     result_delay = _schedule_integer(schedule, "result_delay_seconds")
     if function_code in {2011, 2061} and result_delay:
+        grace = (int(schedule["tolerance_seconds"]) if function_code == 2061
+                 else int(schedule["interval_seconds"]))
         deadline = datetime.fromisoformat(scheduled_at) + timedelta(
-            seconds=result_delay + int(schedule["interval_seconds"]))
+            seconds=result_delay + grace)
         timeliness = "late" if received >= deadline else "on_time"
     else:
         timeliness = "late" if received - observed > timedelta(seconds=int(schedule["tolerance_seconds"])) else "on_time"
@@ -246,9 +274,10 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     """SELECT value.id AS value_id,value.observation_batch_id,value.protocol_code,
-                              value.business_metric,value.instrument_asset_code,value.standard_value,
-                              value.standard_unit,value.quality,batch.raw_frame_id,batch.endpoint_id,
-                              batch.business_site_id,batch.observed_at,batch.received_at,batch.function_code
+                               value.business_metric,value.instrument_asset_code,value.standard_value,
+                               value.standard_unit,value.quality,value.parser_version,
+                               batch.raw_frame_id,batch.endpoint_id,
+                               batch.business_site_id,batch.observed_at,batch.received_at,batch.function_code
                        FROM observation_values value
                        JOIN observation_batches batch ON batch.id=value.observation_batch_id
                        LEFT JOIN monitoring_business_observations business
@@ -259,6 +288,13 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                     (value_id,),
                 ).fetchone()
                 if row:
+                    source_value_kind = None
+                    if str(row["protocol_code"]).startswith("HJ212:"):
+                        prefix = f"{HJ212_PARSER_VERSION}:"
+                        if str(row["parser_version"]).startswith(prefix):
+                            candidate_kind = str(row["parser_version"])[len(prefix):]
+                            if candidate_kind in {"avg", "rtd"}:
+                                source_value_kind = candidate_kind
                     was_projected = _project_business_observation(
                         connection, value_id=row["value_id"], batch_id=row["observation_batch_id"],
                         endpoint_id=row["endpoint_id"], site_id=row["business_site_id"],
@@ -266,11 +302,13 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                         instrument_asset_code=row["instrument_asset_code"], observed_at=row["observed_at"],
                         received_at=row["received_at"], standard_value=row["standard_value"],
                         standard_unit=row["standard_unit"], quality=row["quality"],
-                        function_code=row["function_code"])
+                        function_code=row["function_code"], source_value_kind=source_value_kind)
                     if was_projected:
                         projected += 1
-                    elif row["function_code"] == 2061 and _business_schedule_for(
-                            connection, row["endpoint_id"], row["protocol_code"], row["observed_at"]):
+                    elif (row["function_code"] == 2061 and source_value_kind == "avg"
+                          and _business_schedule_for(
+                              connection, row["endpoint_id"], row["protocol_code"],
+                              row["observed_at"])):
                         _record_issue(
                             connection, row["raw_frame_id"], row["observation_batch_id"],
                             row["business_site_id"], "business_time_outside_schedule", row["protocol_code"],
@@ -378,6 +416,10 @@ def normalize_raw_frame(
         )
         batch_status = "accepted"
         for factor in report_factors:
+            source_value_kind = (getattr(factor, "value_kind", None)
+                                 if family == "hj212" else None)
+            value_parser_version = (f"{parser_version}:{source_value_kind}"
+                                    if source_value_kind else parser_version)
             if factor.quality == "fault":
                 batch_status = "partial"
                 _record_issue(
@@ -416,7 +458,8 @@ def normalize_raw_frame(
                 _record_issue(connection, raw_id, batch_id, site_id, "unmapped_factor", factor.protocol_code)
                 connection.execute(
                     """INSERT INTO observation_values(observation_batch_id, protocol_code, quality, parser_version, is_published)
-                       VALUES (?, ?, 'unmapped', ?, 0)""", (batch_id, factor.protocol_code, parser_version),
+                       VALUES (?, ?, 'unmapped', ?, 0)""",
+                    (batch_id, factor.protocol_code, value_parser_version),
                 )
                 continue
             metric = mapping["business_metric"] or definition["business_metric"]
@@ -433,7 +476,7 @@ def normalize_raw_frame(
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (batch_id, factor.protocol_code, metric, factor.raw_value, definition["raw_unit"], factor.raw_value,
                  definition["standard_unit"], factor.quality, mapping["instrument_asset_code"] or profile["instrument_asset_code"],
-                 parser_version, int(published and factor.quality in {"valid", "suspect"})),
+                  value_parser_version, int(published and factor.quality in {"valid", "suspect"})),
             )
             if published and factor.quality in {"valid", "suspect"}:
                 projected = _project_business_observation(
@@ -444,9 +487,11 @@ def normalize_raw_frame(
                     observed_at=observed_at, received_at=raw["received_at"],
                     standard_value=factor.raw_value, standard_unit=definition["standard_unit"],
                     quality=factor.quality, function_code=function_code,
+                    source_value_kind=source_value_kind,
                 )
-                if not projected and function_code == 2061 and _business_schedule_for(
-                        connection, raw["endpoint_id"], factor.protocol_code, observed_at):
+                if (not projected and function_code == 2061 and source_value_kind == "avg"
+                        and _business_schedule_for(
+                            connection, raw["endpoint_id"], factor.protocol_code, observed_at)):
                     batch_status = "partial"
                     _record_issue(
                         connection, raw_id, batch_id, site_id,
@@ -490,40 +535,35 @@ def reproject_historical_business_observations(
     return results
 
 
-def current_factor_configurations(connection, site_id: int, *, at_time: str | None = None):
-    """Return every currently published factor, including factors that never reported."""
-    at_time = at_time or _utc_now()
-    rows = connection.execute(
-        """SELECT profile.endpoint_id, mapping.protocol_code,
-                  COALESCE(mapping.business_metric, definition.business_metric) AS business_metric,
-                  COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code) AS instrument_asset_code,
-                  definition.standard_unit, mapping.expected_interval_seconds AS ingestion_interval_seconds,
-                  mapping.tolerance_seconds AS ingestion_tolerance_seconds,
-                  profile.effective_from AS profile_effective_from, profile.effective_to AS profile_effective_to,
-                  mapping.effective_from AS mapping_effective_from, mapping.effective_to AS mapping_effective_to
-           FROM monitoring_endpoint_profiles profile
-           JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id
-           JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
-           WHERE profile.business_site_id=? AND profile.enabled=1
-             AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
-             AND mapping.enabled=1 AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
-             AND definition.is_published=1 AND COALESCE(mapping.business_metric, definition.business_metric) IS NOT NULL
-           ORDER BY profile.endpoint_id, mapping.protocol_code, mapping.effective_from DESC""",
-        (site_id, at_time, at_time, at_time, at_time),
-    ).fetchall()
+def _business_schedule_from_rows(schedule_rows, endpoint_id: int, protocol_code: str, at_time: str):
+    rows = [row for row in schedule_rows
+            if row["endpoint_id"] == endpoint_id and row["enabled"] == 1
+            and row["protocol_code"] in {None, protocol_code}
+            and row["effective_from"] <= at_time
+            and (row["effective_to"] is None or row["effective_to"] > at_time)]
+    rows.sort(key=lambda row: (
+        row["protocol_code"] == protocol_code, row["effective_from"], row["id"]), reverse=True)
+    return rows[0] if rows else None
+
+
+def _factor_configurations_from_rows(rows, schedule_rows, at_time: str):
     grouped = {}
     for row in rows:
         item = dict(row)
-        key = (item["endpoint_id"], item["business_metric"], item["instrument_asset_code"])
+        item["_schedule_rows"] = schedule_rows
+        key = (item["business_site_id"], item["endpoint_id"], item["business_metric"],
+               item["instrument_asset_code"])
         grouped.setdefault(key, []).append(item)
-    result = []
-    for configurations in grouped.values():
+    result = {}
+    at_datetime = datetime.fromisoformat(at_time).astimezone(timezone.utc)
+    for (site_id, _endpoint_id, _metric, _instrument), configurations in grouped.items():
         configurations.sort(key=lambda item: _protocol_business_priority(item["protocol_code"]))
         item = dict(configurations[0])
         item["protocol_codes"] = [entry["protocol_code"] for entry in configurations]
         item["protocol_configurations"] = configurations
         scheduled = [
-            (entry, _business_schedule_for(connection, entry["endpoint_id"], entry["protocol_code"], at_time))
+            (entry, _business_schedule_from_rows(
+                schedule_rows, entry["endpoint_id"], entry["protocol_code"], at_time))
             for entry in configurations
         ]
         scheduled = [(entry, schedule) for entry, schedule in scheduled if schedule]
@@ -537,9 +577,8 @@ def current_factor_configurations(connection, site_id: int, *, at_time: str | No
             "result_delay_seconds": _schedule_integer(schedule, "result_delay_seconds") if schedule else None,
         })
         if schedule:
-            at_datetime = datetime.fromisoformat(at_time).astimezone(timezone.utc)
             future_slots = expected_business_slots(
-                connection, item, at_datetime.isoformat(),
+                None, item, at_datetime.isoformat(),
                 (at_datetime + timedelta(days=2)).isoformat(),
             )
             item["next_expected_at"] = next(
@@ -548,7 +587,7 @@ def current_factor_configurations(connection, site_id: int, *, at_time: str | No
             interval = int(item["expected_interval_seconds"] or 0)
             delay = int(item["result_delay_seconds"] or 0)
             recent_slots = expected_business_slots(
-                connection, item,
+                None, item,
                 (at_datetime - timedelta(seconds=max(interval + delay, interval * 2))).isoformat(),
                 (at_datetime + timedelta(seconds=max(interval, 1))).isoformat(),
             )
@@ -564,8 +603,55 @@ def current_factor_configurations(connection, site_id: int, *, at_time: str | No
             item["next_expected_at"] = None
             item["has_due_slot"] = False
             item["pending_until"] = None
-        result.append(item)
+        result.setdefault(site_id, []).append(item)
     return result
+
+
+def current_factor_configurations_batch(connection, site_ids, *, at_time: str | None = None):
+    """Read all current factor configurations in two bounded SQL statements."""
+    site_ids = list(dict.fromkeys(int(site_id) for site_id in site_ids))
+    if not site_ids:
+        return {}
+    at_time = at_time or _utc_now()
+    marks = ",".join("?" * len(site_ids))
+    rows = connection.execute(
+        f"""SELECT profile.endpoint_id, profile.business_site_id, mapping.protocol_code,
+                   COALESCE(mapping.business_metric, definition.business_metric) AS business_metric,
+                   COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code) AS instrument_asset_code,
+                   definition.standard_unit, mapping.expected_interval_seconds AS ingestion_interval_seconds,
+                   mapping.tolerance_seconds AS ingestion_tolerance_seconds,
+                   profile.effective_from AS profile_effective_from, profile.effective_to AS profile_effective_to,
+                   mapping.effective_from AS mapping_effective_from, mapping.effective_to AS mapping_effective_to
+            FROM monitoring_endpoint_profiles profile
+            JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id
+            JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
+            WHERE profile.business_site_id IN ({marks}) AND profile.enabled=1
+              AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
+              AND mapping.enabled=1 AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
+              AND definition.is_published=1
+              AND COALESCE(mapping.business_metric, definition.business_metric) IS NOT NULL
+            ORDER BY profile.business_site_id,profile.endpoint_id,mapping.protocol_code,
+                     mapping.effective_from DESC""",
+        [*site_ids, at_time, at_time, at_time, at_time],
+    ).fetchall()
+    endpoint_ids = list(dict.fromkeys(int(row["endpoint_id"]) for row in rows))
+    if not endpoint_ids:
+        return {site_id: [] for site_id in site_ids}
+    endpoint_marks = ",".join("?" * len(endpoint_ids))
+    schedule_rows = [dict(row) for row in connection.execute(
+        f"""SELECT * FROM monitoring_business_schedules
+            WHERE enabled=1 AND endpoint_id IN ({endpoint_marks})
+            ORDER BY endpoint_id,effective_from,id""",
+        endpoint_ids,
+    ).fetchall()]
+    result = _factor_configurations_from_rows(rows, schedule_rows, at_time)
+    return {site_id: result.get(site_id, []) for site_id in site_ids}
+
+
+def current_factor_configurations(connection, site_id: int, *, at_time: str | None = None):
+    """Return every currently published factor, including factors that never reported."""
+    return current_factor_configurations_batch(
+        connection, [site_id], at_time=at_time).get(site_id, [])
 
 
 def expected_business_slots(connection, configuration: dict, start: str, end: str):
@@ -579,13 +665,22 @@ def expected_business_slots(connection, configuration: dict, start: str, end: st
         return [slots[key] for key in sorted(slots)]
     start_at = datetime.fromisoformat(start).astimezone(timezone.utc)
     end_at = datetime.fromisoformat(end).astimezone(timezone.utc)
-    rows = connection.execute(
-        """SELECT * FROM monitoring_business_schedules
-           WHERE endpoint_id=? AND enabled=1 AND (protocol_code=? OR protocol_code IS NULL)
-             AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
-           ORDER BY effective_from,id""",
-        (configuration["endpoint_id"], configuration["protocol_code"], end_at.isoformat(), start_at.isoformat()),
-    ).fetchall()
+    prefetched = configuration.get("_schedule_rows")
+    if prefetched is None:
+        rows = connection.execute(
+            """SELECT * FROM monitoring_business_schedules
+               WHERE endpoint_id=? AND enabled=1 AND (protocol_code=? OR protocol_code IS NULL)
+                 AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
+               ORDER BY effective_from,id""",
+            (configuration["endpoint_id"], configuration["protocol_code"],
+             end_at.isoformat(), start_at.isoformat()),
+        ).fetchall()
+    else:
+        rows = [row for row in prefetched
+                if row["endpoint_id"] == configuration["endpoint_id"] and row["enabled"] == 1
+                and row["protocol_code"] in {None, configuration["protocol_code"]}
+                and row["effective_from"] <= end_at.isoformat()
+                and (row["effective_to"] is None or row["effective_to"] > start_at.isoformat())]
     slots = {}
     for schedule in rows:
         try:
@@ -611,8 +706,10 @@ def expected_business_slots(connection, configuration: dict, start: str, end: st
                 if utc_text < configuration["profile_effective_from"] or (
                         configuration["profile_effective_to"] and utc_text >= configuration["profile_effective_to"]):
                     continue
-                effective = _business_schedule_for(
-                    connection, configuration["endpoint_id"], configuration["protocol_code"], utc_text)
+                effective = (_business_schedule_from_rows(
+                    prefetched, configuration["endpoint_id"], configuration["protocol_code"], utc_text)
+                    if prefetched is not None else _business_schedule_for(
+                        connection, configuration["endpoint_id"], configuration["protocol_code"], utc_text))
                 if effective and effective["id"] == schedule["id"]:
                     slots[utc_text] = {
                         "scheduled_at": utc_text, "schedule_id": schedule["id"],
@@ -644,22 +741,248 @@ def next_business_slot(connection, configuration: dict, after: str) -> str | Non
          if datetime.fromisoformat(slot["scheduled_at"]) > after_at), None)
 
 
+def _formal_source_type(row) -> bool:
+    return (
+        not str(row["protocol_code"]).startswith("HJ212:")
+        or (row["function_code"] == 2061
+            and row["projection_version"] == BUSINESS_PROJECTION_VERSION)
+    )
+
+
+def _formal_source(row) -> bool:
+    return row["quality"] == "valid" and _formal_source_type(row)
+
+
+def _cycle_factor(connection, site_id: int, configuration: dict, scheduled_at: str,
+                  evaluated_at: datetime) -> dict:
+    rows = _slot_rows(connection, site_id, configuration, scheduled_at)
+    formal_rows = [row for row in rows if _formal_source(row)]
+    distinct_formal_values = {
+        (row["standard_value"], row["standard_unit"]) for row in formal_rows
+    }
+    selected = formal_rows[0] if len(distinct_formal_values) == 1 else None
+    deadline_at = business_slot_deadline(configuration, scheduled_at)
+    base = {
+        "business_metric": configuration["business_metric"],
+        "instrument_asset_code": configuration["instrument_asset_code"],
+        "standard_unit": configuration.get("standard_unit") or "",
+        "scheduled_at": scheduled_at,
+        "available_at": (datetime.fromisoformat(scheduled_at) + timedelta(
+            seconds=int(configuration.get("result_delay_seconds") or 0))).isoformat(),
+        "deadline_at": deadline_at,
+        "process_candidate_count": sum(
+            row["function_code"] == 2011 and str(row["protocol_code"]).startswith("HJ212:")
+            for row in rows
+        ),
+        "formal_candidate_count": len(formal_rows),
+        "duplicate_count": max(0, len(formal_rows) - 1),
+    }
+    if len(distinct_formal_values) > 1:
+        return dict(base, status="review_required", source_type="hj212_2061_avg",
+                    value=None, observed_at=None, received_at=None,
+                    reason_code="formal_source_conflict",
+                    reason="同一检测周期存在多个不同的正式来源值，需核对")
+    if selected:
+        return dict(base, status="value",
+                    source_type=("hj212_2061_avg" if str(selected["protocol_code"]).startswith("HJ212:")
+                                 else "scheduled_protocol_observation"),
+                    protocol_code=selected["protocol_code"], value=selected["standard_value"],
+                    standard_unit=selected["standard_unit"], observed_at=selected["observed_at"],
+                    received_at=selected["received_at"], timeliness=selected["timeliness"],
+                    reason_code=None, reason=None)
+    pending = evaluated_at < datetime.fromisoformat(deadline_at)
+    return dict(base, status="pending" if pending else "missing", source_type=None,
+                value=None, observed_at=None, received_at=None,
+                reason_code="analysis_pending" if pending else "missing_formal_result",
+                reason=("正式结果仍在分析与宽限窗口内" if pending
+                        else "截止时间后仍无唯一有效的正式结果"))
+
+
+def _business_rows_for_configuration(rows, configuration: dict, *, scheduled_at: str | None = None):
+    protocol_codes = set(configuration.get("protocol_codes") or [configuration["protocol_code"]])
+    return [row for row in rows
+            if row["endpoint_id"] == configuration["endpoint_id"]
+            and row["business_metric"] == configuration["business_metric"]
+            and row["instrument_asset_code"] == configuration["instrument_asset_code"]
+            and row["protocol_code"] in protocol_codes
+            and (scheduled_at is None or row["scheduled_at"] == scheduled_at)]
+
+
+def _cycle_factor_from_rows(rows, configuration: dict, scheduled_at: str,
+                            evaluated_at: datetime) -> dict:
+    rows = _business_rows_for_configuration(rows, configuration, scheduled_at=scheduled_at)
+    formal_rows = [row for row in rows if _formal_source(row)]
+    distinct_formal_values = {
+        (row["standard_value"], row["standard_unit"]) for row in formal_rows
+    }
+    selected = formal_rows[0] if len(distinct_formal_values) == 1 else None
+    deadline_at = business_slot_deadline(configuration, scheduled_at)
+    base = {
+        "business_metric": configuration["business_metric"],
+        "instrument_asset_code": configuration["instrument_asset_code"],
+        "standard_unit": configuration.get("standard_unit") or "",
+        "scheduled_at": scheduled_at,
+        "available_at": (datetime.fromisoformat(scheduled_at) + timedelta(
+            seconds=int(configuration.get("result_delay_seconds") or 0))).isoformat(),
+        "deadline_at": deadline_at,
+        "process_candidate_count": sum(
+            row["function_code"] == 2011 and str(row["protocol_code"]).startswith("HJ212:")
+            for row in rows
+        ),
+        "formal_candidate_count": len(formal_rows),
+        "duplicate_count": max(0, len(formal_rows) - 1),
+    }
+    if len(distinct_formal_values) > 1:
+        return dict(base, status="review_required", source_type="hj212_2061_avg",
+                    value=None, observed_at=None, received_at=None,
+                    reason_code="formal_source_conflict",
+                    reason="同一检测周期存在多个不同的正式来源值，需核对")
+    if selected:
+        return dict(base, status="value",
+                    source_type=("hj212_2061_avg" if str(selected["protocol_code"]).startswith("HJ212:")
+                                 else "scheduled_protocol_observation"),
+                    protocol_code=selected["protocol_code"], value=selected["standard_value"],
+                    standard_unit=selected["standard_unit"], observed_at=selected["observed_at"],
+                    received_at=selected["received_at"], timeliness=selected["timeliness"],
+                    reason_code=None, reason=None)
+    pending = evaluated_at < datetime.fromisoformat(deadline_at)
+    return dict(base, status="pending" if pending else "missing", source_type=None,
+                value=None, observed_at=None, received_at=None,
+                reason_code="analysis_pending" if pending else "missing_formal_result",
+                reason=("正式结果仍在分析与宽限窗口内" if pending
+                        else "截止时间后仍无唯一有效的正式结果"))
+
+
+def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
+                  configurations: list[dict] | None = None,
+                  include_latest_complete: bool = True,
+                  business_rows: list[dict] | None = None):
+    """Build the authoritative latest four-hour cycle without promoting minute facts."""
+    at_time = at_time or _utc_now()
+    evaluated_at = datetime.fromisoformat(at_time).astimezone(timezone.utc)
+    configurations = (configurations if configurations is not None
+                      else current_factor_configurations(connection, site_id, at_time=at_time))
+    configured = [item for item in configurations if item.get("schedule_id")]
+    if not configurations or len(configured) != len(configurations):
+        return {
+            "scheduled_at": None, "available_at": None, "deadline_at": None,
+            "status": "not_configured", "expected_count": len(configurations),
+            "formed_count": 0, "missing_count": 0, "pending_count": 0,
+            "review_required_count": 0, "sufficient_for_business": False,
+            "latest_complete_cycle_at": None, "factors": [],
+        }
+    candidate_slots = set()
+    for configuration in configured:
+        interval = int(configuration.get("expected_interval_seconds") or 14400)
+        delay = int(configuration.get("result_delay_seconds") or 0)
+        tolerance = int(configuration.get("tolerance_seconds") or 0)
+        start = evaluated_at - timedelta(seconds=max(interval * 2, interval + delay + tolerance))
+        candidate_slots.update(
+            slot["scheduled_at"] for slot in expected_business_slots(
+                connection, configuration, start.isoformat(),
+                (evaluated_at + timedelta(seconds=1)).isoformat())
+            if datetime.fromisoformat(slot["scheduled_at"]) <= evaluated_at
+        )
+    scheduled_at = max(candidate_slots, default=None)
+    if scheduled_at is None:
+        return {
+            "scheduled_at": None, "available_at": None, "deadline_at": None,
+            "status": "not_configured", "expected_count": len(configured),
+            "formed_count": 0, "missing_count": 0, "pending_count": 0,
+            "review_required_count": 0, "sufficient_for_business": False,
+            "latest_complete_cycle_at": None, "factors": [],
+        }
+    factors = [
+        (_cycle_factor_from_rows(business_rows, item, scheduled_at, evaluated_at)
+         if business_rows is not None else
+         _cycle_factor(connection, site_id, item, scheduled_at, evaluated_at))
+        for item in configured
+    ]
+    formed_count = sum(item["status"] == "value" for item in factors)
+    review_count = sum(item["status"] == "review_required" for item in factors)
+    pending_count = sum(item["status"] == "pending" for item in factors)
+    missing_count = sum(item["status"] == "missing" for item in factors)
+    status = ("review_required" if review_count else "pending" if pending_count
+              else "complete" if formed_count == len(factors) else "incomplete")
+    available_at = max(item["available_at"] for item in factors)
+    deadline_at = max(item["deadline_at"] for item in factors)
+    return {
+        "scheduled_at": scheduled_at, "available_at": available_at, "deadline_at": deadline_at,
+        "status": status, "expected_count": len(factors), "formed_count": formed_count,
+        "missing_count": missing_count, "pending_count": pending_count,
+        "review_required_count": review_count, "sufficient_for_business": status == "complete",
+        "latest_complete_cycle_at": (_latest_complete_cycle_at(
+            connection, site_id, configured, scheduled_at)
+            if include_latest_complete else None),
+        "factors": factors,
+    }
+
+
+def _latest_complete_cycle_at(connection, site_id: int, configurations: list[dict],
+                              before_or_at: str) -> str | None:
+    if not configurations:
+        return None
+    key_clauses = []
+    params = [site_id, before_or_at, BUSINESS_PROJECTION_VERSION]
+    for item in configurations:
+        key_clauses.append(
+            "(business.endpoint_id=? AND business.business_metric=? "
+            "AND business.instrument_asset_code IS ?)"
+        )
+        params.extend((item["endpoint_id"], item["business_metric"], item["instrument_asset_code"]))
+    params.append(len(configurations))
+    row = connection.execute(
+        f"""WITH unique_factor_results AS (
+                SELECT business.scheduled_at,business.endpoint_id,business.business_metric,
+                       business.instrument_asset_code
+                FROM monitoring_business_observations business
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.business_site_id=? AND business.scheduled_at<=?
+                  AND business.is_current=1 AND batch.is_current=1 AND business.quality='valid'
+                  AND (business.protocol_code NOT LIKE 'HJ212:%'
+                       OR (batch.function_code=2061 AND business.projection_version=?))
+                  AND ({' OR '.join(key_clauses)})
+                GROUP BY business.scheduled_at,business.endpoint_id,business.business_metric,
+                         business.instrument_asset_code
+                HAVING COUNT(DISTINCT printf('%.17g',business.standard_value)||char(31)||business.standard_unit)=1
+            )
+            SELECT scheduled_at FROM unique_factor_results
+            GROUP BY scheduled_at HAVING COUNT(*)=?
+            ORDER BY scheduled_at DESC LIMIT 1""",
+        params,
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _latest_value_for_configuration(connection, site_id: int, configuration: dict):
     protocol_codes = configuration.get('protocol_codes') or [configuration['protocol_code']]
     marks = ','.join('?' * len(protocol_codes))
-    return connection.execute(
-        f"""SELECT business_metric,protocol_code,standard_value,standard_unit,quality,
-                  instrument_asset_code,endpoint_id,scheduled_at,observed_at,received_at,
-                  timeliness,slot_state,'business_schedule' AS aggregation_source,
-                  projection_version AS normalization_version
-           FROM monitoring_business_observations
-           WHERE business_site_id=? AND endpoint_id=? AND is_current=1 AND slot_state='selected'
-             AND quality='valid'
-             AND protocol_code IN ({marks}) AND business_metric=? AND instrument_asset_code IS ?
-           ORDER BY scheduled_at DESC,id DESC LIMIT 1""",
+    rows = connection.execute(
+        f"""SELECT business.business_metric,business.protocol_code,business.standard_value,
+                   business.standard_unit,business.quality,business.instrument_asset_code,
+                   business.endpoint_id,business.scheduled_at,business.observed_at,
+                   business.received_at,business.timeliness,business.slot_state,
+                   'business_schedule' AS aggregation_source,
+                   business.projection_version,
+                   business.projection_version AS normalization_version,batch.function_code
+            FROM monitoring_business_observations business
+            JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            WHERE business.business_site_id=? AND business.endpoint_id=?
+              AND business.is_current=1 AND batch.is_current=1 AND business.quality='valid'
+              AND business.protocol_code IN ({marks}) AND business.business_metric=?
+              AND business.instrument_asset_code IS ?
+            ORDER BY business.scheduled_at DESC,business.id DESC LIMIT 1000""",
         (site_id, configuration['endpoint_id'], *protocol_codes, configuration['business_metric'],
          configuration['instrument_asset_code']),
-    ).fetchone()
+    ).fetchall()
+    by_slot = {}
+    for row in rows:
+        if _formal_source(row):
+            by_slot.setdefault(row['scheduled_at'], []).append(row)
+    for slot_rows in by_slot.values():
+        if len({(row['standard_value'], row['standard_unit']) for row in slot_rows}) == 1:
+            return dict(slot_rows[0])
+    return None
 
 
 def latest_values(connection, site_id: int, *, at_time: str | None = None):
@@ -674,6 +997,86 @@ def latest_values(connection, site_id: int, *, at_time: str | None = None):
     return result
 
 
+def _latest_values_from_rows(configurations: list[dict], rows) -> list[dict]:
+    result = []
+    for configuration in configurations:
+        matching = [row for row in _business_rows_for_configuration(rows, configuration)
+                    if _formal_source(row)]
+        by_slot = {}
+        for row in matching:
+            by_slot.setdefault(row["scheduled_at"], []).append(row)
+        for slot_rows in by_slot.values():
+            if len({(row["standard_value"], row["standard_unit"]) for row in slot_rows}) != 1:
+                continue
+            row = slot_rows[0]
+            item = {
+                "business_metric": row["business_metric"],
+                "protocol_code": row["protocol_code"],
+                "standard_value": row["standard_value"],
+                "standard_unit": row["standard_unit"],
+                "quality": row["quality"],
+                "instrument_asset_code": row["instrument_asset_code"],
+                "endpoint_id": row["endpoint_id"],
+                "scheduled_at": row["scheduled_at"],
+                "observed_at": row["observed_at"],
+                "received_at": row["received_at"],
+                "timeliness": row["timeliness"],
+                "slot_state": row["slot_state"],
+                "aggregation_source": "business_schedule",
+                "projection_version": row["projection_version"],
+                "normalization_version": row["projection_version"],
+                "function_code": row["function_code"],
+                "expected_interval_seconds": configuration["expected_interval_seconds"],
+                "tolerance_seconds": configuration["tolerance_seconds"],
+            }
+            result.append(item)
+            break
+    return result
+
+
+def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_time: str | None = None):
+    """Read current business rows once, then project every list item in memory."""
+    site_ids = list(configurations_by_site)
+    if not site_ids:
+        return {}, {}
+    at_time = at_time or _utc_now()
+    marks = ",".join("?" * len(site_ids))
+    rows = [dict(row) for row in connection.execute(
+        f"""WITH ranked AS (
+                SELECT business.id,business.business_site_id,business.business_metric,
+                       business.protocol_code,business.standard_value,business.standard_unit,
+                       business.quality,business.instrument_asset_code,business.endpoint_id,
+                       business.scheduled_at,business.observed_at,business.received_at,
+                       business.timeliness,business.slot_state,business.projection_version,
+                       batch.function_code,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY business.business_site_id,business.endpoint_id,
+                                        business.business_metric,COALESCE(business.instrument_asset_code,'')
+                           ORDER BY business.scheduled_at DESC,business.id DESC
+                       ) AS factor_rank
+                FROM monitoring_business_observations business
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.business_site_id IN ({marks})
+                  AND business.is_current=1 AND batch.is_current=1
+            )
+            SELECT * FROM ranked WHERE factor_rank<=1000
+            ORDER BY business_site_id,endpoint_id,business_metric,scheduled_at DESC,id DESC""",
+        site_ids,
+    ).fetchall()]
+    rows_by_site = {}
+    for row in rows:
+        rows_by_site.setdefault(row["business_site_id"], []).append(row)
+    values_by_site = {}
+    cycles_by_site = {}
+    for site_id, configurations in configurations_by_site.items():
+        site_rows = rows_by_site.get(site_id, [])
+        values_by_site[site_id] = _latest_values_from_rows(configurations, site_rows)
+        cycles_by_site[site_id] = latest_cycle(
+            connection, site_id, at_time=at_time, configurations=configurations,
+            include_latest_complete=False, business_rows=site_rows)
+    return values_by_site, cycles_by_site
+
+
 def trend(connection, site_id: int, metric: str, start: str, end: str, limit: int):
     configurations = [
         item for item in current_factor_configurations(connection, site_id)
@@ -684,19 +1087,78 @@ def trend(connection, site_id: int, metric: str, start: str, end: str, limit: in
         protocol_codes = configuration.get('protocol_codes') or [configuration['protocol_code']]
         marks = ','.join('?' * len(protocol_codes))
         rows = connection.execute(
-            f"""SELECT business_metric,standard_value AS value,standard_unit AS unit,quality,
-                      scheduled_at,observed_at,received_at,timeliness,slot_state,
-                      'business_schedule' AS aggregation_source,projection_version AS normalization_version
-               FROM monitoring_business_observations
-               WHERE business_site_id=? AND endpoint_id=? AND is_current=1 AND slot_state='selected'
-                 AND protocol_code IN ({marks}) AND business_metric=? AND instrument_asset_code IS ?
-                 AND scheduled_at>=? AND scheduled_at<?
-               ORDER BY scheduled_at,id LIMIT ?""",
+            f"""SELECT business.business_metric,business.protocol_code,
+                      business.standard_value AS value,business.standard_unit AS unit,business.quality,
+                      business.scheduled_at,business.observed_at,business.received_at,
+                      business.timeliness,business.slot_state,business.projection_version,
+                      'business_schedule' AS aggregation_source,
+                      business.projection_version AS normalization_version,batch.function_code
+               FROM monitoring_business_observations business
+               JOIN observation_batches batch ON batch.id=business.observation_batch_id
+               WHERE business.business_site_id=? AND business.endpoint_id=?
+                 AND business.is_current=1 AND batch.is_current=1
+                 AND business.protocol_code IN ({marks}) AND business.business_metric=?
+                 AND business.instrument_asset_code IS ?
+                 AND business.scheduled_at>=? AND business.scheduled_at<?
+               ORDER BY business.scheduled_at,business.id""",
             (site_id, configuration['endpoint_id'], *protocol_codes, configuration['business_metric'],
-             configuration['instrument_asset_code'], start, end, limit),
+             configuration['instrument_asset_code'], start, end),
         ).fetchall()
-        points.extend(dict(row) for row in rows)
+        by_slot = {}
+        for row in rows:
+            if _formal_source(row):
+                by_slot.setdefault(row['scheduled_at'], []).append(row)
+        for slot_rows in by_slot.values():
+            if len({(row['value'], row['unit']) for row in slot_rows}) == 1:
+                points.append(dict(slot_rows[0]))
     return sorted(points, key=lambda item: (item['observed_at'], item['business_metric']))[:limit]
+
+
+def trend_slots(connection, site_id: int, metric: str, start: str, end: str,
+                *, at_time: str | None = None):
+    """Return every configured slot, including explicit null-valued gaps."""
+    configurations = [
+        item for item in current_factor_configurations(connection, site_id, at_time=end)
+        if item['business_metric'] == metric
+    ]
+    evaluated_at = datetime.fromisoformat(at_time or _utc_now()).astimezone(timezone.utc)
+    slot_map = {}
+    for configuration in configurations:
+        for slot in expected_business_slots(connection, configuration, start, end):
+            slot_map.setdefault(slot['scheduled_at'], []).append((configuration, slot))
+    result = []
+    for scheduled_at in sorted(slot_map):
+        selected = None
+        review_required = False
+        deadline_at = None
+        for configuration, slot in slot_map[scheduled_at]:
+            rows = _slot_rows(connection, site_id, configuration, scheduled_at)
+            formal_rows = [row for row in rows if _formal_source(row)]
+            distinct_formal_values = {
+                (row['standard_value'], row['standard_unit']) for row in formal_rows
+            }
+            if len(distinct_formal_values) > 1:
+                review_required = True
+            if len(distinct_formal_values) == 1:
+                selected = selected or formal_rows[0]
+            deadline_at = max(deadline_at or slot['result_window_end_at'], slot['result_window_end_at'])
+        if review_required:
+            status, value = 'review_required', None
+        elif selected:
+            status, value = 'value', selected['standard_value']
+        elif deadline_at and evaluated_at < datetime.fromisoformat(deadline_at):
+            status, value = 'pending', None
+        else:
+            status, value = 'missing', None
+        result.append({
+            'business_metric': metric, 'scheduled_at': scheduled_at, 'status': status,
+            'value': value, 'unit': selected['standard_unit'] if selected else '',
+            'quality': selected['quality'] if selected else None,
+            'observed_at': selected['observed_at'] if selected else None,
+            'received_at': selected['received_at'] if selected else None,
+            'deadline_at': deadline_at,
+        })
+    return result
 
 
 def business_slot_diagnostics(connection, site_id: int, metric: str, start: str, end: str):
@@ -712,17 +1174,31 @@ def business_slot_diagnostics(connection, site_id: int, metric: str, start: str,
         protocol_codes = configuration.get('protocol_codes') or [configuration['protocol_code']]
         marks = ','.join('?' * len(protocol_codes))
         rows = connection.execute(
-            f"""SELECT scheduled_at,slot_state,timeliness,quality
-               FROM monitoring_business_observations
-               WHERE business_site_id=? AND endpoint_id=? AND protocol_code IN ({marks}) AND business_metric=?
-                 AND instrument_asset_code IS ? AND is_current=1 AND scheduled_at>=? AND scheduled_at<?""",
+            f"""SELECT business.scheduled_at,business.timeliness,business.quality,
+                       business.protocol_code,business.standard_value,business.standard_unit,
+                       business.projection_version,
+                       batch.function_code
+                FROM monitoring_business_observations business
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.business_site_id=? AND business.endpoint_id=?
+                  AND business.protocol_code IN ({marks}) AND business.business_metric=?
+                  AND business.instrument_asset_code IS ? AND business.is_current=1
+                  AND batch.is_current=1 AND business.scheduled_at>=? AND business.scheduled_at<?""",
             (site_id, configuration['endpoint_id'], *protocol_codes, metric,
              configuration['instrument_asset_code'], start, end),
         ).fetchall()
-        conflicts.update(row['scheduled_at'] for row in rows if row['slot_state'] == 'conflict')
-        late.update(row['scheduled_at'] for row in rows if row['timeliness'] == 'late')
-        suspect.update(row['scheduled_at'] for row in rows if row['quality'] == 'suspect')
-        duplicate_records += sum(row['slot_state'] == 'duplicate' for row in rows)
+        source_rows = [row for row in rows if _formal_source_type(row)]
+        formal_rows = [row for row in source_rows if _formal_source(row)]
+        late.update(row['scheduled_at'] for row in source_rows if row['timeliness'] == 'late')
+        suspect.update(row['scheduled_at'] for row in source_rows if row['quality'] == 'suspect')
+        formal_by_slot = {}
+        for row in formal_rows:
+            formal_by_slot.setdefault(row['scheduled_at'], []).append(row)
+        for scheduled_at, formal_rows in formal_by_slot.items():
+            values = {(row['standard_value'], row['standard_unit']) for row in formal_rows}
+            if len(values) > 1:
+                conflicts.add(scheduled_at)
+            duplicate_records += max(0, len(formal_rows) - len(values))
     return {
         'late_points': len(late),
         'suspect_points': len(suspect),

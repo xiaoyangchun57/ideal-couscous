@@ -10,7 +10,7 @@
 .task-status-title { display: block; color: var(--color-text-primary); font-size: 27rpx; font-weight: 600; }
 .task-status-desc { display: block; margin-top: 6rpx; color: var(--color-text-secondary); font-size: 23rpx; line-height: 1.45; }
 .task-status-count { flex: 0 0 auto; color: var(--color-warning); font-size: 25rpx; font-weight: 600; }
-.rework-status { margin: 0 24rpx 20rpx; padding: 20rpx 24rpx; border: 1rpx solid rgba(250,81,81,.35); border-radius: 12rpx; background: rgba(250,81,81,.06); }
+.rework-status { margin: 0 24rpx 20rpx; padding: 20rpx 24rpx; border: 1rpx solid var(--color-error-surface); border-radius: var(--radius-md); background: var(--color-error-surface); }
 .rework-status-title, .rework-status-desc { display: block; }
 .rework-status-title { color: var(--color-error); font-size: 26rpx; font-weight: 600; }
 .rework-status-desc { margin-top: 8rpx; color: var(--color-text-secondary); font-size: 23rpx; line-height: 1.45; }
@@ -48,7 +48,7 @@
 
 .info-chevron {
   font-size: 36rpx;
-  color: var(--palette-gray-400);
+  color: var(--color-icon-tertiary);
   line-height: 1;
   font-weight: 400;
 }
@@ -229,12 +229,15 @@
   line-height: 1.4;
 }
 
+/* ── 结果态：正常（绿） ── */
 .mon-status-normal {
   background: var(--color-success-surface);
 }
 .mon-status-normal .mon-status-tx {
   color: var(--color-success);
 }
+
+/* ── 结果态：需关注（橙） ── */
 .mon-status-attention,
 .mon-status-warning,
 .mon-status-stale {
@@ -245,6 +248,8 @@
 .mon-status-stale .mon-status-tx {
   color: var(--color-warning);
 }
+
+/* ── 结果态：异常（红） ── */
 .mon-status-error,
 .mon-status-offline,
 .mon-status-unavailable {
@@ -255,6 +260,8 @@
 .mon-status-unavailable .mon-status-tx {
   color: var(--color-error);
 }
+
+/* ── 过程态：进行中（蓝） ── */
 .mon-status-info,
 .mon-status-pending {
   background: var(--color-info-surface);
@@ -262,6 +269,26 @@
 .mon-status-info .mon-status-tx,
 .mon-status-pending .mon-status-tx {
   color: var(--color-info);
+}
+
+/* ── 过渡态：中性灰（等待首次数据 / 配置待完成 / 周期待设置） ── */
+.mon-status-not_connected,
+.mon-status-awaiting_first_frame,
+.mon-status-raw_received_config_pending,
+.mon-status-interval_unconfigured,
+.mon-status-waiting_first_valid,
+.mon-status-default,
+.mon-status-unknown {
+  background: var(--color-type-bg);
+}
+.mon-status-not_connected .mon-status-tx,
+.mon-status-awaiting_first_frame .mon-status-tx,
+.mon-status-raw_received_config_pending .mon-status-tx,
+.mon-status-interval_unconfigured .mon-status-tx,
+.mon-status-waiting_first_valid .mon-status-tx,
+.mon-status-default .mon-status-tx,
+.mon-status-unknown .mon-status-tx {
+  color: var(--color-type-text);
 }
 
 /* 监测状态首屏卡片 */
@@ -273,6 +300,113 @@
   display: flex;
   flex-direction: column;
   gap: 20rpx;
+}
+
+/* 门禁关闭 / 监测未启用 — 中性提示卡 */
+.mon-gate-closed-card {
+  margin: 16rpx 24rpx 24rpx;
+  padding: 48rpx 32rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 12rpx;
+}
+
+.mon-gate-closed-ico {
+  width: 72rpx;
+  height: 72rpx;
+  margin-bottom: 8rpx;
+  display: block;
+  opacity: 0.6;
+}
+
+.mon-gate-closed-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.mon-gate-closed-desc {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+  max-width: 520rpx;
+}
+
+/* 监测区加载态 */
+.mon-loading-card {
+  margin: 16rpx 24rpx 24rpx;
+  padding: 48rpx 32rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.mon-loading-spinner {
+  width: 40rpx;
+  height: 40rpx;
+  border: 3rpx solid var(--color-divider);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: mon-spin 0.8s linear infinite;
+}
+
+@keyframes mon-spin {
+  to { transform: rotate(360deg); }
+}
+
+.mon-loading-text {
+  font-size: 26rpx;
+  color: var(--color-text-tertiary);
+}
+
+/* 监测区失败态 */
+.mon-error-card {
+  margin: 16rpx 24rpx 24rpx;
+  padding: 32rpx 28rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+
+.mon-error-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.mon-error-title {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--color-error);
+}
+
+.mon-error-desc {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.mon-error-retry {
+  flex: none;
+  font-size: 26rpx;
+  color: var(--color-primary);
+  font-weight: 500;
+  padding: 12rpx 24rpx;
+  background: var(--color-primary-surface);
+  border-radius: var(--radius-md);
 }
 
 .mon-hero-chip-wrap {

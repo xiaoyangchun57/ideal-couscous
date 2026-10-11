@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table, Input, Select, Button, Space, Tag, Badge,
@@ -9,9 +9,10 @@ import {
   SearchOutlined, FileSearchOutlined,
   ReloadOutlined, DownloadOutlined, UploadOutlined,
   FileTextOutlined, CloudServerOutlined, ApiOutlined, InboxOutlined,
-  PlusOutlined, DeleteOutlined, ExperimentOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, EditOutlined,
+  PlusOutlined, ExperimentOutlined, CheckCircleOutlined,
+  CloseCircleOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
@@ -22,8 +23,13 @@ import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
-import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems } from './stationMonitoring';
+import {
+  communicationStatusView, cycleStatusView, hasAdminRole, mergeMonitoringSites,
+  monitoringSummaryItems, readSiteDirectorySnapshot, siteDirectoryLoadMode,
+  stationDirectorySnapshotKey, writeSiteDirectorySnapshot,
+} from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -68,28 +74,47 @@ export default function SitesPage() {
   const navigate = useNavigate();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const isAdmin = hasAdminRole(user);
   const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
   const monitoringScope = isAdmin ? 'all' : 'mine';
-  const monitoringRequestKey = `${user?.id ?? user?.username ?? ''}:${monitoringScope}:${monitoringPublic}`;
+  const monitoringRequestKey = stationDirectorySnapshotKey(user, monitoringScope, token);
 
   // ---- data state ----
-  const [siteSnapshot, setSiteSnapshot] = useState({ key: null, rows: [] });
-  const sites = siteSnapshot.key === monitoringRequestKey ? siteSnapshot.rows : [];
-  const sitesRef = useRef({ key: null, rows: [] });
+  const [siteSnapshot, setSiteSnapshot] = useState(() => (
+    readSiteDirectorySnapshot(monitoringRequestKey)
+    || { key: monitoringRequestKey, rows: [], summary: {}, scopeFacts: null, ready: false }
+  ));
+  const activeSiteSnapshot = (siteSnapshot.key === monitoringRequestKey
+    ? siteSnapshot : readSiteDirectorySnapshot(monitoringRequestKey));
+  const sites = activeSiteSnapshot?.rows || [];
+  const sitesRef = useRef(siteSnapshot);
   const fetchRequestRef = useRef({ id: 0, controller: null });
-  const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(() => siteDirectoryLoadMode(siteSnapshot) === 'initial');
+  const [refreshing, setRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState(null);
-  const [monitoringSummary, setMonitoringSummary] = useState({});
-  const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(null);
+  const [monitoringSummary, setMonitoringSummary] = useState(siteSnapshot.summary || {});
+  const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(siteSnapshot.scopeFacts || null);
   const [monitoringError, setMonitoringError] = useState(null);
+  const directoryLoading = initialLoading || !activeSiteSnapshot?.ready;
 
   // ---- filter state ----
-  const searchText = searchParams.get('q') || '';
+  const urlSearchText = searchParams.get('q') || '';
   const typeFilter = searchParams.get('type') || undefined;
   const districtFilter = searchParams.get('district') || undefined;
   const managerFilter = searchParams.get('manager') || undefined;
+  const commitSearchText = useCallback((value) => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      const normalized = value.trim();
+      if (normalized) next.set('q', normalized);
+      else next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+  const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
+    urlSearchText, commitSearchText,
+  );
 
   // ---- archive modal ----
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
@@ -135,10 +160,14 @@ export default function SitesPage() {
     const controller = new AbortController();
     const requestId = fetchRequestRef.current.id + 1;
     fetchRequestRef.current = { id: requestId, controller };
-    setLoading(true);
+    const previousSnapshot = sitesRef.current?.key === monitoringRequestKey
+      ? sitesRef.current : null;
+    const loadMode = siteDirectoryLoadMode(previousSnapshot);
+    setInitialLoading(loadMode === 'initial');
+    setRefreshing(loadMode === 'refresh');
     setFetchError(null);
     setMonitoringError(null);
-    if (sitesRef.current.key !== monitoringRequestKey) {
+    if (!previousSnapshot?.ready) {
       setMonitoringSummary({});
       setMonitoringScopeFacts(null);
     }
@@ -149,34 +178,56 @@ export default function SitesPage() {
       if (fetchRequestRef.current.id !== requestId) return;
       if (siteResult.status === 'rejected') throw siteResult.reason;
       const data = siteResult.value;
-      if (monitoringPublic && monitoringResult?.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
-      else if (monitoringPublic && monitoringResult?.status === 'fulfilled') {
-        setMonitoringSummary(monitoringResult.value?.summary || {});
-        setMonitoringScopeFacts({
+      let nextSummary = previousSnapshot?.summary || {};
+      let nextScopeFacts = previousSnapshot?.scopeFacts || null;
+      if (monitoringPublic && monitoringResult?.status === 'rejected') {
+        setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
+      } else if (monitoringPublic && monitoringResult?.status === 'fulfilled') {
+        nextSummary = monitoringResult.value?.summary || {};
+        nextScopeFacts = {
           scope: monitoringResult.value?.scope ?? null,
           availableScopes: Array.isArray(monitoringResult.value?.available_scopes) ? monitoringResult.value.available_scopes : [],
-        });
+        };
       }
       const rows = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
       if (!rows) {
         setFetchError('站点列表返回格式异常，请稍后重试');
         return;
       }
-      const previousRows = sitesRef.current.key === monitoringRequestKey ? sitesRef.current.rows : [];
+      const previousRows = previousSnapshot?.rows || [];
       const merged = monitoringPublic
         ? mergeMonitoringSites(rows, monitoringResult?.status === 'fulfilled' ? monitoringResult.value : null, previousRows)
         : rows;
-      sitesRef.current = { key: monitoringRequestKey, rows: merged };
-      setSiteSnapshot({ key: monitoringRequestKey, rows: merged });
+      const snapshotData = {
+        key: monitoringRequestKey, rows: merged, summary: nextSummary,
+        scopeFacts: nextScopeFacts, ready: true,
+      };
+      const nextSnapshot = writeSiteDirectorySnapshot(
+        monitoringRequestKey, snapshotData) || snapshotData;
+      sitesRef.current = nextSnapshot;
+      setSiteSnapshot(nextSnapshot);
+      setMonitoringSummary(nextSummary);
+      setMonitoringScopeFacts(nextScopeFacts);
     } catch (err) {
       if (fetchRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
       setFetchError(err.message || '网络异常，无法加载站点列表');
     } finally {
-      if (fetchRequestRef.current.id === requestId) setLoading(false);
+      if (fetchRequestRef.current.id === requestId) {
+        setInitialLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [monitoringPublic, monitoringRequestKey, monitoringScope]);
 
   useEffect(() => {
+    const cached = readSiteDirectorySnapshot(monitoringRequestKey)
+      || { key: monitoringRequestKey, rows: [], summary: {}, scopeFacts: null, ready: false };
+    sitesRef.current = cached;
+    setSiteSnapshot(cached);
+    setMonitoringSummary(cached.summary || {});
+    setMonitoringScopeFacts(cached.scopeFacts || null);
+    setInitialLoading(siteDirectoryLoadMode(cached) === 'initial');
+    setRefreshing(false);
     fetchSites();
     return () => {
       fetchRequestRef.current.id += 1;
@@ -529,12 +580,10 @@ export default function SitesPage() {
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
         render: (_, record) => (
           <div>
-            <Space size={6}><Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
-              {record.is_pilot ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>试点</Tag> : null}</Space>
-            <Space size={6} style={{ display: 'flex', marginTop: 2 }}>
-              <Text type="secondary" copyable={{ text: record.code || '' }}>{record.code || '未提供编码'}</Text>
+            <Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
+            <div style={{ marginTop: 2 }}>
               <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
-            </Space>
+            </div>
           </div>
         ),
       },
@@ -557,13 +606,23 @@ export default function SitesPage() {
         },
       },
       ...(monitoringPublic ? [{
-        title: '监测状态',
-        dataIndex: 'monitoring_status',
-        key: 'status',
+        title: '数据接收',
+        dataIndex: 'communication',
+        key: 'communication',
+        width: 145,
+        render: (_, record) => {
+          const view = communicationStatusView(record.communication);
+          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} /><Text type="secondary" style={{ fontSize: 12 }}>{record.communication?.last_received_at ? dayjs(record.communication.last_received_at).format('MM-DD HH:mm') : '暂无报文'}</Text></Space>;
+        },
+      }, {
+        title: '最近检测周期',
+        dataIndex: 'latest_cycle',
+        key: 'latest_cycle',
         width: 170,
         render: (_, record) => {
-          const view = monitoringStatusView(record);
-          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
+          const view = cycleStatusView(record.latest_cycle);
+          const cycle = record.latest_cycle || {};
+          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} /><Text type="secondary" style={{ fontSize: 12 }}>{cycle.scheduled_at ? `${dayjs(cycle.scheduled_at).format('MM-DD HH:mm')} · ${cycle.formed_count || 0}/${cycle.expected_count || 0}` : '暂无周期'}</Text></Space>;
         },
       }, {
         title: '关键时间',
@@ -691,7 +750,7 @@ export default function SitesPage() {
               styles={{ label: { width: 90, minWidth: 90 }, content: { width: 'auto' } }}
             />
             {isAdmin && (
-              <Button type="link" icon={<EditOutlined />} onClick={openProfileEdit} style={{ paddingInline: 0, marginTop: 8 }}>
+              <Button type="link" icon={<HoverGifIcon name="pencil" size={14} />} onClick={openProfileEdit} style={{ paddingInline: 0, marginTop: 8 }}>
                 完善基础档案
               </Button>
             )}
@@ -1180,7 +1239,7 @@ export default function SitesPage() {
             <Button
               icon={<ReloadOutlined />}
               onClick={fetchSites}
-              loading={loading}
+              loading={directoryLoading || refreshing}
             >
               刷新
             </Button>
@@ -1192,8 +1251,7 @@ export default function SitesPage() {
           placeholder="搜索站点名称 / 编码"
           prefix={<SearchOutlined style={{ color: tokens.colorTextQuaternary }} />}
           allowClear
-          value={searchText}
-          onChange={(e) => updateFilter('q', e.target.value)}
+          {...searchInputProps}
           style={{ width: filterInputWidth }}
         /></FilterField>
 
@@ -1264,15 +1322,16 @@ export default function SitesPage() {
       {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
         监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}
       </Text>}
+      {refreshing && sites.length > 0 ? <Text type="secondary">正在后台核对最新站点与监测状态…</Text> : null}
       {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
         <Alert type="warning" showIcon message="监测范围尚未确认"
           description="服务端未确认本次请求范围，监测结果仅按实际返回的站点投影展示。"
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>} />
       )}
-      {fetchError && !loading && sites.length === 0 ? (
+      {fetchError && !directoryLoading && sites.length === 0 ? (
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (
-        <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
+        <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={directoryLoading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
           scroll={{ x: 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
       )}
@@ -1475,7 +1534,7 @@ export default function SitesPage() {
                             </div>
                             <Space size={4}>
                               <Popconfirm title="确认删除此数据源？" onConfirm={() => handleDeleteDs(ds.id)} okText="删除" cancelText="取消">
-                                <Button type="link" size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                                <Button type="link" size="small" danger icon={<HoverGifIcon name="trash-bin" size={14} />}>删除</Button>
                               </Popconfirm>
                             </Space>
                           </div>

@@ -1,15 +1,32 @@
 <view class="page">
+  <!-- 只读现场记录横幅 -->
+  <view class="ip-review-banner" wx:if="{{viewMode === 'review' || viewMode === 'readonly'}}">
+    <view class="ip-review-banner-icon"></view>
+    <text class="ip-review-banner-text">{{viewMode === 'review' ? '审核查看模式' : '现场记录'}} · 仅可查看，不可修改</text>
+  </view>
+
+  <!-- 无权限空态 -->
+  <view class="ip-no-permission" wx:if="{{viewMode === 'no_permission'}}">
+    <image class="ip-no-perm-ico" src="/images/station-monitoring/empty-lock.svg" mode="aspectFit"/>
+    <text class="ip-no-perm-title">暂无现场记录查看权限</text>
+    <text class="ip-no-perm-desc">请确认计划、站点归属或联系管理员</text>
+    <view class="ip-no-perm-action" bindtap="onBack">返回上一页</view>
+  </view>
+
+  <!-- 主内容（有执行权限时渲染） -->
+  <block wx:if="{{viewMode !== 'no_permission'}}">
+
   <!-- 弱网待同步条 -->
-  <view class="sync-bar" wx:if="{{!online}}">
+  <view class="sync-bar" wx:if="{{viewMode === 'execute' && !online}}">
     <text>当前离线 · 现场记录已本地保存</text>
   </view>
-  <view class="sync-bar" wx:elif="{{syncCount > 0}}" bindtap="onSyncNow">
+  <view class="sync-bar" wx:elif="{{viewMode === 'execute' && syncCount > 0}}" bindtap="onSyncNow">
     <text>{{syncCount}} 项待同步 · 弱网记录已保存</text>
     <text class="sync-action">立即同步</text>
   </view>
 
   <!-- ========== 6.5.1 执行包与站点选择阶段 ========== -->
-  <view class="entry-stage" wx:if="{{viewPhase === 'entry'}}">
+  <view class="entry-stage" wx:if="{{viewMode === 'execute' && viewPhase === 'entry'}}">
     <!-- 右上角悬浮刷新（避让胶囊） -->
     <view class="entry-refresh-fab" bindtap="onEntryRetry" wx:if="{{entryState !== 'initial_loading'}}">
       <text class="entry-refresh-fab-icon">↻</text>
@@ -161,7 +178,7 @@
   </view>
 
   <!-- ========== 6.5.2 出发资源与车辆准备阶段 ========== -->
-  <view class="departure-stage" wx:if="{{viewPhase === 'departure'}}">
+  <view class="departure-stage" wx:if="{{viewMode === 'execute' && viewPhase === 'departure'}}">
     <!-- 右上角悬浮刷新（避让胶囊） -->
     <view class="departure-refresh-fab" bindtap="onDepartureRefresh" wx:if="{{departureState !== 'initial_loading' && departureState !== 'blocking_error' && departureState !== 'target_unavailable'}}">
       <view class="departure-refresh-fab-icon"></view>
@@ -377,7 +394,7 @@
   </view>
 
   <!-- ========== 6.5.3 现场作业阶段 ========== -->
-  <block wx:if="{{viewPhase === 'inspection'}}">
+  <block wx:if="{{viewMode === 'review' || viewMode === 'readonly' || viewPhase === 'inspection'}}">
 
     <block wx:if="{{loaded && currentPackage}}">
 
@@ -403,7 +420,7 @@
       </scroll-view>
 
       <!-- ===== 阶段一：待到站 ===== -->
-      <block wx:if="{{stationStage.code === 'unvisited'}}">
+      <block wx:if="{{viewMode === 'execute' && stationStage.code === 'unvisited'}}">
         <view class="ip-card ip-checkin-card">
           <view class="ip-checkin-body" bindtap="onCheckIn">
             <view class="ip-checkin-icon">
@@ -434,7 +451,7 @@
       </block>
 
       <!-- ===== 阶段二 + 阶段三（已到站） ===== -->
-      <block wx:if="{{stationStage.code !== 'unvisited'}}">
+      <block wx:if="{{viewMode !== 'execute' || stationStage.code !== 'unvisited'}}">
 
         <!-- 进度概览卡片 -->
         <view class="ip-card ip-progress-card">
@@ -462,7 +479,7 @@
         </view>
 
         <!-- 次动作入口（四宫格） -->
-        <view class="ip-card ip-quick-card">
+        <view class="ip-card ip-quick-card" wx:if="{{viewMode === 'execute'}}">
           <view class="ip-quick-grid">
             <view class="ip-quick-item" bindtap="onOpenReport">
               <text class="ip-quick-label">异常上报</text>
@@ -498,7 +515,7 @@
         </view>
 
         <!-- ===== 阶段二：逐项检查（未全部完成） ===== -->
-        <block wx:if="{{(completed < total || total === 0) && stationStage.code !== 'local_pending'}}">
+        <block wx:if="{{(viewMode !== 'execute' || completed < total || total === 0) && stationStage.code !== 'local_pending'}}">
           <view class="ip-cat-block" wx:for="{{categories}}" wx:key="category" wx:for-item="cat">
             <view class="ip-cat-header">
               <text class="ip-cat-name">{{cat.category_cn}}</text>
@@ -512,8 +529,7 @@
                   <text class="ip-item-standard" wx:if="{{it.inspection_standard}}">{{it.inspection_standard}}</text>
                   <view class="ip-item-meta">
                     <text class="ip-meta-tag">{{it.frequency_cn || '未设频次'}}</text>
-                    <text class="ip-meta-dot" wx:if="{{it.evidence_status === 'supplement_required' && it.replacement_photo_status === 'pending_review'}}">· 原照片待审核</text>
-                    <text class="ip-meta-dot" wx:elif="{{it.evidence_status === 'supplement_required' && it.replacement_required_photos > 0}}">· 本次补拍 {{it.replacement_required_photos}} 张</text>
+                    <text class="ip-meta-dot" wx:if="{{it.evidence_status === 'supplement_required' && it.replacement_required_photos > 0}}">· 本次补拍 {{it.replacement_required_photos}} 张</text>
                     <text class="ip-meta-dot" wx:elif="{{it.required_photos > 0}}">· 需拍 {{it.required_photos}} 张</text>
                     <text class="ip-meta-dot" wx:if="{{it.check_time}}">· {{it.check_time}}</text>
                   </view>
@@ -545,7 +561,7 @@
             </view>
             <view class="ip-stat-row">
               <text class="ip-stat-label">正式照片</text>
-              <text class="ip-stat-value">{{photoProgress.blocked ? '原照片待审核' : (photoProgress.taken + '/' + photoProgress.req + ' 张')}}</text>
+              <text class="ip-stat-value">{{photoProgress.taken}}/{{photoProgress.req}} 张</text>
             </view>
             <view class="ip-stat-row">
               <text class="ip-stat-label">正常</text>
@@ -557,17 +573,17 @@
             </view>
           </view>
 
-          <view class="ip-summary-sync" wx:if="{{stationSyncPending}}">
+          <view class="ip-summary-sync" wx:if="{{viewMode === 'execute' && stationSyncPending}}">
             <text class="ip-sync-text">{{stationPendingCount}} 项待同步</text>
             <text class="ip-sync-action" bindtap="onSyncNow">立即同步</text>
           </view>
         </view>
 
         <!-- 底部主动作栏占位 -->
-        <view class="ip-bottom-spacer"></view>
+        <view class="ip-bottom-spacer" wx:if="{{viewMode === 'execute'}}"></view>
 
         <!-- 底部固定主动作栏 -->
-        <view class="ip-bottom-bar">
+        <view class="ip-bottom-bar" wx:if="{{viewMode === 'execute'}}">
           <!-- 待到站：到站打卡 -->
           <block wx:if="{{stationStage.code === 'unvisited'}}">
             <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onCheckIn">到站打卡，开始巡检</button>
@@ -603,7 +619,7 @@
 
     <!-- ===== 全高单项操作面板 ===== -->
     <view class="ip-fullpanel-mask" wx:if="{{sheet.open}}" bindtap="onCloseSheet"></view>
-    <view class="ip-fullpanel" wx:if="{{sheet.open}}">
+    <view class="ip-fullpanel" wx:if="{{sheet.open && viewMode === 'execute'}}">
       <!-- 面板头部（固定） -->
       <view class="ip-fullpanel-header">
         <view class="ip-fp-close" bindtap="onCloseSheet">
@@ -618,7 +634,7 @@
 
         <!-- 补拍模式通知 -->
         <view class="ip-fp-banner ip-fp-banner-warning" wx:if="{{sheet.supplementOnly}}">
-          <text class="ip-fp-banner-title">{{sheet.replacementPhotoStatus === 'pending_review' ? '原照片待审核' : '需补拍'}}</text>
+          <text class="ip-fp-banner-title">需补拍</text>
           <text class="ip-fp-banner-text">{{sheet.item.supplement_display_message || '审核说明不完整，请联系审核人'}}</text>
         </view>
 
@@ -661,7 +677,7 @@
         <view class="ip-fp-section">
           <view class="ip-fp-photo-head">
             <text class="ip-fp-field-label">现场照片</text>
-            <text class="ip-fp-photo-count" wx:if="{{sheet.photoInfo.required > 0 && sheet.replacementPhotoStatus !== 'pending_review'}}">
+            <text class="ip-fp-photo-count" wx:if="{{sheet.photoInfo.required > 0}}">
               {{sheet.supplementOnly ? '本次补拍' : '需拍'}} {{sheet.photoInfo.required}} 张 · {{sheet.supplementOnly ? '已补' : '已拍'}} {{sheet.photoInfo.captured}} 张
             </text>
           </view>
@@ -675,8 +691,12 @@
           <block wx:if="{{sheet.rejectedEvidence.length}}">
             <text class="ip-fp-photo-section-title">已驳回照片</text>
             <view class="ip-photo-grid">
-              <view class="ip-photo-item" wx:for="{{sheet.rejectedEvidence}}" wx:key="id" wx:for-item="evidence">
-                <image class="ip-photo-img" src="{{evidence.display_url}}" mode="aspectFill" />
+              <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                      bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">
+                  <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+                </view>
               </view>
             </view>
 
@@ -704,22 +724,53 @@
             </view>
           </view>
 
-          <!-- 照片网格（已上传 + 本地） -->
+          <text class="ip-fp-photo-section-title">必需现场照片</text>
+          <!-- 必需照片网格（已上传 + 本地待重试） -->
           <view class="ip-photo-grid">
-            <view class="ip-photo-item" wx:for="{{sheet.photos}}" wx:key="*this" wx:for-item="p">
-              <image class="ip-photo-img" src="{{p}}" mode="aspectFill" bindtap="onPreview" data-src="{{p}}" />
+            <view class="ip-photo-item" wx:for="{{sheet.photoMedia}}" wx:key="key" wx:for-item="p">
+              <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="photoMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+              <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                    bindtap="onRetryProtectedPhoto" data-list="photoMedia" data-index="{{index}}">
+                <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+              </view>
               <text class="ip-photo-del" catchtap="onDelPhoto" data-idx="{{index}}">×</text>
             </view>
             <view class="ip-photo-item" wx:for="{{sheet.localPhotos}}" wx:key="*this" wx:for-item="p">
-              <image class="ip-photo-img" src="{{p}}" mode="aspectFill" bindtap="onPreview" data-src="{{p}}" />
+              <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
               <text class="ip-photo-del" catchtap="onDelLocalPhoto" data-idx="{{index}}">×</text>
+              <view class="ip-photo-local-actions">
+                <text catchtap="onRetryLocalPhoto" data-kind="required" data-idx="{{index}}">重试上传</text>
+                <text catchtap="onSaveLocalPhotoAsSupplement" data-kind="required" data-idx="{{index}}">转补充</text>
+              </view>
             </view>
           </view>
 
+          <block wx:if="{{sheet.supplementPhotos.length || sheet.supplementLocalPhotos.length}}">
+            <text class="ip-fp-photo-section-title">补充材料（不计入必需照片）</text>
+            <view class="ip-photo-grid">
+              <view class="ip-photo-item" wx:for="{{sheet.supplementMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="supplementMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                      bindtap="onRetryProtectedPhoto" data-list="supplementMedia" data-index="{{index}}">
+                  <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+                </view>
+                <text class="ip-photo-del" catchtap="onDelSupplementPhoto" data-id="{{p.businessId}}">×</text>
+                <text class="ip-photo-material-badge">补充</text>
+              </view>
+              <view class="ip-photo-item" wx:for="{{sheet.supplementLocalPhotos}}" wx:key="*this" wx:for-item="p">
+                <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
+                <text class="ip-photo-del" catchtap="onDelSupplementLocalPhoto" data-idx="{{index}}">×</text>
+                <view class="ip-photo-local-actions ip-photo-local-actions-single">
+                  <text catchtap="onRetryLocalPhoto" data-kind="supplement" data-idx="{{index}}">重试上传</text>
+                </view>
+              </view>
+            </view>
+          </block>
+
           <!-- 拍照来源按钮 -->
-          <view class="ip-photo-source-row" wx:if="{{sheet.photos.length + sheet.localPhotos.length < 6 && sheet.replacementPhotoStatus !== 'pending_review'}}">
+          <view class="ip-photo-source-row" wx:if="{{sheet.photos.length + sheet.localPhotos.length + sheet.supplementPhotos.length + sheet.supplementLocalPhotos.length < 6}}">
             <button class="ip-photo-btn ip-photo-btn-primary" bindtap="onAddPhoto" data-source="camera">现场拍照</button>
-            <button class="ip-photo-btn" bindtap="onAddPhoto" data-source="watermark_album">水印相册</button>
+            <button class="ip-photo-btn" bindtap="onAddPhoto" data-source="supplement">补充材料</button>
           </view>
 
           <!-- 照片结果反馈 -->
@@ -728,7 +779,7 @@
             <text class="ip-photo-result-message">{{sheet.photoResultMessage}}</text>
           </view>
 
-          <text class="ip-fp-photo-hint ip-fp-photo-bottom-hint">水印相册照片将核对原图拍摄时间、位置及历史重复记录</text>
+          <text class="ip-fp-photo-hint ip-fp-photo-bottom-hint">必需照片只能使用现场拍照；补充材料可选历史照片或说明图片，但不能替代现场拍照，也不计入必需数量</text>
         </view>
 
         <view class="ip-fp-bottom-spacer"></view>
@@ -736,11 +787,101 @@
 
       <!-- 底部固定提交按钮 -->
       <view class="ip-fullpanel-footer">
-        <button class="ip-btn ip-btn-primary ip-btn-lg" loading="{{submitting}}" disabled="{{submitting || sheet.replacementPhotoStatus === 'pending_review'}}" bindtap="onSubmitItem">提交本项</button>
+        <button class="ip-btn ip-btn-primary ip-btn-lg" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSubmitItem">提交本项</button>
       </view>
     </view>
 
+    <!-- 审核/执行人结果回看：单项记录只读面板 -->
+    <view class="ip-fullpanel" wx:if="{{sheet.open && (viewMode === 'review' || viewMode === 'readonly')}}">
+      <view class="ip-fullpanel-header">
+        <view class="ip-fp-close" bindtap="onCloseSheet"><text>关闭</text></view>
+        <text class="ip-fp-title">{{sheet.item.item_name}}</text>
+        <view class="ip-fp-placeholder"></view>
+      </view>
+      <scroll-view class="ip-fullpanel-body" scroll-y enhanced show-scrollbar="{{false}}">
+        <view class="ip-fp-banner ip-fp-banner-warning" wx:if="{{sheet.supplementOnly}}">
+          <text class="ip-fp-banner-title">需补拍</text>
+          <text class="ip-fp-banner-text">{{sheet.item.supplement_display_message || '审核说明不完整，请联系审核人'}}</text>
+        </view>
+        <view class="ip-fp-section">
+          <text class="ip-fp-freq" wx:if="{{sheet.item.frequency_cn}}">{{sheet.item.frequency_cn}}</text>
+          <view class="ip-fp-standard" wx:if="{{sheet.item.inspection_standard}}">
+            <text class="ip-fp-standard-label">检查标准</text>
+            <text class="ip-fp-standard-text">{{sheet.item.inspection_standard}}</text>
+          </view>
+        </view>
+        <view class="ip-fp-section">
+          <text class="ip-fp-field-label">判定结果</text>
+          <text class="ip-fp-standard-text">{{sheet.result === 'abnormal' ? '异常' : '正常'}}</text>
+        </view>
+        <view class="ip-fp-section">
+          <text class="ip-fp-field-label">现场说明</text>
+          <text class="ip-fp-standard-text">{{sheet.remark || '无'}}</text>
+        </view>
+        <view class="ip-fp-section">
+          <text class="ip-fp-field-label">提交时间</text>
+          <text class="ip-fp-standard-text">{{sheet.item.check_time || '未记录'}}</text>
+        </view>
+        <view class="ip-fp-section">
+          <text class="ip-fp-field-label">审核状态</text>
+          <text class="ip-fp-standard-text">{{sheet.item.review_status_cn || '未进入审核'}}</text>
+          <text class="ip-fp-standard-text" wx:if="{{sheet.item.review_comment}}">审核说明：{{sheet.item.review_comment}}</text>
+        </view>
+        <view class="ip-fp-section" wx:if="{{sheet.requiresCalibration}}">
+          <text class="ip-fp-field-label">校准信息</text>
+          <text class="ip-fp-standard-text">校准人：{{sheet.calibrator || '未记录'}}</text>
+          <text class="ip-fp-standard-text">校准值：{{sheet.calValues || '未记录'}}</text>
+        </view>
+        <view class="ip-fp-section">
+          <view class="ip-fp-photo-head">
+            <text class="ip-fp-field-label">现场照片</text>
+          </view>
+          <text class="ip-fp-photo-hint" wx:if="{{sheet.voidedEvidenceCount}}">历史中有 {{sheet.voidedEvidenceCount}} 张已作废证据</text>
+          <block wx:if="{{sheet.rejectedEvidence.length}}">
+            <text class="ip-fp-photo-section-title">已驳回照片</text>
+            <view class="ip-photo-grid">
+              <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                      bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">
+                  <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+                </view>
+              </view>
+            </view>
+          </block>
+          <view class="ip-photo-grid">
+            <view class="ip-photo-item" wx:for="{{sheet.photoMedia}}" wx:key="key" wx:for-item="p">
+              <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="photoMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+              <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                    bindtap="onRetryProtectedPhoto" data-list="photoMedia" data-index="{{index}}">
+                <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+              </view>
+            </view>
+            <view class="ip-photo-item" wx:for="{{sheet.localPhotos}}" wx:key="*this" wx:for-item="p">
+              <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
+            </view>
+          </view>
+          <block wx:if="{{sheet.supplementPhotos.length}}">
+            <text class="ip-fp-photo-section-title">补充材料</text>
+            <view class="ip-photo-grid">
+              <view class="ip-photo-item" wx:for="{{sheet.supplementMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="supplementMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+                      bindtap="onRetryProtectedPhoto" data-list="supplementMedia" data-index="{{index}}">
+                  <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
+                </view>
+                <text class="ip-photo-material-badge">补充</text>
+              </view>
+            </view>
+          </block>
+          <text class="ip-fp-photo-hint" wx:if="{{!sheet.photos.length && !sheet.localPhotos.length && !sheet.rejectedEvidence.length && !sheet.supplementPhotos.length}}">暂无现场照片</text>
+        </view>
+        <view class="ip-fp-bottom-spacer"></view>
+      </scroll-view>
+    </view>
+
     <!-- ===== 次级 Sheet ===== -->
+    <block wx:if="{{viewMode === 'execute'}}">
 
     <!-- 异常上报 Sheet -->
     <view class="sheet-mask" wx:if="{{reportSheet.open}}" bindtap="onCloseReport"></view>
@@ -995,11 +1136,12 @@
       <button class="btn-primary" style="margin-top:24rpx;" loading="{{reagentSheet.submitting}}" disabled="{{reagentSheet.submitting}}" bindtap="onSubmitReagent">提交</button>
     </view>
 
+    </block>
   </block>
 
   <!-- 车辆检查 Sheet（独立于阶段） -->
-  <view class="sheet-mask vehicle-check-mask" wx:if="{{vehicleSheet.open}}" bindtap="onVehicleMaskTap"></view>
-  <view class="sheet vehicle-check-sheet" wx:if="{{vehicleSheet.open}}">
+  <view class="sheet-mask vehicle-check-mask" wx:if="{{viewMode === 'execute' && vehicleSheet.open}}" bindtap="onVehicleMaskTap"></view>
+  <view class="sheet vehicle-check-sheet" wx:if="{{viewMode === 'execute' && vehicleSheet.open}}">
     <view class="sheet-head">
       <text class="sheet-title">{{vehicleSheet.mode === 'return' ? '还车检查' : '出车前检查'}}</text>
       <view class="sheet-close" bindtap="onCloseVehicleCheckout">×</view>
@@ -1025,4 +1167,6 @@
       {{vehicleSheet.mode === 'return' ? '确认检查并还车' : '确认检查并出车'}}
     </button>
   </view>
+
+  </block> <!-- /主内容 -->
 </view>

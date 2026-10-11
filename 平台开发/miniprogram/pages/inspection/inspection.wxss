@@ -1,4 +1,63 @@
 .page { padding: 0 0 calc(40rpx + env(safe-area-inset-bottom)); }
+
+/* ===== 审核查看模式横幅 ===== */
+.ip-review-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+  padding: 14rpx 24rpx;
+  background: var(--color-info-surface);
+  color: var(--color-info);
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.ip-review-banner-icon {
+  width: 24rpx;
+  height: 16rpx;
+  border-left: 3rpx solid var(--color-info);
+  border-bottom: 3rpx solid var(--color-info);
+  transform: rotate(-45deg);
+  margin-top: -4rpx;
+}
+
+/* ===== 无权限空态 ===== */
+.ip-no-permission {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 160rpx 48rpx 0;
+  gap: 16rpx;
+}
+.ip-no-perm-ico {
+  width: 96rpx;
+  height: 96rpx;
+  opacity: 0.6;
+  margin-bottom: 12rpx;
+}
+.ip-no-perm-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.ip-no-perm-desc {
+  font-size: 26rpx;
+  color: var(--color-text-secondary);
+  text-align: center;
+  line-height: 1.5;
+  max-width: 520rpx;
+}
+.ip-no-perm-action {
+  margin-top: 24rpx;
+  padding: 16rpx 48rpx;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 28rpx;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+}
+
 .sync-bar { display: flex; align-items: center; justify-content: center; gap: 18rpx; min-height: 54rpx; padding: 10rpx 24rpx; }
 .sync-action { color: var(--color-warning); font-weight: 600; }
 
@@ -223,7 +282,7 @@
 .entry-tag {
   display: inline-flex;
   align-items: center;
-  padding: 4rpx 14rpx;
+  padding: var(--space-1) var(--space-4);
   border-radius: var(--radius-xs);
   font-size: 22rpx;
   font-weight: 500;
@@ -1039,7 +1098,7 @@
   font-size: 24rpx;
   color: var(--color-type-text);
   background: var(--color-type-bg);
-  padding: 6rpx 16rpx;
+  padding: var(--space-1) var(--space-4);
   border-radius: var(--radius-xs);
   margin-bottom: 12rpx;
   font-weight: 500;
@@ -2618,11 +2677,32 @@
   position: relative;
   border-radius: var(--radius-md);
   overflow: hidden;
+  background: #202225;
 }
 
 .ip-photo-img {
   width: 100%;
   height: 100%;
+}
+
+.ip-photo-media-state {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 18rpx;
+  color: rgba(255, 255, 255, 0.78);
+  background: #202225;
+  font-size: 22rpx;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.ip-photo-media-error {
+  color: #fff;
+  background: #6b2f2f;
 }
 
 .ip-photo-del {
@@ -2637,6 +2717,42 @@
   color: #fff;
   border-radius: 50%;
   font-size: 30rpx;
+}
+
+.ip-photo-local-actions {
+  position: absolute;
+  left: 8rpx;
+  right: 8rpx;
+  bottom: 8rpx;
+  display: flex;
+  gap: 8rpx;
+}
+
+.ip-photo-local-actions text {
+  flex: 1;
+  padding: 8rpx 4rpx;
+  border-radius: 8rpx;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 20rpx;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.ip-photo-local-actions-single text {
+  flex: none;
+  width: 100%;
+}
+
+.ip-photo-material-badge {
+  position: absolute;
+  left: 8rpx;
+  bottom: 8rpx;
+  padding: 6rpx 10rpx;
+  border-radius: 8rpx;
+  background: rgba(0, 0, 0, 0.58);
+  color: #fff;
+  font-size: 20rpx;
 }
 
 /* 拍照来源按钮 */
@@ -2968,12 +3084,22 @@
    备件申请 Sheet 样式（限定 .parts-apply-sheet 命名空间）
    ============================================================ */
 
+.parts-apply-sheet {
+  display: flex;
+  flex-direction: column;
+  height: 75vh;
+  max-height: 75vh;
+  padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
 .parts-apply-sheet .sheet-handle {
   width: 64rpx;
   height: 8rpx;
   border-radius: 4rpx;
   background: var(--color-divider);
-  margin: 16rpx auto 0;
+  margin: 0 auto var(--space-5);
   flex-shrink: 0;
 }
 

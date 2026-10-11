@@ -14,6 +14,8 @@
 平台开发/water.db.*
 平台开发/backend/data/
 平台开发/backend/uploads/
+平台开发/private_uploads/
+平台开发/frontend/private_uploads/
 *.log
 .env
 .env.*

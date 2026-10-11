@@ -12,8 +12,8 @@ const SOURCE_LABELS = {
 };
 
 const CAPTURE_LABELS = {
-  camera: '小程序现场拍摄',
-  watermark_album: '水印相册',
+  camera: '系统现场取证',
+  watermark_album: '历史水印材料（非当前取证方式）',
   web_upload: '网页补充',
 };
 

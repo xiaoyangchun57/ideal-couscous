@@ -12,9 +12,6 @@ function inspectionPhotoProgress(categories) {
     (category.items || []).forEach((item) => {
       const itemRequired = Math.max(0, Number(item.required_photos) || 0);
       if (item.evidence_status === 'supplement_required') {
-        if (item.replacement_photo_status === 'pending_review') {
-          return;
-        }
         const replacementRequired = item.replacement_required_photos == null
           ? Math.max(1, itemRequired - inspectionItemPhotoState(item).formalPhotos.length)
           : Math.max(0, Number(item.replacement_required_photos) || 0);
@@ -100,9 +97,14 @@ function photoStorageKey(value) {
 function inspectionItemPhotoState(item) {
   const source = item || {};
   const historical = new Set();
+  const displayByStorage = new Map();
   (Array.isArray(source.evidence_attachments) ? source.evidence_attachments : []).forEach(attachment => {
+    const storageKey = photoStorageKey(attachment && attachment.stored_path);
+    if (storageKey && attachment && attachment.display_url) {
+      displayByStorage.set(storageKey, attachment.display_url);
+    }
     if (!['rejected', 'voided', 'superseded'].includes(attachment && attachment.review_status)) return;
-    const key = photoStorageKey(attachment.stored_path);
+    const key = storageKey;
     if (key) historical.add(key);
   });
   const formalPhotos = [];
@@ -112,24 +114,22 @@ function inspectionItemPhotoState(item) {
     ? source.current_photo_urls : parsePhotoUrls(source.photo_urls);
   submittedPhotos.forEach(path => {
     const key = photoStorageKey(path);
-    if (!historical.has(key) && !known.has(key)) { known.add(key); formalPhotos.push(path); }
+    if (!historical.has(key) && !known.has(key)) {
+      known.add(key); formalPhotos.push(displayByStorage.get(key) || path);
+    }
   });
   const pendingPhotos = [];
   parsePhotoUrls(source.pending_photo_urls).forEach(path => {
     const key = photoStorageKey(path);
-    if (!historical.has(key) && !known.has(key)) { known.add(key); pendingPhotos.push(path); }
+    if (!historical.has(key) && !known.has(key)) {
+      known.add(key); pendingPhotos.push(displayByStorage.get(key) || path);
+    }
   });
   return { formalPhotos, pendingPhotos, photos: formalPhotos.concat(pendingPhotos) };
 }
 
 function inspectionItemPhotoRequirement(item, localPhotoCount) {
   const source = item || {};
-  if (source.replacement_photo_status === 'pending_review') {
-    return {
-      required: 0, captured: 0, missing: 0, ready: false, blocked: true,
-      blockReason: source.replacement_block_reason || '原照片待审核，审核完成后才能补拍',
-    };
-  }
   const state = inspectionItemPhotoState(source);
   if (source.evidence_status === 'supplement_required') {
     const expected = source.replacement_required_photos == null
@@ -165,7 +165,7 @@ function rejectedInspectionEvidence(attachments, userId, resolveDisplayUrl) {
     .filter(attachment => attachment && attachment.review_status === 'rejected'
       && Number(attachment.uploader_id) === Number(userId))
     .map(attachment => Object.assign({}, attachment, {
-      display_url: resolve(attachment.stored_path),
+      display_url: resolve(attachment.display_url || attachment.stored_path),
     }));
 }
 

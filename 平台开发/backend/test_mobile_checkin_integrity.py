@@ -107,7 +107,8 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     user_id INTEGER, site_id INTEGER, plan_id INTEGER, item_id INTEGER,
                     work_order_id INTEGER, issued_at TEXT, expires_at TEXT,
                     used_at TEXT, attachment_id INTEGER, gps_lat REAL, gps_lng REAL,
-                    distance_m REAL, rework_required_at TEXT, capture_source TEXT DEFAULT ''
+                    distance_m REAL, rework_required_at TEXT, capture_source TEXT DEFAULT '',
+                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT ''
                 );
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY, item_id INTEGER, source_type TEXT, source_id INTEGER,
@@ -157,6 +158,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, status TEXT
                 );
                 CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vehicle_id INTEGER, document_type TEXT, valid_until TEXT
                 );
                 CREATE TABLE vehicle_applications (
@@ -185,6 +187,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
             'site_id': 1, 'lat': 30.0, 'lng': 116.0,
         })
         self.assertEqual(remote.status_code, 400, remote.json)
+        self.assertEqual(remote.json['code'], 'SITE_GEOFENCE_EXCEEDED')
 
         outside_package = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
             'site_id': 3, 'lat': 28.7000, 'lng': 115.7500,
@@ -453,11 +456,15 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
     def test_calibration_requires_authorized_site_and_explicit_confirmation(self):
         operator_confirmed = self.client.put('/api/sites/1/calibrate', headers=self.headers('operator-token'), json={
             'lat': 28.6801, 'lng': 115.7301, 'confirm': True, 'site_name': '测试站一',
+            'expected_old_lat': 28.68, 'expected_old_lng': 115.73,
+            '_idempotency_key': 'operator-calibration-1',
         })
         self.assertEqual(operator_confirmed.status_code, 200, operator_confirmed.json)
 
         denied = self.client.put('/api/sites/3/calibrate', headers=self.headers('operator-token'), json={
             'lat': 28.7001, 'lng': 115.7501, 'confirm': True, 'site_name': '测试站三',
+            'expected_old_lat': 28.7, 'expected_old_lng': 115.75,
+            '_idempotency_key': 'operator-calibration-forbidden',
         })
         self.assertEqual(denied.status_code, 403, denied.json)
 
@@ -468,6 +475,8 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
 
         confirmed = self.client.put('/api/sites/1/calibrate', headers=self.headers('admin-token'), json={
             'lat': 28.6801, 'lng': 115.7301, 'confirm': True, 'site_name': '测试站一',
+            'expected_old_lat': 28.6801, 'expected_old_lng': 115.7301,
+            '_idempotency_key': 'admin-calibration-1',
         })
         self.assertEqual(confirmed.status_code, 200, confirmed.json)
 
@@ -479,7 +488,10 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
             token = role + '-scoped'
             app_module._tokens[token] = {'id': 2, 'role': role, 'username': role}
             response = self.client.put('/api/sites/1/calibrate', headers=self.headers(token), json={
-                'lat': 28.681, 'lng': 115.731, 'confirm': True, 'site_name': '测试站一'})
+                'lat': 28.681, 'lng': 115.731, 'confirm': True, 'site_name': '测试站一',
+                'expected_old_lat': 28.681 if role != 'operator' else 28.68,
+                'expected_old_lng': 115.731 if role != 'operator' else 115.73,
+                '_idempotency_key': f'{role}-scoped-calibration'})
             self.assertEqual(response.status_code, 200, response.json)
             projected = self.client.get('/api/mobile/site-tasks/1', headers=self.headers(token))
             self.assertTrue(projected.json['site']['can_calibrate'])
@@ -487,16 +499,178 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
             before = tuple(db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone())
             audits = db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0]
         for site_id, payload, status in (
-            (3, {'lat': 28.68, 'lng': 115.73, 'confirm': True}, 403),
-            (1, {'lat': 91, 'lng': 115.73, 'confirm': True}, 400),
-            (1, {'lat': 28.68, 'lng': 115.73, 'confirm': True, 'site_name': '错误站'}, 409),
-            (1, {'lat': 28.68, 'lng': 115.73}, 409),
+            (999, {'lat': 28.68, 'lng': 115.73, 'confirm': True,
+                   'expected_old_lat': 28.68, 'expected_old_lng': 115.73,
+                   '_idempotency_key': 'failure-not-found'}, 404),
+            (3, {'lat': 28.68, 'lng': 115.73, 'confirm': True,
+                 'expected_old_lat': 28.7, 'expected_old_lng': 115.75,
+                 '_idempotency_key': 'failure-forbidden'}, 403),
+            (1, {'lat': 91, 'lng': 115.73, 'confirm': True,
+                 'expected_old_lat': 28.681, 'expected_old_lng': 115.731,
+                 '_idempotency_key': 'failure-invalid'}, 400),
+            (1, {'lat': 28.68, 'lng': 115.73, 'confirm': True, 'site_name': '错误站',
+                 'expected_old_lat': 28.681, 'expected_old_lng': 115.731,
+                 '_idempotency_key': 'failure-name'}, 409),
+            (1, {'lat': 28.68, 'lng': 115.73,
+                 'expected_old_lat': 28.681, 'expected_old_lng': 115.731,
+                 '_idempotency_key': 'failure-confirm'}, 409),
+            (1, {'lat': 28.68, 'lng': 115.73, 'confirm': True,
+                 'expected_old_lat': 28.681, 'expected_old_lng': 115.731}, 400),
+            (1, {'lat': 28.68, 'lng': 115.73, 'confirm': True,
+                 '_idempotency_key': 'failure-baseline'}, 409),
         ):
             response = self.client.put(f'/api/sites/{site_id}/calibrate', headers=self.headers('operator-token'), json=payload)
             self.assertEqual(response.status_code, status, response.json)
         with app_module.get_db() as db:
             self.assertEqual(tuple(db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone()), before)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0], audits)
+
+    def test_calibration_idempotency_and_baseline_prevent_stale_replay(self):
+        payload = {
+            'lat': 28.672656, 'lng': 115.869296, 'confirm': True,
+            'site_name': '测试站一', 'expected_old_lat': 28.68,
+            'expected_old_lng': 115.73, '_idempotency_key': 'calibration-current',
+        }
+        first = self.client.put('/api/sites/1/calibrate',
+                                headers=self.headers('operator-token'), json=payload)
+        replay = self.client.put('/api/sites/1/calibrate',
+                                 headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertEqual(first.json, replay.json)
+        self.assertEqual((first.json['site_id'], first.json['new_lat'], first.json['new_lng']),
+                         (1, 28.672656, 115.869296))
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=1')
+        forbidden_replay = self.client.put('/api/sites/1/calibrate',
+                                           headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(forbidden_replay.status_code, 403, forbidden_replay.json)
+        self.assertEqual(forbidden_replay.json['code'], 'SITE_CALIBRATION_FORBIDDEN')
+        with app_module.get_db() as db:
+            db.execute('INSERT INTO user_sites(user_id,site_id) VALUES (2,1)')
+
+        changed_payload = dict(payload, lat=28.62084, lng=115.9258)
+        conflict = self.client.put('/api/sites/1/calibrate',
+                                   headers=self.headers('operator-token'), json=changed_payload)
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertEqual(conflict.json['code'], 'IDEMPOTENCY_PAYLOAD_CONFLICT')
+
+        stale = self.client.put('/api/sites/1/calibrate', headers=self.headers('operator-token'), json={
+            'lat': 28.62084, 'lng': 115.9258, 'confirm': True,
+            'site_name': '测试站一', 'expected_old_lat': 28.68,
+            'expected_old_lng': 115.73, '_idempotency_key': 'calibration-stale-replay',
+        })
+        self.assertEqual(stale.status_code, 409, stale.json)
+        self.assertEqual(stale.json['code'], 'SITE_LOCATION_CHANGED')
+        with app_module.get_db() as db:
+            site = db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone()
+            audits = db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0]
+        self.assertEqual(tuple(site), (28.672656, 115.869296))
+        self.assertEqual(audits, 1)
+
+    def test_calibration_transaction_failure_rolls_back_coordinates_audit_and_cache(self):
+        working_get_db = app_module.get_db
+
+        class FailingConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, sql, *args, **kwargs):
+                if "INSERT INTO timeline_events" in sql:
+                    raise sqlite3.OperationalError('injected calibration audit failure')
+                return self.connection.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+        @contextmanager
+        def failing_db():
+            with working_get_db() as db:
+                yield FailingConnection(db)
+
+        with mock.patch.object(app_module, 'get_db', failing_db):
+            failed = self.client.put('/api/sites/1/calibrate',
+                                     headers=self.headers('operator-token'), json={
+                'lat': 28.672656, 'lng': 115.869296, 'confirm': True,
+                'site_name': '测试站一', 'expected_old_lat': 28.68,
+                'expected_old_lng': 115.73, '_idempotency_key': 'calibration-rollback',
+            })
+        self.assertEqual(failed.status_code, 500, failed.json)
+        with working_get_db() as db:
+            site = db.execute('SELECT gps_lat,gps_lng FROM sites WHERE id=1').fetchone()
+            audits = db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='calibrated'").fetchone()[0]
+            caches = db.execute("SELECT COUNT(*) FROM mobile_idempotency").fetchone()[0]
+        self.assertEqual(tuple(site), (28.68, 115.73))
+        self.assertEqual((audits, caches), (0, 0))
+
+    def test_calibrated_coordinates_flow_through_detail_checkin_capture_and_evidence(self):
+        old_lat, old_lng = 28.62084, 115.9258
+        field_lat, field_lng = 28.672656, 115.869296
+        headers = self.headers('operator-token')
+        with app_module.get_db() as db:
+            db.execute('UPDATE sites SET gps_lat=?,gps_lng=? WHERE id=1', (old_lat, old_lng))
+        before = self.client.post('/api/mobile/check-in', headers=headers, json={
+            'site_id': 1, 'plan_id': 20, 'lat': field_lat, 'lng': field_lng,
+        })
+        self.assertEqual(before.status_code, 400, before.json)
+        self.assertEqual(before.json['code'], 'SITE_GEOFENCE_EXCEEDED')
+        self.assertAlmostEqual(before.json['distance_m'], 7975, delta=2)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM inspection_checkins').fetchone()[0], 0)
+
+        calibrated = self.client.put('/api/sites/1/calibrate', headers=headers, json={
+            'lat': field_lat, 'lng': field_lng, 'confirm': True, 'site_name': '测试站一',
+            'expected_old_lat': old_lat, 'expected_old_lng': old_lng,
+            '_idempotency_key': 'full-coordinate-flow',
+        })
+        self.assertEqual(calibrated.status_code, 200, calibrated.json)
+        self.assertEqual(calibrated.json['site_id'], 1)
+
+        detail = self.client.get('/api/mobile/site-tasks/1', headers=headers)
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual((detail.json['site']['id'], detail.json['site']['lat'], detail.json['site']['lng']),
+                         (1, field_lat, field_lng))
+
+        checked = self.client.post('/api/mobile/check-in', headers=headers, json={
+            'site_id': 1, 'plan_id': 20, 'lat': field_lat, 'lng': field_lng,
+            '_idempotency_key': 'full-coordinate-flow-checkin',
+        })
+        self.assertEqual(checked.status_code, 200, checked.json)
+        self.assertLessEqual(checked.json['distance_m'], 1)
+
+        captured = self.client.post('/api/mobile/photo-capture-session', headers=headers, json={
+            'site_id': 1, 'plan_id': 20, 'item_id': 30,
+            'gps_lat': field_lat, 'gps_lng': field_lng, 'capture_source': 'camera',
+        })
+        self.assertEqual(captured.status_code, 200, captured.json)
+        self.assertLessEqual(captured.json['distance_m'], 1)
+
+        received = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with app_module.get_db() as db:
+            assessment = app_module._assess_attachment_evidence(
+                db, source_type='inspection', source_id=30, site_id=1, uploader_id=2,
+                received_at=received, capture_source='watermark_album',
+                watermark_fields={
+                    'taken_at': received, 'gps_lat': field_lat, 'gps_lng': field_lng,
+                    'code': 'CALIBRATEDFLOW123', 'confidence': 0.99,
+                }, watermark_confidence=0.99, watermark_status='recognized',
+                gps_lat=field_lat, gps_lng=field_lng)
+            stored_site = db.execute('SELECT id,gps_lat,gps_lng FROM sites WHERE id=1').fetchone()
+        self.assertEqual((assessment['qualification'], assessment['basis']),
+                         ('qualified', 'watermark'))
+        self.assertLessEqual(assessment['facts']['distance_m'], 1)
+        self.assertEqual((assessment['facts']['site_id'], tuple(stored_site)),
+                         (1, (1, field_lat, field_lng)))
+
+        with app_module.get_db() as db:
+            db.execute('INSERT INTO user_sites(user_id,site_id) VALUES (2,2)')
+        wrong_site = self.client.post('/api/mobile/photo-capture-session', headers=headers, json={
+            'site_id': 2, 'plan_id': 20, 'item_id': 30,
+            'gps_lat': 28.69, 'gps_lng': 115.74, 'capture_source': 'camera',
+        })
+        self.assertEqual(wrong_site.status_code, 403, wrong_site.json)
+        self.assertEqual(wrong_site.json['code'], 'INSPECTION_ITEM_ACCESS_CHANGED')
 
     def test_item_submission_requires_a_same_day_site_checkin(self):
         response = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={

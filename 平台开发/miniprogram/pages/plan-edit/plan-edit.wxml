@@ -72,11 +72,16 @@
   </view>
 
   <!-- 变更原因 / 退回原因（业务上下文，非错误） -->
-  <view class="pe-banner-group" wx:if="{{isChange || rejectReason}}">
+  <view class="pe-banner-group" wx:if="{{isChange || rejectReason || vehicleAdjustmentRequired}}">
+    <view class="pe-banner pe-banner-warning" wx:if="{{vehicleAdjustmentRequired}}">
+      <text class="pe-banner-title">车辆需调整</text>
+      <text class="pe-banner-text">前序车辆延期占用了当前安排，请选择其他可用车辆。</text>
+      <text class="pe-banner-sub">保存草稿不会解除限制，确认变更后系统将重新校验并生效。</text>
+    </view>
     <view class="pe-banner pe-banner-info" wx:if="{{isChange}}">
       <text class="pe-banner-title">变更原因</text>
       <text class="pe-banner-text">{{changeReason || '—'}}</text>
-      <text class="pe-banner-sub">完成修改后需提交管理员审核</text>
+      <text class="pe-banner-sub">完成修改并确认后，新计划将直接生效</text>
     </view>
     <view class="pe-banner pe-banner-warning" wx:if="{{rejectReason}}">
       <text class="pe-banner-title">退回原因</text>
@@ -410,7 +415,7 @@
   <!-- 底部固定操作栏 -->
   <view class="pe-bottom-bar">
     <button class="pe-btn pe-btn-ghost" bindtap="onSaveDraft" disabled="{{submitting}}">存草稿</button>
-    <button class="pe-btn pe-btn-primary" bindtap="onSubmit" loading="{{submitting}}" disabled="{{submitting}}">{{isChange ? '提交变更审核' : '提交审批'}}</button>
+    <button class="pe-btn pe-btn-primary" bindtap="onSubmit" loading="{{submitting}}" disabled="{{submitting}}">{{isChange ? '确认变更并生效' : '提交审批'}}</button>
   </view>
 </view>
 

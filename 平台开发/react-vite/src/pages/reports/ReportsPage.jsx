@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   Alert, Button, Form, Image, Input, Modal, Popconfirm, Select, Space, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { CheckOutlined, CloseCircleOutlined, EyeOutlined, InboxOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CheckOutlined, CloseCircleOutlined, InboxOutlined, ReloadOutlined } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import { useTheme } from '../../hooks/useTheme';
@@ -153,7 +154,7 @@ export default function ReportsPage() {
       title: '现场证据', key: 'evidence', width: 108, render: (_, record) => {
         const photos = reportPhotos(record);
         return photos.length
-          ? <Button aria-label={`查看${record.site_name || '异常上报'}异常上报#${record.id}的${photos.length}张现场照片`} size="small" icon={<EyeOutlined />} onClick={() => setEvidenceRecord(record)}>照片 {photos.length}</Button>
+          ? <Button aria-label={`查看${record.site_name || '异常上报'}异常上报#${record.id}的${photos.length}张现场照片`} size="small" icon={<HoverGifIcon name="eye" size={14} />} onClick={() => setEvidenceRecord(record)}>照片 {photos.length}</Button>
           : <Text type="secondary">缺失</Text>;
       },
     },

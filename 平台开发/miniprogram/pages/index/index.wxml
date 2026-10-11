@@ -2,7 +2,7 @@
   <!-- 自定义导航栏：今日任务 -->
   <custom-navbar showBorder="{{false}}">
     <view slot="left" class="nav-home-left">
-      <text class="nav-home-title">水质智慧运维</text>
+      <text class="nav-home-title">大禹质水</text>
     </view>
   </custom-navbar>
 
@@ -43,32 +43,159 @@
       <text class="re-retry">点击重试</text>
     </view>
 
-    <!-- ===== 今日行动 ===== -->
-    <!-- 行动为空时不渲染空占位 -->
-    <view class="section-header" wx:if="{{actions.length > 0}}">
-      <text class="section-title">今日行动</text>
-    </view>
+    <!-- ============================================================
+         角色主任务区（提升到问候区下方第一位）
+         ============================================================ -->
 
-    <view class="action-card card" wx:for="{{actions}}" wx:key="key" data-index="{{index}}" bindtap="onActionTap">
-      <view class="action-content">
-        <view class="action-tags">
-          <text class="tag tag-neutral">{{item.typeLabel}}</text>
-          <text class="tag tag-{{item.statusCls}}">{{item.statusLabel}}</text>
-        </view>
-        <text class="action-title">{{item.title}}</text>
-        <text class="action-subtitle" wx:if="{{item.meta.length}}">{{item.meta[0]}}<text wx:if="{{item.meta[1]}}"> · {{item.meta[1]}}</text></text>
+    <!-- reviewer 主任务：待我审核（提升态，视觉最重） -->
+    <view class="section-header section-header--promoted" wx:if="{{homeLayout === 'reviewer' && reviewVisible}}">
+      <text class="section-title">待我审核</text>
+    </view>
+    <view class="review-card review-card--promoted card" wx:if="{{homeLayout === 'reviewer' && reviewVisible}}" bindtap="goReview">
+      <view class="review-icon-circle review-icon-circle--promoted">
+        <view class="review-checkmark"></view>
       </view>
-      <text class="action-chevron">›</text>
+      <view class="review-content">
+        <text class="review-title review-title--promoted">{{reviewDisplay}}</text>
+        <text class="review-subtitle">巡检质控 · 工单 · 备件 · 用车</text>
+      </view>
+      <text class="review-chevron">›</text>
     </view>
 
-    <!-- ===== 今日作业包 ===== -->
-    <view class="section-header">
-      <text class="section-title">今日作业包</text>
+    <!-- admin 主任务：运维概览（提升态，视觉最重） -->
+    <view class="section-header section-header--promoted" wx:if="{{homeLayout === 'admin'}}">
+      <text class="section-title">运维概览</text>
+    </view>
+    <view class="ov-group ov-group--promoted card" wx:if="{{homeLayout === 'admin'}}">
+      <!-- 站点数据 -->
+      <view class="ov-row" bindtap="goResponsibleSites">
+        <view class="ov-row-left">
+          <text class="ov-title ov-title--promoted">站点数据</text>
+        </view>
+        <view class="ov-row-right">
+          <block wx:if="{{stationsState === 'initial_loading'}}">
+            <text class="ov-loading">加载中…</text>
+          </block>
+          <block wx:elif="{{stationSummary}}">
+            <text class="ov-value ov-value--promoted">{{stationSummary.total}} 个站点</text>
+          </block>
+          <block wx:elif="{{stationsState === 'not_enabled'}}">
+            <text class="ov-value ov-value--muted">监测未启用</text>
+          </block>
+          <block wx:else>
+            <view class="ov-fail">
+              <text class="ov-fail-tx">加载失败</text>
+              <text class="ov-fail-retry" catchtap="onRetryStations">重试</text>
+            </view>
+          </block>
+          <text class="ov-chevron">›</text>
+        </view>
+      </view>
+      <view class="ov-sub" wx:if="{{stationSummary}}">
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--success"></text>
+          正常 {{stationSummary.normal}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--warning"></text>
+          需关注 {{stationSummary.attention}}
+        </text>
+        <text class="ov-sub-item">
+          <text class="ov-dot ov-dot--gray"></text>
+          暂无有效数据 {{stationSummary.unavailable}}
+        </text>
+      </view>
+      <view class="ov-sub ov-sub--muted" wx:if="{{stationsState === 'not_enabled'}}">
+        <text class="ov-sub-muted-tx">站点档案正常可用，监测数据待开通</text>
+      </view>
+      <view class="ov-refresh-fail" wx:if="{{stationsState === 'refresh_error' && stationSummary}}" catchtap="onRetryStations">
+        <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+      </view>
+
+      <view class="ov-divider" wx:if="{{stationSummary || stationsState !== 'initial_loading'}}"></view>
+
+      <!-- 试剂情况 -->
+      <view class="ov-row" bindtap="goResponsibleSitesReagent">
+        <view class="ov-row-left">
+          <text class="ov-title ov-title--promoted">试剂情况</text>
+        </view>
+        <view class="ov-row-right">
+          <block wx:if="{{reagentsState === 'initial_loading'}}">
+            <text class="ov-loading">加载中…</text>
+          </block>
+          <block wx:elif="{{reagentSummary}}">
+            <block wx:if="{{reagentSummary.concernCount > 0}}">
+              <text class="ov-value ov-value--warning">{{reagentSummary.concernCount}} 项关注</text>
+            </block>
+            <block wx:else>
+              <text class="ov-value ov-value--success">全部正常</text>
+            </block>
+          </block>
+          <block wx:elif="{{reagentsState === 'not_enabled'}}">
+            <text class="ov-value ov-value--muted">未启用</text>
+          </block>
+          <block wx:else>
+            <view class="ov-fail">
+              <text class="ov-fail-tx">加载失败</text>
+              <text class="ov-fail-retry" catchtap="onRetryReagents">重试</text>
+            </view>
+          </block>
+          <text class="ov-chevron">›</text>
+        </view>
+      </view>
+      <view class="ov-sub" wx:if="{{reagentSummary && reagentSummary.concernCount > 0}}">
+        <text class="ov-sub-item" wx:if="{{reagentSummary.expiredCount > 0}}">
+          <text class="ov-dot ov-dot--error"></text>
+          已过期 {{reagentSummary.expiredCount}}
+        </text>
+        <text class="ov-sub-item" wx:if="{{reagentSummary.expiringCount > 0}}">
+          <text class="ov-dot ov-dot--warning"></text>
+          临期 {{reagentSummary.expiringCount}}
+        </text>
+        <text class="ov-sub-item" wx:if="{{reagentSummary.lowVolumeCount > 0}}">
+          <text class="ov-dot ov-dot--yellow"></text>
+          低余量 {{reagentSummary.lowVolumeCount}}
+        </text>
+        <text class="ov-sub-item" wx:if="{{reagentSummary.pendingQcCount > 0}}">
+          <text class="ov-dot ov-dot--warning"></text>
+          待标定 {{reagentSummary.pendingQcCount}}
+        </text>
+        <text class="ov-sub-item" wx:if="{{reagentSummary.failedQcCount > 0}}">
+          <text class="ov-dot ov-dot--error"></text>
+          标定异常 {{reagentSummary.failedQcCount}}
+        </text>
+      </view>
+      <view class="ov-sub ov-sub--success" wx:if="{{reagentSummary && reagentSummary.concernCount === 0}}">
+        <text class="ov-sub-success-tx">✓ 有权站点试剂状态正常</text>
+      </view>
+      <view class="ov-sub ov-sub--muted" wx:if="{{reagentsState === 'not_enabled'}}">
+        <text class="ov-sub-muted-tx">试剂模块待开通</text>
+      </view>
+      <view class="ov-refresh-fail" wx:if="{{reagentsState === 'refresh_error' && reagentSummary}}" catchtap="onRetryReagents">
+        <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+      </view>
     </view>
 
+    <!-- ============================================================
+         今日待办（单一待办区域：巡检作业包 + 其他待办）
+         设计原则：巡检作业包是最高优先级，放在最上方；
+                  其他待办（整改/工单等）作为次级列表。
+         ============================================================ -->
+
+    <!-- 今日待办 section header：有作业包或有行动时显示 -->
+    <view class="section-header {{homeLayout === 'operator' ? '' : 'section-header--secondary'}}" wx:if="{{workPackage.hasPlan || actions.length > 0}}">
+      <text class="section-title">今日待办</text>
+    </view>
+
+    <!-- ===== 巡检作业包（置顶，最高优先级）===== -->
+    <!-- 视觉权重按首页布局区分；执行入口只由权威本人作业包决定 -->
     <!-- 有作业包 -->
-    <view class="plan-card card" wx:if="{{workPackage.hasPlan}}">
-      <!-- 站点名 -->
+    <view class="plan-card plan-card--inspection card {{homeLayout === 'operator' ? '' : 'plan-card--secondary'}}" wx:if="{{workPackage.hasPlan}}">
+      <!-- 巡检标识 + 站点名 -->
+      <view class="plan-inspection-label">
+        <view class="pil-icon"></view>
+        <text class="pil-text">今日巡检</text>
+      </view>
       <view class="plan-sites">
         <text class="site-chip" wx:for="{{workPackage.siteNames}}" wx:for-item="sname" wx:key="*this">{{sname}}</text>
       </view>
@@ -104,17 +231,150 @@
         </view>
       </view>
 
-      <button class="btn-primary plan-action-btn" bindtap="goInspection">
+      <button class="btn-primary plan-action-btn" bindtap="goInspection" wx:if="{{workPackage.hasPlan}}">
         进入现场作业
       </button>
     </view>
 
-    <!-- 无作业包 -->
-    <view class="card plan-empty-card" wx:else>
+    <!-- 无作业包（仅 operator 显示空态） -->
+    <view class="card plan-empty-card" wx:if="{{!workPackage.hasPlan && homeLayout === 'operator'}}">
       <view class="empty-icon-shape"></view>
-      <text class="empty-title-sm">今日暂无作业包</text>
+      <text class="empty-title-sm">今日暂无巡检作业</text>
       <view class="link-btn" bindtap="goPlan">查看全部计划 ›</view>
     </view>
+
+    <!-- ===== 其他待办（整改/工单/告警等）===== -->
+    <!-- reviewer/admin：次级展示；operator：正常展示 -->
+    <view class="other-tasks-label" wx:if="{{actions.length > 0 && workPackage.hasPlan}}">
+      <text class="other-tasks-text">其他待办</text>
+    </view>
+    <view class="action-card card {{homeLayout === 'operator' ? '' : 'action-card--secondary'}}" wx:for="{{actions}}" wx:key="key" data-index="{{index}}" bindtap="onActionTap">
+      <view class="action-content">
+        <view class="action-tags">
+          <text class="tag tag-neutral">{{item.typeLabel}}</text>
+          <text class="tag tag-{{item.statusCls}}">{{item.statusLabel}}</text>
+        </view>
+        <text class="action-title">{{item.title}}</text>
+        <text class="action-subtitle" wx:if="{{item.meta.length}}">{{item.meta[0]}}<text wx:if="{{item.meta[1]}}"> · {{item.meta[1]}}</text></text>
+      </view>
+      <text class="action-chevron">›</text>
+    </view>
+
+    <!-- ===== 运维概览（非 admin 时在这里显示） ===== -->
+    <block wx:if="{{homeLayout !== 'admin'}}">
+      <view class="section-header {{homeLayout === 'reviewer' ? 'section-header--secondary' : ''}}">
+        <text class="section-title">运维概览</text>
+      </view>
+      <view class="ov-group card">
+        <!-- 站点数据 -->
+        <view class="ov-row" bindtap="goResponsibleSites">
+          <view class="ov-row-left">
+            <text class="ov-title">站点数据</text>
+          </view>
+          <view class="ov-row-right">
+            <block wx:if="{{stationsState === 'initial_loading'}}">
+              <text class="ov-loading">加载中…</text>
+            </block>
+            <block wx:elif="{{stationSummary}}">
+              <text class="ov-value">{{stationSummary.total}} 个站点</text>
+            </block>
+            <block wx:elif="{{stationsState === 'not_enabled'}}">
+              <text class="ov-value ov-value--muted">监测未启用</text>
+            </block>
+            <block wx:else>
+              <view class="ov-fail">
+                <text class="ov-fail-tx">加载失败</text>
+                <text class="ov-fail-retry" catchtap="onRetryStations">重试</text>
+              </view>
+            </block>
+            <text class="ov-chevron">›</text>
+          </view>
+        </view>
+        <view class="ov-sub" wx:if="{{stationSummary}}">
+          <text class="ov-sub-item">
+            <text class="ov-dot ov-dot--success"></text>
+            正常 {{stationSummary.normal}}
+          </text>
+          <text class="ov-sub-item">
+            <text class="ov-dot ov-dot--warning"></text>
+            需关注 {{stationSummary.attention}}
+          </text>
+          <text class="ov-sub-item">
+            <text class="ov-dot ov-dot--gray"></text>
+            暂无有效数据 {{stationSummary.unavailable}}
+          </text>
+        </view>
+        <view class="ov-sub ov-sub--muted" wx:if="{{stationsState === 'not_enabled'}}">
+          <text class="ov-sub-muted-tx">站点档案正常可用，监测数据待开通</text>
+        </view>
+        <view class="ov-refresh-fail" wx:if="{{stationsState === 'refresh_error' && stationSummary}}" catchtap="onRetryStations">
+          <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+        </view>
+
+        <view class="ov-divider" wx:if="{{stationSummary || stationsState !== 'initial_loading'}}"></view>
+
+        <!-- 试剂情况 -->
+        <view class="ov-row" bindtap="goResponsibleSitesReagent">
+          <view class="ov-row-left">
+            <text class="ov-title">试剂情况</text>
+          </view>
+          <view class="ov-row-right">
+            <block wx:if="{{reagentsState === 'initial_loading'}}">
+              <text class="ov-loading">加载中…</text>
+            </block>
+            <block wx:elif="{{reagentSummary}}">
+              <block wx:if="{{reagentSummary.concernCount > 0}}">
+                <text class="ov-value ov-value--warning">{{reagentSummary.concernCount}} 项关注</text>
+              </block>
+              <block wx:else>
+                <text class="ov-value ov-value--success">全部正常</text>
+              </block>
+            </block>
+            <block wx:elif="{{reagentsState === 'not_enabled'}}">
+              <text class="ov-value ov-value--muted">未启用</text>
+            </block>
+            <block wx:else>
+              <view class="ov-fail">
+                <text class="ov-fail-tx">加载失败</text>
+                <text class="ov-fail-retry" catchtap="onRetryReagents">重试</text>
+              </view>
+            </block>
+            <text class="ov-chevron">›</text>
+          </view>
+        </view>
+        <view class="ov-sub" wx:if="{{reagentSummary && reagentSummary.concernCount > 0}}">
+          <text class="ov-sub-item" wx:if="{{reagentSummary.expiredCount > 0}}">
+            <text class="ov-dot ov-dot--error"></text>
+            已过期 {{reagentSummary.expiredCount}}
+          </text>
+          <text class="ov-sub-item" wx:if="{{reagentSummary.expiringCount > 0}}">
+            <text class="ov-dot ov-dot--warning"></text>
+            临期 {{reagentSummary.expiringCount}}
+          </text>
+          <text class="ov-sub-item" wx:if="{{reagentSummary.lowVolumeCount > 0}}">
+            <text class="ov-dot ov-dot--yellow"></text>
+            低余量 {{reagentSummary.lowVolumeCount}}
+          </text>
+          <text class="ov-sub-item" wx:if="{{reagentSummary.pendingQcCount > 0}}">
+            <text class="ov-dot ov-dot--warning"></text>
+            待标定 {{reagentSummary.pendingQcCount}}
+          </text>
+          <text class="ov-sub-item" wx:if="{{reagentSummary.failedQcCount > 0}}">
+            <text class="ov-dot ov-dot--error"></text>
+            标定异常 {{reagentSummary.failedQcCount}}
+          </text>
+        </view>
+        <view class="ov-sub ov-sub--success" wx:if="{{reagentSummary && reagentSummary.concernCount === 0}}">
+          <text class="ov-sub-success-tx">✓ 有权站点试剂状态正常</text>
+        </view>
+        <view class="ov-sub ov-sub--muted" wx:if="{{reagentsState === 'not_enabled'}}">
+          <text class="ov-sub-muted-tx">试剂模块待开通</text>
+        </view>
+        <view class="ov-refresh-fail" wx:if="{{reagentsState === 'refresh_error' && reagentSummary}}" catchtap="onRetryReagents">
+          <text class="ov-refresh-fail-tx">刷新失败，点击重试</text>
+        </view>
+      </view>
+    </block>
 
     <!-- ===== 全部工单（低强调导航行） ===== -->
     <view class="workorder-entry" bindtap="goWorkorder">
@@ -128,12 +388,11 @@
       <text class="wo-entry-chevron">›</text>
     </view>
 
-    <!-- ===== 待我审核（有审核角色时叠加） ===== -->
-    <view class="section-header" wx:if="{{reviewVisible}}">
+    <!-- ===== 待我审核（非 reviewer 时在这里显示标准态） ===== -->
+    <view class="section-header section-header--secondary" wx:if="{{homeLayout !== 'reviewer' && reviewVisible}}">
       <text class="section-title">待我审核</text>
     </view>
-
-    <view class="review-card card" wx:if="{{reviewVisible}}" bindtap="goReview">
+    <view class="review-card card" wx:if="{{homeLayout !== 'reviewer' && reviewVisible}}" bindtap="goReview">
       <view class="review-icon-circle">
         <view class="review-checkmark"></view>
       </view>

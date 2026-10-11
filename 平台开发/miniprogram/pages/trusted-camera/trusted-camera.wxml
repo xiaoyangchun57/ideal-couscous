@@ -1,0 +1,40 @@
+<view class="camera-page {{frameOrientation}}">
+  <view class="camera-context">
+    <text class="camera-site">{{siteName || '当前站点'}}</text>
+    <text class="camera-item">{{itemName || '现场检查项'}}</text>
+  </view>
+
+  <view class="camera-stage">
+    <view class="camera-frame" style="{{cameraStyle}}">
+      <camera
+        class="camera-preview"
+        device-position="back"
+        flash="auto"
+        resolution="high"
+        bindinitdone="onCameraInit"
+        binderror="onCameraError"
+      ></camera>
+      <view class="frame-border"></view>
+      <view class="frame-label">最终照片范围 {{frameRatio}}</view>
+    </view>
+  </view>
+
+  <view class="camera-controls">
+    <view class="camera-status {{errorText ? 'is-error' : ''}}">
+      <text>{{statusText}}</text>
+      <text wx:if="{{previewReady}}" class="preview-ready">相机画面已就绪</text>
+    </view>
+    <view class="camera-actions">
+      <button class="camera-cancel" bindtap="onCancel">取消</button>
+      <button
+        class="camera-shutter {{ready ? 'is-ready' : ''}}"
+        disabled="{{!ready || capturing}}"
+        bindtap="onTakePhoto"
+        aria-label="拍照"
+      ><view class="shutter-core"></view></button>
+      <button wx:if="{{errorText && !showSettings}}" class="camera-retry" bindtap="onRetryPreparation">重试</button>
+      <button wx:elif="{{showSettings}}" class="camera-retry" bindtap="onOpenSettings">去设置</button>
+      <view wx:else class="camera-action-placeholder"></view>
+    </view>
+  </view>
+</view>

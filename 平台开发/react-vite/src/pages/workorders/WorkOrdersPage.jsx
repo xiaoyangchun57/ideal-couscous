@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams, useLocation, useNavigate } from 'react-router-dom';
 import {
   Input, Select, Button, Space, Tag, Badge, Modal, Upload, Spin,
@@ -6,12 +6,13 @@ import {
   Row, Col, Descriptions, Timeline, Drawer, Image, App,
 } from 'antd';
 import {
-  PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined,
+  PlusOutlined, SearchOutlined, ReloadOutlined,
   ExclamationCircleOutlined,
   FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
   InboxOutlined, SwapOutlined, CheckOutlined, AuditOutlined,
   UploadOutlined, DownloadOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
@@ -646,7 +647,7 @@ export default function WorkOrdersPage() {
         return (
           <Space size={4}>
             <Tooltip title="查看工单详情">
-              <Button type="text" size="small" icon={<EyeOutlined />} aria-label={`查看工单 ${record.order_no} 详情`}
+              <Button type="text" size="small" icon={<HoverGifIcon name="eye" size={14} />} aria-label={`查看工单 ${record.order_no} 详情`}
                 onClick={() => handleView(record)} />
             </Tooltip>
             {primaryAction && (

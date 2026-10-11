@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { App, Alert, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, Typography, Empty } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { filterInputWidth } from '../../services/pageStyles';
+import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
@@ -24,7 +26,7 @@ export default function ReagentMasterPage() {
   const [editing, setEditing] = useState(null); // null=新增，对象=编辑
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
-  const search = searchParams.get('q') || '';
+  const urlSearch = searchParams.get('q') || '';
 
   const updateSearch = useCallback((value) => {
     setSearchParams((previous) => {
@@ -35,6 +37,7 @@ export default function ReagentMasterPage() {
       return next;
     }, { replace: true });
   }, [setSearchParams]);
+  const { draft: search, inputProps: searchInputProps } = useUrlSyncedSearch(urlSearch, updateSearch);
 
   const filteredData = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -136,7 +139,7 @@ export default function ReagentMasterPage() {
       render: (_, r) => (
         <Space size={0}>
           {canWrite && (
-            <Button size="small" type="link" icon={<EditOutlined />} aria-label={`编辑试剂：${r.name}`} onClick={() => openEdit(r)}>
+            <Button size="small" type="link" icon={<HoverGifIcon name="pencil" size={14} />} aria-label={`编辑试剂：${r.name}`} onClick={() => openEdit(r)}>
               编辑
             </Button>
           )}
@@ -149,7 +152,7 @@ export default function ReagentMasterPage() {
               okButtonProps={{ danger: true }}
               onConfirm={() => del(r)}
             >
-              <Button size="small" type="link" danger icon={<DeleteOutlined />} aria-label={`删除试剂：${r.name}`}>删除</Button>
+              <Button size="small" type="link" danger icon={<HoverGifIcon name="trash-bin" size={14} />} aria-label={`删除试剂：${r.name}`}>删除</Button>
             </Popconfirm>
           )}
         </Space>
@@ -180,10 +183,9 @@ export default function ReagentMasterPage() {
         >
           <Input
             placeholder="搜索试剂名称、厂家、规格..."
-            prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+            prefix={<HoverGifIcon name="magnifier" size={14} style={{ opacity: 0.45 }} />}
             allowClear
-            value={search}
-            onChange={(event) => updateSearch(event.target.value)}
+            {...searchInputProps}
             style={{ width: filterInputWidth, borderRadius: 8 }}
           />
           <Text type="secondary">共 {filteredData.length} 项</Text>

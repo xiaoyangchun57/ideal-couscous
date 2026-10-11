@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -29,6 +29,11 @@ class ProvisionError(RuntimeError):
 
 FORMAL_STATION_CODE_ROWS = 43
 FORMAL_STATION_CODE_IGNORED_ROWS = 1
+B2_INTERVAL_SECONDS = 14400
+B2_TIMEZONE = "Asia/Shanghai"
+B2_ANCHOR_LOCAL_TIME = "00:00:00"
+B2_TOLERANCE_SECONDS = 0
+B2_RESULT_DELAY_SECONDS = 7200
 
 
 def _utc_time(value: object, field: str, *, nullable: bool = False) -> str | None:
@@ -1098,19 +1103,683 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
     }
 
 
+def load_b2_factor_matrix(path: Path) -> dict[str, Any]:
+    """Load only the approved identity/factor facts needed by the B2 offline tool."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProvisionError("B2 factor matrix cannot be read") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("approved_identities"), list):
+        raise ProvisionError("B2 factor matrix fields are invalid")
+    for flag in ("contains_raw_payloads", "contains_observed_values", "contains_credentials"):
+        if document.get(flag) is not False:
+            raise ProvisionError("B2 factor matrix must not contain private or observed values")
+    identities = []
+    station_codes = set()
+    for index, item in enumerate(document["approved_identities"]):
+        if not isinstance(item, dict):
+            raise ProvisionError("B2 factor matrix identity is invalid")
+        station_code = item.get("station_code")
+        binding_status = item.get("binding_status")
+        system_name = item.get("system_name")
+        original_name = item.get("original_name")
+        factors = item.get("observed_hj212_factor_codes")
+        if (not isinstance(station_code, str) or not station_code.strip() or len(station_code) > 128
+                or not station_code.isascii() or binding_status not in {"bound", "unbound"}
+                or not isinstance(system_name, str) or not system_name.strip()
+                or not isinstance(original_name, str) or not original_name.strip()
+                or not isinstance(factors, list)
+                or any(not isinstance(code, str) or not code.startswith("HJ212:") or len(code) > 128 for code in factors)):
+            raise ProvisionError("B2 factor matrix identity fields are invalid")
+        station_code = station_code.strip()
+        if station_code in station_codes:
+            raise ProvisionError("B2 factor matrix contains duplicate station identities")
+        station_codes.add(station_code)
+        identities.append({
+            "source_index": index,
+            "station_code": station_code,
+            "binding_status": binding_status,
+            "system_name": system_name.strip(),
+            "original_name": original_name.strip(),
+            "factors": sorted(set(factors)),
+        })
+    canonical = {"report_type": document.get("report_type"), "identities": identities}
+    encoded = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"identities": identities, "source_fingerprint": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16]}
+
+
+def _b2_effective_boundary(now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ProvisionError("B2 planning time must include timezone")
+    local = current.astimezone(ZoneInfo(B2_TIMEZONE))
+    seconds = local.hour * 3600 + local.minute * 60 + local.second
+    if local.microsecond:
+        seconds += 1
+    boundary_seconds = ((seconds + B2_INTERVAL_SECONDS - 1) // B2_INTERVAL_SECONDS) * B2_INTERVAL_SECONDS
+    boundary_day = local.date()
+    if boundary_seconds >= 86400:
+        boundary_day += timedelta(days=1)
+        boundary_seconds = 0
+    boundary = datetime.combine(boundary_day, datetime.min.time(), local.tzinfo) + timedelta(seconds=boundary_seconds)
+    return boundary.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _b2_matches(row: sqlite3.Row, expected: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    return all(row[key] == expected[key] for key in keys)
+
+
+def _b2_period_action(
+    rows: list[sqlite3.Row], effective_from: str, expected: dict[str, Any], keys: tuple[str, ...],
+    kind: str, hard_errors: list[dict[str, Any]], context: dict[str, Any], operations: list[dict[str, Any]],
+) -> str:
+    exact = [row for row in rows if row["effective_from"] == effective_from]
+    active = [row for row in rows if row["enabled"] and row["effective_from"] <= effective_from
+              and (row["effective_to"] is None or row["effective_to"] > effective_from)]
+    future = [row for row in rows if row["enabled"] and row["effective_from"] > effective_from]
+    if len(exact) > 1 or len(active) > 1:
+        hard_errors.append(dict(context, category=f"ambiguous_{kind}_period"))
+        return "conflict"
+    if exact:
+        row = exact[0]
+        if row["enabled"] and _b2_matches(row, expected, keys):
+            return "reuse"
+        hard_errors.append(dict(context, category=f"{kind}_boundary_conflict"))
+        return "conflict"
+    if future:
+        hard_errors.append(dict(context, category=f"{kind}_future_period_conflict"))
+        return "conflict"
+    if active:
+        row = active[0]
+        if _b2_matches(row, expected, keys):
+            return "reuse"
+        operations.append({"kind": kind, "action": "replace", "close_id": int(row["id"]), "values": expected})
+        return "replace"
+    operations.append({"kind": kind, "action": "create", "close_id": None, "values": expected})
+    return "create"
+
+
+def _b2_plan_from_connection(
+    connection: sqlite3.Connection, matrix: dict[str, Any], effective_from: str,
+    identity_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    verify_station_monitoring_schema(connection)
+    resolutions_by_station_code = {
+        resolution["station_code"]: resolution
+        for resolution in (identity_manifest or {}).get("resolutions", [])
+    }
+    definitions = {
+        row["protocol_code"]: row for row in connection.execute(
+            "SELECT protocol_code,business_metric,is_published FROM monitoring_factor_definitions"
+        )
+    }
+    operations: list[dict[str, Any]] = []
+    endpoints = []
+    soft_differences: list[dict[str, Any]] = []
+    hard_errors: list[dict[str, Any]] = []
+    for identity in matrix["identities"]:
+        source_context = {"source_index": identity["source_index"]}
+        if identity["binding_status"] != "bound":
+            soft_differences.append(dict(source_context, category="unbound_identity"))
+            continue
+        if not identity["factors"]:
+            soft_differences.append(dict(source_context, category="no_observed_factors"))
+            continue
+        endpoint = connection.execute(
+            """SELECT endpoint.*,site.name AS business_site_name FROM trusted_endpoints endpoint
+               LEFT JOIN sites site ON site.id=endpoint.business_site_id WHERE endpoint.station_code=?""",
+            (identity["station_code"],),
+        ).fetchone()
+        if (endpoint is None or not endpoint["enabled"] or endpoint["endpoint_state"] != "bound"
+                or endpoint["business_site_id"] is None or endpoint["business_site_name"] is None):
+            hard_errors.append(dict(source_context, category="bound_identity_unavailable"))
+            continue
+        context = {"endpoint_id": int(endpoint["id"]), "business_site_id": int(endpoint["business_site_id"])}
+        identity_names = {identity["system_name"], identity["original_name"]}
+        resolution = resolutions_by_station_code.get(identity["station_code"])
+        if resolution is None:
+            name_matches = str(endpoint["business_site_name"]).strip() in identity_names
+        else:
+            canonical_sites = connection.execute(
+                "SELECT id FROM sites WHERE name=?", (resolution["canonical_name"],)
+            ).fetchall()
+            approved_names = {resolution["canonical_name"], *resolution["aliases"]}
+            name_matches = (
+                len(canonical_sites) == 1
+                and int(canonical_sites[0]["id"]) == int(endpoint["business_site_id"])
+                and identity_names.issubset(approved_names)
+            )
+        if not name_matches:
+            hard_errors.append(dict(context, category="business_site_binding_mismatch"))
+            continue
+        credential_summary = str(endpoint["credential_hmac"] or "")
+        if len(credential_summary) != 64 or any(
+            character not in "0123456789abcdef" for character in credential_summary.lower()
+        ):
+            hard_errors.append(dict(context, category="invalid_credential_summary"))
+            continue
+        factors = []
+        for code in identity["factors"]:
+            definition = definitions.get(code)
+            if definition is None or not definition["is_published"] or not definition["business_metric"]:
+                soft_differences.append(dict(context, category="unknown_or_unpublished_factor", protocol_code=code))
+            else:
+                factors.append((code, str(definition["business_metric"])))
+        if not factors:
+            soft_differences.append(dict(context, category="only_unknown_factors"))
+            continue
+
+        profile_rows = list(connection.execute(
+            "SELECT * FROM monitoring_endpoint_profiles WHERE endpoint_id=? ORDER BY effective_from,id", (endpoint["id"],)
+        ))
+        active_profile = next((row for row in profile_rows if row["enabled"] and row["effective_from"] <= effective_from
+                               and (row["effective_to"] is None or row["effective_to"] > effective_from)), None)
+        if active_profile is not None and active_profile["business_site_id"] != endpoint["business_site_id"]:
+            hard_errors.append(dict(context, category="profile_business_site_mismatch"))
+            continue
+        profile_expected = {
+            "endpoint_id": int(endpoint["id"]), "business_site_id": int(endpoint["business_site_id"]),
+            "rtu_asset_code": active_profile["rtu_asset_code"] if active_profile else None,
+            "instrument_asset_code": active_profile["instrument_asset_code"] if active_profile else None,
+            "timezone": B2_TIMEZONE, "enabled": 1, "expected_granularity": "realtime",
+            "expected_interval_seconds": B2_INTERVAL_SECONDS, "effective_from": effective_from, "effective_to": None,
+        }
+        profile_action = _b2_period_action(
+            profile_rows, effective_from, profile_expected,
+            ("business_site_id", "rtu_asset_code", "instrument_asset_code", "timezone", "enabled",
+             "expected_granularity", "expected_interval_seconds", "effective_to"),
+            "profile", hard_errors, context, operations,
+        )
+        factor_plans = []
+        asset_mappings = []
+        for code, business_metric in factors:
+            factor_context = dict(context, protocol_code=code)
+            mapping_rows = list(connection.execute(
+                """SELECT * FROM monitoring_factor_mappings
+                   WHERE endpoint_id=? AND protocol_code=? ORDER BY effective_from,id""", (endpoint["id"], code)
+            ))
+            active_mapping = next((row for row in mapping_rows if row["enabled"] and row["effective_from"] <= effective_from
+                                   and (row["effective_to"] is None or row["effective_to"] > effective_from)), None)
+            mapping_expected = {
+                "endpoint_id": int(endpoint["id"]), "protocol_code": code, "business_metric": business_metric,
+                "instrument_asset_code": (active_mapping["instrument_asset_code"] if active_mapping
+                                          else profile_expected["instrument_asset_code"]),
+                "expected_interval_seconds": B2_INTERVAL_SECONDS, "tolerance_seconds": B2_TOLERANCE_SECONDS,
+                "effective_from": effective_from, "effective_to": None, "enabled": 1,
+            }
+            mapping_action = _b2_period_action(
+                mapping_rows, effective_from, mapping_expected,
+                ("protocol_code", "business_metric", "instrument_asset_code", "expected_interval_seconds",
+                 "tolerance_seconds", "effective_to", "enabled"),
+                "mapping", hard_errors, factor_context, operations,
+            )
+            asset_mappings.append(mapping_expected)
+            schedule_rows = list(connection.execute(
+                """SELECT * FROM monitoring_business_schedules
+                   WHERE endpoint_id=? AND protocol_code=? ORDER BY effective_from,id""", (endpoint["id"], code)
+            ))
+            schedule_expected = {
+                "endpoint_id": int(endpoint["id"]), "protocol_code": code, "timezone": B2_TIMEZONE,
+                "interval_seconds": B2_INTERVAL_SECONDS, "anchor_local_time": B2_ANCHOR_LOCAL_TIME,
+                "tolerance_seconds": B2_TOLERANCE_SECONDS,
+                "result_delay_seconds": B2_RESULT_DELAY_SECONDS, "effective_from": effective_from,
+                "effective_to": None, "enabled": 1,
+            }
+            schedule_action = _b2_period_action(
+                schedule_rows, effective_from, schedule_expected,
+                ("protocol_code", "timezone", "interval_seconds", "anchor_local_time", "tolerance_seconds",
+                 "result_delay_seconds", "effective_to", "enabled"),
+                "schedule", hard_errors, factor_context, operations,
+            )
+            factor_plans.append({"protocol_code": code, "mapping": mapping_action, "schedule": schedule_action})
+        try:
+            _verify_assets_when_available(connection, {
+                "business_site_id": int(endpoint["business_site_id"]),
+                "rtu_asset_code": profile_expected["rtu_asset_code"],
+                "instrument_asset_code": profile_expected["instrument_asset_code"],
+                "mappings": asset_mappings,
+            })
+        except ProvisionError:
+            hard_errors.append(dict(context, category="asset_business_site_mismatch"))
+        endpoints.append(dict(context, profile=profile_action, factors=factor_plans))
+
+    fingerprint_value = {
+        "source_fingerprint": matrix["source_fingerprint"], "effective_from": effective_from,
+        "identity_resolution_source_fingerprint": (
+            identity_manifest["source_fingerprint"] if identity_manifest else None
+        ),
+        "constants": [B2_INTERVAL_SECONDS, B2_TIMEZONE, B2_ANCHOR_LOCAL_TIME,
+                      B2_TOLERANCE_SECONDS, B2_RESULT_DELAY_SECONDS],
+        "endpoints": endpoints, "soft_differences": soft_differences, "hard_errors": hard_errors,
+        "operations": operations,
+    }
+    encoded = json.dumps(fingerprint_value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "action": "b2-batch-plan", "result": "ready" if not hard_errors else "conflicted",
+        "source_fingerprint": matrix["source_fingerprint"], "fingerprint": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16],
+        "effective_from": effective_from, "eligible_endpoint_count": len(endpoints),
+        "eligible_factor_count": sum(len(item["factors"]) for item in endpoints),
+        "soft_difference_count": len(soft_differences), "soft_differences": soft_differences,
+        "hard_error_count": len(hard_errors), "hard_errors": hard_errors, "endpoints": endpoints,
+        "_operations": operations,
+    }
+
+
+def _b2_public(plan: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in plan.items() if not key.startswith("_")}
+
+
+def preview_b2_batch(
+    database: Path, matrix_path: Path, *, identity_resolution_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    matrix = load_b2_factor_matrix(matrix_path)
+    identity_manifest = (
+        load_b2_identity_resolutions(identity_resolution_path) if identity_resolution_path else None
+    )
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        return _b2_public(_b2_plan_from_connection(
+            connection, matrix, _b2_effective_boundary(now), identity_manifest,
+        ))
+
+
+def _apply_b2_operations(connection: sqlite3.Connection, operations: list[dict[str, Any]], effective_from: str) -> None:
+    tables = {"profile": "monitoring_endpoint_profiles", "mapping": "monitoring_factor_mappings",
+              "schedule": "monitoring_business_schedules"}
+    for operation in operations:
+        if operation["close_id"] is not None:
+            cursor = connection.execute(
+                f"UPDATE {tables[operation['kind']]} SET effective_to=? WHERE id=? AND enabled=1 AND (effective_to IS NULL OR effective_to>?)",
+                (effective_from, operation["close_id"], effective_from),
+            )
+            if cursor.rowcount != 1:
+                raise ProvisionError("B2 configuration changed while applying")
+        values = operation["values"]
+        if operation["kind"] == "profile":
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(endpoint_id,business_site_id,rtu_asset_code,instrument_asset_code,
+                   timezone,enabled,expected_granularity,expected_interval_seconds,effective_from,effective_to)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                tuple(values[key] for key in ("endpoint_id", "business_site_id", "rtu_asset_code", "instrument_asset_code",
+                      "timezone", "enabled", "expected_granularity", "expected_interval_seconds", "effective_from", "effective_to")),
+            )
+        elif operation["kind"] == "mapping":
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                   expected_interval_seconds,tolerance_seconds,effective_from,effective_to,enabled)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                tuple(values[key] for key in ("endpoint_id", "protocol_code", "business_metric", "instrument_asset_code",
+                      "expected_interval_seconds", "tolerance_seconds", "effective_from", "effective_to", "enabled")),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(endpoint_id,protocol_code,timezone,interval_seconds,
+                   anchor_local_time,tolerance_seconds,result_delay_seconds,effective_from,effective_to,enabled)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                tuple(values[key] for key in ("endpoint_id", "protocol_code", "timezone", "interval_seconds",
+                      "anchor_local_time", "tolerance_seconds", "result_delay_seconds",
+                      "effective_from", "effective_to", "enabled")),
+            )
+
+
+def apply_b2_batch(
+    database: Path, matrix_path: Path, *, expected_fingerprint: str, effective_from: str,
+    offline_confirmed: bool, identity_resolution_path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not offline_confirmed or not expected_fingerprint:
+        raise ProvisionError("B2 batch apply requires offline confirmation and preview fingerprint")
+    locked_boundary = _utc_time(effective_from, "B2 effective_from")
+    current_value = now or datetime.now(timezone.utc)
+    if current_value.tzinfo is None:
+        raise ProvisionError("B2 apply time must include timezone")
+    current = current_value.astimezone(timezone.utc).replace(microsecond=0)
+    if datetime.fromisoformat(locked_boundary) < current:
+        raise ProvisionError("B2 effective boundary has passed; create a new preview")
+    matrix = load_b2_factor_matrix(matrix_path)
+    identity_manifest = (
+        load_b2_identity_resolutions(identity_resolution_path) if identity_resolution_path else None
+    )
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = _b2_plan_from_connection(connection, matrix, locked_boundary, identity_manifest)
+            if plan["hard_error_count"]:
+                raise ProvisionError("B2 batch contains hard configuration errors")
+            if plan["fingerprint"] != expected_fingerprint:
+                raise ProvisionError("B2 preview fingerprint or input matrix changed")
+            _apply_b2_operations(connection, plan["_operations"], locked_boundary)
+            verify_station_monitoring_schema(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    outcome = _b2_public(plan)
+    outcome.update({"action": "b2-batch-apply", "result": "applied", "write_count": len(plan["_operations"])})
+    return outcome
+
+
+def verify_b2_batch(
+    database: Path, matrix_path: Path, *, effective_from: str,
+    identity_resolution_path: Path | None = None,
+) -> dict[str, Any]:
+    boundary = _utc_time(effective_from, "B2 effective_from")
+    matrix = load_b2_factor_matrix(matrix_path)
+    identity_manifest = (
+        load_b2_identity_resolutions(identity_resolution_path) if identity_resolution_path else None
+    )
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        plan = _b2_plan_from_connection(connection, matrix, boundary, identity_manifest)
+        errors = list(plan["hard_errors"])
+        errors.extend({
+            "endpoint_id": operation["values"]["endpoint_id"],
+            **({"protocol_code": operation["values"]["protocol_code"]}
+               if operation["kind"] != "profile" else {}),
+            "category": f"{operation['kind']}_configuration_not_current",
+        } for operation in plan["_operations"])
+        profile_count = mapping_count = schedule_count = 0
+        for endpoint in plan["endpoints"]:
+            endpoint_id = endpoint["endpoint_id"]
+            profiles = connection.execute(
+                """SELECT * FROM monitoring_endpoint_profiles WHERE endpoint_id=? AND enabled=1 AND effective_from<=?
+                   AND (effective_to IS NULL OR effective_to>?) ORDER BY effective_from DESC""",
+                (endpoint_id, boundary, boundary),
+            ).fetchall()
+            if len(profiles) != 1 or profiles[0]["business_site_id"] != endpoint["business_site_id"] \
+                    or profiles[0]["timezone"] != B2_TIMEZONE \
+                    or profiles[0]["expected_interval_seconds"] != B2_INTERVAL_SECONDS:
+                errors.append({"endpoint_id": endpoint_id, "category": "profile_verification_failed"})
+            else:
+                profile_count += 1
+            for factor in endpoint["factors"]:
+                code = factor["protocol_code"]
+                mappings = connection.execute(
+                    """SELECT * FROM monitoring_factor_mappings WHERE endpoint_id=? AND protocol_code=? AND enabled=1
+                       AND effective_from<=? AND (effective_to IS NULL OR effective_to>?) ORDER BY effective_from DESC""",
+                    (endpoint_id, code, boundary, boundary),
+                ).fetchall()
+                if len(mappings) != 1 or mappings[0]["expected_interval_seconds"] != B2_INTERVAL_SECONDS \
+                        or mappings[0]["tolerance_seconds"] != B2_TOLERANCE_SECONDS:
+                    errors.append({"endpoint_id": endpoint_id, "protocol_code": code,
+                                   "category": "mapping_verification_failed"})
+                else:
+                    mapping_count += 1
+                schedules = connection.execute(
+                    """SELECT * FROM monitoring_business_schedules WHERE endpoint_id=?
+                       AND (protocol_code=? OR protocol_code IS NULL) AND enabled=1
+                       AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
+                       ORDER BY CASE WHEN protocol_code=? THEN 0 ELSE 1 END,effective_from DESC""",
+                    (endpoint_id, code, boundary, boundary, code),
+                ).fetchall()
+                if not schedules or schedules[0]["protocol_code"] != code \
+                        or schedules[0]["interval_seconds"] != B2_INTERVAL_SECONDS \
+                        or schedules[0]["tolerance_seconds"] != B2_TOLERANCE_SECONDS \
+                        or schedules[0]["result_delay_seconds"] != B2_RESULT_DELAY_SECONDS \
+                        or schedules[0]["timezone"] != B2_TIMEZONE \
+                        or schedules[0]["anchor_local_time"] != B2_ANCHOR_LOCAL_TIME:
+                    errors.append({"endpoint_id": endpoint_id, "protocol_code": code,
+                                   "category": "schedule_verification_failed"})
+                else:
+                    schedule_count += 1
+            if connection.execute(
+                """SELECT 1 FROM monitoring_endpoint_profiles
+                   WHERE endpoint_id=? AND effective_from=? AND expected_interval_seconds=3600 LIMIT 1""",
+                (endpoint_id, boundary),
+            ).fetchone():
+                errors.append({"endpoint_id": endpoint_id, "category": "one_hour_configuration_detected",
+                               "table": "monitoring_endpoint_profiles"})
+            for factor in endpoint["factors"]:
+                code = factor["protocol_code"]
+                for table, interval_column in (("monitoring_factor_mappings", "expected_interval_seconds"),
+                                               ("monitoring_business_schedules", "interval_seconds")):
+                    if connection.execute(
+                        f"""SELECT 1 FROM {table} WHERE endpoint_id=? AND protocol_code=?
+                            AND effective_from=? AND {interval_column}=3600 LIMIT 1""",
+                        (endpoint_id, code, boundary),
+                    ).fetchone():
+                        errors.append({"endpoint_id": endpoint_id, "protocol_code": code,
+                                       "category": "one_hour_configuration_detected", "table": table})
+    return {
+        "action": "b2-batch-verify", "result": "verified" if not errors else "conflicted",
+        "effective_from": boundary, "eligible_endpoint_count": plan["eligible_endpoint_count"],
+        "eligible_factor_count": plan["eligible_factor_count"], "profile_count": profile_count,
+        "mapping_count": mapping_count, "schedule_count": schedule_count,
+        "soft_difference_count": plan["soft_difference_count"], "soft_differences": plan["soft_differences"],
+        "hard_error_count": len(errors), "hard_errors": errors,
+    }
+
+
+def load_b2_identity_resolutions(path: Path) -> dict[str, Any]:
+    """Load product-approved aliases without accepting credentials or observed data."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProvisionError("B2 identity resolution file cannot be read") from exc
+    if (not isinstance(document, dict) or document.get("contains_credentials") is not False
+            or not isinstance(document.get("approved_resolutions"), list)):
+        raise ProvisionError("B2 identity resolution fields are invalid")
+    resolutions = []
+    station_codes = set()
+    canonical_names = set()
+    for index, item in enumerate(document["approved_resolutions"]):
+        if not isinstance(item, dict) or set(item) != {
+                "canonical_system_name", "station_code", "approved_aliases"}:
+            raise ProvisionError("B2 identity resolution item is invalid")
+        canonical_name = item["canonical_system_name"]
+        station_code = item["station_code"]
+        aliases = item["approved_aliases"]
+        if (not isinstance(canonical_name, str) or not canonical_name.strip()
+                or not isinstance(station_code, str) or not station_code.strip()
+                or len(station_code) > 128 or not station_code.isascii()
+                or not isinstance(aliases, list)
+                or any(not isinstance(alias, str) or not alias.strip() for alias in aliases)):
+            raise ProvisionError("B2 identity resolution item is invalid")
+        canonical_name = canonical_name.strip()
+        station_code = station_code.strip()
+        aliases = sorted({alias.strip() for alias in aliases})
+        if canonical_name in aliases or station_code in station_codes or canonical_name in canonical_names:
+            raise ProvisionError("B2 identity resolutions contain duplicate targets")
+        station_codes.add(station_code)
+        canonical_names.add(canonical_name)
+        resolutions.append({
+            "source_index": index, "canonical_name": canonical_name,
+            "station_code": station_code, "aliases": aliases,
+        })
+    canonical = {"report_type": document.get("report_type"), "resolutions": resolutions}
+    encoded = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "resolutions": resolutions,
+        "source_fingerprint": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16],
+    }
+
+
+def _b2_identity_resolution_plan(connection: sqlite3.Connection, manifest: dict[str, Any]) -> dict[str, Any]:
+    verify_station_monitoring_schema(connection)
+    sites_by_name: dict[str, list[sqlite3.Row]] = {}
+    for row in connection.execute("SELECT id,name FROM sites"):
+        sites_by_name.setdefault(str(row["name"]).strip(), []).append(row)
+    operations = []
+    errors = []
+    for resolution in manifest["resolutions"]:
+        context = {"source_index": resolution["source_index"]}
+        sites = sites_by_name.get(resolution["canonical_name"], [])
+        if len(sites) != 1:
+            errors.append(dict(context, category="canonical_site_unavailable"))
+            continue
+        site_id = int(sites[0]["id"])
+        endpoint = connection.execute(
+            "SELECT * FROM trusted_endpoints WHERE station_code=?", (resolution["station_code"],)
+        ).fetchone()
+        if endpoint is None:
+            action = "create_bind"
+            endpoint_id = None
+        elif not endpoint["enabled"] or endpoint["endpoint_state"] == "disabled":
+            errors.append(dict(context, category="approved_identity_disabled"))
+            continue
+        elif endpoint["business_site_id"] is None and endpoint["endpoint_state"] == "unbound":
+            action = "bind"
+            endpoint_id = int(endpoint["id"])
+        elif endpoint["business_site_id"] == site_id and endpoint["endpoint_state"] == "bound":
+            action = "reuse"
+            endpoint_id = int(endpoint["id"])
+        else:
+            errors.append(dict(context, category="approved_identity_bound_elsewhere"))
+            continue
+        superseded = list(connection.execute(
+            """SELECT id FROM trusted_endpoints
+               WHERE business_site_id=? AND station_code<>? AND enabled=1 AND endpoint_state='bound'""",
+            (site_id, resolution["station_code"]),
+        ))
+        if len(superseded) > 1:
+            errors.append(dict(context, category="ambiguous_superseded_identity"))
+            continue
+        operations.append({
+            "source_index": resolution["source_index"], "site_id": site_id,
+            "station_code": resolution["station_code"], "endpoint_id": endpoint_id,
+            "action": action, "retire_endpoint_ids": [int(row["id"]) for row in superseded],
+        })
+    locked = {
+        "source_fingerprint": manifest["source_fingerprint"], "operations": operations, "errors": errors,
+    }
+    encoded = json.dumps(locked, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "action": "b2-identities-plan", "result": "ready" if not errors else "conflicted",
+        "source_fingerprint": manifest["source_fingerprint"],
+        "fingerprint": "sha256:" + hashlib.sha256(encoded).hexdigest()[:16],
+        "resolution_count": len(manifest["resolutions"]), "planned_count": len(operations),
+        "create_count": sum(item["action"] == "create_bind" for item in operations),
+        "bind_count": sum(item["action"] == "bind" for item in operations),
+        "reuse_count": sum(item["action"] == "reuse" for item in operations),
+        "retire_count": sum(len(item["retire_endpoint_ids"]) for item in operations),
+        "hard_error_count": len(errors), "hard_errors": errors, "_operations": operations,
+    }
+
+
+def _b2_identity_public(plan: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in plan.items() if not key.startswith("_")}
+
+
+def preview_b2_identity_resolutions(database: Path, resolution_path: Path) -> dict[str, Any]:
+    manifest = load_b2_identity_resolutions(resolution_path)
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        return _b2_identity_public(_b2_identity_resolution_plan(connection, manifest))
+
+
+def apply_b2_identity_resolutions(
+    database: Path, resolution_path: Path, *, credential: bytes, expected_fingerprint: str,
+    offline_confirmed: bool, retire_confirmed: bool,
+) -> dict[str, Any]:
+    if not offline_confirmed or not expected_fingerprint:
+        raise ProvisionError("B2 identity apply requires offline confirmation and preview fingerprint")
+    if not credential or len(credential) > 128 or not credential.isascii():
+        raise ProvisionError("HJ212 credential must be non-empty ASCII text")
+    manifest = load_b2_identity_resolutions(resolution_path)
+    expected_hmac = credential_hmac(credential, _credential_pepper())
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = _b2_identity_resolution_plan(connection, manifest)
+            if plan["hard_error_count"]:
+                raise ProvisionError("B2 identity resolutions contain hard errors")
+            if plan["fingerprint"] != expected_fingerprint:
+                raise ProvisionError("B2 identity resolutions changed after preview")
+            if plan["retire_count"] and not retire_confirmed:
+                raise ProvisionError("explicit confirmation is required before retiring superseded identities")
+            writes = 0
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            for operation in plan["_operations"]:
+                endpoint = (connection.execute("SELECT * FROM trusted_endpoints WHERE id=?", (operation["endpoint_id"],)).fetchone()
+                            if operation["endpoint_id"] is not None else None)
+                if endpoint is not None and endpoint["credential_hmac"] != expected_hmac:
+                    raise ProvisionError("approved identity credential differs from the private input")
+                for endpoint_id in operation["retire_endpoint_ids"]:
+                    old = connection.execute("SELECT credential_hmac FROM trusted_endpoints WHERE id=?", (endpoint_id,)).fetchone()
+                    if old is None or old["credential_hmac"] != expected_hmac:
+                        raise ProvisionError("superseded identity credential differs from the private input")
+                    connection.execute(
+                        "UPDATE trusted_endpoints SET enabled=0,endpoint_state='disabled',updated_at=? WHERE id=?",
+                        (now, endpoint_id),
+                    )
+                    writes += 1
+                if operation["action"] == "create_bind":
+                    connection.execute(
+                        """INSERT INTO trusted_endpoints(
+                               station_code,credential_hmac,business_site_id,enabled,endpoint_state,updated_at)
+                           VALUES (?,?,?,1,'bound',?)""",
+                        (operation["station_code"], expected_hmac, operation["site_id"], now),
+                    )
+                    writes += 1
+                elif operation["action"] == "bind":
+                    connection.execute(
+                        """UPDATE trusted_endpoints SET business_site_id=?,endpoint_state='bound',updated_at=?
+                           WHERE id=? AND enabled=1 AND endpoint_state='unbound' AND business_site_id IS NULL""",
+                        (operation["site_id"], now, operation["endpoint_id"]),
+                    )
+                    if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                        raise ProvisionError("B2 identity changed while applying")
+                    writes += 1
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    outcome = _b2_identity_public(plan)
+    outcome.update({"action": "b2-identities-apply", "result": "applied", "write_count": writes})
+    return outcome
+
+
+def verify_b2_identity_resolutions(
+    database: Path, resolution_path: Path, *, credential: bytes,
+) -> dict[str, Any]:
+    if not credential or len(credential) > 128 or not credential.isascii():
+        raise ProvisionError("HJ212 credential must be non-empty ASCII text")
+    manifest = load_b2_identity_resolutions(resolution_path)
+    expected_hmac = credential_hmac(credential, _credential_pepper())
+    with closing(_connect(_require_existing_database(Path(database)))) as connection:
+        verified = 0
+        for resolution in manifest["resolutions"]:
+            sites = connection.execute(
+                "SELECT id FROM sites WHERE name=?", (resolution["canonical_name"],)
+            ).fetchall()
+            if len(sites) != 1:
+                raise ProvisionError("canonical site is unavailable during verification")
+            endpoint = connection.execute(
+                """SELECT * FROM trusted_endpoints
+                   WHERE station_code=? AND business_site_id=? AND enabled=1 AND endpoint_state='bound'""",
+                (resolution["station_code"], sites[0]["id"]),
+            ).fetchone()
+            if endpoint is None or endpoint["credential_hmac"] != expected_hmac:
+                raise ProvisionError("approved identity is unavailable during verification")
+            if connection.execute(
+                """SELECT 1 FROM trusted_endpoints
+                   WHERE business_site_id=? AND id<>? AND enabled=1 AND endpoint_state='bound' LIMIT 1""",
+                (sites[0]["id"], endpoint["id"]),
+            ).fetchone():
+                raise ProvisionError("canonical site has another active identity")
+            verified += 1
+    return {
+        "action": "b2-identities-verify", "result": "verified",
+        "source_fingerprint": manifest["source_fingerprint"], "verified_count": verified,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline station-monitoring provisioning")
     parser.add_argument("action", choices=(
         "plan", "apply", "verify", "disable",
+        "b2-batch-plan", "b2-batch-apply", "b2-batch-verify",
+        "b2-identities-plan", "b2-identities-apply", "b2-identities-verify",
         "station-codes-plan", "station-codes-apply", "station-codes-verify",
         "station-identities-plan", "station-identities-apply", "station-identities-verify",
         "station-identities-bind-plan", "station-identities-bind-apply", "station-identities-bind-verify",
     ))
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--matrix", type=Path)
+    parser.add_argument("--identity-resolutions", type=Path)
     parser.add_argument("--workbook", type=Path)
     parser.add_argument("--template", type=Path)
     parser.add_argument("--expected-fingerprint")
+    parser.add_argument("--effective-from")
     parser.add_argument("--expected-accepted-rows", type=int)
     parser.add_argument("--expected-ignored-rows", type=int)
     parser.add_argument("--target-business-site-id", type=int)
@@ -1120,8 +1789,57 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reason")
     arguments = parser.parse_args(argv)
     try:
-        if arguments.action.startswith("station-identities-"):
-            if arguments.config is not None or arguments.workbook is None or arguments.template is not None:
+        if arguments.action.startswith("b2-identities-"):
+            if (arguments.identity_resolutions is None or arguments.config is not None
+                    or arguments.matrix is not None or arguments.workbook is not None
+                    or arguments.template is not None):
+                raise ProvisionError("B2 identity actions require --identity-resolutions only")
+            if arguments.action == "b2-identities-plan":
+                outcome = preview_b2_identity_resolutions(arguments.database, arguments.identity_resolutions)
+            elif arguments.action == "b2-identities-apply":
+                if not arguments.credential_stdin:
+                    raise ProvisionError("B2 identity apply requires private credential stdin")
+                outcome = apply_b2_identity_resolutions(
+                    arguments.database, arguments.identity_resolutions,
+                    credential=_read_hj212_credential_from_stdin(),
+                    expected_fingerprint=arguments.expected_fingerprint or "",
+                    offline_confirmed=arguments.offline_confirmation,
+                    retire_confirmed=arguments.confirm_disable,
+                )
+            else:
+                if not arguments.credential_stdin:
+                    raise ProvisionError("B2 identity verify requires private credential stdin")
+                outcome = verify_b2_identity_resolutions(
+                    arguments.database, arguments.identity_resolutions,
+                    credential=_read_hj212_credential_from_stdin(),
+                )
+        elif arguments.action.startswith("b2-batch-"):
+            if (arguments.matrix is None or arguments.config is not None or arguments.workbook is not None
+                    or arguments.template is not None):
+                raise ProvisionError("B2 batch actions require --matrix and optionally --identity-resolutions")
+            if arguments.action == "b2-batch-plan":
+                outcome = preview_b2_batch(
+                    arguments.database, arguments.matrix,
+                    identity_resolution_path=arguments.identity_resolutions,
+                )
+            elif arguments.action == "b2-batch-apply":
+                if not arguments.effective_from:
+                    raise ProvisionError("B2 batch apply requires the preview effective boundary")
+                outcome = apply_b2_batch(
+                    arguments.database, arguments.matrix, expected_fingerprint=arguments.expected_fingerprint or "",
+                    effective_from=arguments.effective_from, offline_confirmed=arguments.offline_confirmation,
+                    identity_resolution_path=arguments.identity_resolutions,
+                )
+            else:
+                if not arguments.effective_from:
+                    raise ProvisionError("B2 batch verify requires the applied effective boundary")
+                outcome = verify_b2_batch(
+                    arguments.database, arguments.matrix, effective_from=arguments.effective_from,
+                    identity_resolution_path=arguments.identity_resolutions,
+                )
+        elif arguments.action.startswith("station-identities-"):
+            if (arguments.config is not None or arguments.workbook is None or arguments.template is not None
+                    or arguments.identity_resolutions is not None):
                 raise ProvisionError("station identity actions require --workbook without --template")
             binding_action = arguments.action.startswith("station-identities-bind-")
             if binding_action != (arguments.target_business_site_id is not None):
@@ -1173,7 +1891,8 @@ def main(argv: list[str] | None = None) -> int:
                 outcome.update(summary(preview))
                 outcome["result"] = "applied"
         elif arguments.action.startswith("station-codes-"):
-            if arguments.config is not None or arguments.workbook is None or arguments.template is None:
+            if (arguments.config is not None or arguments.workbook is None or arguments.template is None
+                    or arguments.identity_resolutions is not None):
                 raise ProvisionError("station-code actions require --workbook and --template only")
             template = load_station_code_import_template(arguments.template)
             if arguments.action == "station-codes-plan":
@@ -1204,7 +1923,8 @@ def main(argv: list[str] | None = None) -> int:
                 outcome = _station_code_import_summary(preview, template)
                 outcome.update({"result": "applied", "disabled_endpoints": applied["disabled_endpoints"]})
         else:
-            if arguments.config is None or arguments.workbook is not None or arguments.template is not None:
+            if (arguments.config is None or arguments.workbook is not None or arguments.template is not None
+                    or arguments.identity_resolutions is not None):
                 raise ProvisionError("single-endpoint actions require --config only")
             configuration = load_configuration(arguments.config)
             credential = _read_credential_from_stdin() if arguments.action == "apply" and arguments.credential_stdin else None
@@ -1222,6 +1942,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"action": arguments.action, "result": "failed", "reason": "database operation could not be completed"}), file=sys.stderr)
         return 3
     print(json.dumps(outcome, ensure_ascii=True, sort_keys=True))
+    if arguments.action in {"b2-batch-verify", "b2-identities-verify"} and outcome["result"] != "verified":
+        return 2
     return 0
 
 

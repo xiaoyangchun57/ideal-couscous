@@ -9,11 +9,18 @@ function resolveUploadUrl(path) {
 }
 
 function uploadStoragePath(url) {
-  if (typeof url !== 'string' || !url || url.trim() !== url || /[?#]/.test(url)) return '';
-  if (url.startsWith('/uploads/')) return url.length > '/uploads/'.length ? url : '';
+  if (typeof url !== 'string' || !url || url.trim() !== url) return '';
+  if (url.includes('#')) return '';
+  const queryIndex = url.indexOf('?');
+  const cleanUrl = queryIndex >= 0 ? url.slice(0, queryIndex) : url;
+  if (queryIndex >= 0) {
+    const query = url.slice(queryIndex + 1);
+    if (!/^ticket=[A-Za-z0-9._~-]+$/.test(query)) return '';
+  }
+  if (cleanUrl.startsWith('/uploads/')) return cleanUrl.length > '/uploads/'.length ? cleanUrl : '';
   const prefix = CONFIG.BASE_URL.replace(/\/$/, '');
   const absolutePrefix = prefix + '/uploads/';
-  if (url.startsWith(absolutePrefix) && url.length > absolutePrefix.length) return url.slice(prefix.length);
+  if (cleanUrl.startsWith(absolutePrefix) && cleanUrl.length > absolutePrefix.length) return cleanUrl.slice(prefix.length);
   return '';
 }
 

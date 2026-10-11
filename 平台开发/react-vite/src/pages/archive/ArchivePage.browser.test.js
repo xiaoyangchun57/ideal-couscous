@@ -21,7 +21,8 @@ function payload(url, total = 205) {
     items: Array.from({ length: Math.max(0, Math.min(100, total - start)) }, (_, offset) => {
       const id = start + offset + 1;
       return {
-        id, item_name: `${history ? '历史' : '当前'}档案记录${id}`, stored_path: image,
+        id, item_name: `${history ? '历史' : '当前'}档案记录${id}`,
+        stored_path: image, display_url: image,
         site_name: '隔离档案测试站', source_type: 'inspection', review_status: history ? 'rejected' : 'approved',
         taken_at: '2026-09-15 08:00:00', original_filename: `isolated-archive-${id}.png`,
       };

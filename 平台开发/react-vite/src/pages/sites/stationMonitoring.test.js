@@ -4,6 +4,8 @@ import {
   AXIS_META,
   MONITORING_STATUS_META,
   axisView,
+  communicationStatusView,
+  cycleStatusView,
   hasAdminRole,
   mergeMonitoringSites,
   monitoringStatusView,
@@ -14,6 +16,11 @@ import {
   monitoringTrendView,
   monitoringFactorName,
   formatMonitoringTime,
+  clearSiteDirectorySnapshots,
+  readSiteDirectorySnapshot,
+  siteDirectoryLoadMode,
+  stationDirectorySnapshotKey,
+  writeSiteDirectorySnapshot,
 } from './stationMonitoring.js';
 
 test('monitoring status metadata covers the eight product states', () => {
@@ -124,6 +131,52 @@ test('trend view preserves the server window, unit, coverage and zero values', (
   });
   assert.equal(monitoringCoverageLabel(suspectOnly), '0.0% (0/6)');
   assert.equal(suspectOnly.suspectPoints, 1);
+});
+
+test('site directory snapshot survives page re-entry but is isolated by session identity roles capabilities and scope', () => {
+  clearSiteDirectorySnapshots();
+  const user = {
+    id: 7, username: 'operator-a', roles: ['reviewer', 'operator'],
+    capabilities: { station_monitoring_public: true, archive_read: true },
+  };
+  const key = stationDirectorySnapshotKey(user, 'mine', 'session-a');
+  writeSiteDirectorySnapshot(key, {
+    ready: true, rows: [{ id: 9, name: '缓存站点' }], summary: { total: 1 },
+    scopeFacts: { scope: 'mine', availableScopes: ['mine'] },
+  });
+  const restored = readSiteDirectorySnapshot(key);
+  assert.equal(siteDirectoryLoadMode(restored), 'refresh');
+  assert.deepEqual(restored.rows.map((item) => item.id), [9]);
+  assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(user, 'all', 'session-a')), null);
+  assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(
+    { ...user, roles: ['operator'] }, 'mine', 'session-a')),
+  null);
+  assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(
+    { ...user, capabilities: { station_monitoring_public: false, archive_read: true } },
+    'mine', 'session-a')),
+  null);
+  assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(user, 'mine', 'session-b')), null);
+  assert.equal(siteDirectoryLoadMode(null), 'initial');
+  clearSiteDirectorySnapshots();
+});
+
+test('communication and latest cycle remain independent while trend gaps stay null', () => {
+  assert.equal(communicationStatusView({ status: 'normal' }).label, '接收正常');
+  assert.equal(cycleStatusView({ status: 'incomplete' }).label, '结果不完整');
+  const trend = monitoringTrendView({
+    points: [
+      { scheduled_at: '2026-10-09T00:00:00+08:00', status: 'value', value: 7.1 },
+      { scheduled_at: '2026-10-09T04:00:00+08:00', status: 'missing', value: null },
+      { scheduled_at: '2026-10-09T08:00:00+08:00', status: 'review_required', value: null },
+    ],
+    coverage: {},
+  });
+  assert.deepEqual(monitoringTrendChartOption(trend).series[0].data, [
+    ['2026-10-09T00:00:00+08:00', 7.1],
+    ['2026-10-09T04:00:00+08:00', null],
+    ['2026-10-09T08:00:00+08:00', null],
+  ]);
+  assert.equal(monitoringTrendChartOption(trend).series[0].connectNulls, false);
 });
 
 test('observation axis exposes the next authoritative business slot', () => {

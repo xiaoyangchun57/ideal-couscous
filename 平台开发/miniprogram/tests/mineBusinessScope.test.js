@@ -72,6 +72,13 @@ test('mine page does not duplicate parts application, issue, order or fulfillmen
   assert.doesNotMatch(mineWxml, /parts|备件|领用|下单|到货/i);
 });
 
+test('mine does not duplicate the station tab entry', () => {
+  const mineJs = source('pages/mine/mine.js');
+  const mineWxml = source('pages/mine/mine.wxml');
+  assert.doesNotMatch(mineJs, /goResponsibleSites/);
+  assert.doesNotMatch(mineWxml, /bindtap="goResponsibleSites"|>负责站点</);
+});
+
 test('mine report entry keeps the existing route and names the business it opens', () => {
   const mineWxml = source('pages/mine/mine.wxml');
   const reportsWxml = source('pages/reports/reports.wxml');

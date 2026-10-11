@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty,
@@ -7,9 +7,10 @@ import {
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
   CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
-  StarOutlined, FolderOpenOutlined, DeleteOutlined,
-  ClearOutlined, EditOutlined, PlusOutlined,
+  StarOutlined, FolderOpenOutlined,
+  ClearOutlined, PlusOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
@@ -1063,7 +1064,7 @@ export default function PlanSchedulesPage() {
       primaryAction={<Space>
         {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
         {isAdmin && <Button icon={<FileSearchOutlined />} onClick={openPurgeAudits}>删除记录</Button>}
-        {canCleanup && <Button icon={<DeleteOutlined />} danger onClick={openCleanup}>清理无效数据</Button>}
+        {canCleanup && <Button icon={<HoverGifIcon name="trash-bin" size={14} />} danger onClick={openCleanup}>清理无效数据</Button>}
       </Space>}
       statusItems={[
         { key: 'total', label: '当前结果', value: stats.total, color: tokens.colorText, always: true },
@@ -1181,7 +1182,7 @@ export default function PlanSchedulesPage() {
         footer={detail && (canCancelDetail || canEditDetail || canReviewDetail || canPurgeDetail) ? (
           <div className="plan-detail-actions">
             {canPurgeDetail && (
-              <Button danger icon={<DeleteOutlined />} onClick={openPlanPurge}
+              <Button danger icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={openPlanPurge}
                 loading={purgeLoading}>彻底删除无效计划</Button>
             )}
             {canCancelDetail && (
@@ -1189,7 +1190,7 @@ export default function PlanSchedulesPage() {
                 loading={cancelLoading}>取消计划</Button>
             )}
             {canEditDetail && (
-              <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(detail)}>编辑计划</Button>
+              <Button type="primary" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => openEditor(detail)}>编辑计划</Button>
             )}
             {canReviewDetail && (
               <>
@@ -1498,7 +1499,7 @@ export default function PlanSchedulesPage() {
                 return <div className="plan-edit-day" key={date}>
                   <div className="plan-edit-day__header">
                     <Space><Text strong>{date}</Text><Tag>{weekdayOf(date)}</Tag></Space>
-                    <Button type="text" danger icon={<DeleteOutlined />} aria-label={`删除${date}安排`} onClick={() => removeEditDay(date)} />
+                    <Button type="text" danger icon={<HoverGifIcon name="trash-bin" size={14} />} aria-label={`删除${date}安排`} onClick={() => removeEditDay(date)} />
                   </div>
                   <div className="plan-edit-form__row">
                     <div>
@@ -1549,7 +1550,7 @@ export default function PlanSchedulesPage() {
                     <InputNumber min={1} max={9999} precision={0} value={Number(part.quantity || 1)}
                       addonAfter={editParts.find(item => Number(item.id) === Number(part.part_id))?.unit || '件'}
                       onChange={quantity => updateEditPart(index, { quantity: Number(quantity || 1) })} />
-                    <Button danger icon={<DeleteOutlined />} aria-label={`移除备件${index + 1}`} onClick={() => removeEditPart(index)} />
+                    <Button danger icon={<HoverGifIcon name="trash-bin" size={14} />} aria-label={`移除备件${index + 1}`} onClick={() => removeEditPart(index)} />
                   </Space.Compact>
                 ))}
                 {!editDraft.spare_parts?.length && <Text type="secondary">无备件需求</Text>}
@@ -1668,7 +1669,7 @@ export default function PlanSchedulesPage() {
               系统按原计划的相对日期复用站点、车辆和备件，并重新校验冲突；一次性工单、审批和执行记录不会复制。
             </Text>
             <div style={{ textAlign: 'right' }}>
-              <Button danger type="text" icon={<DeleteOutlined />} onClick={deleteFavorite} loading={favoriteLoading}>删除此收藏</Button>
+              <Button danger type="text" icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={deleteFavorite} loading={favoriteLoading}>删除此收藏</Button>
             </div>
           </div>
         )}

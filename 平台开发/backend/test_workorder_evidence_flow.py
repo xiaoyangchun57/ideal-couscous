@@ -478,6 +478,8 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 headers=self.headers('operator-token'),
                 json={'image': base64.b64encode(b'web-failure' * 32).decode('ascii')})
         self.assertEqual(web.status_code, 500)
+        self.assertEqual(web.json['code'], 'WORKORDER_PHOTO_SAVE_FAILED')
+        self.assertTrue(web.json['retryable'])
 
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")

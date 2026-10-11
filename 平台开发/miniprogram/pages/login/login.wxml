@@ -2,7 +2,7 @@
   <!-- 品牌区 -->
   <view class="brand-area">
     <image class="brand-logo" src="/images/home-logo.png" mode="aspectFit" />
-    <text class="brand-name">{{mustChangePassword ? '设置新密码' : '水质智慧运维'}}</text>
+    <text class="brand-name">{{mustChangePassword ? '设置新密码' : '大禹质水'}}</text>
     <text class="brand-sub">{{mustChangePassword ? '临时密码验证成功，修改后进入系统' : '专业水质监测运维管理'}}</text>
   </view>
 

@@ -7,7 +7,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import EChart from '../../components/EChart';
 import {
-  AXIS_META, axisView, capabilityLabel, formatMonitoringTime, monitoringCoverageLabel, monitoringStatusView,
+  AXIS_META, axisView, capabilityLabel, communicationStatusView, cycleStatusView, formatMonitoringTime, monitoringCoverageLabel, monitoringStatusView,
   monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption, monitoringTrendView,
 } from './stationMonitoring';
 import './SiteMonitoringPage.css';
@@ -47,6 +47,32 @@ function LatestValues({ values }) {
         </List.Item>
       )}
     />
+  );
+}
+
+function LatestCycle({ cycle }) {
+  const view = cycleStatusView(cycle);
+  const factors = Array.isArray(cycle?.factors) ? cycle.factors : [];
+  return (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} items={[
+        { key: 'status', label: '周期状态', children: <Tag color={view.color}>{view.label}</Tag> },
+        { key: 'slot', label: '检测时点', children: formatMonitoringTime(cycle?.scheduled_at) },
+        { key: 'deadline', label: '缺测截止', children: formatMonitoringTime(cycle?.deadline_at) },
+        { key: 'count', label: '完整度', children: `${cycle?.formed_count || 0}/${cycle?.expected_count || 0}` },
+        { key: 'last-complete', label: '最近完整时点（辅助）', children: formatMonitoringTime(cycle?.latest_complete_cycle_at) },
+      ]} />
+      {factors.length ? <List size="small" dataSource={factors} renderItem={(item) => {
+        const labels = { value: '已形成', pending: '形成中', missing: '缺测', review_required: '待核对' };
+        return <List.Item>
+          <Space direction="vertical" size={0}>
+            <Text strong>{monitoringFactorName(item)}</Text>
+            <Text type="secondary">{labels[item.status] || item.status || '待确认'}{item.reason ? `：${item.reason}` : ''}</Text>
+          </Space>
+          <Text>{item.status === 'value' ? `${item.value} ${item.standard_unit || ''}` : '—'}</Text>
+        </List.Item>;
+      }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无检测周期配置" />}
+    </Space>
   );
 }
 
@@ -149,6 +175,8 @@ export default function SiteMonitoringPage() {
   const site = visibleData.site || {};
   const monitoring = visibleData.monitoring || {};
   const status = monitoringStatusView(site);
+  const communication = communicationStatusView(monitoring.communication || site.communication);
+  const latestCycle = monitoring.latest_cycle || site.latest_cycle || {};
   const axesPayload = visibleData.axes || monitoring.axes || {};
   const axes = Object.keys(AXIS_META).map((key) => axisView(key, axesPayload[key] || {}));
   const capabilities = visibleData.capabilities || monitoring.capabilities || {};
@@ -181,6 +209,7 @@ export default function SiteMonitoringPage() {
             column={{ xs: 1, sm: 2, md: 3 }}
             items={[
               { key: 'status', label: '监测状态', children: <Tag color={status.color}>{status.label}</Tag> },
+              { key: 'communication-status', label: '数据接收', children: <Tag color={communication.color}>{communication.label}</Tag> },
               { key: 'reason', label: '主原因', children: status.reason },
               { key: 'communication', label: '最后收到报文', children: formatMonitoringTime(site.last_received_at || site.last_communication_at) },
               { key: 'observation', label: '最后有效观测', children: formatMonitoringTime(site.last_valid_observation_at) },
@@ -188,9 +217,16 @@ export default function SiteMonitoringPage() {
           />
         </Card>
 
+        <Card title="最近检测周期" extra={<Tag color={cycleStatusView(latestCycle).color}>{cycleStatusView(latestCycle).label}</Tag>}>
+          <LatestCycle cycle={latestCycle} />
+        </Card>
+
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={12}>
-            <Card title="最新有效值" extra={<Tag>{capabilityLabel(capabilities.latest)}</Tag>}><LatestValues values={monitoring.latest_values} /></Card>
+            <Card title="各因子最近可用值" extra={<Tag>{capabilityLabel(capabilities.latest)}</Tag>}>
+              <Alert type="info" showIcon message="各项可能来自不同检测周期，不代表同一次完整检测" style={{ marginBottom: 12 }} />
+              <LatestValues values={monitoring.latest_values} />
+            </Card>
           </Col>
           <Col xs={24} xl={12}>
             <Card title="最近24小时趋势" extra={<Select aria-label="趋势因子" value={selectedMetric || undefined} placeholder="选择监测因子" onChange={setSelectedMetric} options={factors.filter((item) => item.business_metric).map((item) => ({ value: item.business_metric, label: `${monitoringFactorName(item)}${item.standard_unit ? ` (${item.standard_unit})` : ''}` }))} style={{ minWidth: 180 }} />}>

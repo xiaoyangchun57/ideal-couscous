@@ -118,12 +118,11 @@ const pendingReviewItem = {
   current_photo_urls: [],
 };
 assert.deepEqual(inspectionItemPhotoRequirement(pendingReviewItem, 0), {
-  required: 0, captured: 0, missing: 0, ready: false, blocked: true,
-  blockReason: '原照片待审核，审核完成后才能补拍',
+  required: 4, captured: 0, missing: 4, ready: false,
 });
 assert.deepEqual(inspectionPhotoProgress([{ items: [pendingReviewItem] }]),
-  { req: 0, taken: 0, missing: 0 },
-  'the station summary must not invent a replacement count while review is pending');
+  { req: 4, taken: 0, missing: 4 },
+  'historical pending-review state must not block replacement capture');
 assert.deepEqual(inspectionItemPhotoRequirement({
   required_photos: 4,
   evidence_status: 'supplement_required',

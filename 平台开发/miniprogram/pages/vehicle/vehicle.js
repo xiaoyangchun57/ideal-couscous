@@ -547,6 +547,7 @@ Page({
       wx.showToast({ title: '该用车安排当前无需延续，请刷新后查看', icon: 'none' });
       return;
     }
+    this._extensionIdempotencyKey = `vehicle-extension-${application.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.setData({ extensionSheet: { open: true, applicationId: application.id, endDate: todayStr(), submitting: false } });
   },
   onCloseExtension() {
@@ -555,18 +556,36 @@ Page({
   },
   onExtensionDate(e) { this.setData({ 'extensionSheet.endDate': e.detail.value }); },
   onSubmitExtension() {
+    return this._submitExtension(false);
+  },
+  _submitExtension(confirmConflicts) {
     if (!this._ensureWritable()) return;
     const sheet = this.data.extensionSheet;
     if (!sheet.applicationId || !sheet.endDate) { wx.showToast({ title: '请选择延续截止日期', icon: 'none' }); return; }
     this.setData({ 'extensionSheet.submitting': true });
-    api.extendVehicleApplication(sheet.applicationId, sheet.endDate)
+    api.extendVehicleApplication(sheet.applicationId, sheet.endDate, {
+      confirmConflicts: !!confirmConflicts,
+      idempotencyKey: this._extensionIdempotencyKey,
+    })
       .then(() => {
         this.setData({ 'extensionSheet.open': false, 'extensionSheet.submitting': false });
+        this._extensionIdempotencyKey = '';
         wx.showToast({ title: '用车时间已延续', icon: 'success' });
         this.load();
       })
       .catch(err => {
         this.setData({ 'extensionSheet.submitting': false });
+        if (err && err.code === 'VEHICLE_EXTENSION_CONFIRM_REQUIRED') {
+          const conflicts = Array.isArray(err.conflicts) ? err.conflicts : [];
+          const names = [...new Set(conflicts.map(item => item.responsible_name).filter(Boolean))];
+          wx.showModal({
+            title: '后续计划车辆将冲突',
+            content: `${conflicts.length} 项后续安排需要更换车辆${names.length ? `，负责人：${names.join('、')}` : ''}。确认延期并通知相关人员？`,
+            confirmText: '确认延期',
+            success: result => { if (result.confirm) this._submitExtension(true); },
+          });
+          return;
+        }
         wx.showToast({ title: (err && (err.error || err.message)) || '延续失败，请重试', icon: 'none' });
       });
   },

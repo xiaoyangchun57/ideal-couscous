@@ -7,6 +7,7 @@ import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
 import { getSearchablePages } from '../config/navigation';
 import { buildGlobalSearchPath } from '../utils/shellNavigation';
+import { HoverGifIcon } from './HoverGifIcon';
 
 const { Text } = Typography;
 const resultTypeLabels = {
@@ -106,7 +107,7 @@ export default function GlobalSearch({ open, onClose }) {
         autoFocus
         allowClear
         size="large"
-        prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+        prefix={<HoverGifIcon name="magnifier" size={16} style={{ opacity: 0.45 }} />}
         placeholder="搜索页面、站点、工单或设备"
         value={query}
         onChange={(event) => setQuery(event.target.value)}

@@ -66,6 +66,11 @@ function normalizeGeneratedTasks(detail) {
         const completedItems = item.completed_items === null || item.completed_items === undefined || item.completed_items === ''
           ? null : Number(item.completed_items);
         const hasItemCounts = Number.isFinite(totalItems) && Number.isFinite(completedItems);
+        const executionPlanId = Number(item.plan_id || item.id);
+        const siteId = Number(item.site_id);
+        const canViewResult = item.status === 'completed'
+          && Number.isInteger(executionPlanId) && executionPlanId > 0
+          && Number.isInteger(siteId) && siteId > 0;
         return Object.assign({}, item, {
           key: ['site', item.plan_id || item.id || 0, executionDate, item.site_id || 0, index].join('-'),
           display_name: executionDate + ' · ' + siteName,
@@ -74,6 +79,8 @@ function normalizeGeneratedTasks(detail) {
           total_items: hasItemCounts ? totalItems : null,
           completed_items: hasItemCounts ? completedItems : null,
           item_counts_text: hasItemCounts ? `${completedItems}/${totalItems} 项` : '检查项未记录',
+          can_view_result: canViewResult,
+          result_action_text: canViewResult ? '查看记录' : '',
           legacy: false
         });
       })
@@ -144,15 +151,21 @@ Page({
     canContinueExecution: false,
     executionActionText: '进入现场作业',
     executionTarget: null,
+    canViewCompletedResult: false,
+    completedResultTarget: null,
     reworkBlockReason: '',
     executionBlockReason: '',
+    vehicleAdjustmentRequired: false,
     canFavorite: false,
     favoriting: false,
     favorite: null,
     favoriteSheet: { open: false, periodStart: '', submitting: false },
     canCancel: false,
     cancelBlockReason: '',
-    cancelSheet: { open: false, reason: '', submitting: false, error: '' }
+    cancelSheet: { open: false, reason: '', submitting: false, error: '' },
+    canAbandonChange: false,
+    abandonChangeBlockReason: '',
+    abandoningChange: false
   },
 
   onLoad(opts) {
@@ -243,6 +256,14 @@ Page({
         const favorite = (favorites || []).find(item => Number(item.source_schedule_id) === Number(this.scheduleId)) || null;
         const executionCompleted = !!res.execution_completed;
         const generatedTasks = normalizeGeneratedTasks(res);
+        const completedResultTasks = generatedTasks.mode === 'site'
+          ? generatedTasks.items.filter(item => item.can_view_result) : [];
+        const completedResultTarget = completedResultTasks.length === 1
+          ? {
+              executionPlanId: Number(completedResultTasks[0].plan_id || completedResultTasks[0].id),
+              siteId: Number(completedResultTasks[0].site_id),
+            }
+          : null;
         const headerStatus = planHeaderPresentation(res);
         const statusTone = STATUS_CLS_TO_TONE[headerStatus.cls] || 'default';
         const { totalSites, completedSites, totalItems, completedItems } = summarizeGeneratedTasks(generatedTasks);
@@ -279,12 +300,18 @@ Page({
           canContinueExecution,
           executionActionText,
           executionTarget: actionTarget,
+          canViewCompletedResult: !!(executionCompleted && completedResultTarget),
+          completedResultTarget,
           reworkBlockReason: res.rework_block_reason || '',
           executionBlockReason: res.execution_block_reason || '',
+          vehicleAdjustmentRequired: res.vehicle_adjustment_required === true,
           canFavorite: canUseFavorites && Number(res.user_id) === Number(user.id) && days.some(day => day.sites.length > 0),
           canCancel: res.can_cancel === true,
           cancelBlockReason: res.can_cancel === true
             ? '' : (res.cancel_block_reason || '当前计划不可取消'),
+          canAbandonChange: res.can_abandon_change === true,
+          abandonChangeBlockReason: res.can_abandon_change === true
+            ? '' : (res.abandon_change_block_reason || '当前计划没有可恢复的未提交变更'),
           favorite,
           totalSites,
           completedSites,
@@ -338,6 +365,41 @@ Page({
       return;
     }
     this._preflightFieldExecution();
+  },
+
+  _openSiteResult(planId, siteId) {
+    const executionPlanId = Number(planId);
+    const targetSiteId = Number(siteId);
+    if (!Number.isInteger(executionPlanId) || executionPlanId <= 0
+        || !Number.isInteger(targetSiteId) || targetSiteId <= 0) {
+      wx.showToast({ title: '现场记录目标无效，请刷新后重试', icon: 'none' });
+      return false;
+    }
+    const target = {
+      executionPlanId,
+      siteId: targetSiteId,
+      readOnly: true,
+      source: 'completed_plan_detail',
+    };
+    app.globalData.executionTarget = target;
+    wx.switchTab({
+      url: '/pages/inspection/inspection',
+      fail: () => {
+        if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+        wx.showToast({ title: '现场记录打开失败，请重试', icon: 'none' });
+      },
+    });
+    return true;
+  },
+
+  onViewSiteResult(event) {
+    const dataset = event && event.currentTarget && event.currentTarget.dataset || {};
+    return this._openSiteResult(dataset.planId, dataset.siteId);
+  },
+
+  onViewPrimaryResult() {
+    const target = this.data.completedResultTarget || {};
+    return this._openSiteResult(target.executionPlanId, target.siteId);
   },
 
   _preflightReworkExecution() {
@@ -569,28 +631,76 @@ Page({
       });
   },
 
-  // 开始修改只会进入编辑态；正式提交仍由编辑页完成。
+  // 先解释审批失效与重新提交后果；确认并填写原因后才进入既有变更流程。
   onChangeRequest() {
     wx.showModal({
-      title: '开始修改计划',
-      editable: true,
-      content: '此步只进入编辑，不会提交管理员审核。完成修改后请点“提交变更审核”。',
-      placeholderText: '请填写修改原因（如日期或站点顺序错误）',
+      title: '确认变更计划',
+      content: '进入变更后，原审批结果失效，修改完成后需要重新提交并审核。是否继续？',
+      confirmText: '继续变更',
+      cancelText: '暂不变更',
       success: (r) => {
         if (!r.confirm) return;
-        const reason = (r.content || '').trim();
-        if (!reason) {
-          wx.showToast({ title: '请填写变更原因', icon: 'none' });
-          return;
-        }
-        api.requestPlanScheduleChange(this.scheduleId, reason)
+        wx.showModal({
+          title: '填写变更原因',
+          editable: true,
+          placeholderText: '请填写变更原因（如日期或站点顺序错误）',
+          success: (reasonResult) => {
+            if (!reasonResult.confirm) return;
+            const reason = (reasonResult.content || '').trim();
+            if (!reason) {
+              wx.showToast({ title: '请填写变更原因', icon: 'none' });
+              return;
+            }
+            api.requestPlanScheduleChange(this.scheduleId, reason)
+              .then(() => {
+                wx.showToast({ title: '请修改后重新提交审批', icon: 'none' });
+                wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
+              })
+              .catch(err => {
+                wx.showToast({
+                  title: (err && (err.error || err.message)) || '发起变更失败',
+                  icon: 'none'
+                });
+              });
+          }
+        });
+      }
+    });
+  },
+
+  onAbandonChange() {
+    if (!this.data.canAbandonChange) {
+      wx.showToast({
+        title: this.data.abandonChangeBlockReason || '计划状态已变化，请刷新后重试',
+        icon: 'none'
+      });
+      return;
+    }
+    if (this.data.abandoningChange) {
+      wx.showToast({ title: '正在恢复原计划，请稍候', icon: 'none' });
+      return;
+    }
+    wx.showModal({
+      title: '放弃本次变更',
+      content: '将恢复变更前已审批计划，本次尚未提交的修改不会保留。确认放弃？',
+      confirmText: '恢复原计划',
+      cancelText: '继续修改',
+      success: (result) => {
+        if (!result.confirm) return;
+        const detail = this.data.detail || {};
+        this.setData({ abandoningChange: true });
+        api.abandonPlanScheduleChange(this.scheduleId, detail.version)
           .then(() => {
-            wx.showToast({ title: '请完成修改并提交审核', icon: 'none' });
-            wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
+            wx.showToast({ title: '已恢复原计划', icon: 'success' });
+            this.load();
           })
           .catch(err => {
-            wx.showToast({ title: (err && err.message) || '发起变更失败', icon: 'none' });
-          });
+            wx.showToast({
+              title: (err && (err.error || err.message)) || '恢复原计划失败，请重试',
+              icon: 'none'
+            });
+          })
+          .finally(() => this.setData({ abandoningChange: false }));
       }
     });
   },

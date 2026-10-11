@@ -11,6 +11,7 @@ let definition;
 global.getApp = () => app;
 global.Page = page => { definition = page; };
 global.wx = {
+  getSystemInfoSync: () => ({ platform: 'devtools' }),
   getAccountInfoSync: () => ({ miniProgram: { envVersion: 'develop' } }),
   getStorageSync: key => storage[key] || '',
   setStorageSync: (key, value) => { storage[key] = value; },
@@ -53,7 +54,7 @@ const reset = () => {
       options.success({ statusCode: 401, data: { code: 'SESSION_EXPIRED' } });
     };
     await assert.rejects(originalRestoreSession(), error => error.status === 401);
-    assert.equal(restoreUrl, 'http://192.168.2.107:5000/api/auth/me');
+    assert.equal(restoreUrl, 'http://127.0.0.1:5000/api/auth/me');
     assert.equal(storage.token, 'api-token', 'the recovery API leaves 401 cleanup to the login page');
 
     reset();

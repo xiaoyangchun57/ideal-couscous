@@ -9,7 +9,9 @@ const {
   homePackage,
   projectHome,
   projectIdentity,
+  projectReagentSummary,
   projectReview,
+  projectStationSummary,
   projectUnread
 } = require('../utils/homeTaskState.js');
 const { workorderCn, linkedWorkorderCn, metricCn } = require('../services/maps.js');
@@ -78,6 +80,35 @@ test('today package has an explicit empty state and no future-plan projection', 
   const state = projectHome({ summary: {}, upcoming: [{ schedule_id: 99 }], work_package: { has_plan: false } });
   assert.equal(state.workPackage.hasPlan, false);
   assert.equal(Object.hasOwn(state, 'upcoming'), false);
+});
+
+test('home overview projects mine-scope monitoring states and authoritative reagent concerns', () => {
+  assert.deepEqual(projectStationSummary({ summary: {
+    total: 8, normal: 3, attention: 2, not_connected: 1,
+    awaiting_first_frame: 1, raw_received_config_pending: 1,
+  } }), { total: 8, normal: 3, attention: 2, unavailable: 3 });
+
+  assert.deepEqual(projectReagentSummary({ concern_count: 0, items: [] }), {
+    concernCount: 0, expiredCount: null, expiringCount: null, lowVolumeCount: null,
+    pendingQcCount: null, failedQcCount: null, display: '暂无需处理', items: [], remainingCount: 0,
+  });
+  const projected = projectReagentSummary({ concern_count: 3, status_counts: {
+    expired: 1, expiring: 1, low_volume: 2, pending_qc: 1, failed_qc: 0,
+  }, items: [
+    { id: 1, site_id: 10, site_name: '南昌青云水厂', reagent_name: '余氯试剂', status: '临期' },
+    { id: 2, site_id: 10, site_name: '南昌青云水厂', reagent_name: 'pH 标液', status: '低余量' },
+    { id: 3, site_id: 11, site_name: '昌南站', reagent_name: '氨氮试剂', status: '已过期' },
+  ] });
+  assert.equal(projected.display, '3项需关注');
+  assert.deepEqual(projected.items.map(item => item.text), [
+    '南昌青云水厂 · 余氯试剂 · 临期',
+    '南昌青云水厂 · pH 标液 · 低余量',
+  ]);
+  assert.equal(projected.remainingCount, 1);
+  assert.deepEqual([
+    projected.expiredCount, projected.expiringCount, projected.lowVolumeCount,
+    projected.pendingQcCount, projected.failedQcCount,
+  ], [1, 1, 2, 1, 0]);
 });
 
 test('rework sites remain discoverable as independent today actions without a work package', () => {
@@ -161,13 +192,14 @@ test('identity, auxiliary counts and errors use centralized non-fabricating proj
 test('homepage keeps the approved structure while binding only projected status fields', () => {
   const page = fs.readFileSync(path.join(__dirname, '../pages/index/index.js'), 'utf8');
   const view = fs.readFileSync(path.join(__dirname, '../pages/index/index.wxml'), 'utf8');
-  assert.match(view, /今日任务[\s\S]*今日行动[\s\S]*今日作业包/);
+  // S5.1 单一待办区域：今日待办 + 今日巡检标识 + 其他待办
+  assert.match(view, /今日待办[\s\S]*今日巡检/);
   assert.match(view, /workPackage\.resources\.vehicleText/);
   assert.match(view, /workPackage\.resources\.departureText/);
   assert.doesNotMatch(view, /vehicleAssigned|departurePendingCount/);
   assert.doesNotMatch(page, /res\.workorders|res\.alerts|res\.work_package|res\.summary|buildMainViewModel/);
   assert.match(page, /projectHome\(res\)/);
-  assert.doesNotMatch(view, /wx:if="\{\{false\}\}"|我的计划|即将执行|待办站点|今日进度/);
+  assert.doesNotMatch(view, /wx:if="\{\{false\}\}"|我的计划|即将执行|待办站点|今日进度|今日行动|今日作业包/);
 });
 
 const apiPath = require.resolve('../services/api.js');
@@ -276,6 +308,62 @@ test('main request distinguishes first failure and preserves old data across ref
     assert.equal(page.data.actions[0].title, '新任务');
   } finally {
     api.myToday = original;
+  }
+});
+
+test('station and reagent overview load retry and stale responses are independent', async () => {
+  const originals = {
+    stationMonitoringSites: api.stationMonitoringSites,
+    reagentOverview: api.reagentOverview,
+  };
+  try {
+    const page = pageInstance();
+    const oldStations = deferred();
+    const newStations = deferred();
+    let stationCall = 0;
+    api.stationMonitoringSites = options => {
+      assert.equal(options.scope, 'mine');
+      return (++stationCall === 1 ? oldStations.promise : newStations.promise);
+    };
+    page.loadStations();
+    page.loadStations();
+    newStations.resolve({ summary: { total: 2, normal: 1, attention: 1 } });
+    await flush();
+    oldStations.resolve({ summary: { total: 99, normal: 99, attention: 0 } });
+    await flush();
+    assert.deepEqual(page.data.stationSummary, { total: 2, normal: 1, attention: 1, unavailable: 0 });
+
+    const existing = page.data.stationSummary;
+    api.stationMonitoringSites = () => Promise.reject({ error: '站点服务失败' });
+    await page.loadStations(true);
+    assert.equal(page.data.stationsState, 'refresh_error');
+    assert.equal(page.data.stationSummary, existing);
+
+    api.reagentOverview = () => Promise.resolve({ concern_count: 1, items: [
+      { id: 3, site_id: 1, site_name: '青云站', reagent_name: '余氯试剂', status: '临期' },
+    ] });
+    await page.loadReagents();
+    assert.equal(page.data.reagentsState, 'ready');
+    assert.equal(page.data.reagentSummary.concernCount, 1);
+    assert.equal(page.data.stationSummary, existing, 'reagent success does not replace station state');
+
+    const reagentExisting = page.data.reagentSummary;
+    api.reagentOverview = () => Promise.reject({ message: '试剂服务失败' });
+    await page.loadReagents(true);
+    assert.equal(page.data.reagentsState, 'refresh_error');
+    assert.equal(page.data.reagentSummary, reagentExisting);
+
+    const callsBeforeUnload = page.setDataCalls;
+    const late = deferred();
+    api.reagentOverview = () => late.promise;
+    page.loadReagents();
+    page.onUnload();
+    late.resolve({ concern_count: 0, items: [] });
+    await flush();
+    assert.equal(page.setDataCalls, callsBeforeUnload + 1,
+      'only the loading transition occurs before unload; late data is ignored');
+  } finally {
+    Object.assign(api, originals);
   }
 });
 
@@ -436,6 +524,39 @@ test('all-workorders entry clears stale targets, reports failure, and stays inde
   navigationCalls[2].options.fail({ errMsg: 'navigateTo:fail' });
   assert.equal(app.globalData.selWorkorderNo, 'WO-NEWER',
     'an exact navigation failure clears only the target written by that invocation');
+});
+
+test('home station summaries use one-time targets and switch to the station tab', () => {
+  const page = pageInstance();
+  navigationCalls.length = 0;
+  toastCalls.length = 0;
+  app.globalData.stationHubTarget = null;
+
+  assert.equal(page.goResponsibleSites(), true);
+  const stationTarget = app.globalData.stationHubTarget;
+  assert.deepEqual(stationTarget, { view: 'stations' });
+  assert.equal(navigationCalls[0].method, 'switchTab');
+  assert.equal(navigationCalls[0].options.url, '/pages/responsible-sites/responsible-sites');
+  assert.equal(page.goResponsibleSites(), false, 'duplicate taps share one navigation');
+  navigationCalls[0].options.fail({ errMsg: 'switchTab:fail' });
+  assert.equal(app.globalData.stationHubTarget, null);
+  assert.deepEqual(toastCalls.at(-1), { title: '打开站点列表失败，请重试', icon: 'none' });
+
+  assert.equal(page.goResponsibleSitesReagent(), true);
+  const reagentTarget = app.globalData.stationHubTarget;
+  assert.deepEqual(reagentTarget, { view: 'reagents', filter: '' });
+  assert.equal(navigationCalls[1].method, 'switchTab');
+  navigationCalls[1].options.complete();
+  assert.equal(app.globalData.stationHubTarget, reagentTarget,
+    'a successful switch leaves the target for the station tab to consume');
+
+  assert.equal(page.goResponsibleSites(), true);
+  const failedTarget = app.globalData.stationHubTarget;
+  app.globalData.stationHubTarget = { view: 'reagents', filter: 'expired' };
+  navigationCalls[2].options.fail({ errMsg: 'switchTab:fail' });
+  assert.notEqual(app.globalData.stationHubTarget, failedTarget,
+    'an older failure cannot clear a newer station target');
+  assert.deepEqual(app.globalData.stationHubTarget, { view: 'reagents', filter: 'expired' });
 });
 
 test('home rework action navigates with exact target and clears it on failure', () => {

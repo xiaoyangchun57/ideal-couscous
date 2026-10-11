@@ -34,7 +34,10 @@ class ManualReportEvidenceTest(unittest.TestCase):
         app_module._tokens['operator-token'] = {'id': 9, 'role': 'operator', 'real_name': 'Operator'}
         with temporary_db() as db:
             db.executescript('''
-                CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT, real_name TEXT, status TEXT);
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY, role TEXT, real_name TEXT,
+                    status TEXT, phone TEXT DEFAULT ''
+                );
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE manual_reports (
@@ -55,7 +58,8 @@ class ManualReportEvidenceTest(unittest.TestCase):
                     source_type TEXT, source_id INTEGER, description TEXT
                 );
             ''')
-            db.execute("INSERT INTO users VALUES (9, 'operator', 'Operator', 'active')")
+            db.execute("""INSERT INTO users (id,role,real_name,status,phone)
+                VALUES (9,'operator','Operator','active','')""")
             db.execute('INSERT INTO user_sites VALUES (9, 7)')
             db.execute("INSERT INTO user_roles VALUES (9, 'operator')")
             db.execute("""INSERT INTO operation_attachments

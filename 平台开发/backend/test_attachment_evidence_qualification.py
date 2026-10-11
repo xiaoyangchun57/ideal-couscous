@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -61,7 +62,10 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 );
                 INSERT INTO insp_plan_items VALUES
                     (10,20,1,'浊度仪检查',NULL,'2026-08-12 10:00:00','2026-08-12 11:00:00',NULL,NULL,1,'active');
-                CREATE TABLE inspection_checkins (site_id INTEGER, user_id INTEGER, check_time TEXT);
+                CREATE TABLE inspection_checkins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER,
+                    user_id INTEGER, check_time TEXT, plan_id INTEGER
+                );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER, status TEXT,
                     check_in_time TEXT, review_submitted_at TEXT, resolved_at TEXT
@@ -99,7 +103,10 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
                 CREATE TABLE photo_capture_sessions (
                     id INTEGER PRIMARY KEY, token_hash TEXT UNIQUE, user_id INTEGER, site_id INTEGER,
                     plan_id INTEGER, item_id INTEGER, work_order_id INTEGER, issued_at TEXT,
-                    expires_at TEXT, used_at TEXT, attachment_id INTEGER
+                    expires_at TEXT, used_at TEXT, attachment_id INTEGER,
+                    gps_lat REAL, gps_lng REAL, distance_m REAL,
+                    rework_required_at TEXT, capture_source TEXT DEFAULT '',
+                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT ''
                 );
             ''')
         self.client = app_module.app.test_client()
@@ -135,29 +142,155 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
         self.assertEqual((exif['qualification'], exif['basis']), ('qualified', 'exif'))
 
         complete_watermark = self.assess(
-            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'code': 'ANTI123456'},
+            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'code': 'ANTI123456',
+                              'confidence': 0.91},
             watermark_confidence=0.91, watermark_status='recognized')
         self.assertEqual((complete_watermark['qualification'], complete_watermark['basis']),
                          ('qualified', 'watermark'))
 
         weak_watermark = self.assess(
-            watermark_fields={'taken_at': '2026-08-12 10:05:00'},
+            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'confidence': 0.91},
             watermark_confidence=0.91, watermark_status='recognized')
         self.assertEqual(weak_watermark['qualification'], 'ineligible')
 
         consistent = self.assess(
             exif_taken_at='2026-08-12 10:05:00',
-            watermark_fields={'taken_at': '2026-08-12 10:09:00', 'code': 'ANTI123456'},
+            watermark_fields={'taken_at': '2026-08-12 10:09:00', 'code': 'ANTI123456',
+                              'confidence': 0.91},
             watermark_confidence=0.91, watermark_status='recognized')
         self.assertEqual((consistent['qualification'], consistent['basis']),
                          ('qualified', 'exif_watermark'))
 
         conflict = self.assess(
             exif_taken_at='2026-08-12 10:01:00',
-            watermark_fields={'taken_at': '2026-08-12 10:09:00', 'code': 'ANTI123456'},
+            watermark_fields={'taken_at': '2026-08-12 10:09:00', 'code': 'ANTI123456',
+                              'confidence': 0.91},
             watermark_confidence=0.91, watermark_status='recognized')
         self.assertEqual((conflict['qualification'], conflict['basis']),
                          ('ineligible', 'time_conflict'))
+
+    def test_watermark_qualification_uses_selected_block_confidence_not_image_average(self):
+        strong_block = self.assess(
+            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'code': 'ANTI123456',
+                              'confidence': 0.91},
+            watermark_confidence=0.20, watermark_status='recognized')
+        self.assertEqual((strong_block['qualification'], strong_block['basis']),
+                         ('qualified', 'watermark'))
+        self.assertEqual(strong_block['facts']['watermark_confidence'], 0.91)
+
+        weak_block = self.assess(
+            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'code': 'ANTI123456',
+                              'confidence': 0.84},
+            watermark_confidence=0.99, watermark_status='recognized')
+        self.assertEqual((weak_block['qualification'], weak_block['basis']),
+                         ('ineligible', 'unknown'))
+        self.assertEqual(weak_block['facts']['watermark_confidence'], 0.84)
+
+        legacy_without_field_confidence = self.assess(
+            watermark_fields={'taken_at': '2026-08-12 10:05:00', 'code': 'ANTI123456'},
+            watermark_confidence=0.99, watermark_status='recognized')
+        self.assertEqual((legacy_without_field_confidence['qualification'],
+                          legacy_without_field_confidence['basis']),
+                         ('ineligible', 'unknown'))
+
+    def test_inspection_photo_uses_plan_scoped_checkin_before_capture_time(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items
+                SET check_in_time=NULL,check_out_time=NULL WHERE id=10""")
+            db.executemany("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id) VALUES (?,?,?,?)""", [
+                (1, 2, '2026-08-12 08:00:00', 20),
+                (1, 2, '2026-08-12 12:00:00', 20),
+                (1, 2, '2026-08-13 08:00:00', 20),
+                (1, 2, '2026-08-12 09:30:00', 99),
+                (1, 3, '2026-08-12 09:45:00', 20),
+                (2, 2, '2026-08-12 09:50:00', 20),
+            ])
+
+        first_visit = self.assess(
+            received_at='2026-08-12 10:10:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(first_visit['qualification'], 'qualified')
+        self.assertEqual(first_visit['facts']['work_window'], {
+            'start': '2026-08-12 08:00:00',
+            'end': '2026-08-12 10:10:00',
+            'checkin_plan_id': 20,
+            'checkin_source': 'plan_checkin',
+        })
+
+        uploaded_next_day = self.assess(
+            received_at='2026-08-13 09:00:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(uploaded_next_day['qualification'], 'qualified')
+        self.assertEqual(
+            uploaded_next_day['facts']['work_window']['start'], '2026-08-12 08:00:00')
+
+        between_visits = self.assess(
+            received_at='2026-08-12 13:10:00',
+            exif_taken_at='2026-08-12 13:00:00')
+        self.assertEqual(between_visits['qualification'], 'qualified')
+        self.assertEqual(
+            between_visits['facts']['work_window']['start'], '2026-08-12 12:00:00')
+
+        next_day = self.assess(
+            received_at='2026-08-13 09:10:00',
+            exif_taken_at='2026-08-13 09:00:00')
+        self.assertEqual(next_day['qualification'], 'qualified')
+        self.assertEqual(next_day['facts']['work_window']['start'], '2026-08-13 08:00:00')
+
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id)
+                VALUES (1,2,'2026-08-14 08:00:00',20)""")
+        unchanged = self.assess(
+            received_at='2026-08-12 10:10:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(
+            unchanged['facts']['work_window']['start'], '2026-08-12 08:00:00')
+
+        before_first = self.assess(
+            received_at='2026-08-12 08:10:00',
+            exif_taken_at='2026-08-12 07:50:00')
+        self.assertEqual(before_first['qualification'], 'ineligible')
+        self.assertIn('早于到站签到', before_first['reason'])
+
+    def test_explicit_plan_conflict_is_rejected_and_legacy_checkin_requires_unique_plan(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items
+                SET check_in_time=NULL,check_out_time=NULL WHERE id=10""")
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id)
+                VALUES (1,2,'2026-08-12 09:00:00',99)""")
+        conflict = self.assess(
+            received_at='2026-08-12 10:10:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(conflict['qualification'], 'ineligible')
+        self.assertIn('没有可验证的到站记录', conflict['reason'])
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM inspection_checkins')
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id)
+                VALUES (1,2,'2026-08-12 09:00:00',NULL)""")
+        legacy_unique = self.assess(
+            received_at='2026-08-12 10:10:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(legacy_unique['qualification'], 'qualified')
+        self.assertEqual(
+            legacy_unique['facts']['work_window']['checkin_source'],
+            'legacy_unique_checkin')
+
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO insp_plans VALUES (21,'并行计划','active',2)")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,item_name,result,check_in_time,check_out_time,
+                 completed_at,check_time,required_photos,execution_status)
+                VALUES (11,21,1,'并行项',NULL,NULL,NULL,NULL,NULL,1,'active')""")
+        legacy_ambiguous = self.assess(
+            received_at='2026-08-12 10:10:00',
+            exif_taken_at='2026-08-12 10:00:00')
+        self.assertEqual(legacy_ambiguous['qualification'], 'ineligible')
+        self.assertIn('没有可验证的到站记录', legacy_ambiguous['reason'])
 
     def test_evidence_site_geofence_300m_boundary_without_mutation(self):
         for distance, qualification in ((299.9, 'qualified'), (300, 'qualified'),
@@ -194,10 +327,12 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
             capture_source='camera', client_taken_at='2026-01-01 00:00:00',
             session={'id': 8, 'issued_at': '2026-08-12 10:04:00'})
         self.assertEqual((session['qualification'], session['basis'], session['taken_at']),
-                         ('qualified', 'camera_session', '2026-08-12 10:04:00'))
+                         ('qualified', 'server_capture_session', '2026-08-12 10:10:00'))
+        self.assertEqual(session['facts']['capture_session_issued_at'], '2026-08-12 10:04:00')
+        self.assertNotEqual(session['taken_at'], session['facts']['capture_session_issued_at'])
 
         no_location = self.assess(exif_taken_at='2026-08-12 10:05:00', gps_lat=None, gps_lng=None)
-        self.assertEqual(no_location['qualification'], 'review')
+        self.assertEqual(no_location['qualification'], 'ineligible')
 
         duplicate = self.assess(exif_taken_at='2026-08-12 10:05:00', duplicate_of_id=99)
         self.assertEqual((duplicate['qualification'], duplicate['basis']), ('ineligible', 'duplicate'))
@@ -206,12 +341,47 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
             db.execute("""UPDATE insp_plan_items SET check_in_time='2026-08-10 08:00:00',
                 check_out_time='2026-08-12 11:00:00' WHERE id=10""")
         delayed = self.assess(exif_taken_at='2026-08-11 09:00:00')
-        self.assertEqual(delayed['qualification'], 'review')
+        self.assertEqual(delayed['qualification'], 'ineligible')
         self.assertIn('超过24小时', delayed['reason'])
+
+    def test_supplement_required_ignores_legacy_pending_but_replacement_submission_stays_locked(self):
+        item = {
+            'id': 10, 'plan_id': 20, 'required_photos': 1, 'photo_urls': '["/uploads/old.jpg"]',
+            'evidence_status': 'supplement_required', 'review_status': 3,
+            'rework_required_at': '2026-08-12 10:20:00',
+        }
+        historical = [{
+            'id': 90, 'stored_path': '/uploads/old.jpg', 'source_type': 'inspection',
+            'source_id': 10, 'site_id': 1, 'review_status': 'pending',
+            'evidence_qualification': 'qualified',
+            'extra_json': json.dumps({'material_role': 'formal'}),
+        }]
+        state = app_module._mobile_inspection_photo_state(item, historical)
+        self.assertEqual(state['replacement_photo_status'], 'ready')
+        self.assertTrue(state['replacement_submission_allowed'])
+        self.assertEqual(state['replacement_required_photos'], 1)
+        self.assertEqual(state['replacement_block_reason'], '')
+        self.assertEqual(state['original_formal_pending_photo_urls'], ['/uploads/old.jpg'])
+
+        submitted = dict(item, evidence_status='replacement_submitted')
+        submitted_state = app_module._mobile_inspection_photo_state(submitted, historical)
+        self.assertEqual(submitted_state['replacement_photo_status'], 'replacement_pending_review')
+        self.assertFalse(submitted_state['replacement_submission_allowed'])
+        self.assertIsNone(submitted_state['replacement_required_photos'])
+        self.assertIn('业务审核', submitted_state['replacement_block_reason'])
+
+        submitted_without_attachment = app_module._mobile_inspection_photo_state(submitted, [])
+        self.assertEqual(submitted_without_attachment['replacement_photo_status'],
+                         'replacement_pending_review')
+        self.assertFalse(submitted_without_attachment['replacement_submission_allowed'])
+        self.assertIsNone(submitted_without_attachment['replacement_required_photos'])
+        self.assertIn('业务审核', submitted_without_attachment['replacement_block_reason'])
 
     def test_capture_session_is_reserved_once(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO photo_capture_sessions
+                (id,token_hash,user_id,site_id,plan_id,item_id,work_order_id,
+                 issued_at,expires_at,used_at,attachment_id)
                 VALUES (1,?,2,1,20,10,NULL,'2026-08-12 10:00:00',
                         '2026-08-12 10:15:00',NULL,NULL)""",
                 (app_module._hash_token('one-time-token'),))
@@ -419,6 +589,35 @@ class AttachmentEvidenceQualificationTest(unittest.TestCase):
         history = self.client.get('/api/attachments/60/evidence-evaluations', headers=self.headers())
         self.assertEqual(history.status_code, 200, history.json)
         self.assertEqual([row['evaluation_type'] for row in history.json], ['historical_scan'])
+
+    def test_unqualified_pending_photo_never_enters_individual_admin_review(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (id,filename,stored_path,source_type,source_id,site_id,uploader_id,
+                 review_status,evidence_qualification,extra_json)
+                VALUES (61,'legacy-pending.jpg','/uploads/legacy-pending.jpg','inspection',10,1,2,
+                        'pending','review',?)""",
+                (json.dumps({'material_role': 'formal'}),))
+            before_evaluations = db.execute(
+                'SELECT COUNT(*) FROM attachment_evidence_evaluations').fetchone()[0]
+
+        single = self.client.post('/api/inspection/photos/61/review',
+            headers=self.headers(), json={'action': 'approve'})
+        self.assertEqual(single.status_code, 410, single.json)
+        self.assertEqual(single.json['code'], 'PHOTO_INDIVIDUAL_REVIEW_RETIRED')
+        batch = self.client.post('/api/inspection/photos/batch-review',
+            headers=self.headers(), json={'photo_ids': [61], 'action': 'approve'})
+        self.assertEqual(batch.status_code, 410, batch.json)
+        self.assertEqual(batch.json['code'], 'PHOTO_INDIVIDUAL_REVIEW_RETIRED')
+
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT review_status,evidence_qualification,is_deleted
+                FROM operation_attachments WHERE id=61""").fetchone()
+            after_evaluations = db.execute(
+                'SELECT COUNT(*) FROM attachment_evidence_evaluations').fetchone()[0]
+        self.assertEqual((row['review_status'], row['evidence_qualification'], row['is_deleted']),
+                         ('pending', 'review', 0))
+        self.assertEqual(after_evaluations, before_evaluations)
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - direct module execution
 
 
 HJ212_HEAD = b"##"
-HJ212_PARSER_VERSION = "hj212-text-v2"
+HJ212_PARSER_VERSION = "hj212-text-v3"
 _LENGTH_BYTES = 4
 _TRAILER_BYTES = 6  # Four ASCII CRC digits followed by CRLF.
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -30,6 +30,7 @@ class HJ212Factor:
     raw_value: float | None
     quality: str
     issue_code: str | None = None
+    value_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +170,8 @@ def _parse_factors(content: str, command: str) -> list[HJ212Factor]:
             quality = "invalid"
             issue_code = "hj212_invalid_numeric"
         protocol_code = "HJ212:w01019-Rtd" if code.lower() == "w01019" else f"HJ212:{code.lower()}"
-        factors.append(HJ212Factor(protocol_code, code, number, quality, issue_code))
+        factors.append(HJ212Factor(
+            protocol_code, code, number, quality, issue_code, selected_kind.lower()))
     return factors
 
 

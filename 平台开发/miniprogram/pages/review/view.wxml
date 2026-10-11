@@ -1,13 +1,13 @@
 <view class="rv-page">
-  <!-- 顶部轻量统计 -->
-  <view class="rv-summary" wx:if="{{loadState !== 'loading' && total > 0}}">
-    <text class="rv-summary-text">待审核 </text>
-    <text class="rv-summary-num">{{total}}</text>
-    <text class="rv-summary-text"> 项</text>
+  <!-- 无权限空态 -->
+  <view wx:if="{{loadState === 'no_permission'}}" class="rv-empty">
+    <image class="rv-empty-lock-ico" src="/images/station-monitoring/empty-lock.svg" mode="aspectFit"/>
+    <text class="rv-empty-tx">暂无审核权限</text>
+    <text class="rv-empty-sub">请联系管理员开通审核角色</text>
   </view>
 
   <!-- 加载中 -->
-  <view wx:if="{{loadState === 'loading'}}" class="rv-empty">
+  <view wx:elif="{{loadState === 'loading'}}" class="rv-empty">
     <view class="rv-empty-ico"></view>
     <text class="rv-empty-tx">加载中…</text>
   </view>
@@ -30,6 +30,13 @@
 
   <!-- 分组列表 -->
   <block wx:else>
+    <!-- 顶部轻量统计 -->
+    <view class="rv-summary" wx:if="{{total > 0}}">
+      <text class="rv-summary-text">待审核 </text>
+      <text class="rv-summary-num">{{total}}</text>
+      <text class="rv-summary-text"> 项</text>
+    </view>
+
     <view class="rv-summary-line rv-stale-line" wx:if="{{loadState === 'stale'}}">
       {{loadError}}，<text bindtap="onRetry">重试</text>
     </view>
@@ -43,7 +50,7 @@
 
       <view class="rv-card">
         <view wx:for="{{item.items}}" wx:for-item="it" wx:key="id" class="rv-item {{it.detailOpen ? 'rv-item-open' : ''}} {{it.targeted ? 'review-target rv-item-target' : ''}}">
-          <!-- ========== 收起态摘要 ========== -->
+            <!-- ========== 收起态摘要 ========== -->
           <view class="rv-item-head" data-id="{{it.id}}" bindtap="onToggleDetails">
             <view class="rv-item-main">
               <text class="rv-item-title">{{it.title}}</text>
@@ -176,7 +183,9 @@
                   <!-- 照片网格 -->
                   <view class="rv-photo-grid" wx:if="{{group.photos.length}}">
                     <view wx:for="{{group.photos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item {{photo.selectedForReject ? 'rv-photo-reject' : ''}}">
-                      <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                      <image wx:if="{{photo.mediaStatus === 'ready'}}" class="rv-photo-img" src="{{photo.localPath}}" mode="aspectFit" bindtap="onPreviewPhoto" binderror="onProtectedReviewPhotoRenderError" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}" />
+                      <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state">照片加载中</view>
+                      <view wx:else class="rv-photo-media-state rv-photo-media-error" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
                       <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
                         {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
                       </view>
@@ -193,7 +202,9 @@
               <block wx:elif="{{it.reviewPhotos.length}}">
                 <view class="rv-photo-grid">
                   <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item {{photo.selectedForReject ? 'rv-photo-reject' : ''}}">
-                    <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                    <image wx:if="{{photo.mediaStatus === 'ready'}}" class="rv-photo-img" src="{{photo.localPath}}" mode="aspectFit" bindtap="onPreviewPhoto" binderror="onProtectedReviewPhotoRenderError" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}" />
+                    <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state">照片加载中</view>
+                    <view wx:else class="rv-photo-media-state rv-photo-media-error" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
                     <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
                       {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
                     </view>
@@ -208,6 +219,13 @@
                 <text class="rv-meta-item" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>
                 <text class="rv-meta-item" wx:if="{{it.source_name}}">计划单号：{{it.source_name}}</text>
                 <text class="rv-meta-item" wx:if="{{it.submit_time}}">提交时间：{{it.submit_time}}</text>
+              </view>
+
+              <!-- 查看现场记录入口 -->
+              <view class="rv-view-site-link" bindtap="onViewSiteInspection" data-id="{{it.id}}" data-plan-id="{{it.executionPlanId}}" data-site-id="{{it.executionSiteId}}" wx:if="{{it.canViewInspection}}">
+                <view class="rv-view-site-icon"></view>
+                <text class="rv-view-site-text">查看现场记录</text>
+                <text class="rv-view-site-arrow">›</text>
               </view>
             </block>
 
@@ -226,7 +244,9 @@
               <!-- 2. 现场证据 -->
               <view class="rv-photo-grid" wx:if="{{it.reviewPhotos.length}}">
                 <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item">
-                  <image class="rv-photo-img" src="{{photo.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo.url}}" />
+                  <image wx:if="{{photo.mediaStatus === 'ready'}}" class="rv-photo-img" src="{{photo.localPath}}" mode="aspectFit" bindtap="onPreviewPhoto" binderror="onProtectedReviewPhotoRenderError" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}" />
+                  <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state">照片加载中</view>
+                  <view wx:else class="rv-photo-media-state rv-photo-media-error" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
                   <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
                   <view class="rv-photo-flag" wx:if="{{photo.flag_reason}}">
                     <text class="rv-photo-flag-text">{{photo.flag_reason}}</text>
@@ -368,8 +388,15 @@
                 <text class="rv-detail-label">风险提示</text>
                 <text class="rv-detail-value rv-risk-text">{{it.flag_reason}}</text>
               </view>
-              <view class="rv-photo-grid rv-photo-grid-simple" wx:if="{{it.photoUrls.length}}">
-                <image wx:for="{{it.photoUrls}}" wx:key="*this" wx:for-item="photo" class="rv-photo-img rv-photo-simple" src="{{photo}}" mode="aspectFill" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo}}" />
+              <view class="rv-photo-grid rv-photo-grid-simple" wx:if="{{it.reviewPhotos.length}}">
+                <view wx:for="{{it.reviewPhotos}}" wx:key="id" wx:for-item="photo" class="rv-photo-item">
+                  <image wx:if="{{photo.mediaStatus === 'ready'}}" class="rv-photo-img rv-photo-simple" src="{{photo.localPath}}" mode="aspectFit" bindtap="onPreviewPhoto" binderror="onProtectedReviewPhotoRenderError" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}" />
+                  <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state rv-photo-simple">照片加载中</view>
+                  <view wx:else class="rv-photo-media-state rv-photo-media-error rv-photo-simple" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
+                </view>
+              </view>
+              <view class="rv-photo-grid rv-photo-grid-simple" wx:elif="{{it.photoUrls.length}}">
+                <image wx:for="{{it.photoUrls}}" wx:key="*this" wx:for-item="photo" class="rv-photo-img rv-photo-simple" src="{{photo}}" mode="aspectFit" bindtap="onPreviewPhoto" data-id="{{it.id}}" data-url="{{photo}}" />
               </view>
               <view class="rv-meta-row">
                 <text class="rv-meta-item" wx:if="{{it.site_name}}">站点：{{it.site_name}}</text>

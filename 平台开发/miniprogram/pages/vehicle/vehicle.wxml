@@ -212,7 +212,7 @@
       </view>
     </view>
     <scroll-view class="vh-sheet-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
-      <view class="vh-sheet-hint">关联巡检闭环前车辆保持占用。延续时会检查该车辆和申请人的其他安排冲突。</view>
+      <view class="vh-sheet-hint">原安排到期后不会继续占用车辆；如需继续使用请延续。与后续安排冲突时，确认后会通知相关负责人更换车辆。</view>
       <view class="vh-form-group">
         <text class="vh-form-label">新的截止日期</text>
         <picker mode="date" start="{{extensionSheet.endDate}}" value="{{extensionSheet.endDate}}" bindchange="onExtensionDate">

@@ -72,6 +72,26 @@ async function settle() {
   await Promise.resolve();
 }
 
+test('entering alert tab does not replay native TabBar show animation', async () => {
+  const definition = loadPage('../pages/alert/alert.js');
+  const page = pageInstance(definition);
+  const originalAlerts = api.alerts;
+  try {
+    api.alerts = () => Promise.resolve([]);
+    tabBarCalls.length = 0;
+    page.onShow();
+    await settle();
+    assert.deepEqual(tabBarCalls, []);
+
+    page.setAlertTabBarHidden(true);
+    assert.deepEqual(tabBarCalls.at(-1), { action: 'hide', options: { animation: false } });
+    page.setAlertTabBarHidden(false);
+    assert.deepEqual(tabBarCalls.at(-1), { action: 'show', options: { animation: false } });
+  } finally {
+    api.alerts = originalAlerts;
+  }
+});
+
 test('workorder filters form five exhaustive groups while cards keep exact stages', () => {
   const definition = loadPage('../pages/workorder/workorder.js');
   const page = pageInstance(definition);

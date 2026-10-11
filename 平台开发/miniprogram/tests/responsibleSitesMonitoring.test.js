@@ -23,6 +23,9 @@ const makePage = () => {
   try {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(wxml, /最后收到报文/);
+    assert.match(wxml, /接收：/);
+    assert.match(wxml, /周期：/);
+    assert.match(wxml, /最近检测周期/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
     assert.doesNotMatch(wxml, /RTU|仪器状态|最后通信/);
     const calls = [];

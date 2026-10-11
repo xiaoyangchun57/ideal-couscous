@@ -18,7 +18,13 @@ function chooseAndCompress(maxCount) {
 
 // 巡检证据必须先保留原图，后端才能读取 EXIF 并在校验后生成压缩存储图。
 function chooseInspectionPhotos(maxCount, captureSource) {
-  const sourceType = captureSource === 'camera' ? ['camera'] : ['album'];
+  if (captureSource !== 'supplement') {
+    return Promise.reject({
+      error: '正式现场拍照必须使用小程序内可信相机页',
+      code: 'TRUSTED_CAMERA_PAGE_REQUIRED',
+    });
+  }
+  const sourceType = ['album'];
   return new Promise((resolve, reject) => {
     wx.chooseMedia({
       count: maxCount || 1,
@@ -77,7 +83,7 @@ function captureSourceNeedsLocationSession(captureSource) {
 
 function photoActionOpeningTitle(captureSource) {
   if (captureSource === 'camera') return '正在打开相机';
-  if (captureSource === 'watermark_album') return '正在打开相册';
+  if (captureSource === 'supplement') return '正在打开补充材料';
   return '正在打开相机/相册';
 }
 
@@ -148,25 +154,57 @@ function deletePendingReportPhotoOnce(owner, displayUrl, storagePath, requestDel
 function inspectionUploadTaskResult(response, context, resolveUrl) {
   const result = response || {};
   const details = context || {};
+  const rawUrl = typeof result.url === 'string' ? result.url.trim() : '';
+  if (result.supplemental === true && rawUrl) {
+    const displayUrl = typeof result.display_url === 'string' && result.display_url.trim()
+      ? result.display_url.trim() : rawUrl;
+    const resolved = typeof resolveUrl === 'function' ? resolveUrl(displayUrl) : displayUrl;
+    return {
+      supplementUrl: resolved,
+      supplementAttachment: {
+        id: Number(result.id) || 0,
+        url: resolved,
+        storagePath: rawUrl,
+      },
+    };
+  }
   if (result.accepted_for_review === false) {
     return Object.assign({ rejected: result }, details);
   }
-  const rawUrl = typeof result.url === 'string' ? result.url.trim() : '';
-  return rawUrl ? { url: typeof resolveUrl === 'function' ? resolveUrl(rawUrl) : rawUrl } : {};
+  if (!rawUrl) return {};
+  const displayUrl = typeof result.display_url === 'string' && result.display_url.trim()
+    ? result.display_url.trim() : rawUrl;
+  return { url: typeof resolveUrl === 'function' ? resolveUrl(displayUrl) : displayUrl };
 }
 
 function collectInspectionPhotoUploadResults(results) {
-  const summary = { urls: [], localPaths: [], localMetadata: [], issues: [] };
+  const summary = {
+    urls: [], supplementUrls: [], localPaths: [], localMetadata: [],
+    supplementAttachments: [], supplementLocalPaths: [], supplementLocalMetadata: [], issues: [],
+  };
   (Array.isArray(results) ? results : []).forEach((result, index) => {
     if (result && result.status === 'fulfilled') {
       const value = result.value || {};
       const url = typeof value.url === 'string' ? value.url.trim() : '';
+      const supplementUrl = typeof value.supplementUrl === 'string'
+        ? value.supplementUrl.trim() : '';
       const localPath = typeof value.localPath === 'string' ? value.localPath.trim() : '';
       const businessRejected = value.rejected && typeof value.rejected === 'object';
-      if (url) summary.urls.push(url);
-      else if (localPath) {
-        summary.localPaths.push(localPath);
-        summary.localMetadata.push(value.metadata || {});
+      if (url) {
+        summary.urls.push(url);
+      } else if (supplementUrl) {
+        summary.supplementUrls.push(supplementUrl);
+        if (value.supplementAttachment) {
+          summary.supplementAttachments.push(value.supplementAttachment);
+        }
+      } else if (localPath) {
+        if (value.supplemental === true) {
+          summary.supplementLocalPaths.push(localPath);
+          summary.supplementLocalMetadata.push(value.metadata || {});
+        } else {
+          summary.localPaths.push(localPath);
+          summary.localMetadata.push(value.metadata || {});
+        }
       } else if (businessRejected) {
         summary.issues.push({ kind: 'rejected', index, value });
       } else {
@@ -233,6 +271,46 @@ function processPhotoUploadIssues(issues, promptIssue, retainSupplement) {
     }), Promise.resolve());
 }
 
+function retainRejectedPhotoAsSupplement(failedPhoto, handlers) {
+  const source = failedPhoto || {};
+  const actions = handlers || {};
+  const originalMetadata = source.metadata && typeof source.metadata === 'object'
+    ? source.metadata : {};
+  const originalKey = source.idempotencyKey || originalMetadata._idempotency_key || '';
+  const idempotencyKey = String(originalKey).endsWith(':supplement')
+    ? String(originalKey) : `${originalKey}:supplement`;
+  const metadata = Object.assign({}, originalMetadata, {
+    _idempotency_key: idempotencyKey,
+    capture_source: 'supplement',
+  });
+  delete metadata.capture_session;
+  delete metadata.gps_lat;
+  delete metadata.gps_lng;
+  delete metadata.taken_at;
+  if (!source.path || !source.image || typeof actions.persist !== 'function'
+      || typeof actions.upload !== 'function') {
+    return Promise.reject({ error: '原照片保留信息不完整，请重新选择补充材料' });
+  }
+  return Promise.resolve().then(() => actions.persist(source.path)).then(localPath => {
+    if (!localPath) throw { error: '原照片保留失败，请重新选择补充材料' };
+    const draft = { localPath, metadata, supplemental: true };
+    return Promise.resolve(typeof actions.onPersisted === 'function'
+      ? actions.onPersisted(draft) : undefined).then(() => actions.upload(
+      source.image, idempotencyKey, metadata)).then(result => {
+      if (!result || !result.url || result.supplemental !== true) {
+        throw { error: '补充材料保存结果异常，请重试上传' };
+      }
+      return Promise.resolve(typeof actions.cleanup === 'function'
+        ? actions.cleanup(localPath) : undefined).then(() => ({
+        supplementUrl: result.display_url || result.url,
+        localPath,
+        metadata,
+        response: result,
+      }));
+    }).catch(error => Object.assign({}, draft, { uploadError: error }));
+  });
+}
+
 function compressOne(path) {
   return new Promise((resolve) => {
     wx.compressImage({
@@ -270,6 +348,29 @@ function persistFile(tempFilePath) {
   });
 }
 
+function persistFileStrict(tempFilePath) {
+  return new Promise((resolve, reject) => {
+    if (!tempFilePath) {
+      reject({ error: '原照片保存失败，请立即重新选择补充材料' });
+      return;
+    }
+    if (tempFilePath.indexOf('wxfile://usr/') === 0) {
+      resolve(tempFilePath);
+      return;
+    }
+    wx.saveFile({
+      tempFilePath,
+      success(r) {
+        if (r && r.savedFilePath) resolve(r.savedFilePath);
+        else reject({ error: '原照片保存失败，请立即重新选择补充材料' });
+      },
+      fail(cause) {
+        reject({ error: '原照片保存失败，请立即重新选择补充材料', cause });
+      }
+    });
+  });
+}
+
 // 失败队列重传成功回调：把已上传照片的 URL 回填到当前巡检页（若详情面板仍打开）
 // 用于「照片上传接入失败队列」——弱网时上传请求入队，网络恢复重试成功后此处补回 UI
 const { resolveUploadUrl } = require('./url.js');
@@ -286,10 +387,12 @@ function captureFlushedPhoto(task, resp) {
 }
 
 module.exports = {
-  chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, captureFlushedPhoto,
+  chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, persistFileStrict,
+  captureFlushedPhoto,
   isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
   requestCaptureSessionWithLocation, captureSourceNeedsLocationSession,
   collectInspectionPhotoUploadResults, processPhotoUploadIssues,
+  retainRejectedPhotoAsSupplement,
   inspectionPhotoIssueFeedback, inspectionPhotoIssueMessage, setInspectionPhotoIssueMessage,
   photoActionOpeningTitle, runPhotoActionOnce,
   validateReportPhotoPaths, handlePhotoActionFailure,

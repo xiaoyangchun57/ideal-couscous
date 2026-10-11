@@ -274,7 +274,22 @@ class AuthSecurityTest(unittest.TestCase):
     def test_disable_account_revokes_existing_session(self):
         user_token = self.login('operator', 'OperatorPass123')
         admin_token = self.login('admin', 'AdminPass123')
-        response = self.client.put('/api/users/2/status', headers=self.headers(admin_token), json={'status': 'inactive'})
+        blocked = self.client.put('/api/users/2/status', headers=self.headers(admin_token),
+                                  json={'status': 'inactive'})
+        self.assertEqual(blocked.status_code, 409, blocked.json)
+        self.assertEqual(blocked.json['code'], 'USER_SITE_TRANSFER_REQUIRED')
+        with self.temporary_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM users WHERE id=2').fetchone()['status'],
+                             'active')
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM user_sites WHERE user_id=2 AND site_id=1').fetchone()[0], 1)
+        self.assertEqual(self.client.get(
+            '/api/auth/me', headers=self.headers(user_token)).status_code, 200)
+
+        with self.temporary_db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (3,1)')
+        response = self.client.put('/api/users/2/status', headers=self.headers(admin_token),
+                                   json={'status': 'inactive'})
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(self.client.get('/api/auth/me', headers=self.headers(user_token)).status_code, 401)
 

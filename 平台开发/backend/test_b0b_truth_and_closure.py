@@ -106,7 +106,10 @@ class B0BTruthAndClosureTest(unittest.TestCase):
                     site_id INTEGER, site_code TEXT, status TEXT, message TEXT, created_at TEXT
                 );
                 CREATE TABLE vehicles (id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT, status TEXT);
-                CREATE TABLE vehicle_documents (vehicle_id INTEGER, document_type TEXT, valid_until TEXT);
+                CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vehicle_id INTEGER, document_type TEXT, valid_until TEXT
+                );
                 CREATE TABLE vehicle_applications (
                     id INTEGER PRIMARY KEY, vehicle_id INTEGER, applicant_id INTEGER,
                     start_at TEXT, end_at TEXT, destination TEXT, reason TEXT, status TEXT,

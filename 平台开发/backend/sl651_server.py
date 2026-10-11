@@ -683,7 +683,7 @@ class StationIngestServer:
             if auth.status == "authenticated" and not duplicate:
                 if not configuration_pending:
                     self._schedule_normalization(raw_id)
-            # CN=2011/CN=2061 have no confirmed application reply, but a durable receipt is
+            # CN=2011/2061 have no confirmed application reply, but a durable receipt is
             # successful and must not discard later sticky frames on this TCP stream.
             return ProcessingResult(None, auth.status in {"authenticated", "unbound_authenticated"})
         if frame.direction != "up":
