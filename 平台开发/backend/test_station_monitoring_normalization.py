@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,12 +28,13 @@ def bcd_number(value, digits, precision=0):
     return bytes((int(encoded[index]) << 4) | int(encoded[index + 1]) for index in range(0, len(encoded), 2))
 
 
-def make_32h(payload, serial=7, sent_at=None, observed_at=None, payload_station='0012345678'):
+def make_32h(payload, serial=7, sent_at=None, observed_at=None,
+             payload_station='0012345678', credential=b'\x12\x34'):
     sent_at = sent_at or datetime(2020, 6, 12, 2, 0, 0)
     observed_at = observed_at or sent_at.replace(second=0)
     body = b'\xf1\xf1' + encode_station_code(payload_station) + b'\x51\xf0\xf0' + encode_bcd_observation_time(observed_at) + payload
     content = serial.to_bytes(2, "big") + encode_bcd_time(sent_at) + body
-    prefix = b"\x7e\x7e\x10" + encode_station_code("0012345678") + b"\x12\x34\x32" + len(content).to_bytes(2, "big") + b"\x02" + content + bytes((UP_FLOW_CONTROL,))
+    prefix = b"\x7e\x7e\x10" + encode_station_code("0012345678") + credential + b"\x32" + len(content).to_bytes(2, "big") + b"\x02" + content + bytes((UP_FLOW_CONTROL,))
     return prefix + crc16_modbus(prefix).to_bytes(2, "big")
 
 
@@ -1043,6 +1045,66 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         item = next(item for item in response.get_json()['items'] if item['site_id'] == self.site_id)
         self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
 
+    def test_recent_credential_failure_is_visible_without_becoming_authenticated_data(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        local_now = now.astimezone().replace(tzinfo=None)
+        frame = parse_frame(make_32h(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=89,
+            sent_at=local_now, observed_at=local_now.replace(second=0),
+            credential=b'\x99\x99'))
+        authentication = self.storage.authenticate(frame)
+        self.assertEqual(authentication.status, 'credential_failed')
+        raw_id, duplicate = self.storage.persist_parsed(
+            frame, authentication, now.isoformat())
+        self.assertFalse(duplicate)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT authentication_status FROM ingest_raw_frames WHERE id=?',
+                (raw_id,),
+            ).fetchone()[0], 'credential_failed')
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM observation_batches WHERE raw_frame_id=?',
+                (raw_id,),
+            ).fetchone()[0], 0)
+
+        headers = self._headers('monitor-admin')
+        client = web_app.app.test_client()
+        summary = client.get('/api/station-monitoring/access-summary', headers=headers)
+        listed = client.get('/api/station-monitoring/sites?scope=all', headers=headers)
+        detail = client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+        for response in (summary, listed, detail):
+            self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(summary.get_json()['authentication']['credential_failed_frames'], 1)
+        self.assertEqual(summary.get_json()['authentication']['authenticated_frames'], 0)
+        item = next(
+            row for row in listed.get_json()['items'] if row['site_id'] == self.site_id)
+        self.assertEqual(item['reason_code'], 'authentication_failed')
+        self.assertEqual(item['recent_authentication_failures'], 1)
+        self.assertEqual(item['communication']['status'], 'authentication_failed')
+        self.assertEqual(detail.get_json()['site']['reason_code'], 'authentication_failed')
+
+    def test_access_summary_keeps_historical_last_authenticated_time_outside_diagnostic_window(self):
+        received_at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=9)
+        local_received_at = received_at.astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+        self._persist(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=88,
+            sent_at=local_received_at, observed_at=local_received_at.replace(second=0),
+            received_at=received_at.isoformat(),
+        )
+
+        summary = web_app.app.test_client().get(
+            '/api/station-monitoring/access-summary',
+            headers=self._headers('monitor-admin'),
+        ).get_json()
+
+        self.assertEqual(summary['authentication']['authenticated_frames'], 0)
+        self.assertEqual(
+            summary['authentication']['last_authenticated_received_at'],
+            received_at.isoformat(),
+        )
+
     def test_list_and_detail_share_bound_identity_and_exclude_expired_profile(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("UPDATE monitoring_endpoint_profiles SET effective_to='2020-01-01T00:00:00+00:00'")
@@ -1072,6 +1134,76 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(item['last_valid_observation_at'], detail['site']['last_valid_observation_at'])
         self.assertEqual(item['monitoring_status'], detail['site']['monitoring_status'])
         self.assertEqual(item['reason_code'], detail['site']['reason_code'])
+
+    def test_post_r22_frame_reaches_storage_projection_summary_list_detail_and_trend(self):
+        now_local = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai'))
+        current_slot_local = now_local.replace(
+            hour=(now_local.hour // 4) * 4, minute=0, second=0, microsecond=0)
+        current_slot_utc = current_slot_local.astimezone(timezone.utc).isoformat()
+        completed_slot_local = current_slot_local - timedelta(hours=4)
+        completed_slot_utc = completed_slot_local.astimezone(timezone.utc)
+        received_at = completed_slot_utc + timedelta(minutes=5)
+        sent_at = (completed_slot_local + timedelta(minutes=5)).replace(tzinfo=None)
+        observed_at = completed_slot_local.replace(tzinfo=None)
+        scheduled_at = completed_slot_utc.isoformat()
+        trend_start = (completed_slot_utc - timedelta(hours=1)).isoformat().replace('+', '%2B')
+        trend_end = (completed_slot_utc + timedelta(hours=1)).isoformat().replace('+', '%2B')
+        raw_id = self._persist(
+            bytes.fromhex('0311') + bcd_number(8.8, 3, 1), serial=90,
+            sent_at=sent_at, observed_at=observed_at,
+            received_at=received_at.isoformat())
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT authentication_status FROM ingest_raw_frames WHERE id=?',
+                (raw_id,),
+            ).fetchone()[0], 'authenticated')
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM observation_batches WHERE raw_frame_id=? AND batch_status=?',
+                (raw_id, 'accepted'),
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                """SELECT COUNT(*) FROM monitoring_business_observations business
+                   JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                   WHERE batch.raw_frame_id=? AND business.business_metric='water_temp'
+                     AND business.standard_value=8.8 AND business.quality='valid'""",
+                (raw_id,),
+            ).fetchone()[0], 1)
+
+        headers = self._headers('monitor-admin')
+        client = web_app.app.test_client()
+        summary = client.get('/api/station-monitoring/access-summary', headers=headers)
+        listed = client.get('/api/station-monitoring/sites?scope=all', headers=headers)
+        detail = client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+        trend = client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp'
+            f'&start={trend_start}&end={trend_end}',
+            headers=headers,
+        )
+        for response in (summary, listed, detail, trend):
+            self.assertEqual(response.status_code, 200, response.get_json())
+
+        summary_body = summary.get_json()
+        self.assertEqual(summary_body['authentication']['authenticated_frames'], 1)
+        self.assertEqual(summary_body['observation']['valid_sites'], 1)
+        list_item = next(
+            item for item in listed.get_json()['items'] if item['site_id'] == self.site_id)
+        self.assertEqual(list_item['last_valid_observation_at'], scheduled_at)
+        list_factor = next(
+            item for item in list_item['latest_cycle']['factors']
+            if item['business_metric'] == 'water_temp')
+        self.assertEqual(list_item['latest_cycle']['scheduled_at'], current_slot_utc)
+        self.assertIn(list_factor['status'], ('pending', 'missing'))
+        self.assertIsNone(list_factor['value'])
+        detail_value = next(
+            item for item in detail.get_json()['monitoring']['latest_values']
+            if item['business_metric'] == 'water_temp')
+        self.assertEqual(detail_value['standard_value'], 8.8)
+        trend_point = next(
+            item for item in trend.get_json()['points']
+            if item['scheduled_at'] == scheduled_at)
+        self.assertEqual((trend_point['status'], trend_point['value']), ('value', 8.8))
 
     def test_unknown_schedule_and_minute_value_stay_unconfigured_in_list_and_detail(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -1203,18 +1335,18 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             self.assertEqual(ph['status'], 'review_required')
             self.assertIsNone(ph['value'])
 
-    def test_batch_last_receipt_query_uses_endpoint_received_index(self):
+    def test_batch_last_receipt_query_uses_authenticated_endpoint_received_index(self):
         with closing(sqlite3.connect(self.database)) as connection:
             plan = connection.execute(
                 """EXPLAIN QUERY PLAN
                    SELECT endpoint_id,MAX(received_at) FROM ingest_raw_frames
-                   INDEXED BY idx_ingest_raw_endpoint_received
+                   INDEXED BY idx_ingest_raw_authenticated_endpoint_received
                    WHERE authentication_status='authenticated' AND endpoint_id IN (?)
                    GROUP BY endpoint_id""",
                 (self.endpoint_id,),
             ).fetchall()
         detail = ' '.join(str(row[3]) for row in plan)
-        self.assertIn('idx_ingest_raw_endpoint_received', detail)
+        self.assertIn('idx_ingest_raw_authenticated_endpoint_received', detail)
 
     def test_batch_projection_query_count_is_constant_for_one_ten_and_fifty_sites(self):
         def ensure_sites(connection, target):
@@ -1285,7 +1417,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                 counts[size] = len(statements)
                 self.assertEqual(len(items), size)
                 self.assertTrue(all(item['published_factor_count'] == 4 for item in items))
-        self.assertEqual(counts, {1: 8, 10: 8, 50: 8})
+        self.assertEqual(counts, {1: 10, 10: 10, 50: 10})
 
     def test_latest_cycle_keeps_thirteen_configured_factors_and_reports_nine_of_thirteen(self):
         with closing(sqlite3.connect(self.database)) as connection:

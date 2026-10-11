@@ -135,13 +135,13 @@ def validate_submission_photos(result, required_photos, photo_urls):
     return _validate_submission_photos(result, required_photos, photo_urls)
 from station_monitoring import (business_slot_diagnostics as monitoring_business_slot_diagnostics,
                                 BUSINESS_PROJECTION_VERSION as MONITORING_BUSINESS_PROJECTION_VERSION,
+                                _latest_values_from_rows as monitoring_latest_values_from_rows,
                                 business_slot_deadline as monitoring_business_slot_deadline,
                                 current_factor_configurations as monitoring_factor_configurations,
                                 current_factor_configurations_batch as monitoring_factor_configurations_batch,
                                 expected_business_slots as monitoring_expected_business_slots,
                                 latest_cycle as monitoring_latest_cycle,
                                 latest_values as monitoring_latest_values,
-                                latest_values_and_cycles_batch as monitoring_latest_values_and_cycles_batch,
                                 next_business_slot as monitoring_next_business_slot,
                                 trend_slots as monitoring_trend_slots)
 import os, uuid, urllib.request, urllib.error, urllib.parse, json as _json
@@ -36286,12 +36286,18 @@ def _monitoring_query_time(value, field):
 
 
 _MONITORING_UNSET = object()
+_MONITORING_AUTH_DIAGNOSTIC_HOURS = 8
+
+
+def _monitoring_auth_diagnostic_cutoff():
+    return (datetime.now(timezone.utc).replace(microsecond=0)
+            - timedelta(hours=_MONITORING_AUTH_DIAGNOSTIC_HOURS)).isoformat()
 
 
 def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORING_UNSET,
                                    raw=_MONITORING_UNSET, configs=None,
                                    values=None, include_latest_complete=False, responsibility=None,
-                                   cycle=None, factor_states=None):
+                                   cycle=None, factor_states=None, auth_diagnostic=_MONITORING_UNSET):
     """Build the first-wave read-only station monitoring contract from normalized facts."""
     site = site or db.execute(
         "SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, gps_lng AS lng, manager, phone FROM sites WHERE id=?",
@@ -36302,7 +36308,8 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     if profile is _MONITORING_UNSET:
         profile = db.execute(
-            """SELECT profile.* FROM monitoring_endpoint_profiles profile
+            """SELECT profile.*, endpoint.station_code AS endpoint_station_code
+               FROM monitoring_endpoint_profiles profile
                JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
                  AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id IS NOT NULL
                  AND endpoint.business_site_id=profile.business_site_id
@@ -36312,7 +36319,8 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
         ).fetchone()
         if profile is None:
             profile = db.execute(
-                """SELECT id AS endpoint_id FROM trusted_endpoints
+                """SELECT id AS endpoint_id, station_code AS endpoint_station_code
+                   FROM trusted_endpoints
                    WHERE enabled=1 AND endpoint_state='bound' AND business_site_id=? LIMIT 1""", (site_id,)
             ).fetchone()
     responsibility = (responsibility if responsibility is not None
@@ -36325,6 +36333,7 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
         'responsible_people': responsibility['responsible_people'],
         'monitoring_status_label': '未接入', 'reason_code': 'not_connected', 'monitoring_reason': '未配置启用的监测身份',
         'last_received_at': None, 'last_communication_at': None,
+        'last_transport_received_at': None, 'recent_authentication_failures': 0,
         'last_valid_observation_at': None, 'published_factor_count': 0,
         'monitoring_status': 'not_connected', 'monitoring_load_state': 'ready',
         'communication': {'status': 'not_connected', 'last_received_at': None},
@@ -36339,7 +36348,20 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
             """SELECT MAX(received_at) AS received_at FROM ingest_raw_frames
                WHERE endpoint_id=? AND authentication_status='authenticated'""", (profile['endpoint_id'],)
         ).fetchone()
+    if auth_diagnostic is _MONITORING_UNSET:
+        station_code = (profile['endpoint_station_code']
+                        if 'endpoint_station_code' in profile.keys() else None)
+        auth_diagnostic = (db.execute(
+            """SELECT COUNT(*) AS failure_count, MAX(received_at) AS last_transport_received_at
+               FROM ingest_raw_frames
+               WHERE station_code=? AND authentication_status='credential_failed'
+                 AND received_at>=?""",
+            (station_code, _monitoring_auth_diagnostic_cutoff()),
+        ).fetchone() if station_code else None)
     last_communication = raw['received_at'] if raw and raw['received_at'] else None
+    authentication_failures = int(auth_diagnostic['failure_count'] or 0) if auth_diagnostic else 0
+    last_transport_received_at = (auth_diagnostic['last_transport_received_at']
+                                  if auth_diagnostic else None)
     configs = configs if configs is not None else monitoring_factor_configurations(db, site_id)
     configs = [item for item in configs if item.get('endpoint_id') == profile['endpoint_id']]
     values = values if values is not None else monitoring_latest_values(db, site_id)
@@ -36351,13 +36373,28 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
                             'normal' if communication_freshness['state'] == 'fresh' else 'stale')
     base['last_received_at'] = last_communication
     base['last_communication_at'] = last_communication
-    base['communication'] = {'status': communication_status, 'last_received_at': last_communication}
+    base['last_transport_received_at'] = last_transport_received_at
+    base['recent_authentication_failures'] = authentication_failures
+    base['communication'] = {
+        'status': ('authentication_failed' if not last_communication and authentication_failures
+                   else communication_status),
+        'last_received_at': last_communication,
+        'last_transport_received_at': last_transport_received_at,
+        'recent_authentication_failures': authentication_failures,
+        'diagnostic_window_hours': _MONITORING_AUTH_DIAGNOSTIC_HOURS,
+    }
     base['latest_cycle'] = cycle
     base['last_valid_observation_at'] = max(
         (item.get('scheduled_at') for item in values if item.get('scheduled_at')), default=None)
     base['published_factor_count'] = len(configs)
     if not last_communication:
-        base.update(monitoring_status='awaiting_first_frame', monitoring_status_label='等待首帧', reason_code='no_authenticated_frame', monitoring_reason='身份已接入，尚未收到认证原文')
+        if authentication_failures:
+            base.update(
+                monitoring_status='attention', monitoring_status_label='认证失败',
+                reason_code='authentication_failed',
+                monitoring_reason=f'最近{_MONITORING_AUTH_DIAGNOSTIC_HOURS}小时已收到站点报文，但认证未通过')
+        else:
+            base.update(monitoring_status='awaiting_first_frame', monitoring_status_label='等待首帧', reason_code='no_authenticated_frame', monitoring_reason='身份已接入，尚未收到认证原文')
     elif not configs:
         base.update(monitoring_status='raw_received_config_pending', monitoring_status_label='档案待批准', reason_code='monitoring_config_pending', monitoring_reason='已收到认证原文，监测档案或因子尚未批准')
     elif any(not item.get('expected_interval_seconds') for item in configs):
@@ -36376,11 +36413,11 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
             db, site_id, profile, configs, values, last_communication,
             factor_states=factor_states)
         base.update(monitoring_status=summary['status'], monitoring_status_label=summary['status_label'], reason_code=summary['reason_code'], monitoring_reason=summary['reason'])
-    if cycle['status'] in {'incomplete', 'review_required'}:
+    if last_communication and cycle['status'] in {'incomplete', 'review_required'}:
         base.update(monitoring_status='attention', monitoring_status_label='数据需关注',
                     reason_code='latest_cycle_' + cycle['status'],
                     monitoring_reason='最近检测周期不完整或存在待核对结果')
-    elif cycle['status'] == 'pending' and not cycle['formed_count']:
+    elif last_communication and cycle['status'] == 'pending' and not cycle['formed_count']:
         base.update(monitoring_status='waiting_first_valid', monitoring_status_label='等待分析结果',
                     reason_code='analysis_pending', monitoring_reason='最近检测周期仍在结果窗口内')
     return base
@@ -36721,6 +36758,97 @@ def _station_monitoring_overview(db, site_id):
             'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
 
 
+def _station_monitoring_latest_values_and_cycles_for_list(db, configurations_by_site, *, at_time):
+    """Read only the current cycle and the latest unambiguous formal result per factor."""
+    site_ids = list(configurations_by_site)
+    if not site_ids:
+        return {}, {}
+    configurations = [item for items in configurations_by_site.values() for item in items]
+    marks = ','.join('?' * len(site_ids))
+    latest_rows = [dict(row) for row in db.execute(f"""WITH formal AS (
+            SELECT business.id,business.business_site_id,business.business_metric,
+                   business.protocol_code,business.standard_value,business.standard_unit,
+                   business.quality,business.instrument_asset_code,business.endpoint_id,
+                   business.scheduled_at,business.observed_at,business.received_at,
+                   business.timeliness,business.slot_state,business.projection_version,
+                   batch.function_code
+            FROM monitoring_business_observations business
+            JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            WHERE business.business_site_id IN ({marks})
+              AND business.is_current=1 AND batch.is_current=1 AND business.quality='valid'
+              AND (business.protocol_code NOT LIKE 'HJ212:%'
+                   OR (batch.function_code=2061 AND business.projection_version=?))
+        ), unique_slots AS (
+            SELECT business_site_id,endpoint_id,business_metric,
+                   COALESCE(instrument_asset_code,'') AS instrument_key,scheduled_at
+            FROM formal
+            GROUP BY business_site_id,endpoint_id,business_metric,instrument_key,scheduled_at
+            HAVING COUNT(DISTINCT printf('%.17g',standard_value)||char(31)||standard_unit)=1
+        ), latest_slots AS (
+            SELECT business_site_id,endpoint_id,business_metric,instrument_key,
+                   MAX(scheduled_at) AS scheduled_at
+            FROM unique_slots
+            GROUP BY business_site_id,endpoint_id,business_metric,instrument_key
+        )
+        SELECT formal.* FROM formal
+        JOIN latest_slots latest
+          ON latest.business_site_id=formal.business_site_id
+         AND latest.endpoint_id=formal.endpoint_id
+         AND latest.business_metric=formal.business_metric
+         AND latest.instrument_key=COALESCE(formal.instrument_asset_code,'')
+         AND latest.scheduled_at=formal.scheduled_at
+        ORDER BY formal.business_site_id,formal.endpoint_id,formal.business_metric,
+                 formal.scheduled_at DESC,formal.id DESC""",
+        [*site_ids, MONITORING_BUSINESS_PROJECTION_VERSION]).fetchall()]
+    if configurations:
+        evaluated_at = datetime.fromisoformat(at_time).astimezone(timezone.utc)
+        lookback_seconds = max(
+            max(int(item.get('expected_interval_seconds') or 14400) * 2,
+                int(item.get('expected_interval_seconds') or 14400)
+                + int(item.get('result_delay_seconds') or 0)
+                + int(item.get('tolerance_seconds') or 0))
+            for item in configurations
+        )
+        recent_from = (evaluated_at - timedelta(seconds=lookback_seconds)).isoformat()
+        recent_rows = [dict(row) for row in db.execute(f"""SELECT
+                business.id,business.business_site_id,business.business_metric,
+                business.protocol_code,business.standard_value,business.standard_unit,
+                business.quality,business.instrument_asset_code,business.endpoint_id,
+                business.scheduled_at,business.observed_at,business.received_at,
+                business.timeliness,business.slot_state,business.projection_version,
+                batch.function_code
+            FROM monitoring_business_observations business
+            JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            WHERE business.business_site_id IN ({marks})
+              AND business.is_current=1 AND batch.is_current=1
+              AND business.scheduled_at>=? AND business.scheduled_at<=?
+            ORDER BY business.business_site_id,business.endpoint_id,business.business_metric,
+                     business.scheduled_at DESC,business.id DESC""",
+            [*site_ids, recent_from, at_time]).fetchall()]
+    else:
+        recent_rows = []
+    rows_by_site = {}
+    seen_ids = set()
+    for row in sorted([*recent_rows, *latest_rows],
+                      key=lambda item: (item['business_site_id'], item['endpoint_id'],
+                                        item['business_metric'], item['scheduled_at'], item['id']),
+                      reverse=True):
+        if row['id'] in seen_ids:
+            continue
+        seen_ids.add(row['id'])
+        rows_by_site.setdefault(row['business_site_id'], []).append(row)
+    values_by_site = {}
+    cycles_by_site = {}
+    for site_id, site_configurations in configurations_by_site.items():
+        site_rows = rows_by_site.get(site_id, [])
+        values_by_site[site_id] = monitoring_latest_values_from_rows(
+            site_configurations, site_rows)
+        cycles_by_site[site_id] = monitoring_latest_cycle(
+            db, site_id, at_time=at_time, configurations=site_configurations,
+            include_latest_complete=False, business_rows=site_rows)
+    return values_by_site, cycles_by_site
+
+
 def _station_monitoring_batch_projections(db, site_rows):
     """Fetch monitoring facts in bounded sets, then assemble per-site projections."""
     if not site_rows:
@@ -36729,9 +36857,10 @@ def _station_monitoring_batch_projections(db, site_rows):
     site_ids = [row['id'] for row in site_rows]
     marks = ','.join('?' * len(site_ids))
     endpoints = db.execute(f"SELECT * FROM trusted_endpoints WHERE enabled=1 AND endpoint_state='bound' AND business_site_id IS NOT NULL AND business_site_id IN ({marks})", site_ids).fetchall()
+    endpoint_by_id = {row['id']: row for row in endpoints}
     endpoint_ids = [row['id'] for row in endpoints]
     epmarks = ','.join('?' * len(endpoint_ids)) or 'NULL'
-    raw_rows = db.execute(f"SELECT endpoint_id, MAX(received_at) AS received_at FROM ingest_raw_frames INDEXED BY idx_ingest_raw_endpoint_received WHERE authentication_status='authenticated' AND endpoint_id IN ({epmarks}) GROUP BY endpoint_id", endpoint_ids).fetchall()
+    raw_rows = db.execute(f"SELECT endpoint_id, MAX(received_at) AS received_at FROM ingest_raw_frames INDEXED BY idx_ingest_raw_authenticated_endpoint_received WHERE authentication_status='authenticated' AND endpoint_id IN ({epmarks}) GROUP BY endpoint_id", endpoint_ids).fetchall()
     profiles = db.execute(f"""SELECT profile.* FROM monitoring_endpoint_profiles profile
         JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
           AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id=profile.business_site_id
@@ -36739,11 +36868,27 @@ def _station_monitoring_batch_projections(db, site_rows):
           AND profile.business_site_id IN ({marks}) AND profile.endpoint_id IN ({epmarks}) ORDER BY profile.effective_from DESC""", [now, now, *site_ids, *endpoint_ids]).fetchall()
     profile_by_site = {}
     for row in profiles:
-        profile_by_site.setdefault(row['business_site_id'], row)
+        profile = dict(row)
+        endpoint = endpoint_by_id.get(row['endpoint_id'])
+        profile['endpoint_station_code'] = endpoint['station_code'] if endpoint else None
+        profile_by_site.setdefault(row['business_site_id'], profile)
     endpoint_by_site = {}
     for row in endpoints:
-        endpoint_by_site.setdefault(row['business_site_id'], {'endpoint_id': row['id']})
+        endpoint_by_site.setdefault(row['business_site_id'], {
+            'endpoint_id': row['id'], 'endpoint_station_code': row['station_code']})
     raw_by_ep = {row['endpoint_id']: row for row in raw_rows}
+    station_codes = [row['station_code'] for row in endpoints if row['station_code']]
+    if station_codes:
+        code_marks = ','.join('?' * len(station_codes))
+        auth_rows = db.execute(f"""SELECT station_code,COUNT(*) AS failure_count,
+                MAX(received_at) AS last_transport_received_at
+            FROM ingest_raw_frames INDEXED BY idx_ingest_raw_station_auth_received
+            WHERE station_code IN ({code_marks}) AND authentication_status='credential_failed'
+              AND received_at>=? GROUP BY station_code""",
+            [*station_codes, _monitoring_auth_diagnostic_cutoff()]).fetchall()
+    else:
+        auth_rows = []
+    auth_by_station_code = {row['station_code']: row for row in auth_rows}
     responsibility_rows = db.execute(f"""SELECT DISTINCT us.site_id,u.id,u.real_name,u.phone
         FROM user_sites us JOIN users u ON u.id=us.user_id
         LEFT JOIN user_roles ur ON ur.user_id=u.id
@@ -36775,7 +36920,7 @@ def _station_monitoring_batch_projections(db, site_rows):
             item for item in all_configs.get(site_id, [])
             if item.get('endpoint_id') == endpoint_id
         ]
-    values_by_site, cycles_by_site = monitoring_latest_values_and_cycles_batch(
+    values_by_site, cycles_by_site = _station_monitoring_latest_values_and_cycles_for_list(
         db, configs_by_site, at_time=now)
     issue_rows = db.execute(f"""SELECT issue.business_site_id,issue.issue_type,
                issue.object_summary AS protocol_code,batch.observed_at
@@ -36793,12 +36938,13 @@ def _station_monitoring_batch_projections(db, site_rows):
         raw = raw_by_ep.get(profile['endpoint_id']) if profile else None
         configs = configs_by_site.get(sid, [])
         values = values_by_site.get(sid, [])
+        station_code = profile.get('endpoint_station_code') if profile else None
         factor_states = _station_monitoring_factor_states(
             db, sid, configs, values, faults=faults_by_site.get(sid, {}))
         result.append(_station_monitoring_projection(
             db, sid, site=site, profile=profile, raw=raw, configs=configs, values=values,
             responsibility=responsibility_by_site[sid], cycle=cycles_by_site.get(sid),
-            factor_states=factor_states))
+            factor_states=factor_states, auth_diagnostic=auth_by_station_code.get(station_code)))
     return result
 
 
@@ -36879,38 +37025,66 @@ def station_monitoring_access_summary():
     with get_db() as db:
         endpoint_count = db.execute("SELECT COUNT(*) FROM trusted_endpoints WHERE enabled=1").fetchone()[0]
         site_count = db.execute("SELECT COUNT(DISTINCT business_site_id) FROM trusted_endpoints WHERE enabled=1 AND endpoint_state='bound' AND business_site_id IS NOT NULL").fetchone()[0]
-        raw_sites = db.execute("SELECT COUNT(DISTINCT endpoint.business_site_id) FROM ingest_raw_frames frame JOIN trusted_endpoints endpoint ON endpoint.id=frame.endpoint_id AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id IS NOT NULL WHERE frame.authentication_status='authenticated'").fetchone()[0]
+        raw_sites = db.execute("""SELECT COUNT(*) FROM trusted_endpoints endpoint
+            WHERE endpoint.enabled=1 AND endpoint.endpoint_state='bound'
+              AND endpoint.business_site_id IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM ingest_raw_frames frame
+                  INDEXED BY idx_ingest_raw_authenticated_endpoint_received
+                  WHERE frame.endpoint_id=endpoint.id
+                    AND frame.authentication_status='authenticated')""").fetchone()[0]
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        auth_cutoff = _monitoring_auth_diagnostic_cutoff()
+        auth_rows = db.execute("""SELECT authentication_status,COUNT(*) AS frame_count,
+                MAX(received_at) AS last_received_at
+            FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
+            WHERE received_at>=? GROUP BY authentication_status""", (auth_cutoff,)).fetchall()
+        auth_by_status = {row['authentication_status']: row for row in auth_rows}
+        last_transport = db.execute(
+            'SELECT MAX(received_at) FROM ingest_raw_frames').fetchone()[0]
+        last_authenticated = db.execute(
+            """SELECT MAX(received_at) AS received_at FROM ingest_raw_frames
+               INDEXED BY idx_ingest_raw_authenticated_received
+               WHERE authentication_status='authenticated'""").fetchone()
         configured_sites = db.execute("""SELECT COUNT(DISTINCT profile.business_site_id) FROM monitoring_endpoint_profiles profile
             JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id IS NOT NULL
               AND endpoint.business_site_id=profile.business_site_id
             JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id AND mapping.enabled=1 AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
             JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code AND definition.is_published=1
             WHERE profile.enabled=1 AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)""", (now, now, now, now)).fetchone()[0]
-        valid_sites = db.execute("""SELECT COUNT(DISTINCT business.business_site_id)
-            FROM monitoring_business_observations business
-            JOIN observation_batches batch ON batch.id=business.observation_batch_id AND batch.is_current=1
-            JOIN trusted_endpoints endpoint ON endpoint.id=business.endpoint_id
+        valid_sites = db.execute("""SELECT COUNT(*) FROM (
+            SELECT DISTINCT profile.business_site_id
+            FROM monitoring_endpoint_profiles profile
+            JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
               AND endpoint.enabled=1 AND endpoint.endpoint_state='bound'
-              AND endpoint.business_site_id IS NOT NULL
-              AND endpoint.business_site_id=business.business_site_id
-            JOIN monitoring_endpoint_profiles profile ON profile.endpoint_id=business.endpoint_id
-              AND profile.business_site_id=business.business_site_id AND profile.enabled=1
-              AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
-            JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=business.endpoint_id
-              AND mapping.protocol_code=business.protocol_code AND mapping.enabled=1
-              AND mapping.effective_from<=? AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
-              AND COALESCE(mapping.business_metric, business.business_metric)=business.business_metric
-              AND COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code)
-                  IS business.instrument_asset_code
+              AND endpoint.business_site_id=profile.business_site_id
+            JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id
+              AND mapping.enabled=1 AND mapping.effective_from<=?
+              AND (mapping.effective_to IS NULL OR mapping.effective_to>?)
             JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
               AND definition.is_published=1
-            WHERE business.is_current=1 AND business.quality='valid'
-              AND (business.protocol_code NOT LIKE 'HJ212:%'
-                   OR (batch.function_code=2061 AND business.projection_version=?))""",
-            (now, now, now, now, MONITORING_BUSINESS_PROJECTION_VERSION)).fetchone()[0]
+            WHERE profile.enabled=1 AND profile.effective_from<=?
+              AND (profile.effective_to IS NULL OR profile.effective_to>?)
+              AND EXISTS (
+                  SELECT 1 FROM monitoring_business_observations business
+                  INDEXED BY idx_monitoring_business_valid_endpoint_factor
+                  JOIN observation_batches batch
+                    ON batch.id=business.observation_batch_id AND batch.is_current=1
+                  WHERE business.endpoint_id=profile.endpoint_id
+                    AND business.business_site_id=profile.business_site_id
+                    AND business.protocol_code=mapping.protocol_code
+                    AND business.business_metric=COALESCE(mapping.business_metric,business.business_metric)
+                    AND business.instrument_asset_code IS COALESCE(
+                        mapping.instrument_asset_code,profile.instrument_asset_code)
+                    AND business.is_current=1 AND business.quality='valid'
+                    AND (business.protocol_code NOT LIKE 'HJ212:%'
+                         OR (batch.function_code=2061 AND business.projection_version=?))
+              )
+        )""", (now, now, now, now, MONITORING_BUSINESS_PROJECTION_VERSION)).fetchone()[0]
         quality_count = db.execute("SELECT COUNT(*) FROM monitoring_quality_issues WHERE status='open'").fetchone()[0]
-        return jsonify({'runtime': {'enabled_endpoints': endpoint_count}, 'identity': {'bound_sites': site_count, 'received_raw_sites': raw_sites}, 'configuration': {'configured_sites': configured_sites}, 'observation': {'valid_sites': valid_sites}, 'quality': {'open_items': quality_count}, 'storage': {'raw_frames': db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 'observation_batches': db.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0]}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
+        def auth_count(status):
+            row = auth_by_status.get(status)
+            return int(row['frame_count']) if row else 0
+        return jsonify({'runtime': {'enabled_endpoints': endpoint_count}, 'identity': {'bound_sites': site_count, 'received_raw_sites': raw_sites}, 'authentication': {'diagnostic_window_hours': _MONITORING_AUTH_DIAGNOSTIC_HOURS, 'authenticated_frames': auth_count('authenticated'), 'credential_failed_frames': auth_count('credential_failed'), 'unknown_endpoint_frames': auth_count('unknown_endpoint'), 'unbound_authenticated_frames': auth_count('unbound_authenticated'), 'last_transport_received_at': last_transport, 'last_authenticated_received_at': last_authenticated['received_at']}, 'configuration': {'configured_sites': configured_sites}, 'observation': {'valid_sites': valid_sites}, 'quality': {'open_items': quality_count}, 'storage': {'raw_frames': db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 'observation_batches': db.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0]}, 'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat()})
 
 
 @app.route('/api/station-monitoring/sites/<int:site_id>/summary')

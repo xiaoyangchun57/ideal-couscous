@@ -24,6 +24,7 @@ MIGRATIONS = (
     ("20260918_006_hj212_legacy_005_dissolved_oxygen", Path(__file__).with_name("migrations") / "20260918_006_hj212_legacy_005_dissolved_oxygen.sql"),
     ("20260921_007_monitoring_result_window", Path(__file__).with_name("migrations") / "20260921_007_monitoring_result_window.sql"),
     ("20260922_008_station_master_refresh", Path(__file__).with_name("migrations") / "20260922_008_station_master_refresh.sql"),
+    ("20261011_009_station_monitoring_read_indexes", Path(__file__).with_name("migrations") / "20261011_009_station_monitoring_read_indexes.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -32,6 +33,7 @@ RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
 HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_oxygen"
 MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_window"
 STATION_MASTER_REFRESH_MIGRATION_VERSION = "20260922_008_station_master_refresh"
+STATION_MONITORING_READ_INDEX_MIGRATION_VERSION = "20261011_009_station_monitoring_read_indexes"
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -299,6 +301,30 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not station_master or station_master[0] != migration_checksum(STATION_MASTER_REFRESH_MIGRATION_VERSION):
         raise MigrationError("station master refresh migration is missing or incompatible")
+    read_indexes = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
+    ).fetchone()
+    if not read_indexes or read_indexes[0] != migration_checksum(
+            STATION_MONITORING_READ_INDEX_MIGRATION_VERSION):
+        raise MigrationError("station monitoring read-index migration is missing or incompatible")
+    required_read_indexes = {
+        "idx_ingest_raw_authenticated_endpoint_received",
+        "idx_ingest_raw_authenticated_received",
+        "idx_ingest_raw_station_auth_received",
+        "idx_monitoring_business_current_site_scheduled",
+        "idx_monitoring_business_valid_endpoint_factor",
+    }
+    existing_indexes = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    missing_read_indexes = required_read_indexes - existing_indexes
+    if missing_read_indexes:
+        raise MigrationError(
+            "station monitoring read indexes are missing: "
+            + ", ".join(sorted(missing_read_indexes)))
     required_master_tables = {"site_name_aliases", "station_master_refresh_audits"}
     if required_master_tables - existing:
         raise MigrationError("station master refresh tables are missing")

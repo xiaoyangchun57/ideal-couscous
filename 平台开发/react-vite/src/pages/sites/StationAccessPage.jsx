@@ -74,6 +74,7 @@ export default function StationAccessPage() {
 
   const runtime = data.runtime || {};
   const identity = data.identity || {};
+  const authentication = data.authentication || {};
   const profile = data.profile || data.configuration || {};
   const observation = data.observation || data.observations || {};
   const quality = data.quality || {};
@@ -97,6 +98,16 @@ export default function StationAccessPage() {
             { key: 'enabled', label: '启用端点', value: runtime.enabled_endpoints },
             { key: 'bound', label: '已绑定站点', value: identity.bound_identities ?? identity.bound_sites ?? runtime.bound_sites },
             { key: 'received', label: '收到认证原文', value: identity.authenticated_frame_endpoints ?? identity.received_raw_sites },
+          ]}
+        />
+        <SummarySection
+          title={`最近${authentication.diagnostic_window_hours ?? 8}小时认证诊断`}
+          description="区分认证成功、凭据失败、未知身份和已认证但未绑定"
+          items={[
+            { key: 'authenticated', label: '认证成功原文', value: authentication.authenticated_frames },
+            { key: 'credential_failed', label: '凭据失败原文', value: authentication.credential_failed_frames },
+            { key: 'unknown_endpoint', label: '未知身份原文', value: authentication.unknown_endpoint_frames },
+            { key: 'unbound', label: '认证但未绑定', value: authentication.unbound_authenticated_frames },
           ]}
         />
         <SummarySection
@@ -127,7 +138,11 @@ export default function StationAccessPage() {
           ]}
         />
         <Card size="small">
-          <Descriptions column={1} items={[{ key: 'updated', label: '摘要更新时间', children: data.updated_at ? formatMonitoringTime(data.updated_at) : '服务端未提供' }]} />
+          <Descriptions column={{ xs: 1, sm: 2 }} items={[
+            { key: 'last_transport', label: '最后网络报文', children: authentication.last_transport_received_at ? formatMonitoringTime(authentication.last_transport_received_at) : '暂无' },
+            { key: 'last_authenticated', label: '最后认证成功原文', children: authentication.last_authenticated_received_at ? formatMonitoringTime(authentication.last_authenticated_received_at) : '暂无' },
+            { key: 'updated', label: '摘要更新时间', children: data.updated_at ? formatMonitoringTime(data.updated_at) : '服务端未提供' },
+          ]} />
         </Card>
       </Space>
     </div>

@@ -260,6 +260,10 @@ class StationIngestionMigrationTest(unittest.TestCase):
                 'DELETE FROM schema_migrations WHERE version=?',
                 (migration.MONITORING_RESULT_WINDOW_MIGRATION_VERSION,),
             )
+            connection.execute(
+                'DELETE FROM schema_migrations WHERE version=?',
+                (migration.STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
+            )
             endpoint = connection.execute(
                 """INSERT INTO trusted_endpoints(
                        station_code,credential_hmac,business_site_id,endpoint_state)

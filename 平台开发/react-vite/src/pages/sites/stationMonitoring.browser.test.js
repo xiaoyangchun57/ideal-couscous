@@ -57,6 +57,12 @@ function trend(metric = '酸碱度') {
 
 const summary = {
   runtime: { enabled_endpoints: 11 }, identity: { bound_sites: 7, received_raw_sites: 5 },
+  authentication: {
+    diagnostic_window_hours: 8, authenticated_frames: 17, credential_failed_frames: 2,
+    unknown_endpoint_frames: 1, unbound_authenticated_frames: 3,
+    last_transport_received_at: '2026-10-11T08:01:00+08:00',
+    last_authenticated_received_at: '2026-10-11T08:00:00+08:00',
+  },
   configuration: { configured_sites: 3 }, observation: { valid_sites: 2 },
   quality: { open_items: 1 }, storage: { raw_frames: 19, observation_batches: 13 },
   updated_at: '2026-09-15T08:00:00+08:00',
@@ -334,10 +340,13 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       fail = false;
       await page.getByRole('button', { name: '重试', exact: true }).click();
       await visible(page.getByText('形成观测站点', { exact: true }));
-      for (const [label, value] of [['启用端点', '11'], ['已绑定站点', '7'], ['收到认证原文', '5'], ['已批准因子', '暂无'], ['已配置周期', '暂无'], ['有效值数量', '暂无']]) {
+      await visible(page.getByText('最近8小时认证诊断', { exact: true }));
+      for (const [label, value] of [['启用端点', '11'], ['已绑定站点', '7'], ['收到认证原文', '5'], ['认证成功原文', '17'], ['凭据失败原文', '2'], ['未知身份原文', '1'], ['认证但未绑定', '3'], ['已批准因子', '暂无'], ['已配置周期', '暂无'], ['有效值数量', '暂无']]) {
         const statistic = page.locator('.ant-statistic').filter({ has: page.getByText(label, { exact: true }) });
         assert.equal(await statistic.locator('.ant-statistic-content').innerText(), value);
       }
+      await visible(page.getByText('最后网络报文', { exact: true }));
+      await visible(page.getByText('最后认证成功原文', { exact: true }));
       await snapshot(page, 'access-desktop');
       fail = true;
       await page.getByRole('button', { name: /刷新/ }).click();
