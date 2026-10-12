@@ -251,6 +251,14 @@ class FreezeSecurityTest(unittest.TestCase):
         self.assertEqual(noninspection.status_code, 404)
         self.assertEqual(self.attachment_statuses()[20], 'pending')
 
+        before_batch = self.attachment_statuses()
+        noninspection_batch = self.status(
+            'admin', 'post', '/api/inspection/photos/batch-review',
+            json={'photo_ids': [20], 'action': 'approve'},
+        )
+        self.assertEqual(noninspection_batch.status_code, 404)
+        self.assertEqual(self.attachment_statuses(), before_batch)
+
     def test_duplicate_batch_ids_update_and_notify_once(self):
         response = self.status('reviewer-1', 'post', '/api/inspection/photos/batch-review', json={
             'photo_ids': [10, 10], 'action': 'reject', 'reject_reason': 'image is unclear',

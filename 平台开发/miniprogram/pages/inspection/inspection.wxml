@@ -733,12 +733,14 @@
                     bindtap="onRetryProtectedPhoto" data-list="photoMedia" data-index="{{index}}">
                 <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
               </view>
+              <text class="ip-photo-upload-status">已上传</text>
               <text class="ip-photo-del" catchtap="onDelPhoto" data-idx="{{index}}">×</text>
             </view>
             <view class="ip-photo-item" wx:for="{{sheet.localPhotos}}" wx:key="*this" wx:for-item="p">
               <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
-              <text class="ip-photo-del" catchtap="onDelLocalPhoto" data-idx="{{index}}">×</text>
-              <view class="ip-photo-local-actions">
+              <text class="ip-photo-upload-status {{sheet.localPhotoMeta[index].uploadStatus === 'failed' ? 'ip-photo-upload-status-failed' : ''}}">{{sheet.localPhotoMeta[index].uploadStatusLabel || '上传失败，可重试/删除'}}</text>
+              <text class="ip-photo-del" wx:if="{{sheet.localPhotoMeta[index].uploadStatus === 'failed'}}" catchtap="onDelLocalPhoto" data-idx="{{index}}">×</text>
+              <view class="ip-photo-local-actions" wx:if="{{sheet.localPhotoMeta[index].uploadStatus === 'failed'}}">
                 <text catchtap="onRetryLocalPhoto" data-kind="required" data-idx="{{index}}">重试上传</text>
                 <text catchtap="onSaveLocalPhotoAsSupplement" data-kind="required" data-idx="{{index}}">转补充</text>
               </view>
@@ -755,12 +757,14 @@
                   <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
                 </view>
                 <text class="ip-photo-del" catchtap="onDelSupplementPhoto" data-id="{{p.businessId}}">×</text>
+                <text class="ip-photo-upload-status">已上传</text>
                 <text class="ip-photo-material-badge">补充</text>
               </view>
               <view class="ip-photo-item" wx:for="{{sheet.supplementLocalPhotos}}" wx:key="*this" wx:for-item="p">
                 <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
-                <text class="ip-photo-del" catchtap="onDelSupplementLocalPhoto" data-idx="{{index}}">×</text>
-                <view class="ip-photo-local-actions ip-photo-local-actions-single">
+                <text class="ip-photo-upload-status {{sheet.supplementLocalMeta[index].uploadStatus === 'failed' ? 'ip-photo-upload-status-failed' : ''}}">{{sheet.supplementLocalMeta[index].uploadStatusLabel || '上传失败，可重试/删除'}}</text>
+                <text class="ip-photo-del" wx:if="{{sheet.supplementLocalMeta[index].uploadStatus === 'failed'}}" catchtap="onDelSupplementLocalPhoto" data-idx="{{index}}">×</text>
+                <view class="ip-photo-local-actions ip-photo-local-actions-single" wx:if="{{sheet.supplementLocalMeta[index].uploadStatus === 'failed'}}">
                   <text catchtap="onRetryLocalPhoto" data-kind="supplement" data-idx="{{index}}">重试上传</text>
                 </view>
               </view>
@@ -890,7 +894,7 @@
         <text class="sheet-title">异常上报</text>
         <view class="sheet-close" bindtap="onCloseReport">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="field-label">异常类型</view>
         <picker mode="selector" range="{{reportTypes}}" range-key="label" value="{{reportSheet.typeIndex}}" bindchange="onReportType">
           <view class="input-field">{{reportTypes[reportSheet.typeIndex].label || '请选择异常类型'}}</view>
@@ -919,7 +923,7 @@
         <text class="sheet-title">整改资源申请</text>
         <view class="sheet-close" bindtap="onCloseReworkResource">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="field-label">资源方式</view>
         <view class="seg-row">
           <view class="seg-item {{reworkResourceSheet.mode === 'vehicle' ? 'active' : ''}}" bindtap="onReworkResourceMode" data-mode="vehicle">安排车辆</view>
@@ -946,7 +950,7 @@
         <text class="sheet-title">备件发放</text>
         <view class="sheet-close" bindtap="onClosePartsIssue">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="parts-issue-row" wx:for="{{partsIssueSheet.items}}" wx:key="part_id">
           <view class="parts-issue-left">
             <text class="parts-issue-name">{{item.part_name}}</text>
@@ -1057,7 +1061,7 @@
         <text class="sheet-title">{{refuelSheet.label}}登记</text>
         <view class="sheet-close" bindtap="onCloseRefuel">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="field-label">{{refuelSheet.label}}量（{{refuelSheet.unit}}）</view>
         <input class="input-field" type="digit" placeholder="请输入补给量" value="{{refuelSheet.quantity}}" data-field="quantity" bindinput="onRefuelField" />
         <view class="field-label">金额（元）</view>
@@ -1077,7 +1081,7 @@
         <text class="sheet-title">车辆故障上报</text>
         <view class="sheet-close" bindtap="onCloseVehicleFault">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="field-label">故障类型</view>
         <view class="input-field">{{vehicleFaultSheet.faultType}}</view>
         <view class="field-label">当前里程（公里）</view>
@@ -1097,7 +1101,7 @@
         <text class="sheet-title">现场试剂</text>
         <view class="sheet-close" bindtap="onCloseReagentSheet">×</view>
       </view>
-      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+      <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
         <view class="field-label">试剂选择</view>
         <picker mode="selector" range="{{reagents}}" range-key="reagent_name" value="{{reagentSheet.index}}" bindchange="onReagentPick">
           <view class="input-field">{{reagents[reagentSheet.index].reagent_name || '请选择试剂'}}</view>
@@ -1146,7 +1150,7 @@
       <text class="sheet-title">{{vehicleSheet.mode === 'return' ? '还车检查' : '出车前检查'}}</text>
       <view class="sheet-close" bindtap="onCloseVehicleCheckout">×</view>
     </view>
-    <scroll-view scroll-y enhanced show-scrollbar="{{false}}" style="max-height:60vh;">
+    <scroll-view scroll-y enhanced show-scrollbar="{{false}}" class="sheet-scroll">
       <view class="field-label">里程表（公里）</view>
       <input class="input-field" type="digit" placeholder="请输入出车时里程" value="{{vehicleSheet.mileage}}" bindinput="onVehicleMileage" />
       <view class="field-label">检查项</view>

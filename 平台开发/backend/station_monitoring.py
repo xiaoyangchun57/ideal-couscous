@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -618,7 +619,8 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
         f"""SELECT profile.endpoint_id, profile.business_site_id, mapping.protocol_code,
                    COALESCE(mapping.business_metric, definition.business_metric) AS business_metric,
                    COALESCE(mapping.instrument_asset_code, profile.instrument_asset_code) AS instrument_asset_code,
-                   definition.standard_unit, mapping.expected_interval_seconds AS ingestion_interval_seconds,
+                   definition.standard_unit, definition.decimal_precision,
+                   mapping.expected_interval_seconds AS ingestion_interval_seconds,
                    mapping.tolerance_seconds AS ingestion_tolerance_seconds,
                    profile.effective_from AS profile_effective_from, profile.effective_to AS profile_effective_to,
                    mapping.effective_from AS mapping_effective_from, mapping.effective_to AS mapping_effective_to
@@ -766,6 +768,7 @@ def _cycle_factor(connection, site_id: int, configuration: dict, scheduled_at: s
         "business_metric": configuration["business_metric"],
         "instrument_asset_code": configuration["instrument_asset_code"],
         "standard_unit": configuration.get("standard_unit") or "",
+        "decimal_precision": int(configuration.get("decimal_precision") or 0),
         "scheduled_at": scheduled_at,
         "available_at": (datetime.fromisoformat(scheduled_at) + timedelta(
             seconds=int(configuration.get("result_delay_seconds") or 0))).isoformat(),
@@ -787,6 +790,8 @@ def _cycle_factor(connection, site_id: int, configuration: dict, scheduled_at: s
                     source_type=("hj212_2061_avg" if str(selected["protocol_code"]).startswith("HJ212:")
                                  else "scheduled_protocol_observation"),
                     protocol_code=selected["protocol_code"], value=selected["standard_value"],
+                    value_display=format_business_value(
+                        selected["standard_value"], configuration.get("decimal_precision")),
                     standard_unit=selected["standard_unit"], observed_at=selected["observed_at"],
                     received_at=selected["received_at"], timeliness=selected["timeliness"],
                     reason_code=None, reason=None)
@@ -821,6 +826,7 @@ def _cycle_factor_from_rows(rows, configuration: dict, scheduled_at: str,
         "business_metric": configuration["business_metric"],
         "instrument_asset_code": configuration["instrument_asset_code"],
         "standard_unit": configuration.get("standard_unit") or "",
+        "decimal_precision": int(configuration.get("decimal_precision") or 0),
         "scheduled_at": scheduled_at,
         "available_at": (datetime.fromisoformat(scheduled_at) + timedelta(
             seconds=int(configuration.get("result_delay_seconds") or 0))).isoformat(),
@@ -842,6 +848,8 @@ def _cycle_factor_from_rows(rows, configuration: dict, scheduled_at: str,
                     source_type=("hj212_2061_avg" if str(selected["protocol_code"]).startswith("HJ212:")
                                  else "scheduled_protocol_observation"),
                     protocol_code=selected["protocol_code"], value=selected["standard_value"],
+                    value_display=format_business_value(
+                        selected["standard_value"], configuration.get("decimal_precision")),
                     standard_unit=selected["standard_unit"], observed_at=selected["observed_at"],
                     received_at=selected["received_at"], timeliness=selected["timeliness"],
                     reason_code=None, reason=None)
@@ -993,6 +1001,9 @@ def latest_values(connection, site_id: int, *, at_time: str | None = None):
             item = dict(row)
             item['expected_interval_seconds'] = configuration['expected_interval_seconds']
             item['tolerance_seconds'] = configuration['tolerance_seconds']
+            item['decimal_precision'] = int(configuration.get('decimal_precision') or 0)
+            item['standard_value_display'] = format_business_value(
+                item.get('standard_value'), configuration.get('decimal_precision'))
             result.append(item)
     return result
 
@@ -1013,7 +1024,10 @@ def _latest_values_from_rows(configurations: list[dict], rows) -> list[dict]:
                 "business_metric": row["business_metric"],
                 "protocol_code": row["protocol_code"],
                 "standard_value": row["standard_value"],
+                "standard_value_display": format_business_value(
+                    row["standard_value"], configuration.get("decimal_precision")),
                 "standard_unit": row["standard_unit"],
+                "decimal_precision": int(configuration.get("decimal_precision") or 0),
                 "quality": row["quality"],
                 "instrument_asset_code": row["instrument_asset_code"],
                 "endpoint_id": row["endpoint_id"],
@@ -1032,6 +1046,21 @@ def _latest_values_from_rows(configurations: list[dict], rows) -> list[dict]:
             result.append(item)
             break
     return result
+
+
+def format_business_value(value, decimal_precision) -> str | None:
+    """Pad to the configured precision without hiding decimals present in the formal value."""
+    if value is None:
+        return None
+    try:
+        precision = max(0, min(8, int(decimal_precision)))
+        raw = str(value).strip() if isinstance(value, str) else format(float(value), '.15g')
+        decimal_value = Decimal(raw)
+        actual_precision = max(0, -decimal_value.normalize().as_tuple().exponent)
+        display_precision = max(precision, actual_precision)
+        return f"{decimal_value:.{display_precision}f}"
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
+        return str(value)
 
 
 def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_time: str | None = None):

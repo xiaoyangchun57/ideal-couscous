@@ -1,3 +1,38 @@
+# r24 operations and monitoring improvement candidate gate (2026-10-12)
+
+Target candidate tag: `release-20261012-cross-module-freeze-r24`
+
+r24 is the only candidate accepted by `deploy/release-candidates.json`; r23 and all earlier release candidates are immutable historical tags. Relative to the deployed r23 baseline, this candidate contains the reviewed downstream formal-observation consumers, inspection-photo upload and review-link closure, station filter retention and latest-value/precision corrections, notification read/write separation, bounded SQLite concurrency and monitoring-cache changes, and the approved miniprogram spacing/scope-control normalization. The still-unapproved station expected-factor contract is explicitly excluded and remains waiting for operations input.
+
+## r24 final automated evidence
+
+| Check | Result | Exit |
+| --- | --- | ---: |
+| Backend unittest discover | 858 tests discovered; full suite completed with `OK` and no failure/error | 0 |
+| Miniprogram Node tests | 51/51 current `*.test.js` files passed | 0 |
+| Combined JavaScript/Python syntax | 206 files passed | 0 |
+| React Node tests | 103/103 passed | 0 |
+| React ESLint | PASS with 0 errors and 1 existing unused-variable warning | 0 |
+| React production build | PASS; 1,751 modules transformed | 0 |
+| Candidate guard | 2/2 release-candidate tests passed; r24 accepted and r23 historical | 0 |
+| Candidate diff and boundary | PASS; no whitespace error, private data, runtime database, upload, log, cache or generated secret included | 0 |
+
+The previously accepted isolated 10-user concurrency evidence is retained and was not repeated: 116,909 requests completed without timeout, 5xx response or SQLite lock error. The final gate intentionally did not repeat the earlier 5/30-minute load runs because no later change invalidated that evidence.
+
+## r24 Review and UI evidence boundary
+
+- Development code Review: **PASS**. The final notification test correction changes only the obsolete test expectation; real notification GET requests remain read-only and cleanup remains in the idempotent background maintenance job.
+- Design static Review: **PASS** for the approved scope switch, spacing/token, card, Sheet, status-chip and station-detail normalization.
+- Existing r23 production UI evidence remains valid for the authenticated-frame to formal-observation and station-display chain, and the later isolated production-shaped acceptance covered the 36-station/24-factor downstream analysis and review path.
+- New r24 design changes in real WeChat UI: **NOT RUN**.
+- Physical-device camera/upload actions after this exact frozen snapshot: **NOT RUN**.
+- Landscape watermark direction remains the user-accepted portrait-only limitation: **SKIPPED**.
+- Station expected-factor completeness contract: **NOT INCLUDED / WAITING OPERATIONS INPUT**. This release must not claim that one configured factor proves a station's business factor set is complete.
+
+No package, Git push, SSH/SCP, server mutation, production database operation or deployment is part of this candidate-freeze evidence. Production deployment is performed only by the independent release task from the immutable annotated tag.
+
+---
+
 # r18 B1 unbound identity candidate gate (2026-09-14)
 
 Target candidate tag: `release-20260914-cross-module-freeze-r18`

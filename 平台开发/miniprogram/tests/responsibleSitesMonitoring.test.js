@@ -7,7 +7,13 @@ let definition;
 global.getApp = () => ({ globalData: {} });
 global.Page = page => { definition = page; };
 let cachedUser = { capabilities: { station_monitoring_public: true } };
-global.wx = { navigateTo: () => {}, getStorageSync: key => key === 'user' ? cachedUser : null };
+const navigationUrls = [];
+const scrollPositions = [];
+global.wx = {
+  navigateTo: options => navigationUrls.push(options.url),
+  pageScrollTo: options => scrollPositions.push(options.scrollTop),
+  getStorageSync: key => key === 'user' ? cachedUser : null,
+};
 require('../pages/responsible-sites/responsible-sites.js');
 
 const originals = { stationMonitoringSites: api.stationMonitoringSites, responsibleSites: api.responsibleSites };
@@ -74,6 +80,52 @@ const makePage = () => {
     await flush();
     assert.deepEqual(calls[2], { scope: 'all', keyword: '水站 A&B' });
     assert.equal(page.data.keyword, '水站 A&B');
+
+    const returnRefresh = [];
+    api.stationMonitoringSites = options => new Promise(resolve => {
+      returnRefresh.push({ options, resolve });
+    });
+    page.data.activeTab = 'stations';
+    page.data.scope = 'all';
+    page.data.pendingScope = null;
+    page.data.keywordInput = '水站 A&B';
+    page.data.keyword = '水站 A&B';
+    page.data.sites = [{ id: 20, name: '筛选结果' }];
+    page.onPageScroll({ scrollTop: 360 });
+    page.openSite({ currentTarget: { dataset: { id: 20 } } });
+    page.onHide();
+    page.data.scope = 'mine';
+    page.data.keywordInput = '';
+    page.data.keyword = '';
+    page.data.sites = [];
+    page.onShow();
+    assert.equal(page.data.scope, 'all');
+    assert.equal(page.data.keywordInput, '水站 A&B');
+    assert.equal(page.data.keyword, '水站 A&B');
+    assert.equal(page.data.sites[0].id, 20, 'return restores the prior list before refresh completes');
+    assert.equal(scrollPositions.at(-1), 360);
+    assert.deepEqual(returnRefresh[0].options, { scope: 'all', keyword: '水站 A&B' });
+    returnRefresh[0].resolve({
+      scope: 'all', available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 1 },
+      items: [{ id: 20, name: '刷新后的筛选结果' }],
+    });
+    await flush();
+    assert.equal(page.data.sites[0].name, '刷新后的筛选结果');
+    page.openSite({ currentTarget: { dataset: { id: 20 } } });
+    page.onUnload();
+    assert.equal(page._stationReturnSnapshot, null, 'unload clears the one-time return snapshot');
+    const freshEntry = makePage();
+    assert.equal(freshEntry.data.scope, 'mine');
+    assert.equal(freshEntry.data.keyword, '');
+    assert.deepEqual(freshEntry.data.sites, []);
+
+    api.stationMonitoringSites = options => {
+      calls.push(options);
+      return Promise.resolve({
+        scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
+        items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
+      });
+    };
     page.onClearSearch();
     await flush();
     assert.deepEqual(calls[3], { scope: 'all', keyword: '' });

@@ -87,8 +87,11 @@ function photoActionOpeningTitle(captureSource) {
   return '正在打开相机/相册';
 }
 
-function runPhotoActionOnce(owner, captureSource, action, onStart, onFinish) {
-  if (owner && owner._photoActionPromise) return owner._photoActionPromise;
+function runPhotoActionOnce(owner, captureSource, action, onStart, onFinish, onBusy) {
+  if (owner && owner._photoActionPromise) {
+    if (typeof onBusy === 'function') onBusy('上一张正在处理');
+    return owner._photoActionPromise;
+  }
   if (!owner || typeof action !== 'function') {
     return Promise.reject(new Error('照片操作无法启动'));
   }

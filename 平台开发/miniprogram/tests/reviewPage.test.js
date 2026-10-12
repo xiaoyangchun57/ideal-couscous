@@ -161,6 +161,26 @@ async function main() {
     assert.equal(selectiveSubmitPage.reloads, 1, 'successful retry refreshes the review center instead of leaving it');
     assert.equal(navigationCalls.length, 0, 'failed and retried photo reviews never create navigation side effects');
 
+    resetObservations();
+    request = deferred();
+    api.reviewPhoto = () => request.promise;
+    const relationFailurePage = makePage(riskyItem('photo_relation_failure', 0));
+    relationFailurePage.onSubmitPhotoReview(eventFor('photo_relation_failure'));
+    request.reject({
+      code: 'ATTACHMENT_ITEM_REQUIRED',
+      error: '照片未完成检查项关联，原照片和本次选择均已保留',
+      photo_ids: [301, 302],
+      missing_relation: 'plan_id/item_id/site_id/uploader',
+      next_action: '请返回原检查项重新关联',
+    });
+    await flushPromises();
+    assert.match(relationFailurePage.data.reviewError, /附件ID：301、302/);
+    assert.match(relationFailurePage.data.reviewError, /plan_id\/item_id\/site_id\/uploader/);
+    assert.match(relationFailurePage.data.reviewError, /请返回原检查项重新关联/);
+    assert.equal(relationFailurePage.data.groups[0].items[0].reviewPhotos.length, 2,
+      'relation failure preserves the selected review object and photos');
+    assert.match(modalCalls.at(-1).content, /原照片和本次选择均已保留/);
+
     console.log('reviewPage tests passed');
   } finally {
     api.reviewPhoto = originalReviewPhoto;

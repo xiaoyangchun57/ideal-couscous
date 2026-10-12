@@ -90,6 +90,82 @@ class StationIngestionMigrationTest(unittest.TestCase):
                 )
             connection.commit()
 
+    @staticmethod
+    def _apply_through_009(database: Path) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == migration.PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version), "2026-10-12T00:00:00+00:00", "isolated-009"),
+                )
+            connection.commit()
+
+    def test_existing_009_database_adds_pending_partial_index_and_query_uses_it(self):
+        self._apply_through_009(self.database)
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            index_rows = {
+                row[1]: row for row in connection.execute("PRAGMA index_list(ingest_raw_frames)")
+            }
+            self.assertIn("idx_ingest_raw_pending_normalization", index_rows)
+            self.assertEqual(index_rows["idx_ingest_raw_pending_normalization"][4], 1)
+            plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT raw.id FROM ingest_raw_frames raw
+                   LEFT JOIN monitoring_normalization_retries retry
+                     ON retry.raw_frame_id=raw.id AND retry.normalization_version=?
+                   WHERE raw.id>? AND raw.persistence_state IN ('pending_parse', 'pending_reparse')
+                     AND (retry.raw_frame_id IS NULL OR (retry.state!='exhausted'
+                          AND (retry.next_attempt_at IS NULL OR retry.next_attempt_at<=?)))
+                   ORDER BY raw.id LIMIT ?""",
+                ("station-monitoring-normalizer-v1", 0, "2026-10-12T00:00:00+00:00", 100),
+            ).fetchall()
+            self.assertIn(
+                "idx_ingest_raw_pending_normalization",
+                " ".join(str(row[3]) for row in plan),
+            )
+            migration.verify_station_monitoring_schema(connection)
+        second_applied, second_backup = migration.apply_migration(self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_pending_partial_index_removal_is_rejected(self):
+        migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP INDEX idx_ingest_raw_pending_normalization")
+            connection.commit()
+            with self.assertRaisesRegex(
+                    migration.MigrationError, "pending normalization partial index"):
+                migration.verify_station_monitoring_schema(connection)
+
+    def test_failed_010_upgrade_restores_the_009_database(self):
+        self._apply_through_009(self.database)
+        with mock.patch.object(
+                migration, "verify_station_monitoring_schema",
+                side_effect=migration.MigrationError("forced-010")):
+            with self.assertRaisesRegex(migration.MigrationError, "forced-010"):
+                migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION,),
+            ).fetchone())
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_ingest_raw_pending_normalization",),
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
+            ).fetchone())
+
     def test_existing_001_through_007_database_upgrades_to_008_and_repeats_without_writes(self):
         self._apply_through_007(self.database)
         with closing(sqlite3.connect(self.database)) as connection:

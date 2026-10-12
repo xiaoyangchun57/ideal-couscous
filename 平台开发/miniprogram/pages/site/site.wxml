@@ -1,10 +1,10 @@
 <view class="page" wx:if="{{site}}">
   <view class="sync-bar" wx:if="{{!readOnlySource && !online}}">当前离线，打卡会暂存并在联网后自动同步</view>
-  <view class="sync-bar" wx:elif="{{!readOnlySource && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
+  <view class="sync-bar sync-bar--action" wx:elif="{{!readOnlySource && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
   <view class="card site-summary">
     <view class="site-name">{{site.name}}</view>
     <view class="site-tags">
-      <text class="tag tag-brand">{{site.type_cn}}</text>
+      <text class="tag tag-neutral">{{site.type_cn}}</text>
       <text class="tag">编码 {{site.code}}</text>
     </view>
   </view>
@@ -86,7 +86,7 @@
           </view>
           <view class="mon-value-row" wx:for="{{site.monitoring.latest_cycle.factors}}" wx:key="business_metric">
             <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}} · {{item.status === 'value' ? '已形成' : item.status === 'pending' ? '形成中' : item.status === 'missing' ? '缺测' : '待核对'}}</text>
-            <view class="mon-value-right"><text class="mon-value-num">{{item.status === 'value' ? item.value : '—'}}</text><text class="mon-value-unit">{{item.standard_unit}}</text></view>
+            <view class="mon-value-right"><text class="mon-value-num">{{item.status === 'value' ? (item.value_display !== undefined && item.value_display !== null ? item.value_display : item.value) : '—'}}</text><text class="mon-value-unit">{{item.standard_unit}}</text></view>
           </view>
         </view>
       </view>
@@ -102,7 +102,7 @@
           <view class="mon-value-row" wx:for="{{site.monitoring.latest_values}}" wx:key="protocol_code">
             <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
             <view class="mon-value-right">
-              <text class="mon-value-num">{{item.standard_value}}</text>
+              <text class="mon-value-num">{{item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value}}</text>
               <text class="mon-value-unit">{{item.standard_unit}}</text>
             </view>
           </view>
@@ -228,7 +228,7 @@
         </picker>
         <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'loading'}}" class="wop-note">库存加载中</text>
         <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'empty'}}" class="wop-note">暂无可领用库存</text>
-        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note wop-note--retry" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
 
         <!-- 非库存：备件名称 -->
         <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">

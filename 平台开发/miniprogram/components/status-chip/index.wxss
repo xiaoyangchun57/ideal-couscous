@@ -2,64 +2,64 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium, 500);
   line-height: 1.4;
   white-space: nowrap;
 }
 
-/* 尺寸 */
+/* 尺寸（2rpx/6rpx 为 token 刻度外微值，保留硬编码） */
 .chip--sm {
-  font-size: 20rpx;
-  padding: 2rpx 12rpx;
+  font-size: var(--font-caption-2, 20rpx);
+  padding: 2rpx var(--space-3, 12rpx);
   border-radius: 6rpx;
 }
 
 .chip--md {
-  font-size: 22rpx;
-  padding: 4rpx 16rpx;
-  border-radius: 8rpx;
+  font-size: var(--font-caption-1, 22rpx);
+  padding: var(--space-1, 4rpx) var(--space-4, 16rpx);
+  border-radius: var(--radius-xs, 8rpx);
 }
 
 /* 变体 */
 .chip--pill {
-  border-radius: 9999rpx;
+  border-radius: var(--radius-full, 9999rpx);
 }
 
 .chip--pill.chip--sm {
-  padding: 2rpx 16rpx;
+  padding: 2rpx var(--space-4, 16rpx);
 }
 
 .chip--pill.chip--md {
-  padding: 4rpx 20rpx;
+  padding: var(--space-1, 4rpx) var(--space-5, 20rpx);
 }
 
-/* 语义色 */
+/* 语义色（surface token 与设计系统 --color-*-surface 对齐） */
 .chip--default {
-  background: rgba(120, 120, 128, 0.12);
-  color: #6e6e73;
+  background: var(--color-type-bg, rgba(120, 120, 128, 0.12));
+  color: var(--color-type-text, #6e6e73);
 }
 
 .chip--primary {
-  background: rgba(0, 122, 255, 0.12);
+  background: var(--color-info-surface, rgba(0, 122, 255, 0.12));
   color: var(--color-primary, #007aff);
 }
 
 .chip--success {
-  background: rgba(52, 199, 89, 0.12);
+  background: var(--color-success-surface, rgba(52, 199, 89, 0.12));
   color: var(--color-success, #34c759);
 }
 
 .chip--warning {
-  background: rgba(255, 149, 0, 0.12);
+  background: var(--color-warning-surface, rgba(255, 149, 0, 0.12));
   color: var(--color-warning, #ff9500);
 }
 
 .chip--error {
-  background: rgba(255, 59, 48, 0.12);
+  background: var(--color-error-surface, rgba(255, 59, 48, 0.12));
   color: var(--color-error, #ff3b30);
 }
 
 .chip--info {
-  background: rgba(0, 122, 255, 0.12);
+  background: var(--color-info-surface, rgba(0, 122, 255, 0.12));
   color: var(--color-info, #007aff);
 }

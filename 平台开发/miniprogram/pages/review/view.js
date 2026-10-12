@@ -58,6 +58,20 @@ function reviewResultLabel(result) {
   return '状态待确认';
 }
 
+function reviewFailureMessage(error) {
+  if (error && error.code === 'ATTACHMENT_ITEM_REQUIRED') {
+    const photoIds = Array.isArray(error.photo_ids) && error.photo_ids.length
+      ? error.photo_ids.join('、') : '未返回';
+    return [
+      error.error || '照片未完成检查项关联，原照片和本次选择均已保留',
+      `附件ID：${photoIds}`,
+      `缺少关联：${error.missing_relation || '检查项关联'}`,
+      `处理方式：${error.next_action || '返回原检查项重新关联后再审核'}`,
+    ].join('\n');
+  }
+  return getRetryErrorMessage(error);
+}
+
 function groupReviewItems(itemDetails, reviewPhotos) {
   const groups = [];
   const groupsByKey = new Map();
@@ -268,6 +282,7 @@ Page({
     curType: '',
     curAction: '',
     submittingId: '',
+    reviewError: '',
     reviewTarget: null
   },
 
@@ -911,7 +926,7 @@ Page({
     } else if (!this._guardSubmission(id)) {
       return;
     }
-    this._lockSubmission(item.id, 'request', { rejectShow: false });
+    this._lockSubmission(item.id, 'request', { rejectShow: false, reviewError: '' });
 
     const p = reviewCapability(item.source_type).dispatch(item, action, reason);
 
@@ -939,7 +954,8 @@ Page({
         this._submissionRecovery = retryState;
         return;
       }
-      const retryMessage = getRetryErrorMessage(err);
+      const retryMessage = reviewFailureMessage(err);
+      this.setData({ reviewError: retryMessage });
       wx.showModal({ title: '操作失败', content: retryMessage, showCancel: false });
     });
   },

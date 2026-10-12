@@ -50,7 +50,25 @@ Page({
     this.setData({ monitoringPublic, monitoringEnabled: monitoringPublic });
     const target = normalizeStationHubTarget(app.globalData.stationHubTarget);
     if (app.globalData.stationHubTarget) app.globalData.stationHubTarget = null;
-    if (target) this.setData({ activeTab: target.view, activeFilter: target.filter || '' });
+    if (target) {
+      this._stationReturnSnapshot = null;
+      this.setData({ activeTab: target.view, activeFilter: target.filter || '' });
+    } else if (this._stationReturnSnapshot) {
+      const snapshot = this._stationReturnSnapshot;
+      this._stationReturnSnapshot = null;
+      this._reagentScrollTop = snapshot.scrollTop || 0;
+      this.setData({
+        activeTab: snapshot.activeTab,
+        scope: snapshot.scope,
+        pendingScope: snapshot.pendingScope,
+        keywordInput: snapshot.keywordInput,
+        keyword: snapshot.keyword,
+        sites: snapshot.sites,
+      });
+      if (snapshot.scrollTop > 0 && wx.pageScrollTo) {
+        wx.pageScrollTo({ scrollTop: snapshot.scrollTop, duration: 0 });
+      }
+    }
     if (this.data.activeTab === 'reagents') this.loadReagents();
     else this.loadSites(this.data.scope || 'mine', this.data.keyword || '');
   },
@@ -124,6 +142,7 @@ Page({
 
   onUnload() {
     this._unloaded = true;
+    this._stationReturnSnapshot = null;
     this.setMaintenanceSheetTabBarHidden(false);
     this._sitesRequestId = (this._sitesRequestId || 0) + 1;
     this._reagentRequestId = (this._reagentRequestId || 0) + 1;
@@ -467,6 +486,15 @@ Page({
   openSite(e) {
     const siteId = Number(e.currentTarget.dataset.id);
     if (!siteId) return;
+    this._stationReturnSnapshot = {
+      activeTab: this.data.activeTab,
+      scope: this.data.scope,
+      pendingScope: this.data.pendingScope,
+      keywordInput: this.data.keywordInput,
+      keyword: this.data.keyword,
+      sites: (this.data.sites || []).slice(),
+      scrollTop: this._reagentScrollTop || 0,
+    };
     app.globalData.selSiteId = siteId;
     wx.navigateTo({ url: '/pages/site/site?site_id=' + siteId + '&source=responsible_sites_monitoring' });
   }

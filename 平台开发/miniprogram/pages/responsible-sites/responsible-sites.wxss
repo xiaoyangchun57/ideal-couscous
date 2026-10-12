@@ -5,11 +5,12 @@
   padding-bottom: calc(88rpx + env(safe-area-inset-bottom));
 }
 
-/* 导航栏标题区 — 消费 nav-bar wechat-custom 规格：17px/600 */
+/* 导航栏标题区 — 消费 nav-bar wechat-custom 规格：17px/600
+   范围切换器样式见全局 .nav-scope */
 .stab-nav-left {
   display: flex;
   align-items: center;
-  gap: 14rpx;
+  gap: var(--space-4);
   height: 100%;
 }
 
@@ -17,38 +18,6 @@
   font-size: var(--font-title-1);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
-}
-
-/* 导航栏范围选择器（与 plan 页 .scope-toggle 一致）
-   嵌在导航栏内，作为页面上下文，不占内容区高度
-   触控铁律：外层 88rpx，内部视觉块紧凑居中 */
-.stab-nav-scope {
-  display: flex;
-  align-items: center;
-  gap: 6rpx;
-  padding: 0 16rpx;
-  background: var(--color-muted);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-callout);
-  color: var(--color-text-secondary);
-  min-height: 88rpx; /* 触控铁律：≥88rpx 点击热区 */
-  transition: opacity 0.15s ease;
-}
-
-.stab-nav-scope.is-pending {
-  opacity: 0.6; /* 切换中视觉反馈，不改变布局 */
-}
-
-.stab-nav-scope-text {
-  font-size: var(--font-callout);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-secondary);
-}
-
-.stab-nav-scope-arrow {
-  font-size: 20rpx;
-  color: var(--color-text-tertiary);
-  line-height: 1;
 }
 
 /* ========= 工具条层级体系 =========
@@ -71,15 +40,15 @@
    触控铁律：外层 padding 扩展至 88rpx 总高，视觉与触控分离
    左对齐 + 内容宽度 → 归属内容区，不是导航 */
 .reagent-filter-wrap {
-  padding: 4rpx 0 12rpx;
+  padding: var(--space-1) 0 var(--space-3);
 }
 .reagent-filter-wrap .segment-control {
   background: transparent;
   border-radius: 0;
   padding: 0;
   height: auto;
-  margin: 0 32rpx;
-  gap: 16rpx;
+  margin: 0 var(--space-8);
+  gap: var(--space-4);
   display: flex;
   justify-content: flex-start;
   flex-wrap: wrap;
@@ -88,13 +57,20 @@
   flex: 0 0 auto;
   min-width: 88rpx;       /* 铁律：触控热区 ≥ 88rpx */
   min-height: 88rpx;      /* 铁律：触控热区 ≥ 88rpx */
-  padding: 12rpx 24rpx;   /* 上下 12rpx 透明扩展 + 64rpx 视觉 = 88rpx 触控 */
+  padding: var(--space-3) 0; /* 只纵向扩展触控热区；横向间隙全部交给 gap，避免视觉间距被 padding 撑大 */
   background: transparent;
+  box-shadow: none;
   position: relative;
   transition: all 0.2s ease;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+/* 杀掉全局 .segment-item.active 的白底+阴影——它们作用在 88rpx 透明热区上，
+   正是"立体底框叠在描边药丸后面"的根因 */
+.reagent-filter-wrap .segment-item.active {
+  background: transparent;
+  box-shadow: none;
 }
 /* 视觉标签层：64rpx 高，描边样式 */
 .reagent-filter-wrap .segment-item text {
@@ -104,9 +80,9 @@
   align-items: center;
   justify-content: center;
   height: 64rpx;
-  padding: 0 24rpx;
+  padding: 0 var(--space-6);
   border: 1rpx solid var(--color-divider);
-  border-radius: 9999rpx;
+  border-radius: var(--radius-full);
   font-size: var(--font-footnote);
   font-weight: var(--font-weight-regular);
   color: var(--color-text-secondary);

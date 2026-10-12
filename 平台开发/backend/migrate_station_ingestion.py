@@ -25,6 +25,7 @@ MIGRATIONS = (
     ("20260921_007_monitoring_result_window", Path(__file__).with_name("migrations") / "20260921_007_monitoring_result_window.sql"),
     ("20260922_008_station_master_refresh", Path(__file__).with_name("migrations") / "20260922_008_station_master_refresh.sql"),
     ("20261011_009_station_monitoring_read_indexes", Path(__file__).with_name("migrations") / "20261011_009_station_monitoring_read_indexes.sql"),
+    ("20261012_010_pending_normalization_index", Path(__file__).with_name("migrations") / "20261012_010_pending_normalization_index.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -34,6 +35,7 @@ HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_ox
 MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_window"
 STATION_MASTER_REFRESH_MIGRATION_VERSION = "20260922_008_station_master_refresh"
 STATION_MONITORING_READ_INDEX_MIGRATION_VERSION = "20261011_009_station_monitoring_read_indexes"
+PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION = "20261012_010_pending_normalization_index"
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -308,6 +310,13 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     if not read_indexes or read_indexes[0] != migration_checksum(
             STATION_MONITORING_READ_INDEX_MIGRATION_VERSION):
         raise MigrationError("station monitoring read-index migration is missing or incompatible")
+    pending_index_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION,),
+    ).fetchone()
+    if not pending_index_migration or pending_index_migration[0] != migration_checksum(
+            PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION):
+        raise MigrationError("pending normalization index migration is missing or incompatible")
     required_read_indexes = {
         "idx_ingest_raw_authenticated_endpoint_received",
         "idx_ingest_raw_authenticated_received",
@@ -325,6 +334,18 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
         raise MigrationError(
             "station monitoring read indexes are missing: "
             + ", ".join(sorted(missing_read_indexes)))
+    pending_index_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+        ("idx_ingest_raw_pending_normalization",),
+    ).fetchone()
+    normalized_pending_index_sql = "".join(
+        str(pending_index_sql[0] if pending_index_sql else "").lower().split())
+    expected_pending_index_clause = (
+        "oningest_raw_frames(id)wherepersistence_statein"
+        "('pending_parse','pending_reparse')"
+    )
+    if expected_pending_index_clause not in normalized_pending_index_sql:
+        raise MigrationError("pending normalization partial index is missing or incompatible")
     required_master_tables = {"site_name_aliases", "station_master_refresh_audits"}
     if required_master_tables - existing:
         raise MigrationError("station master refresh tables are missing")

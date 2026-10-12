@@ -540,7 +540,7 @@ test('inspection photo retry draft is isolated, durable and cleared only after o
   assert.match(pageSource,
     /photoMetadata = Object\.assign\(\{\}, metadata, \{ _idempotency_key: idempotencyKey \}\)/);
   assert.match(pageSource,
-    /appendInspectionPhotoRetryDraft\([\s\S]{0,180}photoMetadata/,
+    /appendInspectionPhotoRetryDraft\(\s*sheet\.item, savedResult\.localPath, savedResult\.metadata/,
     'the persisted retry metadata must retain the original capture session and idempotency key');
 
   const retryBlock = pageSource.slice(
@@ -557,6 +557,8 @@ test('inspection photo retry draft is isolated, durable and cleared only after o
     pageSource.indexOf('onDelSupplementLocalPhoto(e)'),
     pageSource.indexOf('onPreview(e)'));
   assert.match(requiredDeleteBlock, /saveInspectionSheetPhotoRetryDraft\(/);
+  assert.match(requiredDeleteBlock, /wx\.removeSavedFile\(\{ filePath: removed/,
+    'deleting a persisted failed photo must clean the saved file after removing its draft');
   assert.match(supplementDeleteBlock, /saveInspectionSheetPhotoRetryDraft\(/);
   assert.match(pageSource,
     /if \(\(s\.supplementLocalPhotos \|\| \[\]\)\.length\)[\s\S]{0,160}补充材料尚未上传，请先重试或删除/);

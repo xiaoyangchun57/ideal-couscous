@@ -43,7 +43,7 @@ test('the four PM-15 sheets use isolated roots with one calculated scroll surfac
 
   assert.match(appWxss, /\.om-sheet \{/);
   assert.match(appWxss, /\.om-sheet\.om-sheet \.om-sheet-scroll \{/);
-  assert.match(appWxss, /height: 88vh/);
+  assert.match(appWxss, /height: 75vh/);
 
   assert.match(reports, /reportSheet\.open}}" class="om-sheet report-compose-sheet"/);
   assert.match(reports, /class="om-sheet-scroll sheet-body report-compose-body"/);

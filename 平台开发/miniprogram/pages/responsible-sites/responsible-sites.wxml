@@ -1,12 +1,14 @@
 <view class="stab-page">
 
-  <!-- 自定义导航栏：标题 + 范围切换（与计划页一致的导航栏内范围选择器） -->
+  <!-- 自定义导航栏：标题（左）+ 范围切换（右贴胶囊，全局 .nav-scope 规范） -->
   <custom-navbar showBorder="{{false}}">
     <view slot="left" class="stab-nav-left">
       <text class="stab-nav-title">{{activeTab === 'reagents' ? '试剂' : '站点'}}</text>
-      <view class="stab-nav-scope {{pendingScope ? 'is-pending' : ''}}" wx:if="{{canViewAll}}" bindtap="onToggleScope">
-        <text class="stab-nav-scope-text">{{(pendingScope || scope) === 'all' ? '全部' : '我负责'}}</text>
-        <text class="stab-nav-scope-arrow">▾</text>
+    </view>
+    <view slot="right" class="nav-scope {{pendingScope ? 'is-pending' : ''}}" wx:if="{{canViewAll}}" bindtap="onToggleScope">
+      <view class="nav-scope-pill">
+        <text class="nav-scope-text">{{(pendingScope || scope) === 'all' ? '全部' : '我负责'}}</text>
+        <text class="nav-scope-arrow">▾</text>
       </view>
     </view>
   </custom-navbar>

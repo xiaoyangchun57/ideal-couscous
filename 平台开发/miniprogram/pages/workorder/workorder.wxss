@@ -352,7 +352,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
 }
@@ -370,7 +370,7 @@
   flex: 0 1 auto;
   height: 0;
   overflow-y: auto;
-  max-height: calc(85vh - 300rpx);
+  max-height: calc(75vh - 300rpx);
 }
 
 .sheet-content-spacer {
@@ -1255,7 +1255,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -1667,7 +1667,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -2082,17 +2082,18 @@
 
 /* ============================================================
  *  10.2 返修：工单详情视觉收口
- *  - 双类选择器覆盖全局 88vh，短内容紧凑、长内容单滚动
+ *  - 双类选择器覆盖全局 75vh，短内容紧凑、长内容单滚动
  *  - 时间线按 tone 语义着色（done/current/pending）
  *  - 状态标签：设计系统 surface chip 兜底
  * ============================================================ */
 
-/* --- 根容器高度：内容驱动，上限 85vh ---
+/* --- 根容器高度：内容驱动，上限 75vh（设计系统 bottom-sheet 铁律）---
    双类选择器（特异性 0,2,0）覆盖全局 .om-sheet 单类（0,1,0）
-   短内容随内容收束，消除底部空白；长内容到上限后原生 scroll-view 接管 */
+   短内容随内容收束，消除底部空白；长内容到上限后原生 scroll-view 接管
+   注意：此 height:auto 是"内容收束"方案，与 om-sheet 固定高+flex 方案并存，勿混用 */
 .om-sheet.workorder-detail-sheet {
   height: auto;
-  max-height: 85vh;
+  max-height: 75vh;
 }
 
 /* --- 滚动层：flex-basis:auto 让高度随内容，min-height:0 允许收缩时滚动 ---

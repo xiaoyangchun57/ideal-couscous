@@ -1,4 +1,6 @@
 import sqlite3
+import threading
+import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +20,7 @@ from sl651_parser import (FrameError, UP_FLOW_CONTROL, crc16_modbus, encode_bcd_
 from sl651_server import IngestionStorage, credential_hmac
 from station_monitoring import (_project_business_observation, _scheduled_at,
                                 business_slot_deadline, expected_business_slots,
-                                latest_cycle, normalize_raw_frame)
+                                format_business_value, latest_cycle, normalize_raw_frame)
 
 
 def bcd_number(value, digits, precision=0):
@@ -46,8 +48,37 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.previous_monitoring_access_mode = web_app.STATION_MONITORING_ACCESS_MODE
         web_app.STATION_MONITORING_ACCESS_MODE = 'public'
         web_app.DB_PATH = str(self.database)
+        with web_app._station_monitoring_batch_cache_lock:
+            web_app._station_monitoring_batch_cache.clear()
+            web_app._station_monitoring_batch_inflight.clear()
+        with web_app._station_monitoring_list_cache_lock:
+            web_app._station_monitoring_list_cache.clear()
+            web_app._station_monitoring_list_inflight.clear()
+        with web_app._station_monitoring_overview_cache_lock:
+            web_app._station_monitoring_overview_cache.clear()
+            web_app._station_monitoring_overview_inflight.clear()
+        with web_app._station_monitoring_overview_projection_cache_lock:
+            web_app._station_monitoring_overview_projection_cache.clear()
+            web_app._station_monitoring_overview_projection_inflight.clear()
         web_app.init_db()
         apply_migration(self.database, Path(self.temp_dir.name) / "backups")
+        with closing(sqlite3.connect(self.database)) as connection:
+            inspection_columns = {
+                row[1] for row in connection.execute('PRAGMA table_info(inspection_tasks)')
+            }
+            if 'created_at' not in inspection_columns:
+                connection.execute('ALTER TABLE inspection_tasks ADD COLUMN created_at TEXT')
+            connection.execute('''CREATE TABLE IF NOT EXISTS data_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER NOT NULL,
+                metric TEXT NOT NULL, value REAL NOT NULL, recorded_at TEXT NOT NULL,
+                auto_result TEXT, auto_reason TEXT, smart_result TEXT, smart_score REAL,
+                manual_result TEXT, manual_reason TEXT, reviewer_id INTEGER, reviewed_at TEXT,
+                status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now','localtime'))
+            )''')
+            connection.commit()
+        web_app.migrate_formal_observation_consumers()
+        web_app.migrate_alerts_messages()
+        web_app.migrate_alert_flow()
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("INSERT INTO sites(code,name,type) VALUES ('MON-1','隔离监测站','water')")
             self.site_id = connection.execute("SELECT id FROM sites WHERE code='MON-1'").fetchone()[0]
@@ -90,6 +121,18 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.storage = IngestionStorage(self.database, pepper)
 
     def tearDown(self):
+        with web_app._station_monitoring_batch_cache_lock:
+            web_app._station_monitoring_batch_cache.clear()
+            web_app._station_monitoring_batch_inflight.clear()
+        with web_app._station_monitoring_list_cache_lock:
+            web_app._station_monitoring_list_cache.clear()
+            web_app._station_monitoring_list_inflight.clear()
+        with web_app._station_monitoring_overview_cache_lock:
+            web_app._station_monitoring_overview_cache.clear()
+            web_app._station_monitoring_overview_inflight.clear()
+        with web_app._station_monitoring_overview_projection_cache_lock:
+            web_app._station_monitoring_overview_projection_cache.clear()
+            web_app._station_monitoring_overview_projection_inflight.clear()
         web_app.STATION_MONITORING_ACCESS_MODE = self.previous_monitoring_access_mode
         web_app.DB_PATH = self.previous_database
         self.temp_dir.cleanup()
@@ -106,6 +149,58 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertFalse(duplicate)
         return raw_id
 
+    def _insert_formal_observation(self, metric, value, scheduled_at, *, protocol_code='4612',
+                                   quality='valid'):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            schedule_id = connection.execute(
+                'SELECT id FROM monitoring_business_schedules WHERE endpoint_id=? ORDER BY id LIMIT 1',
+                (self.endpoint_id,),
+            ).fetchone()[0]
+            suffix = f'{metric}-{scheduled_at}-{value}-{quality}'
+            raw = connection.execute(
+                """INSERT INTO ingest_raw_frames(
+                       endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                       crc_status,authentication_status,disposition,persistence_state)
+                   VALUES (?,?,?,?,?,8,'valid','authenticated','accepted','persisted')""",
+                (self.endpoint_id, '0012345678', scheduled_at, 'formal-' + suffix, b'formal'),
+            )
+            batch = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,?,?,1,?,?,?,'periodic','device_reported',?,?,'accepted','completed',?)""",
+                (raw.lastrowid, self.endpoint_id, self.site_id, 2061, scheduled_at,
+                 scheduled_at, scheduled_at, 'formal-' + suffix,
+                 web_app.MONITORING_BUSINESS_PROJECTION_VERSION, scheduled_at),
+            )
+            definition = connection.execute(
+                'SELECT standard_unit FROM monitoring_factor_definitions WHERE protocol_code=?',
+                (protocol_code,),
+            ).fetchone()
+            unit = definition['standard_unit'] or ''
+            source = connection.execute(
+                """INSERT INTO observation_values(
+                       observation_batch_id,protocol_code,business_metric,raw_value,raw_unit,
+                       standard_value,standard_unit,quality,instrument_asset_code,parser_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,'formal-test')""",
+                (batch.lastrowid, protocol_code, metric, value, unit, value, unit, quality, 'INST-A'),
+            )
+            business = connection.execute(
+                """INSERT INTO monitoring_business_observations(
+                       source_observation_value_id,observation_batch_id,schedule_id,endpoint_id,
+                       business_site_id,protocol_code,business_metric,instrument_asset_code,
+                       scheduled_at,observed_at,received_at,standard_value,standard_unit,quality,
+                       timeliness,slot_state,projection_version,is_current)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'on_time','selected',?,1)""",
+                (source.lastrowid, batch.lastrowid, schedule_id, self.endpoint_id, self.site_id,
+                 protocol_code, metric, 'INST-A', scheduled_at, scheduled_at, scheduled_at,
+                  value, unit, quality, web_app.MONITORING_BUSINESS_PROJECTION_VERSION),
+            )
+            connection.commit()
+            return business.lastrowid
+
     def test_delayed_result_window_is_half_open_and_crosses_midnight(self):
         schedule = {
             'timezone': 'Asia/Shanghai', 'anchor_local_time': '00:00:00',
@@ -115,6 +210,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             _scheduled_at(schedule, '2026-09-11T17:59:59+00:00', 2011),
             '2026-09-11T12:00:00+00:00',
         )
+
         self.assertEqual(
             _scheduled_at(schedule, '2026-09-11T18:00:00+00:00', 2011),
             '2026-09-11T16:00:00+00:00',
@@ -128,6 +224,30 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             'result_delay_seconds': 7200, 'tolerance_seconds': 900,
             'expected_interval_seconds': 14400,
         }, '2026-09-11T04:00:00+00:00'), '2026-09-11T06:15:00+00:00')
+
+    def test_business_value_display_uses_each_approved_factor_precision(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            rows = connection.execute("""SELECT business_metric,decimal_precision
+                FROM monitoring_factor_definitions
+                WHERE protocol_code IN ('4612','4910','4D1B')""").fetchall()
+        precision = {row[0]: row[1] for row in rows}
+        self.assertEqual(precision, {'ph': 2, 'turbidity': 0, 'total_phosphorus': 3})
+        self.assertEqual(format_business_value(7.34, precision['ph']), '7.34')
+        self.assertEqual(format_business_value(7.00, precision['ph']), '7.00')
+        self.assertEqual(format_business_value(7.34, precision['turbidity']), '7.34')
+        self.assertEqual(format_business_value(7.00, precision['turbidity']), '7')
+        self.assertEqual(format_business_value(7.00, precision['total_phosphorus']), '7.000')
+        self.assertEqual(format_business_value(0.1 + 0.2, 2), '0.30')
+        self.assertEqual(format_business_value(7.123456789, 2), '7.123456789')
+        with closing(sqlite3.connect(self.database)) as connection:
+            published = connection.execute("""SELECT protocol_code,decimal_precision
+                FROM monitoring_factor_definitions WHERE is_published=1 ORDER BY protocol_code""").fetchall()
+        self.assertGreater(len(published), 3)
+        for protocol_code, configured_precision in published:
+            display = format_business_value(7.34, configured_precision)
+            self.assertEqual(float(display), 7.34, protocol_code)
+            displayed_precision = len(display.partition('.')[2]) if '.' in display else 0
+            self.assertGreaterEqual(displayed_precision, max(configured_precision, 2), protocol_code)
 
     def test_32h_golden_factor_payload_covers_current_water_quality_and_status_definitions(self):
         payload = (
@@ -853,6 +973,315 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         cleared = client.get('/api/station-monitoring/sites?scope=all&keyword=%20%20', headers=admin).get_json()
         self.assertEqual(cleared['summary']['total'], 2)
 
+    def test_station_monitoring_list_cache_is_permission_scoped_and_ttl_bounded(self):
+        client = web_app.app.test_client()
+        admin = self._headers('monitor-admin')
+        operator = self._headers('monitor-operator')
+        original = web_app._station_monitoring_sites_body
+        with mock.patch.object(
+                web_app, '_station_monitoring_sites_body', wraps=original) as projected:
+            first = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            second = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual((first.status_code, second.status_code), (200, 200))
+            self.assertEqual(projected.call_count, 1)
+
+            mine = client.get('/api/station-monitoring/sites?scope=mine', headers=operator)
+            self.assertEqual(mine.status_code, 200, mine.get_json())
+            self.assertEqual(projected.call_count, 2)
+
+            self._insert_formal_observation('ph', 7.1, '2020-06-11T16:00:00+00:00')
+            still_cached = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual(still_cached.status_code, 200, still_cached.get_json())
+            self.assertEqual(projected.call_count, 2)
+
+            with web_app._station_monitoring_list_cache_lock:
+                admin_key = [key for key in web_app._station_monitoring_list_cache
+                             if key[-2:] == ('all', '')][0]
+                web_app._station_monitoring_list_cache[admin_key]['refresh_after'] = 0
+            refreshed = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual(refreshed.status_code, 200, refreshed.get_json())
+            deadline = time.monotonic() + 3
+            refreshing = True
+            while time.monotonic() < deadline:
+                with web_app._station_monitoring_list_cache_lock:
+                    refreshing = web_app._station_monitoring_list_cache[admin_key]['refreshing']
+                if projected.call_count >= 3 and not refreshing:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(projected.call_count, 3)
+            self.assertFalse(refreshing)
+            again = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual(again.status_code, 200, again.get_json())
+            self.assertEqual(projected.call_count, 3)
+
+        original_overview = web_app._station_monitoring_overview
+        with mock.patch.object(
+                web_app, '_station_monitoring_overview', wraps=original_overview) as projected:
+            first = client.get(
+                f'/api/station-monitoring/sites/{self.site_id}/overview', headers=admin)
+            second = client.get(
+                f'/api/station-monitoring/sites/{self.site_id}/overview', headers=admin)
+            self.assertEqual((first.status_code, second.status_code), (200, 200))
+            self.assertEqual(projected.call_count, 1)
+
+    def test_station_monitoring_list_stale_refresh_is_single_flight_and_non_blocking(self):
+        client = web_app.app.test_client()
+        admin = self._headers('monitor-admin')
+        seeded = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+        self.assertEqual(seeded.status_code, 200, seeded.get_json())
+        with web_app._station_monitoring_list_cache_lock:
+            cache_key = next(iter(web_app._station_monitoring_list_cache))
+            cached_body = web_app._station_monitoring_list_cache[cache_key]['body']
+            web_app._station_monitoring_list_cache[cache_key]['refresh_after'] = 0
+            web_app._station_monitoring_list_cache[cache_key]['fresh_until'] = 0
+            web_app._station_monitoring_list_cache[cache_key]['stale_until'] = time.monotonic() + 15
+
+        started = threading.Event()
+        release = threading.Event()
+        original = web_app._station_monitoring_sites_body
+
+        def blocked_refresh(*args, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(3), 'background cache refresh was not released')
+            return original(*args, **kwargs)
+
+        with mock.patch.object(web_app, '_station_monitoring_sites_body', side_effect=blocked_refresh) as refreshed:
+            first_started = time.perf_counter()
+            first = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            first_elapsed = time.perf_counter() - first_started
+            self.assertEqual(first.status_code, 200, first.get_json())
+            self.assertEqual(first.get_json(), cached_body)
+            self.assertLess(first_elapsed, 1)
+            self.assertTrue(started.wait(1), 'background cache refresh did not start')
+
+            second_started = time.perf_counter()
+            second = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            second_elapsed = time.perf_counter() - second_started
+            self.assertEqual(second.status_code, 200, second.get_json())
+            self.assertEqual(second.get_json(), cached_body)
+            self.assertLess(second_elapsed, 1)
+            self.assertEqual(refreshed.call_count, 1)
+
+            release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with web_app._station_monitoring_list_cache_lock:
+                    refreshing = web_app._station_monitoring_list_cache[cache_key]['refreshing']
+                if not refreshing:
+                    break
+                time.sleep(0.01)
+            self.assertFalse(refreshing)
+            third = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual(third.status_code, 200, third.get_json())
+            self.assertEqual(refreshed.call_count, 1)
+
+    def test_station_monitoring_list_different_users_cold_start_in_parallel(self):
+        admin = self._headers('monitor-admin')
+        operator = self._headers('monitor-operator')
+        entered = []
+        entered_lock = threading.Lock()
+        both_entered = threading.Event()
+        release = threading.Event()
+        responses = {}
+        original = web_app._station_monitoring_sites_body
+
+        def blocked_body(*args, **kwargs):
+            with entered_lock:
+                entered.append(args[3]['id'])
+                if len(entered) == 2:
+                    both_entered.set()
+            self.assertTrue(release.wait(3), 'parallel list projections were not released')
+            return original(*args, **kwargs)
+
+        def request_sites(name, path, headers):
+            responses[name] = web_app.app.test_client().get(path, headers=headers)
+
+        with mock.patch.object(web_app, '_station_monitoring_sites_body', side_effect=blocked_body) as projected:
+            admin_thread = threading.Thread(
+                target=request_sites,
+                args=('admin', '/api/station-monitoring/sites?scope=all', admin))
+            operator_thread = threading.Thread(
+                target=request_sites,
+                args=('operator', '/api/station-monitoring/sites?scope=mine', operator))
+            admin_thread.start()
+            operator_thread.start()
+            parallel = both_entered.wait(2)
+            release.set()
+            admin_thread.join(5)
+            operator_thread.join(5)
+
+        self.assertTrue(parallel, 'different list cache keys were serialized by the global lock')
+        self.assertFalse(admin_thread.is_alive())
+        self.assertFalse(operator_thread.is_alive())
+        self.assertEqual(projected.call_count, 2)
+        self.assertCountEqual(entered, [self.admin_id, self.operator_id])
+        self.assertEqual(responses['admin'].status_code, 200, responses['admin'].get_json())
+        self.assertEqual(responses['admin'].get_json()['summary']['total'], 2)
+        self.assertEqual(responses['operator'].status_code, 200, responses['operator'].get_json())
+        self.assertEqual(
+            [item['site_id'] for item in responses['operator'].get_json()['items']],
+            [self.site_id],
+        )
+
+    def test_station_monitoring_list_same_user_cold_start_is_single_flight(self):
+        admin = self._headers('monitor-admin')
+        entered = threading.Event()
+        release = threading.Event()
+        responses = []
+        original = web_app._station_monitoring_sites_body
+
+        def blocked_body(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(3), 'single-flight list projection was not released')
+            return original(*args, **kwargs)
+
+        def request_sites():
+            responses.append(web_app.app.test_client().get(
+                '/api/station-monitoring/sites?scope=all', headers=admin))
+
+        with mock.patch.object(web_app, '_station_monitoring_sites_body', side_effect=blocked_body) as projected:
+            first = threading.Thread(target=request_sites)
+            second = threading.Thread(target=request_sites)
+            first.start()
+            self.assertTrue(entered.wait(1), 'first cold list projection did not start')
+            second.start()
+            time.sleep(0.2)
+            self.assertEqual(projected.call_count, 1)
+            release.set()
+            first.join(5)
+            second.join(5)
+
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual(projected.call_count, 1)
+
+    def test_station_monitoring_neutral_projection_expires_at_pre_refresh_boundary(self):
+        rows = [(self.site_id, 'MON-1')]
+        old_items = [{'site_id': self.site_id, 'marker': 'old'}]
+        new_items = [{'site_id': self.site_id, 'marker': 'new'}]
+        with mock.patch.object(
+                web_app, '_station_monitoring_batch_projections',
+                side_effect=(old_items, new_items)) as projected:
+            with mock.patch.object(web_app.time, 'monotonic', return_value=100.0):
+                first = web_app._station_monitoring_batch_projections_cached(None, rows)
+                final_entry = web_app._station_monitoring_cache_entry
+                with mock.patch.object(web_app, '_station_monitoring_list_version', return_value=('v1',)):
+                    final_entry = final_entry(None, {'items': first})
+                with web_app._station_monitoring_batch_cache_lock:
+                    neutral_entry = next(iter(web_app._station_monitoring_batch_cache.values()))
+                    neutral_expires_at = neutral_entry['expires_at']
+
+            with mock.patch.object(web_app.time, 'monotonic', return_value=108.0):
+                second = web_app._station_monitoring_batch_projections_cached(None, rows)
+
+        self.assertEqual(projected.call_count, 2)
+        self.assertEqual(first[0]['marker'], 'old')
+        self.assertEqual(second[0]['marker'], 'new')
+        self.assertEqual(neutral_expires_at, final_entry['refresh_after'])
+        self.assertLessEqual(final_entry['stale_until'] - 100.0, 15.0)
+
+    def test_station_monitoring_overview_user_cache_does_not_extend_projection_expiry(self):
+        clock = [100.0]
+        old_overview = {'site': {'id': self.site_id}, 'marker': 'old'}
+        new_overview = {'site': {'id': self.site_id}, 'marker': 'new'}
+
+        with mock.patch.object(
+                web_app.time, 'monotonic', side_effect=lambda: clock[0]):
+            with mock.patch.object(
+                    web_app, '_station_monitoring_overview',
+                    side_effect=(old_overview, new_overview)) as projected:
+                first = web_app._station_monitoring_overview_cached_body(
+                    ('user-a', self.site_id), self.site_id)
+
+                clock[0] = 109.0
+                shared = web_app._station_monitoring_overview_cached_body(
+                    ('user-b', self.site_id), self.site_id)
+
+                clock[0] = 111.0
+                refreshed = web_app._station_monitoring_overview_cached_body(
+                    ('user-b', self.site_id), self.site_id)
+
+        self.assertEqual(first['marker'], 'old')
+        self.assertEqual(shared['marker'], 'old')
+        self.assertEqual(refreshed['marker'], 'new')
+        self.assertEqual(projected.call_count, 2)
+
+    def test_station_monitoring_overview_different_users_cold_start_in_parallel(self):
+        admin = self._headers('monitor-admin')
+        operator = self._headers('monitor-operator')
+        entered = 0
+        entered_lock = threading.Lock()
+        both_entered = threading.Event()
+        release = threading.Event()
+        responses = {}
+        original = web_app._station_monitoring_overview_projection_body
+
+        def blocked_overview(*args, **kwargs):
+            nonlocal entered
+            with entered_lock:
+                entered += 1
+                if entered == 2:
+                    both_entered.set()
+            self.assertTrue(release.wait(3), 'parallel overview projections were not released')
+            return original(*args, **kwargs)
+
+        def request_overview(name, headers):
+            responses[name] = web_app.app.test_client().get(
+                f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+
+        with mock.patch.object(
+                web_app, '_station_monitoring_overview_projection_body',
+                side_effect=blocked_overview) as projected:
+            admin_thread = threading.Thread(target=request_overview, args=('admin', admin))
+            operator_thread = threading.Thread(target=request_overview, args=('operator', operator))
+            admin_thread.start()
+            operator_thread.start()
+            parallel = both_entered.wait(2)
+            release.set()
+            admin_thread.join(5)
+            operator_thread.join(5)
+
+        self.assertTrue(parallel, 'different overview cache keys were serialized by the global lock')
+        self.assertFalse(admin_thread.is_alive())
+        self.assertFalse(operator_thread.is_alive())
+        self.assertEqual(projected.call_count, 2)
+        self.assertEqual(responses['admin'].status_code, 200, responses['admin'].get_json())
+        self.assertEqual(responses['operator'].status_code, 200, responses['operator'].get_json())
+
+    def test_station_monitoring_overview_same_user_cold_start_is_single_flight(self):
+        admin = self._headers('monitor-admin')
+        entered = threading.Event()
+        release = threading.Event()
+        responses = []
+        original = web_app._station_monitoring_overview_projection_body
+
+        def blocked_overview(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(3), 'single-flight overview projection was not released')
+            return original(*args, **kwargs)
+
+        def request_overview():
+            responses.append(web_app.app.test_client().get(
+                f'/api/station-monitoring/sites/{self.site_id}/overview', headers=admin))
+
+        with mock.patch.object(
+                web_app, '_station_monitoring_overview_projection_body',
+                side_effect=blocked_overview) as projected:
+            first = threading.Thread(target=request_overview)
+            second = threading.Thread(target=request_overview)
+            first.start()
+            self.assertTrue(entered.wait(1), 'first cold overview projection did not start')
+            second.start()
+            time.sleep(0.2)
+            self.assertEqual(projected.call_count, 1)
+            release.set()
+            first.join(5)
+            second.join(5)
+
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual(projected.call_count, 1)
+
     def test_station_monitoring_scope_enforces_operator_and_zero_assignment_boundaries(self):
         client = web_app.app.test_client()
         operator = self._headers('monitor-operator')
@@ -1504,6 +1933,161 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(tuple(retry), (3, 'exhausted'))
         self.assertEqual(raw_state, 'persisted')
         self.assertEqual(issue, 1)
+
+    def test_formal_observation_drives_detail_analysis_and_health_without_sensor_data(self):
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        observation_id = self._insert_formal_observation('ph', 7.34, yesterday.isoformat())
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO param_thresholds(metric,label,unit,low,high,critical_low,critical_high) "
+                "VALUES ('ph','pH','',6,9,5,10)"
+            )
+            connection.executemany(
+                'INSERT INTO sensor_data(site_id,metric,value,recorded_at) VALUES (?,?,?,?)',
+                [(self.site_id, 'ph', 99.0, yesterday.strftime('%Y-%m-%d %H:%M:%S'))] * 8,
+            )
+            connection.commit()
+
+        client = web_app.app.test_client()
+        headers = self._headers('monitor-admin')
+        detail = client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
+        self.assertEqual(detail.status_code, 200, detail.get_json())
+        latest = [item for item in detail.get_json()['items']
+                  if item['business_metric'] == 'ph'][0]
+        self.assertEqual(latest['standard_value'], 7.34)
+        self.assertEqual(latest['standard_value_display'], '7.34')
+
+        local_day = yesterday.astimezone().strftime('%Y-%m-%d')
+        summary = client.get(f'/api/data/arrival/summary?date={local_day}', headers=headers)
+        self.assertEqual(summary.status_code, 200, summary.get_json())
+        ph_summary = [item for item in summary.get_json()['by_metric']
+                      if item['metric'] == 'ph'][0]
+        self.assertEqual(ph_summary['actual_count'], 1)
+
+        trends = client.get('/api/analysis/trends', headers=headers)
+        self.assertEqual(trends.status_code, 200, trends.get_json())
+        day_point = [item for item in trends.get_json()['arrival']
+                     if item['date'] == local_day][0]
+        self.assertIsNotNone(day_point['rate'])
+
+        health = client.get(
+            f'/api/data/health?period=custom&start={local_day}&end={local_day}',
+            headers=headers,
+        )
+        self.assertEqual(health.status_code, 200, health.get_json())
+        site = [item for item in health.get_json()['by_site']
+                if item['site_id'] == self.site_id][0]
+        self.assertEqual(site['actual'], 1, 'legacy sensor_data rows must not enter formal health')
+        self.assertEqual(site['over_limit'], 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM monitoring_business_observations WHERE id=?',
+                (observation_id,),
+            ).fetchone()[0], 1)
+
+    def test_zero_precision_factor_keeps_formal_decimal_in_detail_projection(self):
+        observed_at = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                       expected_interval_seconds,tolerance_seconds,effective_from)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (self.endpoint_id, '4910', 'turbidity', 'INST-A', 14400, 600,
+                 '2020-01-01T00:00:00+00:00'),
+            )
+            connection.commit()
+        observation_id = self._insert_formal_observation(
+            'turbidity', 7.34, observed_at.isoformat(), protocol_code='4910')
+
+        client = web_app.app.test_client()
+        response = client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest',
+            headers=self._headers('monitor-admin'),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        item = [row for row in response.get_json()['items']
+                if row['business_metric'] == 'turbidity'][0]
+        self.assertEqual(item['standard_value'], 7.34)
+        self.assertEqual(item['decimal_precision'], 0)
+        self.assertEqual(item['standard_value_display'], '7.34')
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT standard_value FROM monitoring_business_observations WHERE id=?',
+                (observation_id,),
+            ).fetchone()[0], 7.34)
+
+    def test_formal_review_and_alert_consumers_are_traceable_and_idempotent(self):
+        base = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        normal_id = self._insert_formal_observation('ph', 7.00, base.isoformat())
+        abnormal_id = self._insert_formal_observation(
+            'ph', 15.00, (base + timedelta(hours=4)).isoformat())
+        suspect_id = self._insert_formal_observation(
+            'ph', 7.20, (base + timedelta(hours=8)).isoformat(), quality='suspect')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                "INSERT OR REPLACE INTO param_thresholds(metric,label,unit,low,high,critical_low,critical_high) "
+                "VALUES ('ph','pH','',6,9,5,10)"
+            )
+            generated = web_app._generate_formal_data_reviews(
+                connection, (base - timedelta(hours=1)).isoformat())
+            self.assertEqual(generated['generated'], 2)
+            self.assertEqual(web_app._generate_formal_data_reviews(
+                connection, (base - timedelta(hours=1)).isoformat())['generated'], 0)
+            abnormal_review = connection.execute(
+                'SELECT * FROM data_reviews WHERE monitoring_business_observation_id=?',
+                (abnormal_id,),
+            ).fetchone()
+            self.assertIsNotNone(abnormal_review)
+            suspect_review = connection.execute(
+                'SELECT * FROM data_reviews WHERE monitoring_business_observation_id=?',
+                (suspect_id,),
+            ).fetchone()
+            self.assertIsNotNone(suspect_review)
+            self.assertEqual(suspect_review['status'], 'smart_reviewed')
+            self.assertIn('suspect', suspect_review['auto_reason'])
+            self.assertIsNone(connection.execute(
+                'SELECT id FROM data_reviews WHERE monitoring_business_observation_id=?',
+                (normal_id,),
+            ).fetchone())
+            first_alerts = web_app._evaluate_formal_observation_alerts(
+                connection, (base - timedelta(hours=1)).isoformat())
+            second_alerts = web_app._evaluate_formal_observation_alerts(
+                connection, (base - timedelta(hours=1)).isoformat())
+            connection.commit()
+            self.assertEqual(first_alerts, {'evaluated': 2, 'triggered': 1})
+            self.assertEqual(second_alerts, {'evaluated': 0, 'triggered': 0})
+            self.assertEqual(connection.execute(
+                'SELECT COUNT(*) FROM monitoring_alert_observation_events'
+            ).fetchone()[0], 2)
+            self.assertIsNone(connection.execute(
+                'SELECT observation_id FROM monitoring_alert_observation_events WHERE observation_id=?',
+                (suspect_id,),
+            ).fetchone())
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM alerts').fetchone()[0], 1)
+            review_id = suspect_review['id']
+
+        client = web_app.app.test_client()
+        headers = self._headers('monitor-admin')
+        listing = client.get('/api/data-reviews?per_page=50', headers=headers)
+        self.assertEqual(listing.status_code, 200, listing.get_json())
+        self.assertIn(review_id, [row['id'] for row in listing.get_json()['items']])
+        detail = client.get(f'/api/data-reviews/{review_id}', headers=headers)
+        self.assertEqual(detail.status_code, 200, detail.get_json())
+        self.assertEqual(detail.get_json()['monitoring_business_observation_id'], suspect_id)
+        decided = client.post(
+            f'/api/data-reviews/{review_id}/manual-review', headers=headers,
+            json={'action': 'approve', 'reason': '隔离测试确认'},
+        )
+        self.assertEqual(decided.status_code, 200, decided.get_json())
+        reread = client.get(f'/api/data-reviews/{review_id}', headers=headers)
+        self.assertEqual(reread.get_json()['status'], 'archived')
+        self.assertEqual(reread.get_json()['manual_result'], 'approved')
 
 
 if __name__ == '__main__':

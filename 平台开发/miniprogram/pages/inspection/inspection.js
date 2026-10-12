@@ -190,6 +190,28 @@ function saveInspectionSheetPhotoRetryDraft(sheet, overrides) {
   saveInspectionPhotoRetryDraft(sheet.item, value);
 }
 
+function inspectionLocalPhotoMetadata(metadata, uploadStatus) {
+  const status = uploadStatus || 'failed';
+  const labels = {
+    processing: '处理中',
+    uploading: '上传中',
+    failed: '上传失败，可重试/删除',
+  };
+  return Object.assign({}, metadata || {}, {
+    uploadStatus: status,
+    uploadStatusLabel: labels[status] || labels.failed,
+  });
+}
+
+function normalizeInspectionLocalPhotoMetadata(paths, metadataList) {
+  return (Array.isArray(paths) ? paths : []).map((path, index) =>
+    inspectionLocalPhotoMetadata(
+      Array.isArray(metadataList) ? metadataList[index] : null,
+      metadataList && metadataList[index] && metadataList[index].uploadStatus === 'uploading'
+        ? 'failed' : (metadataList && metadataList[index] && metadataList[index].uploadStatus) || 'failed'
+    ));
+}
+
 function isCurrentInspectionPhotoContext(page, item) {
   const current = page && page.data && page.data.sheet && page.data.sheet.item;
   return Boolean(page && page._alive && current && item
@@ -2591,12 +2613,16 @@ Page({
     const retryDraft = inspectionPhotoRetryDraft(target);
     const retryLocalPhotos = Array.isArray(retryDraft.localPhotos)
       && retryDraft.localPhotos.length ? retryDraft.localPhotos : rejectedLocalPhotos;
-    const retryLocalMeta = Array.isArray(retryDraft.localPhotoMeta)
+    const retryLocalMetaSource = Array.isArray(retryDraft.localPhotoMeta)
       && retryDraft.localPhotoMeta.length ? retryDraft.localPhotoMeta : rejectedPhotoMeta;
+    const retryLocalMeta = normalizeInspectionLocalPhotoMetadata(
+      retryLocalPhotos, retryLocalMetaSource);
     const supplementLocalPhotos = Array.isArray(retryDraft.supplementLocalPhotos)
       ? retryDraft.supplementLocalPhotos : [];
-    const supplementLocalMeta = Array.isArray(retryDraft.supplementLocalMeta)
+    const supplementLocalMetaSource = Array.isArray(retryDraft.supplementLocalMeta)
       ? retryDraft.supplementLocalMeta : [];
+    const supplementLocalMeta = normalizeInspectionLocalPhotoMetadata(
+      supplementLocalPhotos, supplementLocalMetaSource);
     const photoState = inspectionItemPhotoState(target);
     const photos = photoState.photos;
     const requiredPhotos = target.required_photos || 0;
@@ -2810,32 +2836,62 @@ Page({
           metadata.capture_frame_ratio = capture.frameRatio;
           metadata.capture_frame_mode = capture.frameMode;
         }
-        // 网络失败保留本地文件；来源校验失败由服务端返回业务结果，不加入检查项。
-        const tasks = paths.map((p, index) => {
+        const supplemental = captureSource === 'supplement';
+        const localPathsKey = supplemental ? 'supplementLocalPhotos' : 'localPhotos';
+        const localMetaKey = supplemental ? 'supplementLocalMeta' : 'localPhotoMeta';
+        const visiblePaths = (this.data.sheet[localPathsKey] || []).slice();
+        const visibleMeta = (this.data.sheet[localMetaKey] || []).slice();
+        const captureEntries = paths.map((p, index) => {
           const idempotencyKey = photoIdempotencyKey(siteId, p, index);
           const photoMetadata = Object.assign({}, metadata, { _idempotency_key: idempotencyKey });
+          if (visiblePaths.indexOf(p) === -1) {
+            visiblePaths.push(p);
+            visibleMeta.push(inspectionLocalPhotoMetadata(photoMetadata, 'processing'));
+          }
+          return { path: p, idempotencyKey, metadata: photoMetadata };
+        });
+        const visibleUpdates = {};
+        visibleUpdates[`sheet.${localPathsKey}`] = visiblePaths;
+        visibleUpdates[`sheet.${localMetaKey}`] = visibleMeta;
+        if (!supplemental) {
+          visibleUpdates['sheet.photoInfo'] = inspectionSheetPhotoRequirement(
+            this.data.sheet, this.data.sheet.photos, this.data.sheet.pendingPhotos, visiblePaths);
+        }
+        if (isCurrentInspectionPhotoContext(this, sheet.item)) this.setData(visibleUpdates);
+
+        // 相机返回后先展示本地缩略图；网络失败再把同一文件持久化为可重试草稿。
+        const tasks = captureEntries.map(entry => {
+          const p = entry.path;
+          const photoMetadata = entry.metadata;
+          const idempotencyKey = entry.idempotencyKey;
           return fileToBase64(p)
-            .then(b64 => api.uploadSitePhoto(siteId, b64, idempotencyKey, photoMetadata)
-              .then(result => inspectionUploadTaskResult(result, {
+            .then(b64 => {
+              this._setInspectionLocalPhotoStatus(supplemental, p, 'uploading', sheet.item);
+              return api.uploadSitePhoto(siteId, b64, idempotencyKey, photoMetadata)
+                .then(result => inspectionUploadTaskResult(result, {
                 path: p, image: b64, metadata: photoMetadata, idempotencyKey,
-              }, resolveUploadUrl)))
+                }, resolveUploadUrl));
+            })
             .catch(error => {
               if (!isTransientSyncError(error)) throw error;
               return persistFile(p).then(saved => ({
-                localPath: saved, metadata: photoMetadata,
-                supplemental: captureSource === 'supplement',
+                localPath: saved,
+                metadata: inspectionLocalPhotoMetadata(photoMetadata, 'failed'),
+                supplemental,
               })).then(savedResult => {
                 appendInspectionPhotoRetryDraft(
-                  sheet.item, savedResult.localPath, photoMetadata,
+                  sheet.item, savedResult.localPath, savedResult.metadata,
                   savedResult.supplemental);
                 return savedResult;
               });
             });
         });
-        return Promise.allSettled(tasks);
+        return Promise.allSettled(tasks).then(results => ({ results, paths, supplemental }));
       })
-      .then(results => {
-        if (!Array.isArray(results)) return;
+      .then(batch => {
+        if (!batch || !Array.isArray(batch.results)) return;
+        const results = batch.results;
+        const capturedPaths = batch.paths || [];
         wx.hideLoading();
         const uploadResult = collectInspectionPhotoUploadResults(results);
         const urls = uploadResult.urls;
@@ -2844,23 +2900,53 @@ Page({
         const localMeta = uploadResult.localMetadata;
         const supplementLocals = uploadResult.supplementLocalPaths;
         const supplementLocalMeta = uploadResult.supplementLocalMetadata;
-        const allRemote = Array.from(new Set(sheet.photos.concat(urls)));
-        const allPending = Array.from(new Set((sheet.pendingPhotos || []).concat(urls)));
-        const allLocal = sheet.localPhotos.concat(locals);
-        const allLocalMeta = (sheet.localPhotoMeta || []).concat(localMeta);
+        const categories = addPendingInspectionPhotos(
+          this.data.categories, sheet.item.item_id, urls);
+        if (!isCurrentInspectionPhotoContext(this, sheet.item)) {
+          if (urls.length) this.setData({ categories });
+          return;
+        }
+        const currentSheet = this.data.sheet || sheet;
+        const allRemote = Array.from(new Set((currentSheet.photos || []).concat(urls)));
+        const allPending = Array.from(new Set((currentSheet.pendingPhotos || []).concat(urls)));
+        const currentLocal = (currentSheet.localPhotos || []).slice();
+        const currentLocalMeta = (currentSheet.localPhotoMeta || []).slice();
+        const allLocal = [];
+        const allLocalMeta = [];
+        currentLocal.forEach((path, index) => {
+          if (!batch.supplemental && capturedPaths.indexOf(path) !== -1) return;
+          allLocal.push(path);
+          allLocalMeta.push(currentLocalMeta[index] || inspectionLocalPhotoMetadata({}, 'failed'));
+        });
+        locals.forEach((path, index) => {
+          if (allLocal.indexOf(path) !== -1) return;
+          allLocal.push(path);
+          allLocalMeta.push(inspectionLocalPhotoMetadata(localMeta[index], 'failed'));
+        });
         const allSupplements = mergeSupplementPhotos(
-          sheet.supplementPhotos, supplementAttachments);
-        const allSupplementLocals = (sheet.supplementLocalPhotos || []).concat(supplementLocals);
-        const allSupplementLocalMeta = (sheet.supplementLocalMeta || []).concat(supplementLocalMeta);
+          currentSheet.supplementPhotos, supplementAttachments);
+        const currentSupplementLocal = (currentSheet.supplementLocalPhotos || []).slice();
+        const currentSupplementMeta = (currentSheet.supplementLocalMeta || []).slice();
+        const allSupplementLocals = [];
+        const allSupplementLocalMeta = [];
+        currentSupplementLocal.forEach((path, index) => {
+          if (batch.supplemental && capturedPaths.indexOf(path) !== -1) return;
+          allSupplementLocals.push(path);
+          allSupplementLocalMeta.push(
+            currentSupplementMeta[index] || inspectionLocalPhotoMetadata({}, 'failed'));
+        });
+        supplementLocals.forEach((path, index) => {
+          if (allSupplementLocals.indexOf(path) !== -1) return;
+          allSupplementLocals.push(path);
+          allSupplementLocalMeta.push(
+            inspectionLocalPhotoMetadata(supplementLocalMeta[index], 'failed'));
+        });
         saveInspectionSheetPhotoRetryDraft(sheet, {
           localPhotos: allLocal,
           localPhotoMeta: allLocalMeta,
           supplementLocalPhotos: allSupplementLocals,
           supplementLocalMeta: allSupplementLocalMeta,
         });
-        if (!isCurrentInspectionPhotoContext(this, sheet.item)) return;
-        const categories = addPendingInspectionPhotos(
-          this.data.categories, sheet.item.item_id, urls);
         this.setData({
           'sheet.photos': allRemote,
           'sheet.pendingPhotos': allPending,
@@ -2912,7 +2998,7 @@ Page({
               const localMeta = (this.data.sheet.supplementLocalMeta || []).slice();
               if (localPhotos.indexOf(draft.localPath) === -1) {
                 localPhotos.push(draft.localPath);
-                localMeta.push(draft.metadata);
+                localMeta.push(inspectionLocalPhotoMetadata(draft.metadata, 'failed'));
                 this.setData({
                   'sheet.supplementLocalPhotos': localPhotos,
                   'sheet.supplementLocalMeta': localMeta,
@@ -2998,7 +3084,23 @@ Page({
         });
       });
     }, captureSource === 'camera' ? null
-      : title => wx.showLoading({ title, mask: true }), () => wx.hideLoading());
+      : title => wx.showLoading({ title, mask: true }), () => wx.hideLoading(),
+    message => wx.showToast({ title: message, icon: 'none' }));
+  },
+
+  _setInspectionLocalPhotoStatus(supplemental, path, status, expectedItem) {
+    if (!isCurrentInspectionPhotoContext(
+      this, expectedItem || (this.data.sheet && this.data.sheet.item))) return;
+    const pathsKey = supplemental ? 'supplementLocalPhotos' : 'localPhotos';
+    const metadataKey = supplemental ? 'supplementLocalMeta' : 'localPhotoMeta';
+    const paths = (this.data.sheet[pathsKey] || []).slice();
+    const metadata = (this.data.sheet[metadataKey] || []).slice();
+    const index = paths.indexOf(path);
+    if (index === -1) return;
+    metadata[index] = inspectionLocalPhotoMetadata(metadata[index], status);
+    const updates = {};
+    updates[`sheet.${metadataKey}`] = metadata;
+    this.setData(updates);
   },
 
   _retryInspectionLocalPhoto(kind, index, forceSupplement) {
@@ -3012,6 +3114,8 @@ Page({
     const originalMetadata = metadataList[index] || {};
     if (!path || this._showInspectionPhotoEditBlocked(sheet)) return Promise.resolve();
     const metadata = Object.assign({}, originalMetadata);
+    delete metadata.uploadStatus;
+    delete metadata.uploadStatusLabel;
     let idempotencyKey = metadata._idempotency_key
       || photoIdempotencyKey(this.data.selSiteId, path, index);
     if (forceSupplement) {
@@ -3023,7 +3127,13 @@ Page({
       delete metadata.gps_lng;
       delete metadata.taken_at;
     }
-    return runPhotoActionOnce(this, 'retry_upload', () => fileToBase64(path)
+    return runPhotoActionOnce(this, 'retry_upload', () => {
+      metadataList[index] = inspectionLocalPhotoMetadata(originalMetadata, 'uploading');
+      const uploadingUpdate = {};
+      uploadingUpdate[`sheet.${supplementalLocal ? 'supplementLocalMeta' : 'localPhotoMeta'}`]
+        = metadataList;
+      this.setData(uploadingUpdate);
+      return fileToBase64(path)
       .then(image => api.uploadSitePhoto(
         this.data.selSiteId, image, idempotencyKey, metadata))
       .then(result => {
@@ -3048,8 +3158,14 @@ Page({
           });
         }
         wx.removeSavedFile({ filePath: path, fail() {} });
-        if (!isCurrentInspectionPhotoContext(this, sheet.item)) return result;
         const displayUrl = resolveUploadUrl(result.display_url || result.url);
+        const categories = result.supplemental === true ? this.data.categories
+          : addPendingInspectionPhotos(
+            this.data.categories, sheet.item.item_id, [displayUrl]);
+        if (!isCurrentInspectionPhotoContext(this, sheet.item)) {
+          if (result.supplemental !== true) this.setData({ categories });
+          return result;
+        }
         const updates = {};
         if (supplementalLocal) {
           updates['sheet.supplementLocalPhotos'] = paths;
@@ -3071,8 +3187,7 @@ Page({
             (sheet.pendingPhotos || []).concat(displayUrl)));
           updates['sheet.photos'] = photos;
           updates['sheet.pendingPhotos'] = pendingPhotos;
-          updates.categories = addPendingInspectionPhotos(
-            this.data.categories, sheet.item.item_id, [displayUrl]);
+          updates.categories = categories;
           updates['sheet.photoInfo'] = inspectionSheetPhotoRequirement(
             sheet, photos, pendingPhotos, paths);
         }
@@ -3084,6 +3199,23 @@ Page({
       })
       .catch(error => {
         if (!isCurrentInspectionPhotoContext(this, sheet.item)) return;
+        const retainedPaths = supplementalLocal
+          ? (this.data.sheet.supplementLocalPhotos || []).slice()
+          : (this.data.sheet.localPhotos || []).slice();
+        const retainedMeta = supplementalLocal
+          ? (this.data.sheet.supplementLocalMeta || []).slice()
+          : (this.data.sheet.localPhotoMeta || []).slice();
+        const retainedIndex = retainedPaths.indexOf(path);
+        if (retainedIndex !== -1) {
+          retainedMeta[retainedIndex] = inspectionLocalPhotoMetadata(originalMetadata, 'failed');
+          const retainedUpdate = {};
+          retainedUpdate[`sheet.${supplementalLocal ? 'supplementLocalMeta' : 'localPhotoMeta'}`]
+            = retainedMeta;
+          this.setData(retainedUpdate);
+          saveInspectionSheetPhotoRetryDraft(this.data.sheet, supplementalLocal
+            ? { supplementLocalPhotos: retainedPaths, supplementLocalMeta: retainedMeta }
+            : { localPhotos: retainedPaths, localPhotoMeta: retainedMeta });
+        }
         const response = error && error.businessResponse;
         this.setData({
           'sheet.photoResultTitle': response ? '原现场照片无法继续采用' : '上传未完成',
@@ -3096,7 +3228,9 @@ Page({
             || '本地文件和上传信息已保留，请稍后重试',
           showCancel: false,
         });
-      }), title => wx.showLoading({ title, mask: true }), () => wx.hideLoading());
+      });
+    }, title => wx.showLoading({ title, mask: true }), () => wx.hideLoading(),
+    message => wx.showToast({ title: message, icon: 'none' }));
   },
 
   onRetryLocalPhoto(e) {
@@ -3151,12 +3285,15 @@ Page({
     const idx = e.currentTarget.dataset.idx;
     const localPhotos = this.data.sheet.localPhotos.slice();
     const localPhotoMeta = (this.data.sheet.localPhotoMeta || []).slice();
-    localPhotos.splice(idx, 1);
+    const removed = localPhotos.splice(idx, 1)[0];
     localPhotoMeta.splice(idx, 1);
     this.setData({ 'sheet.localPhotos': localPhotos, 'sheet.localPhotoMeta': localPhotoMeta,
       'sheet.photoInfo': inspectionSheetPhotoRequirement(
         this.data.sheet, this.data.sheet.photos, this.data.sheet.pendingPhotos, localPhotos) });
     saveInspectionSheetPhotoRetryDraft(this.data.sheet, { localPhotos, localPhotoMeta });
+    if (removed && removed.indexOf('wxfile://usr/') === 0) {
+      wx.removeSavedFile({ filePath: removed, fail() {} });
+    }
   },
 
   onDelSupplementPhoto(e) {
@@ -3252,7 +3389,7 @@ Page({
     return { completed: fieldProgress.completed, total: fieldProgress.total };
   },
 
-  onSubmitItem() {
+  onSubmitItem(event, localSyncConfirmed) {
     const s = this.data.sheet;
     if (!s.item || this._submittingItem) return;
     if (this._showInspectionPhotoEditBlocked(s)) return;
@@ -3265,8 +3402,27 @@ Page({
       this.setData({ 'sheet.open': false });
       return;
     }
+    const activeUploads = (s.localPhotoMeta || []).concat(s.supplementLocalMeta || [])
+      .filter(metadata => metadata
+        && (metadata.uploadStatus === 'processing' || metadata.uploadStatus === 'uploading'));
+    if (activeUploads.length) {
+      wx.showToast({ title: '照片仍在处理或上传，请等待完成', icon: 'none' });
+      return;
+    }
     if ((s.supplementLocalPhotos || []).length) {
       wx.showToast({ title: '补充材料尚未上传，请先重试或删除', icon: 'none' });
+      return;
+    }
+    if ((s.localPhotos || []).length && !localSyncConfirmed) {
+      wx.showModal({
+        title: '现场照片尚未上传',
+        content: `有 ${s.localPhotos.length} 张现场照片上传失败。可返回重试/删除，或确认保存本次记录并在网络恢复后继续同步。`,
+        confirmText: '保存并同步',
+        cancelText: '返回处理',
+        success: result => {
+          if (result.confirm) this.onSubmitItem(null, true);
+        },
+      });
       return;
     }
     const photoInfo = inspectionSheetPhotoRequirement(

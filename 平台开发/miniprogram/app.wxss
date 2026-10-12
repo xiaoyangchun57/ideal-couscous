@@ -48,6 +48,8 @@ page {
   /* 边框分隔 */
   --color-border: var(--border);
   --color-divider: var(--border);
+  /* 遮罩 */
+  --color-overlay: rgba(0,0,0,0.40);
   /* 类型标签（中性灰） */
   --color-type-bg: rgba(120,120,128,0.12);
   --color-type-text: #6e6e73;
@@ -78,7 +80,8 @@ page {
   --space-4:   16rpx;  /* 基础单位：卡片间距、页面左右边距、列表行 padding */
   --space-5:   20rpx;  /* 卡片纵向 padding、表单项间距 */
   --space-6:   24rpx;  /* Section 内分组间距、大区块间距 */
-  --space-8:   32rpx;  /* 页面级：左右边距、Section 标题上间距 */
+  --space-7:   28rpx;  /* 卡片纵向 padding（设计系统 --card-padding 14px ×2） */
+  --space-8:   32rpx;  /* 页面级：左右边距、Section 标题上间距、卡片横向 padding */
   --space-10:  40rpx;  /* Sheet 详情类横向内边距 */
   --space-12:  48rpx;  /* 大区块间距 */
   --space-16:  64rpx;  /* 页面底部大留白 */
@@ -107,6 +110,7 @@ page {
   --font-caption-2: 20rpx;     /* 11pt caption 2 */
 
   /* 字重 */
+  --font-weight-light: 300;
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
@@ -137,7 +141,7 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   background: var(--color-card);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
-  padding: 28rpx;
+  padding: var(--space-7) var(--space-8);
   margin: 0 var(--space-8) var(--space-4);
 }
 
@@ -146,7 +150,7 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   background: var(--color-card);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
-  padding: 28rpx;
+  padding: var(--space-7) var(--space-8);
   margin: 0 var(--space-8) var(--space-4);
 }
 
@@ -165,6 +169,44 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   color: var(--color-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 1rpx;
+}
+
+/* ============ 导航栏范围选择器（全局规范：计划页/站点页共用） ============
+   外层 .nav-scope 只负责触控热区（88rpx 铁律），透明背景
+   内层 .nav-scope-pill 固定视觉高度 56rpx，主题强调蓝实底 + 白色文字
+   实底蓝 = 明确的"可点击"操作暗示（用户研究：灰底样式大面积被忽略）
+   min-width 按最长文案定宽，同页切换零宽度跳动
+   位置：custom-navbar slot="right"，贴胶囊左缘，跨页 x 坐标恒定 */
+.nav-scope {
+  display: flex;
+  align-items: center;
+  min-height: 88rpx; /* 触控铁律：≥88rpx 点击热区 */
+}
+.nav-scope-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56rpx;
+  min-width: 176rpx; /* 容纳"我的计划+箭头"最长文案 */
+  padding: 0 var(--space-4);
+  background: var(--color-primary);
+  border-radius: var(--radius-sm);
+  transition: opacity 0.15s ease;
+}
+.nav-scope-text {
+  font-size: var(--font-callout);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-primary-foreground);
+  line-height: 1;
+}
+.nav-scope-arrow {
+  font-size: var(--font-caption-2);
+  color: var(--color-primary-foreground);
+  line-height: 1;
+  margin-left: var(--space-2);
+}
+.nav-scope.is-pending .nav-scope-pill {
+  opacity: 0.6; /* 切换中反馈，不改变布局 */
 }
 
 /* ============ iOS 分段控件 ============
@@ -260,29 +302,29 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12rpx;
+  gap: var(--space-3);
   background: var(--color-primary);
-  color: #ffffff;
-  border-radius: 24rpx;
-  font-size: 32rpx;
-  font-weight: 500;
+  color: var(--color-primary-foreground);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-title-2);
+  font-weight: var(--font-weight-medium);
   height: 96rpx;
   border: none;
   width: 100%;
 }
 .btn-primary::after { border: none; }
-.btn-primary[disabled] { background: #c7c7cc; color: rgba(255,255,255,0.85); }
+.btn-primary[disabled] { background: var(--color-text-disabled); color: rgba(255,255,255,0.85); }
 
 .btn-ghost {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8rpx;
+  gap: var(--space-2);
   background: var(--color-card);
   color: var(--color-text-secondary);
-  border-radius: 24rpx;
-  font-size: 30rpx;
-  font-weight: 500;
+  border-radius: var(--radius-lg);
+  font-size: var(--font-title-3);
+  font-weight: var(--font-weight-medium);
   height: 96rpx;
   border: 1rpx solid var(--color-border);
   width: 100%;
@@ -293,11 +335,11 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255,59,48,0.10);
+  background: var(--color-error-surface);
   color: var(--color-error);
-  border-radius: 24rpx;
-  font-size: 30rpx;
-  font-weight: 500;
+  border-radius: var(--radius-lg);
+  font-size: var(--font-title-3);
+  font-weight: var(--font-weight-medium);
   height: 96rpx;
   border: 1rpx solid rgba(255,59,48,0.28);
 }
@@ -401,9 +443,9 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   bottom: 0;
   z-index: 51;
   background: var(--color-card);
-  border-radius: 28rpx 28rpx 0 0;
-  padding: 36rpx var(--space-8) calc(36rpx + env(safe-area-inset-bottom));
-  max-height: 84vh;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--space-8) var(--space-8) calc(var(--space-8) + env(safe-area-inset-bottom));
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   overflow-y: auto;
 }
 .sheet-head {
@@ -417,52 +459,61 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   font-weight: var(--font-weight-semibold);
 }
 .sheet-close {
-  font-size: 48rpx;
+  font-size: var(--font-large-title);
   color: var(--color-text-tertiary);
   line-height: 1;
-  padding: 0 var(--space-2);
-  font-weight: 300;
+  width: 88rpx;            /* 触控铁律：≥88rpx 点击热区 */
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-weight: var(--font-weight-light);
 }
 
 /* ============ 输入框 ============ */
 .input-field {
   background: var(--color-muted);
-  border-radius: 20rpx;
-  padding: 20rpx 24rpx;
-  font-size: 28rpx;
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-6);
+  min-height: 88rpx;   /* 触控铁律 + 消除部分机型文字裁切 */
+  line-height: 1.4;
+  font-size: var(--font-body);
   color: var(--color-text-primary);
   width: 100%;
   border: none;
+  box-sizing: border-box;
 }
 .textarea-field {
   background: var(--color-muted);
-  border-radius: 20rpx;
-  padding: 20rpx 24rpx;
-  font-size: 28rpx;
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-6);
+  font-size: var(--font-body);
   color: var(--color-text-primary);
   width: 100%;
   border: none;
   min-height: 200rpx;
+  box-sizing: border-box;
 }
 .field-label {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-secondary);
-  font-weight: 500;
-  margin-bottom: 12rpx;
+  font-weight: var(--font-weight-medium);
+  margin-bottom: var(--space-3);
   display: block;
 }
 .field-hint {
-  font-size: 24rpx;
+  font-size: var(--font-footnote);
   color: var(--color-text-tertiary);
-  margin-top: 8rpx;
+  margin-top: var(--space-2);
 }
 
 /* ============ 同步条/横幅 ============ */
 .sync-bar {
-  background: rgba(255,149,0,0.10);
+  background: var(--color-warning-surface);
   color: var(--color-warning);
-  font-size: 24rpx;
-  padding: 16rpx 32rpx;
+  font-size: var(--font-footnote);
+  padding: var(--space-4) var(--space-8);
   text-align: center;
 }
 .banner-error {
@@ -564,7 +615,8 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
 }
 
 /* Sheet foundation for the four PM-15 surfaces. It intentionally does not
-   inherit the legacy .sheet rules so other page sheets remain untouched. */
+   inherit the legacy .sheet rules so other page sheets remain untouched.
+   固定高度 + flex 内滚动是"底部真空"修复方案，不得改为 height:auto */
 .om-sheet-mask {
   position: fixed;
   top: 0;
@@ -572,7 +624,7 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   bottom: 0;
   left: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, 0.40);
+  background: var(--color-overlay);
 }
 .om-sheet {
   position: fixed;
@@ -580,14 +632,13 @@ view, text, button, input, textarea, image { box-sizing: border-box; }
   bottom: 0;
   left: 0;
   z-index: 101;
-  height: 88vh;
-  max-height: calc(100vh - 20rpx);
+  height: 75vh; /* 设计系统 bottom-sheet 铁律：不超过屏幕 75% */
   display: flex;
   flex-direction: column;
   overflow: hidden;
   box-sizing: border-box;
   background: var(--color-card);
-  border-radius: 28rpx 28rpx 0 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 .om-sheet.om-sheet .om-sheet-scroll {
   flex: 1 1 0;

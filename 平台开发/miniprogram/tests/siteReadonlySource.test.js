@@ -42,6 +42,9 @@ function createPage() {
     assert.match(wxml, /最近检测周期/);
     assert.match(wxml, /各因子最近可用值/);
     assert.match(wxml, /各项可能来自不同检测周期，不代表同一次完整检测/);
+    assert.match(wxml, /item\.value_display[^<]+item\.value/);
+    assert.match(wxml, /item\.standard_value_display[^<]+item\.standard_value/);
+    assert.doesNotMatch(wxml, /toFixed\(3\)/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
     assert.match(wxml, /!site && monitoringError/);

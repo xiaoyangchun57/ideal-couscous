@@ -150,13 +150,27 @@ test('计划页 custom-navbar 后直接 segment-wrap', () => {
   assert(!between.includes('quick-entry'), '快捷入口仍在中间');
 });
 
-test('.stab-nav-scope 触控热区 ≥ 88rpx', () => {
-  const ruleMatch = sitesWxss.match(/\.stab-nav-scope\s*\{([^}]+)\}/);
-  assert(ruleMatch, '找不到 .stab-nav-scope');
-  const rule = ruleMatch[1];
-  const minHMatch = rule.match(/min-height\s*:\s*([\d.]+)rpx/);
+test('.nav-scope 全局触控热区 ≥ 88rpx 且视觉 pill 固定 56rpx', () => {
+  const appWxss = fs.readFileSync(path.join(__dirname, '../app.wxss'), 'utf8');
+  const ruleMatch = appWxss.match(/\.nav-scope\s*\{([^}]+)\}/);
+  assert(ruleMatch, '找不到全局 .nav-scope');
+  const minHMatch = ruleMatch[1].match(/min-height\s*:\s*([\d.]+)rpx/);
   assert(minHMatch, '没有 min-height');
   assert(Number(minHMatch[1]) >= 88, 'min-height ' + minHMatch[1] + ' < 88');
+  const pillMatch = appWxss.match(/\.nav-scope-pill\s*\{([^}]+)\}/);
+  assert(pillMatch, '找不到 .nav-scope-pill');
+  const hMatch = pillMatch[1].match(/height\s*:\s*([\d.]+)rpx/);
+  assert(hMatch && Number(hMatch[1]) === 56, 'pill 高度未固定为 56rpx');
+  assert(/background\s*:\s*var\(--color-primary\)/.test(pillMatch[1]), 'pill 底色未使用主题强调蓝');
+  assert(/min-width\s*:\s*([\d.]+)rpx/.test(pillMatch[1]), 'pill 缺少定宽 min-width');
+});
+
+test('两页范围切换共用全局规范（页面级无残留私有样式）', () => {
+  assert(!planWxss.includes('.scope-toggle'), 'plan.wxss 仍残留 .scope-toggle');
+  assert(!sitesWxss.includes('.stab-nav-scope'), 'sites.wxss 仍残留 .stab-nav-scope');
+  assert(planWxml.includes('slot="right"') && planWxml.includes('nav-scope-pill'), 'plan 页未接入全局 .nav-scope');
+  assert(sitesWxml.includes('slot="right"') && sitesWxml.includes('nav-scope-pill'), '站点页未接入全局 .nav-scope');
+  assert(planWxml.includes('showBorder="{{false}}"'), 'plan 页 showBorder 未统一为 false');
 });
 
 test('站点 WXML 范围标签消费 pendingScope', () => {

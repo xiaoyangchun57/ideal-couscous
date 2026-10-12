@@ -40,6 +40,10 @@
     <view class="rv-summary-line rv-stale-line" wx:if="{{loadState === 'stale'}}">
       {{loadError}}，<text bindtap="onRetry">重试</text>
     </view>
+    <view class="rv-note rv-note--error" wx:if="{{reviewError}}">
+      <text class="rv-note-label">本次审核未提交，照片和选择已保留</text>
+      <text class="rv-note-text">{{reviewError}}</text>
+    </view>
 
     <view wx:for="{{groups}}" wx:key="label" class="rv-group">
       <!-- 分组标题：多类型时才显示 -->

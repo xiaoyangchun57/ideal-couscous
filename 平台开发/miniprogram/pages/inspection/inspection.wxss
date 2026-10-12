@@ -533,7 +533,7 @@
 .parts-sheet-copy { flex: 1; min-width: 0; }
 .parts-sheet-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-primary); font-size: 24rpx; }
 .parts-sheet-meta { display: block; margin-top: 6rpx; color: var(--color-text-tertiary); font-size: 24rpx; }
-.parts-sheet-input { width: 104rpx; height: 66rpx; padding: 0 12rpx; text-align: center; color: var(--color-text-primary); background: var(--color-muted); border: 1rpx solid var(--color-divider); border-radius: var(--radius-sm); font-size: 26rpx; }
+.parts-sheet-input { width: 104rpx; height: 88rpx; /* 触控铁律：≥88rpx */ padding: 0 12rpx; text-align: center; color: var(--color-text-primary); background: var(--color-muted); border: 1rpx solid var(--color-divider); border-radius: var(--radius-sm); font-size: 26rpx; }
 .parts-sheet-unit { flex-shrink: 0; width: 38rpx; color: var(--color-text-tertiary); font-size: 22rpx; }
 .vehicle-dispatch { display: flex; align-items: center; justify-content: space-between; gap: 16rpx; margin-top: 10rpx; padding: 16rpx; background: var(--color-card); border-radius: var(--radius-sm); }
 .vehicle-dispatch-copy { flex: 1; min-width: 0; }
@@ -2744,6 +2744,23 @@
   width: 100%;
 }
 
+.ip-photo-upload-status {
+  position: absolute;
+  left: 8rpx;
+  top: 8rpx;
+  max-width: calc(100% - 50rpx);
+  padding: 6rpx 10rpx;
+  border-radius: 8rpx;
+  background: rgba(20, 102, 63, 0.84);
+  color: #fff;
+  font-size: 19rpx;
+  line-height: 1.25;
+}
+
+.ip-photo-upload-status-failed {
+  background: rgba(168, 48, 48, 0.9);
+}
+
 .ip-photo-material-badge {
   position: absolute;
   left: 8rpx;
@@ -3084,6 +3101,16 @@
    备件申请 Sheet 样式（限定 .parts-apply-sheet 命名空间）
    ============================================================ */
 
+/* Sheet 内滚动区（页面级定义，禁止提升到 app.wxss 全局——
+   会污染 om-sheet 的"固定高+flex 内滚动"防真空模型）
+   三级渐进：60vh 兜底 → calc 贴满 75vh 弹窗内容区 → 再扣除安全区
+   消除"弹窗还有高度余量却要滚动"的体验问题 */
+.sheet .sheet-scroll {
+  max-height: 60vh;
+  max-height: calc(75vh - 240rpx);
+  max-height: calc(75vh - 240rpx - env(safe-area-inset-bottom));
+}
+
 .parts-apply-sheet {
   display: flex;
   flex-direction: column;
@@ -3131,6 +3158,7 @@
   flex: 1 1 0;
   height: 0;
   min-height: 0;
+  max-height: none; /* 本 Sheet 走固定高+flex 模型，不受上方 vh 限高约束 */
   overflow: hidden;
 }
 

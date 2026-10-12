@@ -1,33 +1,17 @@
 /* pages/plan/plan.wxss */
 
-/* ===== 导航栏 ===== */
+/* ===== 导航栏（范围切换器样式见全局 .nav-scope） ===== */
 .nav-plan-left {
   display: flex;
   align-items: center;
-  gap: 16rpx;
+  gap: var(--space-4);
   height: 100%;
 }
 
 .nav-plan-title {
-  font-size: 34rpx;
-  font-weight: 600;
+  font-size: var(--font-title-1);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
-}
-
-.scope-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6rpx;
-  padding: 8rpx 16rpx;
-  background: var(--color-muted);
-  border-radius: 12rpx;
-  font-size: 26rpx;
-  color: var(--color-text-secondary);
-}
-
-.scope-arrow {
-  font-size: 20rpx;
-  color: var(--color-text-tertiary);
 }
 
 /* ===== 范围切换中提示 ===== */
@@ -412,7 +396,7 @@
   padding: 12rpx 32rpx calc(36rpx + env(safe-area-inset-bottom));
   z-index: 101;
   animation: slideUp 0.25s ease-out;
-  max-height: 84vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   overflow-y: auto;
 }
 
@@ -567,7 +551,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -732,10 +716,10 @@
 
 /* ============================================================
  *  覆盖全局 .om-sheet 固定高度：快速选择/轻操作内容驱动紧凑化
- *  产品裁决 8.4：仅常用计划紧凑化，详情/输入类保持 88vh 高弹层
+ *  产品裁决 8.4：仅常用计划紧凑化，详情/输入类保持 75vh 高弹层
  * ============================================================ */
 
-/* 根容器：height:auto + max-height 替代全局固定 88vh，内容少时紧凑
+/* 根容器：height:auto + max-height 替代全局固定 75vh，内容少时紧凑
    选择器：.om-sheet.plan-favorite-sheet 双类（特异性 0,2,0）> 全局单类（0,1,0） */
 .om-sheet.plan-favorite-sheet {
   height: auto;

@@ -573,7 +573,6 @@ def get_site_trend(site_id, metric, base, var, min_v=None, max_v=None):
 def get_db():
     db = sqlite3.connect(DB_PATH, timeout=3, check_same_thread=False)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=3000")
     db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA cache_size=-8000")
@@ -584,6 +583,62 @@ def get_db():
         raise
     finally:
         db.close()
+
+
+def _ensure_sqlite_wal_mode():
+    """Confirm WAL once during process startup instead of on every request connection."""
+    db = sqlite3.connect(DB_PATH, timeout=5, check_same_thread=False)
+    try:
+        db.execute("PRAGMA busy_timeout=5000")
+        current = str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if current != 'wal':
+            current = str(db.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+        if current != 'wal':
+            raise RuntimeError(f'SQLite WAL mode unavailable: {current}')
+    finally:
+        db.close()
+
+
+@contextmanager
+def _try_process_file_lock(lock_path):
+    """Acquire one non-blocking byte lock shared by all local worker processes."""
+    lock_dir = os.path.dirname(lock_path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    handle = open(lock_path, 'a+b')
+    acquired = False
+    platform_lock = None
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b'\0')
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                platform_lock = ('nt', msvcrt)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                platform_lock = ('posix', fcntl)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        if acquired and platform_lock:
+            handle.seek(0)
+            try:
+                if platform_lock[0] == 'nt':
+                    platform_lock[1].locking(handle.fileno(), platform_lock[1].LK_UNLCK, 1)
+                else:
+                    platform_lock[1].flock(handle.fileno(), platform_lock[1].LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
 
 def migrate_spare_parts_inventory_columns():
     """兼容旧库：为 spare_parts_inventory 补全 manufacturer / model 字段，并对常见备件回填默认值"""
@@ -4026,7 +4081,6 @@ def _scheduler_db():
     """专用调度器数据库连接（超时5秒，异步写入，避免阻塞API）"""
     db = sqlite3.connect(DB_PATH, timeout=5, check_same_thread=False)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=5000")
     db.execute("PRAGMA synchronous=OFF")
     return db
@@ -5429,10 +5483,12 @@ def _notify_attachment_reviewers(db, site_id, attachment_id, title):
 def _coalesce_pending_attachment_notifications(db):
     """Archive obsolete photo-only reminders; current work uses inspection batches."""
     try:
-        db.execute("""UPDATE notifications SET is_read=1
+        result = db.execute("""UPDATE notifications SET is_read=1
             WHERE source_type IN ('attachment_review','attachment_review_batch') AND is_read=0""")
+        return result.rowcount
     except sqlite3.OperationalError as exc:
         print(f'[Attachment review coalesce] 跳过：{exc}')
+        return 0
 
 
 # ===================== 闭环联动辅助函数 =====================
@@ -12481,6 +12537,7 @@ def _retire_stale_plan_notifications(db, user_id):
             "UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?",
             [(nid, user_id) for nid in stale_ids],
         )
+    return len(stale_ids)
 
 
 @app.route('/api/notifications')
@@ -12497,10 +12554,6 @@ def get_notifications():
     offset = (page - 1) * limit
     notification_id = request.args.get('notification_id', type=int)
     with get_db() as db:
-        _coalesce_pending_attachment_notifications(db)
-        _retire_redundant_inspection_photo_notifications(db, user['id'])
-        _retire_stale_plan_notifications(db, user['id'])
-        db.commit()
         status_sql = ''
         exact_sql = ''
         exact_params = []
@@ -12543,10 +12596,6 @@ def unread_notification_count():
     """获取未读通知数量"""
     user = g.current_user
     with get_db() as db:
-        _coalesce_pending_attachment_notifications(db)
-        _retire_redundant_inspection_photo_notifications(db, user['id'])
-        _retire_stale_plan_notifications(db, user['id'])
-        db.commit()
         cnt = db.execute(
             "SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0",
             (user['id'],)
@@ -16485,6 +16534,42 @@ def _retire_redundant_inspection_photo_notifications(db, user_id=None):
     return result.rowcount
 
 
+def notification_maintenance_job():
+    """Retire obsolete notifications in one low-frequency, single-writer transaction."""
+    lock_path = f'{DB_PATH}.notification-maintenance.lock'
+    with _try_process_file_lock(lock_path) as acquired:
+        if not acquired:
+            return {'status': 'skipped', 'reason': 'lock_busy'}
+        db = None
+        try:
+            db = _scheduler_db()
+            db.execute('BEGIN IMMEDIATE')
+            attachment_rows = _coalesce_pending_attachment_notifications(db)
+            redundant_photo_rows = _retire_redundant_inspection_photo_notifications(db)
+            stale_plan_rows = 0
+            if _table_exists(db, 'notifications'):
+                user_ids = [row[0] for row in db.execute(
+                    """SELECT DISTINCT user_id FROM notifications
+                       WHERE source_type='plan_schedule' AND is_read=0""")]
+                for user_id in user_ids:
+                    stale_plan_rows += _retire_stale_plan_notifications(db, user_id)
+            db.commit()
+            return {
+                'status': 'completed',
+                'attachment_rows': attachment_rows,
+                'redundant_photo_rows': redundant_photo_rows,
+                'stale_plan_rows': stale_plan_rows,
+            }
+        except Exception as exc:
+            if db is not None:
+                db.rollback()
+            print(f'[Notification maintenance] 本轮失败，等待下次重试: {exc}')
+            return {'status': 'failed', 'error': str(exc)}
+        finally:
+            if db is not None:
+                db.close()
+
+
 def _reject_inspection_items(db, item_reasons, reviewer_id, now, batch_key):
     """Reject items without reopening a returned vehicle's historical trip.
 
@@ -16829,11 +16914,20 @@ def api_operation_attachments_review():
                     }), 400
                 if ('source_type' in att.keys() and 'source_id' in att.keys()
                         and not (att['source_type'] == 'inspection' and att['source_id'])):
-                    return jsonify({
-                        'error': '未关联检查项的附件没有内容审核标准，仅保留为历史附件',
-                        'attachment_id': aid,
-                        'code': 'ATTACHMENT_ITEM_REQUIRED',
-                    }), 409
+                    if _recover_inspection_attachment_relation(db, att):
+                        att = db.execute(
+                            'SELECT * FROM operation_attachments WHERE id=?', (aid,)
+                        ).fetchone()
+                        attachment_map[aid] = att
+                    else:
+                        return jsonify({
+                            'error': '照片未完成检查项关联，原照片和本次选择均已保留',
+                            'attachment_id': aid,
+                            'photo_ids': [aid],
+                            'code': 'ATTACHMENT_ITEM_REQUIRED',
+                            'missing_relation': 'plan_id/item_id/site_id/uploader',
+                            'next_action': '请返回原检查项重新关联；无法唯一确认归属时重新拍摄',
+                        }), 409
                 if 'source_type' in att.keys() and 'source_id' in att.keys():
                     linked_item = db.execute(
                         'SELECT id,plan_id,site_id FROM insp_plan_items WHERE id=? AND site_id=?',
@@ -16841,9 +16935,12 @@ def api_operation_attachments_review():
                     ).fetchone()
                     if not linked_item:
                         return jsonify({
-                            'error': '附件关联检查项不存在，不能进入内容审核',
+                            'error': '照片关联的检查项不存在或站点不一致，原照片和本次选择均已保留',
                             'attachment_id': aid,
+                            'photo_ids': [aid],
                             'code': 'ATTACHMENT_ITEM_REQUIRED',
+                            'missing_relation': 'inspection item/site relation',
+                            'next_action': '请返回原检查项重新关联；无法唯一确认归属时重新拍摄',
                         }), 409
                     relation_mismatch = False
                     try:
@@ -19138,12 +19235,30 @@ def _bind_inspection_attachments(db, item, uploader_id, photo_urls, resolved_row
             'plan_id': item['plan_id'], 'item_id': item['id'], 'item_name': item_name,
             'classification_source': 'inspection_item', 'material_role': 'formal',
         })
-        db.execute("""UPDATE operation_attachments SET source_type='inspection', source_id=?,
-                   description=?, category=?, recognized_category=?, extra_json=?,
-                   review_required=1, review_status='pending' WHERE id=?""",
-                   (item['id'], item_name, category or '巡检现场照片', item_name,
-                    json.dumps(extra, ensure_ascii=False), row['id']))
+        assignments = ["source_type='inspection'", 'source_id=?', 'description=?',
+                       'category=?', 'recognized_category=?', 'extra_json=?',
+                       'review_required=1', "review_status='pending'"]
+        params = [item['id'], item_name, category or '巡检现场照片', item_name,
+                  json.dumps(extra, ensure_ascii=False)]
+        for column, value in (
+                ('plan_id', item['plan_id']), ('item_id', item['id']),
+                ('item_name', item_name)):
+            if _table_has_column(db, 'operation_attachments', column):
+                assignments.append(f'{column}=?')
+                params.append(value)
+        params.append(row['id'])
+        db.execute(f"UPDATE operation_attachments SET {','.join(assignments)} WHERE id=?", params)
+        if db.execute('SELECT changes()').fetchone()[0] != 1:
+            return False
         _persist_inspection_attachment_link(db, row['id'], item)
+        linked = db.execute("""SELECT 1 FROM operation_attachments attachment
+            JOIN insp_plan_items linked_item
+              ON linked_item.id=attachment.source_id AND linked_item.site_id=attachment.site_id
+            WHERE attachment.id=? AND attachment.source_type='inspection'
+              AND attachment.source_id=? AND linked_item.plan_id=?""",
+            (row['id'], item['id'], item['plan_id'])).fetchone()
+        if not linked:
+            return False
     return True
 
 def _haversine(lat1, lng1, lat2, lng2):
@@ -19525,51 +19640,155 @@ def get_data_arrival():
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
+def _local_day_utc_bounds(date_text):
+    local_zone = datetime.now().astimezone().tzinfo
+    start_local = datetime.strptime(date_text, '%Y-%m-%d').replace(tzinfo=local_zone)
+    return (start_local.astimezone(timezone.utc).isoformat(),
+            (start_local + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+
+
+def _formal_business_observation_rows(db, start, end, site_ids=None, metric=None, limit=None,
+                                      *, qualities=('valid',)):
+    """Return one authoritative current observation for each unambiguous business slot."""
+    if not (_table_exists(db, 'monitoring_business_observations')
+            and _table_exists(db, 'observation_batches')):
+        return []
+    clauses = ['business.scheduled_at>=?', 'business.scheduled_at<?']
+    params = [start, end]
+    if site_ids is not None:
+        normalized = list(dict.fromkeys(int(site_id) for site_id in site_ids))
+        if not normalized:
+            return []
+        clauses.append(f"business.business_site_id IN ({','.join('?' * len(normalized))})")
+        params.extend(normalized)
+    if metric:
+        clauses.append('business.business_metric=?')
+        params.append(metric)
+    quality_values = tuple(dict.fromkeys(qualities or ()))
+    if not quality_values:
+        return []
+    clauses.append(f"business.quality IN ({','.join('?' * len(quality_values))})")
+    params.extend(quality_values)
+    limit_sql = ' LIMIT ?' if limit else ''
+    if limit:
+        params.append(int(limit))
+    return [dict(row) for row in db.execute(f"""WITH formal AS (
+            SELECT business.id,business.business_site_id,business.endpoint_id,
+                   business.business_metric,business.instrument_asset_code,
+                   business.protocol_code,business.standard_value,business.standard_unit,
+                   business.quality,business.scheduled_at,business.observed_at,
+                   business.received_at,business.timeliness,business.projection_version,
+                   batch.function_code
+            FROM monitoring_business_observations business
+            JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            WHERE business.is_current=1 AND batch.is_current=1
+              AND (business.protocol_code NOT LIKE 'HJ212:%'
+                   OR (batch.function_code=2061 AND business.projection_version=?))
+              AND {' AND '.join(clauses)}
+        ), unique_slots AS (
+            SELECT business_site_id,endpoint_id,business_metric,
+                   COALESCE(instrument_asset_code,'') AS instrument_key,scheduled_at
+            FROM formal
+            GROUP BY business_site_id,endpoint_id,business_metric,instrument_key,scheduled_at
+            HAVING COUNT(DISTINCT printf('%.17g',standard_value)||char(31)||standard_unit)=1
+        ), ranked AS (
+            SELECT formal.*,ROW_NUMBER() OVER (
+                PARTITION BY formal.business_site_id,formal.endpoint_id,formal.business_metric,
+                             COALESCE(formal.instrument_asset_code,''),formal.scheduled_at
+                ORDER BY CASE WHEN formal.protocol_code LIKE 'SL651:%' THEN 0
+                              WHEN formal.protocol_code LIKE 'HJ212:%' THEN 1 ELSE 2 END,
+                         formal.id
+            ) AS slot_rank
+            FROM formal JOIN unique_slots slot
+              ON slot.business_site_id=formal.business_site_id
+             AND slot.endpoint_id=formal.endpoint_id
+             AND slot.business_metric=formal.business_metric
+             AND slot.instrument_key=COALESCE(formal.instrument_asset_code,'')
+             AND slot.scheduled_at=formal.scheduled_at
+        )
+        SELECT * FROM ranked WHERE slot_rank=1
+        ORDER BY scheduled_at,business_site_id,business_metric,id{limit_sql}""",
+        [MONITORING_BUSINESS_PROJECTION_VERSION, *params]).fetchall()]
+
+
+def _formal_arrival_summary(db, start, end, site_ids, *, evaluated_at=None):
+    if site_ids is None:
+        site_ids = [row['id'] for row in db.execute('SELECT id FROM sites ORDER BY id').fetchall()]
+    else:
+        site_ids = list(site_ids)
+    if not site_ids:
+        return {'total_avg': 0, 'by_metric': []}
+    evaluated_at = evaluated_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    configurations = monitoring_factor_configurations_batch(
+        db, site_ids, at_time=min(end, evaluated_at))
+    cutoff = min(datetime.fromisoformat(end), datetime.fromisoformat(evaluated_at))
+    expected = {}
+    sites_by_metric = {}
+    site_expected = {}
+    for site_id, items in configurations.items():
+        for configuration in items:
+            metric_name = configuration['business_metric']
+            sites_by_metric.setdefault(metric_name, set()).add(site_id)
+            key_prefix = (site_id, configuration['endpoint_id'], metric_name,
+                          configuration.get('instrument_asset_code'))
+            for slot in monitoring_expected_business_slots(db, configuration, start, end):
+                if datetime.fromisoformat(slot['result_window_end_at']) > cutoff:
+                    continue
+                key = (*key_prefix, slot['scheduled_at'])
+                expected[key] = metric_name
+                site_expected[(site_id, metric_name)] = site_expected.get((site_id, metric_name), 0) + 1
+    observations = _formal_business_observation_rows(db, start, end, site_ids)
+    actual_keys = {
+        (row['business_site_id'], row['endpoint_id'], row['business_metric'],
+         row.get('instrument_asset_code'), row['scheduled_at'])
+        for row in observations
+    }
+    metric_expected = {}
+    metric_actual = {}
+    site_actual = {}
+    for key, metric_name in expected.items():
+        metric_expected[metric_name] = metric_expected.get(metric_name, 0) + 1
+        if key in actual_keys:
+            metric_actual[metric_name] = metric_actual.get(metric_name, 0) + 1
+            site_key = (key[0], metric_name)
+            site_actual[site_key] = site_actual.get(site_key, 0) + 1
+    rows = []
+    total_expected = sum(metric_expected.values())
+    total_actual = sum(metric_actual.values())
+    for metric_name in sorted(metric_expected):
+        expected_count = metric_expected[metric_name]
+        actual_count = metric_actual.get(metric_name, 0)
+        below_threshold = sum(
+            1 for site_id in sites_by_metric.get(metric_name, set())
+            if site_expected.get((site_id, metric_name), 0)
+            and site_actual.get((site_id, metric_name), 0)
+               / site_expected[(site_id, metric_name)] * 100 < _NORMAL_RATE
+        )
+        rows.append({
+            'metric': metric_name,
+            'site_count': len(sites_by_metric.get(metric_name, set())),
+            'expected_count': expected_count,
+            'actual_count': actual_count,
+            'avg_rate': round(actual_count / expected_count * 100, 1) if expected_count else 0,
+            'below_threshold': below_threshold,
+        })
+    return {
+        'total_avg': round(total_actual / total_expected * 100, 1) if total_expected else 0,
+        'by_metric': rows,
+    }
+
+
 @app.route('/api/data/arrival/summary')
 def data_arrival_summary():
-    """到报率汇总：按项目分类（按站点范围隔离）"""
+    """到报率汇总：只按已批准业务时槽统计权威正式观测。"""
     date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+    try:
+        start, end = _local_day_utc_bounds(date)
+    except ValueError:
+        return jsonify({'error': 'date must be YYYY-MM-DD'}), 400
     allowed = _filter_site_ids()
-    sc = f' AND da.site_id IN ({",".join("?" * len(allowed))})' if allowed is not None else ''
-    scp = list(allowed) if allowed is not None else []
-    ssc = f' AND s.id IN ({",".join("?" * len(allowed))})' if allowed is not None else ''
     with get_db() as db:
-        # 检查是否有今天的数据，没有则尝试从sensor_data实时计算
-        has_data = db.execute(f"SELECT COUNT(*) as c FROM data_arrival da WHERE date=?{sc}", (date,) + tuple(scp)).fetchone()['c']
-        if has_data == 0:
-            # 回退：从sensor_data统计今天的到报情况
-            rows = db.execute(f"""
-                SELECT s.type as metric, 
-                    COUNT(DISTINCT sd.site_id) as site_count,
-                    ROUND(AVG(CASE WHEN sd.id IS NOT NULL THEN 100.0 ELSE 0 END),1) as avg_rate,
-                    0 as below_threshold
-                FROM sites s
-                LEFT JOIN sensor_data sd ON s.id = sd.site_id AND sd.recorded_at >= ?
-                {ssc}
-                GROUP BY s.type
-            """, (date + ' 00:00:00',) + tuple(scp)).fetchall()
-            # 如果回退也无数据，返回空
-            if not rows or all((r['avg_rate'] or 0) == 0 for r in rows):
-                return jsonify({'total_avg': 0, 'by_metric': []})
-            total_avg = round(sum(r['avg_rate'] or 0 for r in rows) / max(len(rows), 1), 1)
-            return jsonify({
-                'total_avg': total_avg,
-                'by_metric': [dict(r) for r in rows]
-            })
-        total = db.execute(f"SELECT AVG(arrival_rate) as avg FROM data_arrival da WHERE date=?{sc}", (date,) + tuple(scp)).fetchone()
-        rows = db.execute(f"""
-            SELECT da.metric,
-                COUNT(da.site_id) as site_count,
-                ROUND(AVG(da.arrival_rate),1) as avg_rate,
-                0 as below_threshold
-            FROM data_arrival da
-            WHERE da.date=?{sc}
-            GROUP BY da.metric
-        """, (date,) + tuple(scp)).fetchall()
-        return jsonify({
-            'total_avg': round(total['avg'],1) if total and total['avg'] else 0,
-            'by_metric': [dict(r) for r in rows]
-        })
+        return jsonify(_formal_arrival_summary(db, start, end, allowed))
 
 @app.route('/api/analysis/trends')
 @login_required
@@ -19580,16 +19799,14 @@ def analysis_trends():
     sc = f" AND da.site_id IN ({','.join('?' * len(site_ids))})" if site_ids is not None else ''
     scp = list(site_ids) if site_ids is not None else []
     with get_db() as db:
-        # 近7日到报率（按天聚合，跨站点跨指标平均；无数据记为 None 以呈现断点而非假数据）
+        # 近7日到报率：与单站详情使用相同的正式业务观测和批准时槽。
         today = datetime.now().date()
         arrival = []
         for i in range(6, -1, -1):
             d = (today - timedelta(days=i)).strftime('%Y-%m-%d')
-            row = db.execute(
-                f"SELECT AVG(arrival_rate) as avg FROM data_arrival da WHERE da.date=?{sc}",
-                [d] + scp
-            ).fetchone()
-            rate = round(row['avg'], 1) if row and row['avg'] is not None else None
+            start, end = _local_day_utc_bounds(d)
+            summary = _formal_arrival_summary(db, start, end, site_ids)
+            rate = summary['total_avg'] if summary['by_metric'] else None
             arrival.append({'date': d, 'rate': rate})
 
         # 近12月巡检完成率（按月聚合）
@@ -19718,6 +19935,17 @@ def _monitoring_metric_context(db):
     return monitored_sites, observed_metrics
 
 
+def _formal_monitoring_schema_ready(db):
+    """Return true only when the normalized monitoring contract is available."""
+    required = (
+        'trusted_endpoints', 'monitoring_endpoint_profiles',
+        'monitoring_factor_mappings', 'monitoring_factor_definitions',
+        'monitoring_business_schedules', 'observation_batches',
+        'monitoring_business_observations',
+    )
+    return all(_table_exists(db, table) for table in required)
+
+
 def _expected_samples_for_period(day_frequency, start_at, end_at, reference_now=None):
     """Count only sampling slots that should have occurred within a period."""
     frequency = max(0, int(day_frequency or 0))
@@ -19816,26 +20044,84 @@ def data_health():
             "SELECT id, name, code, type, manager FROM sites" + _site_where,
             _site_params).fetchall()
         th = {r['metric']: dict(r) for r in db.execute("SELECT * FROM param_thresholds").fetchall()}
-        monitored_sites, observed_metrics = _monitoring_metric_context(db)
-
-        actual_rows = db.execute(
-            "SELECT site_id, metric, COUNT(*) as actual FROM sensor_data "
-            "WHERE recorded_at >= ? AND recorded_at <= ?" + _sd_where + " GROUP BY site_id, metric",
-            (start, end) + tuple(_sd_params)).fetchall()
-        actual_map = {(r['site_id'], r['metric']): r['actual'] for r in actual_rows}
-
-        over_rows = db.execute(
-            "SELECT s.site_id, s.metric, COUNT(*) as over FROM sensor_data s "
-            "JOIN param_thresholds t ON t.metric = s.metric "
-            "WHERE s.recorded_at >= ? AND s.recorded_at <= ?" + _sd_where.replace('site_id', 's.site_id') + " "
-            "AND (s.value < t.low OR s.value > t.high) GROUP BY s.site_id, s.metric",
-            (start, end) + tuple(_sd_params)).fetchall()
-        over_map = {(r['site_id'], r['metric']): r['over'] for r in over_rows}
-        latest_rows = db.execute(
-            "SELECT site_id, metric, MAX(recorded_at) as latest FROM sensor_data "
-            "WHERE recorded_at <= ?" + _sd_where + " GROUP BY site_id, metric",
-            (end,) + tuple(_sd_params)).fetchall()
-        latest_map = {(r['site_id'], r['metric']): r['latest'] for r in latest_rows}
+        scoped_site_ids = [int(site['id']) for site in sites]
+        local_zone = datetime.now().astimezone().tzinfo
+        start_utc = start_boundary.replace(tzinfo=local_zone).astimezone(timezone.utc).isoformat()
+        end_utc = (end_boundary + timedelta(seconds=1)).replace(
+            tzinfo=local_zone).astimezone(timezone.utc).isoformat()
+        evaluated_at = min(
+            datetime.fromisoformat(end_utc),
+            datetime.now(timezone.utc).replace(microsecond=0),
+        ).isoformat()
+        expected_map = {}
+        freshness_seconds = {}
+        actual_map = {}
+        over_map = {}
+        latest_map = {}
+        if _formal_monitoring_schema_ready(db):
+            configurations = monitoring_factor_configurations_batch(
+                db, scoped_site_ids, at_time=evaluated_at) if scoped_site_ids else {}
+            observed_metrics = {
+                site_id: {item['business_metric'] for item in items}
+                for site_id, items in configurations.items()
+            }
+            monitored_sites = {site_id for site_id, items in configurations.items() if items}
+            cutoff = datetime.fromisoformat(evaluated_at)
+            for site_id, items in configurations.items():
+                for configuration in items:
+                    key = (site_id, configuration['business_metric'])
+                    expected_map[key] = expected_map.get(key, 0) + sum(
+                        datetime.fromisoformat(slot['result_window_end_at']) <= cutoff
+                        for slot in monitoring_expected_business_slots(
+                            db, configuration, start_utc, end_utc)
+                    )
+                    freshness_seconds[key] = max(
+                        freshness_seconds.get(key, 0),
+                        int(configuration.get('expected_interval_seconds') or 0) * 2
+                        + int(configuration.get('result_delay_seconds') or 0)
+                        + int(configuration.get('tolerance_seconds') or 0),
+                    )
+            formal_rows = _formal_business_observation_rows(
+                db, start_utc, end_utc, scoped_site_ids)
+            for row in formal_rows:
+                key = (row['business_site_id'], row['business_metric'])
+                actual_map[key] = actual_map.get(key, 0) + 1
+                latest_map[key] = max(latest_map.get(key, ''), row['scheduled_at'])
+                threshold = th.get(row['business_metric']) or {}
+                low, high = threshold.get('low'), threshold.get('high')
+                if ((low is not None and row['standard_value'] < low)
+                        or (high is not None and row['standard_value'] > high)):
+                    over_map[key] = over_map.get(key, 0) + 1
+        else:
+            # Compatibility for old isolated databases only.  Once the normalized
+            # schema exists, the production path above never reads sensor_data.
+            monitored_sites, observed_metrics = _monitoring_metric_context(db)
+            actual_rows = db.execute(
+                "SELECT site_id, metric, COUNT(*) AS actual FROM sensor_data "
+                "WHERE recorded_at >= ? AND recorded_at <= ?" + _sd_where
+                + " GROUP BY site_id, metric", (start, end) + tuple(_sd_params)).fetchall()
+            actual_map = {(row['site_id'], row['metric']): row['actual'] for row in actual_rows}
+            over_rows = db.execute(
+                "SELECT sample.site_id, sample.metric, COUNT(*) AS over FROM sensor_data sample "
+                "JOIN param_thresholds threshold ON threshold.metric=sample.metric "
+                "WHERE sample.recorded_at >= ? AND sample.recorded_at <= ?"
+                + _sd_where.replace('site_id', 'sample.site_id')
+                + " AND (sample.value < threshold.low OR sample.value > threshold.high) "
+                  "GROUP BY sample.site_id, sample.metric",
+                (start, end) + tuple(_sd_params)).fetchall()
+            over_map = {(row['site_id'], row['metric']): row['over'] for row in over_rows}
+            latest_rows = db.execute(
+                "SELECT site_id, metric, MAX(recorded_at) AS latest FROM sensor_data "
+                "WHERE recorded_at <= ?" + _sd_where + " GROUP BY site_id, metric",
+                (end,) + tuple(_sd_params)).fetchall()
+            latest_map = {(row['site_id'], row['metric']): row['latest'] for row in latest_rows}
+            for site in sites:
+                site_id = site['id']
+                for metric in observed_metrics.get(site_id, set()):
+                    frequency = _STANDARD_DAILY_COUNT.get((site['type'], metric), 24)
+                    expected_map[(site_id, metric)] = _expected_samples_for_period(
+                        frequency, start_boundary, end_boundary, freshness_reference)
+                    freshness_seconds[(site_id, metric)] = max(7200, int(172800 / frequency))
 
         by_site = []
         manager_agg = {}
@@ -19872,19 +20158,18 @@ def data_health():
             sampled_metric_count = 0
             metric_detail = []
             for metric in sorted(site_metrics):
-                day_freq = _STANDARD_DAILY_COUNT.get((stype, metric), 12)
-                expected = _expected_samples_for_period(day_freq, start_boundary, end_boundary, now)
+                expected = expected_map.get((sid, metric), 0)
                 actual = actual_map.get((sid, metric), 0)
                 m_missing = max(0, expected - actual)
                 m_over = over_map.get((sid, metric), 0)
                 m_abn = min(expected, m_missing + m_over)
                 latest_at = latest_map.get((sid, metric))
-                freshness_hours = max(2.0, 48.0 / max(day_freq, 1))
+                freshness_hours = max(2.0, freshness_seconds.get((sid, metric), 7200) / 3600)
                 timely = None
                 if latest_at:
                     try:
-                        timely = (freshness_reference
-                                  - datetime.strptime(latest_at, '%Y-%m-%d %H:%M:%S')).total_seconds() <= freshness_hours * 3600
+                        latest_time = datetime.fromisoformat(latest_at).astimezone(local_zone).replace(tzinfo=None)
+                        timely = (freshness_reference - latest_time).total_seconds() <= freshness_hours * 3600
                     except Exception:
                         timely = False
                 exp += expected
@@ -25398,8 +25683,12 @@ def mobile_submit_item():
             )
             if photo_error:
                 return jsonify({'error': photo_error}), 400
-            _bind_inspection_attachments(
-                db, item, g.current_user['id'], new_photos, resolved_new_photos)
+            if not _bind_inspection_attachments(
+                    db, item, g.current_user['id'], new_photos, resolved_new_photos):
+                return jsonify({
+                    'error': '补拍照片已保留，但检查项关联写入失败，请保留当前页面并重试提交',
+                    'code': 'INSPECTION_ATTACHMENT_BIND_FAILED',
+                }), 409
             db.execute("UPDATE insp_plan_items SET photo_urls=?, actual_photos=? WHERE id=?",
                        (json.dumps(merged_photos, ensure_ascii=False), len(merged_photos), item_id))
             supplement_updates = []
@@ -25446,8 +25735,12 @@ def mobile_submit_item():
                 'error': '必需现场照片必须由当前检查项的现场拍照入口生成',
                 'code': 'INSPECTION_PHOTO_TRUST_REQUIRED',
             }), 409
-        _bind_inspection_attachments(
-            db, item, g.current_user['id'], submitted_photos, resolved_photos)
+        if not _bind_inspection_attachments(
+                db, item, g.current_user['id'], submitted_photos, resolved_photos):
+            return jsonify({
+                'error': '现场照片已保留，但检查项关联写入失败，请保留当前页面并重试提交',
+                'code': 'INSPECTION_ATTACHMENT_BIND_FAILED',
+            }), 409
 
         updates = ["result=?", "check_time=?", "completed_at=?"]
         params = [result, now, now]
@@ -27077,6 +27370,67 @@ def api_inspection_photo_upload():
 
 
 # ---------- 2.4 批量审核照片 ----------
+def _recover_inspection_attachment_relation(db, attachment):
+    """Repair only a uniquely provable plan/item/site/uploader relation."""
+    try:
+        metadata = json.loads(attachment['extra_json'] or '{}')
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        return False
+
+    def candidate_ids(values):
+        candidates = set()
+        for value in values:
+            if value in (None, '', 0, '0'):
+                continue
+            parsed = _positive_business_id(value)
+            if parsed is None:
+                return None
+            candidates.add(parsed)
+        return candidates
+
+    item_candidates = candidate_ids((
+        attachment['source_id'] if attachment['source_type'] == 'inspection' else None,
+        attachment['item_id'] if 'item_id' in attachment.keys() else None,
+        metadata.get('item_id'),
+    ))
+    plan_candidates = candidate_ids((
+        attachment['plan_id'] if 'plan_id' in attachment.keys() else None,
+        metadata.get('plan_id'),
+    ))
+    if item_candidates is None or plan_candidates is None:
+        return False
+    if len(item_candidates) != 1 or len(plan_candidates) != 1:
+        return False
+    item_id = next(iter(item_candidates))
+    plan_id = next(iter(plan_candidates))
+    item = db.execute("""SELECT i.*,p.assignee_id
+        FROM insp_plan_items i JOIN insp_plans p ON p.id=i.plan_id
+        WHERE i.id=? AND i.plan_id=? AND i.site_id=? AND p.assignee_id=?""", (
+            item_id, plan_id, attachment['site_id'], attachment['uploader_id'])).fetchone()
+    if not item or not _pending_inspection_attachment_editable(db, dict(attachment), metadata):
+        return False
+    item_name = item['item_name'] or f'检查项#{item_id}'
+    metadata.update({
+        'plan_id': plan_id, 'item_id': item_id, 'item_name': item_name,
+        'classification_source': 'inspection_item_recovery', 'material_role': 'formal',
+    })
+    assignments = ["source_type='inspection'", 'source_id=?', 'extra_json=?',
+                   "review_status='pending'", 'review_required=1']
+    params = [item_id, json.dumps(metadata, ensure_ascii=False)]
+    for column, value in (('plan_id', plan_id), ('item_id', item_id), ('item_name', item_name)):
+        if _table_has_column(db, 'operation_attachments', column):
+            assignments.append(f'{column}=?')
+            params.append(value)
+    params.append(attachment['id'])
+    db.execute(f"UPDATE operation_attachments SET {','.join(assignments)} WHERE id=?", params)
+    if db.execute('SELECT changes()').fetchone()[0] != 1:
+        return False
+    _persist_inspection_attachment_link(db, attachment['id'], item)
+    return True
+
+
 def _inspection_attachment_review_scope(db, photo_ids, require_single_site=False):
     """Validate legacy inspection attachments before any review write."""
     if not isinstance(photo_ids, list) or not photo_ids:
@@ -27100,20 +27454,48 @@ def _inspection_attachment_review_scope(db, photo_ids, require_single_site=False
     missing_ids = [photo_id for photo_id in unique_ids if photo_id not in row_map]
     if missing_ids:
         return None, (jsonify({'error': 'inspection attachment not found', 'photo_ids': missing_ids}), 404)
-    wrong_type = [photo_id for photo_id in unique_ids
-                  if row_map[photo_id]['source_type'] != 'inspection'
-                  or not row_map[photo_id]['source_id']]
-    if wrong_type:
-        return None, (jsonify({'error': 'inspection attachment not found', 'photo_ids': wrong_type}), 404)
+    noninspection_ids = [photo_id for photo_id in unique_ids
+                         if row_map[photo_id]['source_type'] != 'inspection']
+    if noninspection_ids:
+        return None, (jsonify({
+            'error': 'inspection attachment not found',
+            'photo_ids': noninspection_ids,
+        }), 404)
+    relation_missing = [photo_id for photo_id in unique_ids if (
+        not row_map[photo_id]['source_id']
+        or not db.execute("""SELECT 1 FROM insp_plan_items item
+            WHERE item.id=? AND item.site_id=?""", (
+                row_map[photo_id]['source_id'], row_map[photo_id]['site_id'])).fetchone()
+    )]
+    recovered_ids = []
+    for photo_id in relation_missing:
+        if _recover_inspection_attachment_relation(db, row_map[photo_id]):
+            recovered_ids.append(photo_id)
+    if recovered_ids:
+        rows = db.execute(f"""SELECT * FROM operation_attachments
+            WHERE id IN ({placeholders}) AND COALESCE(is_deleted,0)=0""", unique_ids).fetchall()
+        row_map = {row['id']: row for row in rows}
+    missing_relation_ids = [photo_id for photo_id in unique_ids
+                            if not row_map[photo_id]['source_id']]
+    if missing_relation_ids:
+        return None, (jsonify({
+            'error': '照片未完成检查项关联，原照片和本次选择均已保留',
+            'photo_ids': missing_relation_ids, 'code': 'ATTACHMENT_ITEM_REQUIRED',
+            'missing_relation': 'plan_id/item_id/site_id/uploader',
+            'next_action': '请返回原检查项重新关联；无法确认归属时重新拍摄',
+        }), 409)
     linked = db.execute(f"""SELECT a.id FROM operation_attachments a
         JOIN insp_plan_items i ON a.source_id=i.id AND a.site_id=i.site_id
         WHERE a.id IN ({placeholders}) AND a.source_type='inspection'""", unique_ids).fetchall()
     linked_ids = {row['id'] for row in linked}
     missing_item_ids = [photo_id for photo_id in unique_ids if photo_id not in linked_ids]
     if missing_item_ids:
-        return None, (jsonify({'error': 'inspection attachment item not found',
-                              'photo_ids': missing_item_ids,
-                              'code': 'ATTACHMENT_ITEM_REQUIRED'}), 409)
+        return None, (jsonify({
+            'error': '照片关联的检查项不存在或站点不一致，原照片和本次选择均已保留',
+            'photo_ids': missing_item_ids, 'code': 'ATTACHMENT_ITEM_REQUIRED',
+            'missing_relation': 'inspection item/site relation',
+            'next_action': '请返回原检查项重新关联；无法唯一确认归属时重新拍摄',
+        }), 409)
     if any(row['site_id'] is None for row in rows):
         return None, (jsonify({'error': 'inspection attachment has no valid site'}), 403)
 
@@ -35270,7 +35652,146 @@ _METRIC_LABELS = {
 }
 
 
-# ---------- 从 sensor_data 生成待审核记录 ----------
+def _ensure_formal_observation_consumer_schema(db):
+    """Add traceability/idempotency storage required by formal-observation consumers."""
+    if _table_exists(db, 'data_reviews'):
+        if not _table_has_column(db, 'data_reviews', 'monitoring_business_observation_id'):
+            db.execute('ALTER TABLE data_reviews ADD COLUMN monitoring_business_observation_id INTEGER')
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_data_reviews_business_observation '
+                   'ON data_reviews(monitoring_business_observation_id) '
+                   'WHERE monitoring_business_observation_id IS NOT NULL')
+    db.execute('''CREATE TABLE IF NOT EXISTS monitoring_alert_observation_events (
+        observation_id INTEGER PRIMARY KEY,
+        alert_id INTEGER,
+        evaluated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )''')
+
+
+def migrate_formal_observation_consumers():
+    with get_db() as db:
+        _ensure_formal_observation_consumer_schema(db)
+        db.commit()
+
+
+def _formal_observation_review_reasons(db, observation):
+    value = observation.get('standard_value')
+    metric = observation.get('business_metric')
+    reasons = []
+    if observation.get('quality') == 'suspect':
+        reasons.append('【正式质量】规范化结果已标记为 suspect')
+    if value is None:
+        return reasons + ['【Q-001】值缺失']
+    bounds = _METRIC_BOUNDS.get(metric)
+    if bounds:
+        low, high = bounds
+        if value < low:
+            reasons.append(f'【Q-001】低于量程下限 {low}')
+        elif value > high:
+            reasons.append(f'【Q-001】超出量程上限 {high}')
+    else:
+        threshold = db.execute(
+            'SELECT low,high FROM param_thresholds WHERE metric=?', (metric,)).fetchone()
+        if threshold:
+            if threshold['low'] is not None and value < threshold['low']:
+                reasons.append(f'【Q-001】低于阈值下限 {threshold["low"]}')
+            elif threshold['high'] is not None and value > threshold['high']:
+                reasons.append(f'【Q-001】超出阈值上限 {threshold["high"]}')
+    recorded_at = datetime.fromisoformat(observation['scheduled_at'])
+    history = _formal_business_observation_rows(
+        db, (recorded_at - timedelta(days=7)).isoformat(), recorded_at.isoformat(),
+        [observation['business_site_id']], metric)
+    values = [row['standard_value'] for row in history if row['standard_value'] is not None]
+    if len(values) >= 20:
+        mean = sum(values) / len(values)
+        variance = sum((item - mean) ** 2 for item in values) / len(values)
+        sigma = max(math.sqrt(variance), 0.001)
+        z_score = abs((value - mean) / sigma)
+        if z_score > 3.0:
+            reasons.append(f'【Q-002】趋势突变 Z={z_score:.1f}')
+    recent_same = [row for row in history
+                   if recorded_at - datetime.fromisoformat(row['scheduled_at']) <= timedelta(hours=2)
+                   and row['standard_value'] == value]
+    if len(recent_same) >= 5:
+        reasons.append(f'【Q-004】数据僵死: 2小时内{len(recent_same)}笔值相同')
+    return reasons
+
+
+def _generate_formal_data_reviews(db, date_from, *, site_id=None, metric=None, limit=5000):
+    _ensure_formal_observation_consumer_schema(db)
+    start_at = _parse_dt(date_from)
+    if not start_at:
+        raise ValueError('date_from is invalid')
+    if start_at.tzinfo is None:
+        start_at = start_at.astimezone()
+    end_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)
+    rows = _formal_business_observation_rows(
+        db, start_at.astimezone(timezone.utc).isoformat(), end_at.isoformat(),
+        [site_id] if site_id else None, metric, limit, qualities=('valid', 'suspect'))
+    inserted = 0
+    for row in rows:
+        if db.execute('SELECT 1 FROM data_reviews WHERE monitoring_business_observation_id=?',
+                      (row['id'],)).fetchone():
+            continue
+        reasons = _formal_observation_review_reasons(db, row)
+        if not reasons:
+            continue
+        db.execute('''INSERT INTO data_reviews
+            (site_id,metric,value,recorded_at,auto_result,auto_reason,
+             smart_result,smart_score,status,monitoring_business_observation_id)
+            VALUES (?,?,?,?,?,?,?,?,'smart_reviewed',?)''', (
+                row['business_site_id'], row['business_metric'], row['standard_value'],
+                row['scheduled_at'], 'suspicious', '; '.join(reasons),
+                'suspicious', 1.0, row['id']))
+        inserted += 1
+    return {'generated': inserted, 'scanned': len(rows)}
+
+
+def _evaluate_formal_observation_alerts(db, date_from, *, limit=5000):
+    _ensure_formal_observation_consumer_schema(db)
+    start_at = _parse_dt(date_from)
+    if not start_at:
+        return {'evaluated': 0, 'triggered': 0}
+    if start_at.tzinfo is None:
+        start_at = start_at.astimezone()
+    rows = _formal_business_observation_rows(
+        db, start_at.astimezone(timezone.utc).isoformat(),
+        (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)).isoformat(),
+        limit=limit)
+    evaluated = triggered = 0
+    for row in rows:
+        db.execute('INSERT OR IGNORE INTO monitoring_alert_observation_events(observation_id) VALUES (?)',
+                   (row['id'],))
+        if db.execute('SELECT changes()').fetchone()[0] != 1:
+            continue
+        evaluated += 1
+        threshold = db.execute(
+            'SELECT label,unit,low,high,critical_low,critical_high FROM param_thresholds WHERE metric=?',
+            (row['business_metric'],)).fetchone()
+        alert_id = None
+        if threshold:
+            value = row['standard_value']
+            low, high = threshold['low'], threshold['high']
+            critical_low, critical_high = threshold['critical_low'], threshold['critical_high']
+            below = low is not None and value < low
+            above = high is not None and value > high
+            if below or above:
+                critical = ((critical_low is not None and value < critical_low)
+                            or (critical_high is not None and value > critical_high))
+                level = 'red' if critical else 'orange'
+                label = threshold['label'] or row['business_metric']
+                unit = threshold['unit'] or row['standard_unit'] or ''
+                boundary = low if below else high
+                direction = '低于' if below else '高于'
+                message = f'{label}{direction}阈值：{value:g}{unit}（阈值{boundary:g}{unit}）'
+                alert_id = create_alert_internal(
+                    db, row['business_site_id'], row['business_metric'], value, level, message)
+                triggered += 1
+        db.execute('UPDATE monitoring_alert_observation_events SET alert_id=? WHERE observation_id=?',
+                   (alert_id, row['id']))
+    return {'evaluated': evaluated, 'triggered': triggered}
+
+
+# ---------- 从权威正式观测生成确需人工审核的记录 ----------
 @app.route('/api/data-reviews/generate', methods=['POST'])
 def api_data_reviews_generate():
     data = request.get_json() or {}
@@ -35279,28 +35800,13 @@ def api_data_reviews_generate():
     metric = data.get('metric')
     date_from = data.get('date_from', (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S'))
     with get_db() as db:
-        q = '''SELECT sd.site_id, sd.metric, sd.value, sd.recorded_at
-               FROM sensor_data sd WHERE sd.recorded_at >= ?'''
-        params = [date_from]
-        if site_id:
-            q += ' AND sd.site_id=?'; params.append(site_id)
-        if metric:
-            q += ' AND sd.metric=?'; params.append(metric)
-        q += ' ORDER BY sd.recorded_at DESC LIMIT 5000'
-        rows = db.execute(q, params).fetchall()
-        inserted = 0
-        for r in rows:
-            existed = db.execute(
-                'SELECT id FROM data_reviews WHERE site_id=? AND metric=? AND value=? AND recorded_at=?',
-                (r['site_id'], r['metric'], r['value'], r['recorded_at'])).fetchone()
-            if existed:
-                continue
-            db.execute(
-                'INSERT INTO data_reviews (site_id, metric, value, recorded_at, status) VALUES (?,?,?,?,"pending")',
-                (r['site_id'], r['metric'], r['value'], r['recorded_at']))
-            inserted += 1
+        try:
+            result = _generate_formal_data_reviews(
+                db, date_from, site_id=site_id, metric=metric)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
         db.commit()
-        return jsonify({'generated': inserted, 'scanned': len(rows)})
+        return jsonify(result)
 
 
 # ---------- 审核列表（多维筛选 + 分页） ----------
@@ -35930,24 +36436,14 @@ def auto_data_review():
     try:
         with app.app_context():
             with get_db() as db:
-                # 1. 生成最近4小时的待审
+                # 1. 只从权威正式观测生成确需人工介入的审核项，并驱动阈值告警。
                 date_from = (datetime.now() - timedelta(hours=4)).strftime('%Y-%m-%d %H:%M:%S')
-                rows = db.execute(
-                    '''SELECT sd.site_id, sd.metric, sd.value, sd.recorded_at
-                       FROM sensor_data sd WHERE sd.recorded_at >= ? ORDER BY sd.recorded_at DESC LIMIT 2000''',
-                    (date_from,)).fetchall()
-                inserted = 0
-                for r in rows:
-                    existed = db.execute(
-                        'SELECT id FROM data_reviews WHERE site_id=? AND metric=? AND value=? AND recorded_at=?',
-                        (r['site_id'], r['metric'], r['value'], r['recorded_at'])).fetchone()
-                    if not existed:
-                        db.execute(
-                            'INSERT INTO data_reviews (site_id, metric, value, recorded_at, status) VALUES (?,?,?,?,"pending")',
-                            (r['site_id'], r['metric'], r['value'], r['recorded_at']))
-                        inserted += 1
-                if inserted:
-                    print(f'[AutoReview] 生成 {inserted} 条待审')
+                generated = _generate_formal_data_reviews(db, date_from, limit=2000)
+                alert_result = _evaluate_formal_observation_alerts(db, date_from, limit=2000)
+                if generated['generated']:
+                    print(f'[AutoReview] 生成 {generated["generated"]} 条正式观测待审')
+                if alert_result['triggered']:
+                    print(f'[AutoReview] 正式观测触发 {alert_result["triggered"]} 条告警规则')
 
                 # 2. L1 四级自动审核管线 -----------------------------------------
                 # 管线1→量程校验（GB3838 上下限+负值+NULL）
@@ -36705,7 +37201,9 @@ def _station_monitoring_overview(db, site_id):
     configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    latest = values if projection['monitoring_status'] in {'normal', 'attention', 'interval_unconfigured'} else []
+    # Historical latest values are an independent fact from the current result cycle.
+    # A pending/incomplete cycle must not hide an older valid formal observation.
+    latest = values
     latest = [dict(
         _station_monitoring_presented_value(item),
         factor_name_cn=_STATION_MONITORING_FACTOR_LABELS.get(
@@ -36948,6 +37446,196 @@ def _station_monitoring_batch_projections(db, site_rows):
     return result
 
 
+_STATION_MONITORING_LIST_CACHE_SECONDS = 10
+_STATION_MONITORING_LIST_REFRESH_SECONDS = 8
+_STATION_MONITORING_LIST_STALE_SECONDS = 15
+_station_monitoring_batch_cache = {}
+_station_monitoring_batch_cache_lock = threading.Lock()
+_station_monitoring_batch_inflight = {}
+_station_monitoring_list_cache = {}
+_station_monitoring_list_cache_lock = threading.Lock()
+_station_monitoring_list_inflight = {}
+_station_monitoring_overview_projection_cache = {}
+_station_monitoring_overview_projection_cache_lock = threading.Lock()
+_station_monitoring_overview_projection_inflight = {}
+_station_monitoring_overview_cache = {}
+_station_monitoring_overview_cache_lock = threading.Lock()
+_station_monitoring_overview_inflight = {}
+
+
+def _station_monitoring_list_version(db):
+    """Cheap projection version; raw communication freshness remains TTL bounded."""
+    return (
+        db.execute("""SELECT COALESCE(MAX(id),0) FROM monitoring_business_observations
+                      WHERE is_current=1 AND slot_state IN ('selected','conflict')""").fetchone()[0],
+        db.execute('SELECT COALESCE(MAX(id),0) FROM monitoring_factor_mappings').fetchone()[0],
+        db.execute('SELECT COALESCE(MAX(id),0) FROM monitoring_endpoint_profiles').fetchone()[0],
+        db.execute('SELECT COALESCE(MAX(id),0) FROM monitoring_business_schedules').fetchone()[0],
+        tuple(db.execute('SELECT COUNT(*),COALESCE(MAX(id),0) FROM sites').fetchone()),
+        tuple(db.execute('SELECT COUNT(*),COALESCE(MAX(rowid),0) FROM user_sites').fetchone()),
+        tuple(db.execute("""SELECT COUNT(*),COALESCE(MAX(id),0)
+                            FROM monitoring_quality_issues WHERE status='open'""").fetchone()),
+    )
+
+
+def _station_monitoring_batch_projections_cached(db, site_rows):
+    site_rows = list(site_rows)
+    cache_key = (os.path.abspath(DB_PATH), tuple(tuple(row) for row in site_rows))
+    while True:
+        owner = False
+        with _station_monitoring_batch_cache_lock:
+            cached = _station_monitoring_batch_cache.get(cache_key)
+            if cached and cached['expires_at'] > time.monotonic():
+                return [dict(item) for item in cached['items']]
+            inflight = _station_monitoring_batch_inflight.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _station_monitoring_batch_inflight[cache_key] = inflight
+                owner = True
+        if not owner:
+            inflight.wait()
+            continue
+        try:
+            items = _station_monitoring_batch_projections(db, site_rows)
+            with _station_monitoring_batch_cache_lock:
+                _station_monitoring_batch_cache[cache_key] = {
+                    'expires_at': time.monotonic() + _STATION_MONITORING_LIST_REFRESH_SECONDS,
+                    'items': items,
+                }
+                if len(_station_monitoring_batch_cache) > 128:
+                    expired = [key for key, value in _station_monitoring_batch_cache.items()
+                               if value['expires_at'] <= time.monotonic()]
+                    for key in expired:
+                        _station_monitoring_batch_cache.pop(key, None)
+            return [dict(item) for item in items]
+        finally:
+            with _station_monitoring_batch_cache_lock:
+                if _station_monitoring_batch_inflight.get(cache_key) is inflight:
+                    _station_monitoring_batch_inflight.pop(cache_key, None)
+                inflight.set()
+
+
+def _station_monitoring_sites_body(db, scope, keyword, user):
+    is_admin = _has_any_role(user, 'admin')
+    responsible_ids = _active_master_site_ids(
+        db, _active_operator_site_ids(db, user['id']))
+    mine_count = len(responsible_ids)
+    all_count = db.execute(
+        'SELECT COUNT(*) FROM sites WHERE ' + _active_master_site_predicate(db)
+    ).fetchone()[0] if is_admin else None
+    where = [_active_master_site_predicate(db)]
+    params = []
+    if scope == 'mine':
+        if not responsible_ids:
+            site_rows = []
+        else:
+            where.append('id IN (' + ','.join('?' * len(responsible_ids)) + ')')
+            params.extend(responsible_ids)
+    if keyword and (scope != 'mine' or responsible_ids):
+        escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        where.append("(name LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')")
+        params.extend((f'%{escaped}%', f'%{escaped}%'))
+    if scope != 'mine' or responsible_ids:
+        order = 'name, id'
+        if scope == 'all' and responsible_ids:
+            responsible_marks = ','.join('?' * len(responsible_ids))
+            order = f'CASE WHEN id IN ({responsible_marks}) THEN 0 ELSE 1 END, name, id'
+            params.extend(responsible_ids)
+        clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+        site_rows = db.execute(
+            'SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, '
+            'gps_lng AS lng, manager, phone FROM sites' + clause + ' ORDER BY ' + order,
+            params,
+        ).fetchall()
+    items = _station_monitoring_batch_projections_cached(db, site_rows)
+    responsible_set = set(responsible_ids)
+    for item in items:
+        item['is_responsible'] = item['site_id'] in responsible_set
+    counts = {state: sum(item['monitoring_status'] == state for item in items) for state in ('not_connected', 'awaiting_first_frame', 'raw_received_config_pending', 'waiting_first_valid', 'interval_unconfigured', 'normal', 'attention')}
+    return {
+        'scope': scope,
+        'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
+        'scope_counts': {'mine': mine_count, 'all': all_count},
+        'summary': dict(total=len(items), **counts),
+        'items': items,
+        'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+
+
+def _station_monitoring_cache_entry(db, body):
+    now = time.monotonic()
+    return {
+        'version': _station_monitoring_list_version(db),
+        'refresh_after': now + _STATION_MONITORING_LIST_REFRESH_SECONDS,
+        'fresh_until': now + _STATION_MONITORING_LIST_CACHE_SECONDS,
+        'stale_until': now + _STATION_MONITORING_LIST_STALE_SECONDS,
+        'refreshing': False,
+        'refresh_token': None,
+        'body': body,
+    }
+
+
+def _refresh_station_monitoring_sites_cache(
+        cache_key, scope, keyword, user, site_ids, refresh_token, refresh_event):
+    try:
+        with app.app_context():
+            g.current_user = dict(user)
+            g.user_site_ids = list(site_ids)
+            with get_db() as db:
+                body = _station_monitoring_sites_body(db, scope, keyword, g.current_user)
+                entry = _station_monitoring_cache_entry(db, body)
+        with _station_monitoring_list_cache_lock:
+            cached = _station_monitoring_list_cache.get(cache_key)
+            if cached and cached.get('refresh_token') is refresh_token:
+                _station_monitoring_list_cache[cache_key] = entry
+    except Exception as exc:
+        print(f'[Station monitoring cache] 后台刷新失败，保留短时旧值: {exc}')
+        with _station_monitoring_list_cache_lock:
+            cached = _station_monitoring_list_cache.get(cache_key)
+            if cached and cached.get('refresh_token') is refresh_token:
+                cached['refreshing'] = False
+                cached['refresh_token'] = None
+    finally:
+        with _station_monitoring_list_cache_lock:
+            if _station_monitoring_list_inflight.get(cache_key) is refresh_event:
+                _station_monitoring_list_inflight.pop(cache_key, None)
+            refresh_event.set()
+
+
+def _station_monitoring_sites_cold_body(cache_key, scope, keyword, user):
+    while True:
+        owner = False
+        with _station_monitoring_list_cache_lock:
+            cached = _station_monitoring_list_cache.get(cache_key)
+            if cached and cached['stale_until'] > time.monotonic():
+                return cached['body']
+            inflight = _station_monitoring_list_inflight.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _station_monitoring_list_inflight[cache_key] = inflight
+                owner = True
+        if not owner:
+            inflight.wait()
+            continue
+        try:
+            with get_db() as db:
+                body = _station_monitoring_sites_body(db, scope, keyword, user)
+                entry = _station_monitoring_cache_entry(db, body)
+            with _station_monitoring_list_cache_lock:
+                _station_monitoring_list_cache[cache_key] = entry
+                if len(_station_monitoring_list_cache) > 256:
+                    expired = [key for key, value in _station_monitoring_list_cache.items()
+                               if value['stale_until'] <= time.monotonic()]
+                    for key in expired:
+                        _station_monitoring_list_cache.pop(key, None)
+            return body
+        finally:
+            with _station_monitoring_list_cache_lock:
+                if _station_monitoring_list_inflight.get(cache_key) is inflight:
+                    _station_monitoring_list_inflight.pop(cache_key, None)
+                inflight.set()
+
+
 @app.route('/api/station-monitoring/sites')
 @login_required
 def station_monitoring_sites():
@@ -36958,50 +37646,129 @@ def station_monitoring_sites():
     if scope == 'all' and not is_admin:
         return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_MONITORING_SCOPE'}), 403
     keyword = (request.args.get('keyword') or '').strip()
-    with get_db() as db:
-        responsible_ids = _active_master_site_ids(
-            db, _active_operator_site_ids(db, g.current_user['id']))
-        mine_count = len(responsible_ids)
-        all_count = db.execute(
-            'SELECT COUNT(*) FROM sites WHERE ' + _active_master_site_predicate(db)
-        ).fetchone()[0] if is_admin else None
-        where = [_active_master_site_predicate(db)]
-        params = []
-        if scope == 'mine':
-            if not responsible_ids:
-                site_rows = []
-            else:
-                where.append('id IN (' + ','.join('?' * len(responsible_ids)) + ')')
-                params.extend(responsible_ids)
-        if keyword and (scope != 'mine' or responsible_ids):
-            escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            where.append("(name LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')")
-            params.extend((f'%{escaped}%', f'%{escaped}%'))
-        if scope != 'mine' or responsible_ids:
-            order = 'name, id'
-            if scope == 'all' and responsible_ids:
-                responsible_marks = ','.join('?' * len(responsible_ids))
-                order = f'CASE WHEN id IN ({responsible_marks}) THEN 0 ELSE 1 END, name, id'
-                params.extend(responsible_ids)
-            clause = (' WHERE ' + ' AND '.join(where)) if where else ''
-            site_rows = db.execute(
-                'SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, '
-                'gps_lng AS lng, manager, phone FROM sites' + clause + ' ORDER BY ' + order,
-                params,
-            ).fetchall()
-        items = _station_monitoring_batch_projections(db, site_rows)
-        responsible_set = set(responsible_ids)
-        for item in items:
-            item['is_responsible'] = item['site_id'] in responsible_set
-        counts = {state: sum(item['monitoring_status'] == state for item in items) for state in ('not_connected', 'awaiting_first_frame', 'raw_received_config_pending', 'waiting_first_valid', 'interval_unconfigured', 'normal', 'attention')}
-        return jsonify({
-            'scope': scope,
-            'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
-            'scope_counts': {'mine': mine_count, 'all': all_count},
-            'summary': dict(total=len(items), **counts),
-            'items': items,
-            'updated_at': datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        })
+    cache_key = (
+        os.path.abspath(DB_PATH), g.current_user.get('id'),
+        tuple(_normalize_user_roles(
+            g.current_user.get('roles') or [g.current_user.get('role')])),
+        tuple(sorted(getattr(g, 'user_site_ids', None) or [])), scope, keyword,
+    )
+    now = time.monotonic()
+    refresh = False
+    refresh_token = None
+    refresh_event = None
+    with _station_monitoring_list_cache_lock:
+        cached = _station_monitoring_list_cache.get(cache_key)
+        if cached and cached['stale_until'] > now:
+            if (cached['refresh_after'] <= now and not cached['refreshing'] and
+                    cache_key not in _station_monitoring_list_inflight):
+                cached['refreshing'] = True
+                refresh_token = object()
+                cached['refresh_token'] = refresh_token
+                refresh_event = threading.Event()
+                _station_monitoring_list_inflight[cache_key] = refresh_event
+                refresh = True
+            stale_body = cached['body']
+        else:
+            stale_body = None
+    if stale_body is not None:
+        if refresh:
+            threading.Thread(
+                target=_refresh_station_monitoring_sites_cache,
+                args=(cache_key, scope, keyword, dict(g.current_user),
+                      tuple(getattr(g, 'user_site_ids', None) or []), refresh_token,
+                      refresh_event),
+                name='station-monitoring-cache-refresh', daemon=True,
+            ).start()
+        return jsonify(stale_body)
+    return jsonify(_station_monitoring_sites_cold_body(
+        cache_key, scope, keyword, dict(g.current_user)))
+
+
+def _station_monitoring_overview_projection_body(site_id, version):
+    cache_key = (os.path.abspath(DB_PATH), site_id, version)
+    while True:
+        owner = False
+        with _station_monitoring_overview_projection_cache_lock:
+            cached = _station_monitoring_overview_projection_cache.get(cache_key)
+            if cached and cached['expires_at'] > time.monotonic():
+                return cached['body'], cached['expires_at']
+            inflight = _station_monitoring_overview_projection_inflight.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _station_monitoring_overview_projection_inflight[cache_key] = inflight
+                owner = True
+        if not owner:
+            inflight.wait()
+            continue
+        try:
+            with get_db() as db:
+                result = _station_monitoring_overview(db, site_id)
+            expires_at = time.monotonic() + _STATION_MONITORING_LIST_CACHE_SECONDS
+            with _station_monitoring_overview_projection_cache_lock:
+                _station_monitoring_overview_projection_cache[cache_key] = {
+                    'expires_at': expires_at,
+                    'body': result,
+                }
+                if len(_station_monitoring_overview_projection_cache) > 512:
+                    expired = [
+                        key for key, value in _station_monitoring_overview_projection_cache.items()
+                        if value['expires_at'] <= time.monotonic()
+                    ]
+                    for key in expired:
+                        _station_monitoring_overview_projection_cache.pop(key, None)
+            return result, expires_at
+        finally:
+            with _station_monitoring_overview_projection_cache_lock:
+                if _station_monitoring_overview_projection_inflight.get(cache_key) is inflight:
+                    _station_monitoring_overview_projection_inflight.pop(cache_key, None)
+                inflight.set()
+
+
+def _station_monitoring_overview_cached_body(cache_key, site_id):
+    while True:
+        with get_db() as db:
+            version = _station_monitoring_list_version(db)
+        owner = False
+        with _station_monitoring_overview_cache_lock:
+            cached = _station_monitoring_overview_cache.get(cache_key)
+            if (cached and cached['version'] == version and
+                    cached['expires_at'] > time.monotonic()):
+                return cached['body']
+            inflight = _station_monitoring_overview_inflight.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _station_monitoring_overview_inflight[cache_key] = inflight
+                owner = True
+        if not owner:
+            inflight.wait()
+            continue
+        try:
+            result, projection_expires_at = _station_monitoring_overview_projection_body(
+                site_id, version)
+            if result is None:
+                return None
+            now = time.monotonic()
+            entry = {
+                'version': version,
+                'expires_at': min(
+                    now + _STATION_MONITORING_LIST_CACHE_SECONDS,
+                    projection_expires_at,
+                ),
+                'body': result,
+            }
+            with _station_monitoring_overview_cache_lock:
+                _station_monitoring_overview_cache[cache_key] = entry
+                if len(_station_monitoring_overview_cache) > 512:
+                    expired = [key for key, value in _station_monitoring_overview_cache.items()
+                               if value['expires_at'] <= time.monotonic()]
+                    for key in expired:
+                        _station_monitoring_overview_cache.pop(key, None)
+            return result
+        finally:
+            with _station_monitoring_overview_cache_lock:
+                if _station_monitoring_overview_inflight.get(cache_key) is inflight:
+                    _station_monitoring_overview_inflight.pop(cache_key, None)
+                inflight.set()
 
 
 @app.route('/api/station-monitoring/sites/<int:site_id>/overview')
@@ -37010,11 +37777,16 @@ def station_monitoring_overview(site_id):
     denied = _site_access_denied(site_id, '读取站点监测')
     if denied:
         return denied
-    with get_db() as db:
-        result = _station_monitoring_overview(db, site_id)
-        if result is None:
-            return jsonify({'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND'}), 404
-        return jsonify(result)
+    cache_key = (
+        os.path.abspath(DB_PATH), g.current_user.get('id'),
+        tuple(_normalize_user_roles(
+            g.current_user.get('roles') or [g.current_user.get('role')])),
+        tuple(sorted(getattr(g, 'user_site_ids', None) or [])), site_id,
+    )
+    result = _station_monitoring_overview_cached_body(cache_key, site_id)
+    if result is None:
+        return jsonify({'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND'}), 404
+    return jsonify(result)
 
 
 @app.route('/api/station-monitoring/access-summary')
@@ -37286,7 +38058,9 @@ if __name__ == '__main__':
     else:
         os.makedirs(_private_site_photo_root(), exist_ok=True)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    _ensure_sqlite_wal_mode()
     init_db()
+    migrate_formal_observation_consumers()
     ensure_alert_rules_config()
     migrate_spare_parts_inventory_columns()
     migrate_workorder_flow_columns()
@@ -37352,6 +38126,12 @@ if __name__ == '__main__':
                 print(f"[Cleanup] 清理过期已办结告警: 删除{total}条（保留近7天）")
     except Exception as e:
         print(f"[Cleanup] 告警清理跳过: {e}")
+    notification_maintenance_job()
+    scheduler.add_job(
+        notification_maintenance_job, 'interval', minutes=5,
+        id='notification_maintenance', replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     cleanup_photo_lifecycle_job()
     # 模拟器已关闭（仅保留静态异常场景数据用于演示）
     # if os.environ.get('SKIP_SIMULATOR') != '1':
