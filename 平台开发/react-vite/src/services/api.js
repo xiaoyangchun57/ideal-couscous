@@ -244,9 +244,21 @@ export const api = {
     return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
   },
   stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
+  stationExpectedFactors: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, options),
+  updateStationExpectedFactors: (siteId, data, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, {
+    ...options,
+    method: 'PUT',
+    body: data,
+  }),
   stationMonitoringTrend: (siteId, metric, options = {}) => {
     const params = new URLSearchParams({ metric });
     return strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/trend?${params}`, options);
   },
   stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),
+  stationServicePolicy: (siteId, options = {}) => strictRequest(`/sites/${encodeURIComponent(siteId)}/service-policy`, options),
+  updateStationServicePolicy: (siteId, data, options = {}) => strictRequest(`/sites/${encodeURIComponent(siteId)}/service-policy`, {
+    ...options,
+    method: 'PUT',
+    body: data,
+  }),
 };

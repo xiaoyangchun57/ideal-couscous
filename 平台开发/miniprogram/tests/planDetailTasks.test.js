@@ -6,6 +6,9 @@ const fs = require('node:fs');
 const pagePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.js');
 const templatePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.wxml');
 const stylePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.wxss');
+const appConfig = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app.json'), 'utf8'));
+const tabBarPaths = new Set((appConfig.tabBar && appConfig.tabBar.list || [])
+  .map(item => '/' + item.pagePath));
 const apiPath = path.resolve(__dirname, '../services/api.js');
 const inspectionTemplatePath = path.resolve(__dirname, '../pages/inspection/inspection.wxml');
 const maps = require('../services/maps.js');
@@ -30,7 +33,10 @@ global.wx = {
   showModal: options => { modals.push(options); },
   reLaunch: () => {},
   navigateTo: options => { navigations.push(options); },
-  switchTab: options => { tabSwitches.push(options); },
+  switchTab: options => {
+    if (!tabBarPaths.has(options.url)) throw new Error('switchTab target is not a tabBar page');
+    tabSwitches.push(options);
+  },
   stopPullDownRefresh: () => {},
 };
 global.Page = page => { pageDefinition = page; };
@@ -173,7 +179,21 @@ test('completed single-site plan opens the exact read-only field result target',
     readOnly: true,
     source: 'completed_plan_detail',
   });
-  assert.deepEqual(tabSwitches, [{ url: '/pages/inspection/inspection', fail: tabSwitches[0].fail }]);
+  assert.equal(tabSwitches.length, 0);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].url, '/pages/inspection/inspection');
+
+  navigations[0].fail();
+  assert.equal(testApp.globalData.executionTarget, null);
+  assert.equal(toasts.at(-1).title, '现场记录打开失败，请重试');
+  assert.equal(page.onViewPrimaryResult(), true);
+  assert.equal(navigations.length, 2, 'failed navigation remains retryable');
+  assert.deepEqual(testApp.globalData.executionTarget, {
+    executionPlanId: 141,
+    siteId: 362,
+    readOnly: true,
+    source: 'completed_plan_detail',
+  });
 });
 
 test('multi-site completed rows preserve each plan and site result identity', async () => {
@@ -194,8 +214,9 @@ test('multi-site completed rows preserve each plan and site result identity', as
     readOnly: true,
     source: 'completed_plan_detail',
   });
-  assert.equal(tabSwitches.length, 1);
-  assert.equal(tabSwitches[0].url, '/pages/inspection/inspection');
+  assert.equal(tabSwitches.length, 0);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].url, '/pages/inspection/inspection');
 });
 
 test('site task item counts use authoritative fields and retain explicit zero values', () => {

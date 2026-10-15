@@ -19,7 +19,9 @@ import {
   normalizeDeleteReason,
 } from './attachmentDeletion';
 import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
-import { archiveCaptureLabel, archiveSourceLabel, hasArchiveFilters } from './archivePresentation';
+import {
+  archiveCaptureLabel, archiveMaterialNature, archiveSourceLabel, hasArchiveFilters,
+} from './archivePresentation';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import './ArchivePage.css';
 
@@ -385,7 +387,10 @@ export default function ArchivePage() {
     },
     {
       title: '来源', width: 150,
-      render: (_, item) => archiveCaptureLabel(item.capture_source),
+      render: (_, item) => <Space direction="vertical" size={2}>
+        <Text>{archiveCaptureLabel(item.capture_source)}</Text>
+        {item.is_archive_material === 1 && <Tag color="blue" style={{ marginInlineEnd: 0 }}>归档材料</Tag>}
+      </Space>,
     },
     ...(archiveMode === 'history' ? [{
       title: '记录状态', width: 130,
@@ -512,7 +517,10 @@ export default function ArchivePage() {
             <Descriptions.Item label="采集来源">{archiveCaptureLabel(detail.capture_source)}</Descriptions.Item>
             <Descriptions.Item label="站点">{detail.site_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="业务来源">{sourceLabel(detail)}</Descriptions.Item>
-            <Descriptions.Item label="检查项">{itemLabel(detail)}</Descriptions.Item>
+            <Descriptions.Item label={detail.is_archive_material === 1 ? '关联业务' : '检查项'}>{itemLabel(detail)}</Descriptions.Item>
+            <Descriptions.Item label="材料性质">
+              {archiveMaterialNature(detail)}
+            </Descriptions.Item>
             <Descriptions.Item label="关联计划">{detail.plan_name || (detail.plan_id ? `#${detail.plan_id}` : '-')}</Descriptions.Item>
             <Descriptions.Item label="上传人">{detail.uploader_name || detail.uploader_real_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="记录状态">{archiveMode === 'current' ? '当前有效' : historyStatus(detail).label}</Descriptions.Item>

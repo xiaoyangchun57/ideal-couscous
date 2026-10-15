@@ -33,11 +33,15 @@ FACTORS = (
     ('HJ212:029', 'total_copper'),
     ('HJ212:027', 'total_lead'),
     ('4E1A', 'total_nitrogen'),
-    ('4F12', 'total_organic_carbon'),
+    ('0311', 'water_temp'),
     ('4D1B', 'total_phosphorus'),
     ('HJ212:022', 'total_tin'),
     ('HJ212:030', 'total_zinc'),
     ('4910', 'turbidity'),
+)
+EXPECTED_FACTORS = (
+    'dissolved_oxygen', 'ph', 'turbidity', 'water_temp', 'conductivity',
+    'codmn', 'total_nitrogen', 'total_phosphorus', 'ammonia',
 )
 OBSERVATION_COUNT = SITE_COUNT * len(FACTORS) * SLOTS_PER_FACTOR
 CHUNK_SIZE = 20_000
@@ -155,6 +159,26 @@ def build_fixture(output: Path, force: bool = False) -> None:
                VALUES (?,?,NULL,'Asia/Shanghai',14400,'00:00:00',900,
                        '2020-01-01T00:00:00+00:00',1,7200)""",
             ((site_id, site_id) for site_id in range(1, SITE_COUNT + 1)),
+        )
+        connection.executemany(
+            """INSERT INTO station_expected_factor_configs(
+                   id,site_id,version,effective_from,previous_metrics_json,
+                   selected_metrics_json,changed_by_user_id,idempotency_key,created_at)
+               VALUES (?,?,1,'2020-01-01T00:00:00+00:00','[]',?,1,?,
+                       '2020-01-01T00:00:00+00:00')""",
+            ((site_id, site_id,
+              '["dissolved_oxygen","ph","turbidity","water_temp","conductivity",'
+              '"codmn","total_nitrogen","total_phosphorus","ammonia"]',
+              f'isolated-scale-expected-{site_id}')
+             for site_id in range(1, SITE_COUNT + 1)),
+        )
+        connection.executemany(
+            """INSERT INTO station_expected_factors(
+                   config_id,site_id,business_metric,display_order,effective_from)
+               VALUES (?,?,?,?, '2020-01-01T00:00:00+00:00')""",
+            ((site_id, site_id, metric, order)
+             for site_id in range(1, SITE_COUNT + 1)
+             for order, metric in enumerate(EXPECTED_FACTORS)),
         )
         connection.commit()
 

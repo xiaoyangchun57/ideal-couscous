@@ -256,6 +256,60 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                  vehicle_id, int(vehicle_id is None),
                  json.dumps({'ok': True, 'errors': []})))
 
+    def install_real_service_policy_schema_and_roles(self):
+        migration_path = os.path.join(
+            os.path.dirname(__file__), 'migrations',
+            '20261013_013_station_service_policy.sql')
+        with open(migration_path, 'r', encoding='utf-8') as source:
+            policy_migration = source.read()
+        with self.db() as db:
+            db.executescript(policy_migration)
+            db.execute('CREATE TABLE user_roles (user_id INTEGER, role TEXT)')
+            db.executemany('INSERT INTO user_roles VALUES (?,?)', (
+                (1, 'admin'), (2, 'operator'), (3, 'operator'),
+            ))
+
+    def prepare_real_ended_site_change_with_template_growth(self, schedule_id):
+        self.install_real_service_policy_schema_and_roles()
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+            db.execute("""INSERT INTO spare_parts_inventory
+                (id,quantity,part_name,part_code,unit)
+                VALUES (1,10,'滤芯','PART-1','个')""")
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET spare_parts=? WHERE id=?', (
+                json.dumps([{'part_id': 1, 'part_name': '滤芯', 'quantity': 2}],
+                           ensure_ascii=False), schedule_id))
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,2)')
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (102,10,'New item after approval','常规',0,0,0,2)""")
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '同日增加仍在服务的站点'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
     def schedule_status(self, schedule_id):
         with self.db() as db:
             return db.execute('SELECT status FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()['status']
@@ -1092,6 +1146,663 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             self.assertGreater(db.execute(
                 'SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id=?',
                 (schedule_id,)).fetchone()[0], 0)
+
+    def test_ended_site_remark_change_preserves_existing_execution_packages(self):
+        schedule_id = 77
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute("""INSERT INTO spare_parts_inventory
+                (id,quantity,part_name,part_code,unit)
+                VALUES (1,10,'滤芯','PART-1','个')""")
+            db.execute('UPDATE plan_schedules SET spare_parts=? WHERE id=?', (
+                json.dumps([{'part_id': 1, 'part_name': '滤芯', 'quantity': 2}],
+                           ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        with self.db() as db:
+            before_plans = [tuple(row) for row in db.execute("""SELECT id,status,schedule_version
+                FROM insp_plans WHERE plan_schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            before_items = [tuple(row) for row in db.execute("""SELECT id,plan_id,site_id,item_name,
+                    execution_status FROM insp_plan_items WHERE plan_id IN (
+                        SELECT id FROM insp_plans WHERE plan_schedule_id=?) ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '修正备注'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
+        with mock.patch.object(
+                app_module, '_current_service_site_ids',
+                side_effect=lambda _db, site_ids: [sid for sid in site_ids if int(sid) != 1]):
+            validated = self.client.post(
+                '/api/plan-schedules/validate', headers=self.headers('operator-token'),
+                json={
+                    'user_id': 2, 'schedule_type': 'monthly',
+                    'period_start': self.day(), 'period_end': self.day(),
+                    'plan_data': {self.day(): {'sites': [1]}},
+                    'vehicle_id': 1, 'vehicle_days': {self.day(): 1},
+                    'vehicle_exception_reason': '',
+                    'exclude_schedule_id': schedule_id,
+                })
+            self.assertEqual(validated.status_code, 200, validated.json)
+            saved = self.client.put(
+                f'/api/plan-schedules/{schedule_id}',
+                headers=self.headers('operator-token'),
+                json={'version': 1, 'remarks': '结束站点存量计划备注修正'})
+            self.assertEqual(saved.status_code, 200, saved.json)
+            submitted = self.client.post(
+                f'/api/plan-schedules/{schedule_id}/submit',
+                headers=self.headers('operator-token'),
+                json={'version': saved.json['version']})
+            self.assertEqual(submitted.status_code, 200, submitted.json)
+            approved = self.client.post(
+                f'/api/plan-schedules/{schedule_id}/approve',
+                headers=self.headers('manager-token'))
+            self.assertEqual(approved.status_code, 200, approved.json)
+
+        self.assertEqual(approved.json['cancelled'], 0)
+        self.assertEqual(approved.json['plans_created'], 0)
+        self.assertEqual(approved.json['items_created'], 0)
+        with self.db() as db:
+            after_plans = [tuple(row) for row in db.execute("""SELECT id,status,schedule_version
+                FROM insp_plans WHERE plan_schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            after_items = [tuple(row) for row in db.execute("""SELECT id,plan_id,site_id,item_name,
+                    execution_status FROM insp_plan_items WHERE plan_id IN (
+                        SELECT id FROM insp_plans WHERE plan_schedule_id=?) ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            remarks = db.execute(
+                'SELECT remarks FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone()['remarks']
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual([row[:2] for row in after_plans], [row[:2] for row in before_plans])
+        self.assertEqual(after_items, before_items)
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+        self.assertEqual(remarks, '结束站点存量计划备注修正')
+
+    def test_ended_site_legacy_selection_keeps_approved_items_in_mixed_site_rebuild(self):
+        schedule_id = 80
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            db.execute("""UPDATE inspection_template_items
+                SET item_name='Original renamed after approval' WHERE id=101""")
+            original_item = db.execute("""SELECT pi.id,pi.plan_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(original_item['item_name'], 'Original')
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [101], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual((approved.json['cancelled'], approved.json['plans_created'],
+                          approved.json['items_created']), (0, 0, 2))
+
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name,pi.plan_id
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+            original_history = db.execute(
+                'SELECT item_name,execution_status FROM insp_plan_items WHERE id=?',
+                (original_item['id'],)).fetchone()
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original', original_item['plan_id']),
+            (2, 'Original renamed after approval', original_item['plan_id']),
+            (2, 'New item after approval', original_item['plan_id']),
+        ])
+        self.assertEqual(tuple(original_history), ('Original', 'active'))
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_ended_site_inactive_template_keeps_existing_result_and_evidence(self):
+        schedule_id = 82
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            db.execute("ALTER TABLE inspection_template_items ADD COLUMN status TEXT DEFAULT 'active'")
+            db.execute("UPDATE inspection_template_items SET status='inactive' WHERE id=101")
+            original_item = db.execute("""SELECT pi.id,pi.plan_id
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal',remark='已完成原批准义务',photo_urls='["trusted.jpg"]',
+                    actual_photos=1 WHERE id=?""", (original_item['id'],))
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual((approved.json['cancelled'], approved.json['plans_created'],
+                          approved.json['items_created']), (0, 0, 1))
+
+        with self.db() as db:
+            kept = db.execute("""SELECT id,plan_id,item_name,result,remark,photo_urls,
+                    actual_photos,execution_status
+                FROM insp_plan_items WHERE id=?""", (original_item['id'],)).fetchone()
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(tuple(kept), (
+            original_item['id'], original_item['plan_id'], 'Original', 'normal',
+            '已完成原批准义务', '["trusted.jpg"]', 1, 'active',
+        ))
+        self.assertEqual(active_items, [
+            (1, 'Original'), (2, 'New item after approval'),
+        ])
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_ended_site_unmapped_legacy_facts_never_fall_back_to_current_template(self):
+        schedule_id = 83
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            plan = db.execute("""SELECT id,plan_snapshot FROM insp_plans
+                WHERE plan_schedule_id=? AND status!='cancelled'""",
+                (schedule_id,)).fetchone()
+            snapshot = json.loads(plan['plan_snapshot'])
+            snapshot[self.day()].pop('_approved_item_ids', None)
+            db.execute('UPDATE insp_plans SET plan_snapshot=? WHERE id=?', (
+                json.dumps(snapshot, ensure_ascii=False), plan['id']))
+            db.execute("""UPDATE inspection_template_items
+                SET item_name='Original renamed after approval' WHERE id=101""")
+
+        before = self.side_effect_snapshot(schedule_id)
+        rejected = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2], 'inspection_items': {'1': [101]},
+                }},
+            })
+        self.assertEqual(
+            (rejected.status_code, rejected.json.get('code')),
+            (409, 'PLAN_APPROVED_ITEM_SNAPSHOT_UNAVAILABLE'), rejected.json)
+        self.assert_side_effect_snapshot_unchanged(
+            before, self.side_effect_snapshot(schedule_id))
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertNotIn(
+            '1', saved.json['plan_data'][self.day()].get('inspection_items', {}))
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original'),
+            (2, 'Original renamed after approval'),
+            (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_known_empty_approval_stays_empty_without_template_fallback(self):
+        schedule_id = 84
+        self.install_real_service_policy_schema_and_roles()
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,2)')
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [], '2': [101]},
+                }}, ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (102,10,'New item after approval','常规',0,0,0,2)""")
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '更新仍在服务站点的检查项'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (2, 'Original'), (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_removal_preserves_factual_items_and_cancels_only_blank_item(self):
+        schedule_id = 93
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        timestamp = self.day() + ' 08:30:00'
+        fact_values = (
+            ('check_out_time', self.day() + ' 09:30:00'),
+            ('check_time', self.day() + ' 08:45:00'),
+            ('completed_at', self.day() + ' 10:00:00'),
+            ('remark', '现场已记录'),
+            ('calibrator', 'Operator'),
+            ('calibration_values', json.dumps({'zero': 0.1})),
+            ('evidence_status', 'accepted'),
+            ('review_comment', '审核意见已记录'),
+            ('review_time', self.day() + ' 10:30:00'),
+            ('review_status', 1),
+            ('reviewer_id', 1),
+            ('result', 'normal'),
+        )
+        with self.db() as db:
+            original = db.execute("""SELECT pi.id,pi.plan_id FROM insp_plan_items pi
+                JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            db.execute("""UPDATE insp_plan_items
+                SET actual_photos=1,photo_urls=?,check_in_time=? WHERE id=?""",
+                (json.dumps(['/uploads/onsite-photo.jpg']), timestamp, original['id']))
+            factual_item_ids = [original['id']]
+            for index, (column, value) in enumerate(fact_values, start=1):
+                cur = db.execute("""INSERT INTO insp_plan_items
+                    (plan_id,site_id,template_id,item_name,category,frequency)
+                    VALUES (?,?,?,?,?,?)""", (
+                        original['plan_id'], 1, 101, f'Fact {index}: {column}',
+                        '常规', 'monthly'))
+                db.execute(
+                    f'UPDATE insp_plan_items SET {column}=? WHERE id=?',
+                    (value, cur.lastrowid))
+                factual_item_ids.append(cur.lastrowid)
+            blank_item_id = db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,template_id,item_name,category,frequency)
+                VALUES (?,?,?,?,?,?)""", (
+                    original['plan_id'], 1, 101, 'Blank item', '常规', 'monthly')).lastrowid
+            before_factual = [tuple(row) for row in db.execute(
+                f"SELECT * FROM insp_plan_items WHERE id IN ({','.join('?' * len(factual_item_ids))}) ORDER BY id",
+                factual_item_ids).fetchall()]
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['cancelled'], 1)
+
+        with self.db() as db:
+            after_factual = [tuple(row) for row in db.execute(
+                f"SELECT * FROM insp_plan_items WHERE id IN ({','.join('?' * len(factual_item_ids))}) ORDER BY id",
+                factual_item_ids).fetchall()]
+            blank_status = db.execute(
+                'SELECT execution_status FROM insp_plan_items WHERE id=?',
+                (blank_item_id,)).fetchone()['execution_status']
+            active_sites = [row['site_id'] for row in db.execute("""SELECT site_id
+                FROM insp_plan_items WHERE plan_id=?
+                  AND COALESCE(execution_status,'active')='active' ORDER BY id""",
+                (original['plan_id'],)).fetchall()]
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(after_factual, before_factual)
+        self.assertEqual(blank_status, 'cancelled')
+        self.assertEqual(active_sites.count(1), len(factual_item_ids))
+        self.assertEqual(active_sites.count(2), 2)
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_removed_dates_preserve_factual_package_and_cancel_unstarted_package(self):
+        schedule_id = 94
+        self.install_real_service_policy_schema_and_roles()
+        first_day = datetime.strptime(self.day(), '%Y-%m-%d')
+        days = [(first_day + timedelta(days=offset)).strftime('%Y-%m-%d')
+                for offset in range(3)]
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules SET period_end=?,plan_data=? WHERE id=?""", (
+                days[-1], json.dumps({day: {'sites': [1]} for day in days}), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            packages = {row['generate_date']: dict(row) for row in db.execute("""SELECT
+                    ip.id AS plan_id,ip.generate_date,pi.id AS item_id
+                FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
+                WHERE ip.plan_schedule_id=? ORDER BY ip.generate_date""",
+                (schedule_id,)).fetchall()}
+            db.execute("""UPDATE insp_plan_items
+                SET actual_photos=1,photo_urls=?,check_in_time=? WHERE id=?""", (
+                    json.dumps(['/uploads/date-photo.jpg']), days[0] + ' 08:30:00',
+                    packages[days[0]]['item_id']))
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '移除前两个执行日期'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {days[2]: {'sites': [1]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+
+        with self.db() as db:
+            states = {}
+            for day, package in packages.items():
+                states[day] = tuple(db.execute("""SELECT ip.status,pi.execution_status,
+                        pi.actual_photos,pi.photo_urls,pi.check_in_time
+                    FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
+                    WHERE ip.id=? AND pi.id=?""",
+                    (package['plan_id'], package['item_id'])).fetchone())
+        self.assertEqual(states[days[0]], (
+            'active', 'active', 1, json.dumps(['/uploads/date-photo.jpg']),
+            days[0] + ' 08:30:00'))
+        self.assertEqual(states[days[1]][:2], ('cancelled', 'cancelled'))
+        self.assertEqual(states[days[2]][:2], ('active', 'active'))
+
+    def test_ended_site_explicit_selection_rejects_new_item_after_real_policy_update(self):
+        schedule_id = 81
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        before = self.side_effect_snapshot(schedule_id)
+
+        rejected = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101, 102]},
+                }},
+            })
+        self.assertEqual(
+            (rejected.status_code, rejected.json.get('code')),
+            (409, 'PLAN_SITE_SERVICE_ENDED'), rejected.json)
+        self.assert_side_effect_snapshot_unchanged(
+            before, self.side_effect_snapshot(schedule_id))
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101]},
+                }},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [101], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original'),
+            (2, 'Original'),
+            (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_change_rejects_new_date_site_and_item_without_side_effects(self):
+        schedule_id = 78
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.executemany("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (?,10,?,'常规',0,0,0,?)""", (
+                    (101, '批准检查项', 1), (102, '新增检查项', 2),
+                ))
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {
+                    'sites': [1], 'inspection_items': {'1': [101]},
+                }}, ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '尝试扩大范围'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        before = self.side_effect_snapshot(schedule_id)
+        with self.db() as db:
+            period_before = tuple(db.execute(
+                'SELECT period_start,period_end FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone())
+        next_day = (BUSINESS_NOW + timedelta(days=1)).strftime('%Y-%m-%d')
+        variants = (
+            {
+                'version': 1, 'period_end': next_day,
+                'plan_data': {
+                    self.day(): {'sites': [1], 'inspection_items': {'1': [101]}},
+                    next_day: {'sites': [1], 'inspection_items': {'1': [101]}},
+                },
+            },
+            {
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101], '2': []},
+                }},
+            },
+            {
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1], 'inspection_items': {'1': [101, 102]},
+                }},
+            },
+        )
+        with mock.patch.object(
+                app_module, '_current_service_site_ids', return_value=[]):
+            for payload in variants:
+                response = self.client.put(
+                    f'/api/plan-schedules/{schedule_id}',
+                    headers=self.headers('operator-token'), json=payload)
+                self.assertEqual(
+                    (response.status_code, response.json.get('code')),
+                    (409, 'PLAN_SITE_SERVICE_ENDED'), response.json)
+                self.assert_side_effect_snapshot_unchanged(
+                    before, self.side_effect_snapshot(schedule_id))
+                with self.db() as db:
+                    self.assertEqual(tuple(db.execute(
+                        'SELECT period_start,period_end FROM plan_schedules WHERE id=?',
+                        (schedule_id,)).fetchone()), period_before)
+
+    def test_change_detail_keeps_previous_site_name_without_inflating_current_count(self):
+        schedule_id = 79
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=?", (schedule_id,))
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '移除原站点'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {'sites': []}}, ensure_ascii=False), schedule_id))
+
+        detail = self.client.get(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'))
+
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(detail.json['site_count'], 0)
+        self.assertEqual(detail.json['site_map']['1']['name'], 'Station')
 
     def test_change_reject_preserves_original_approval_and_duplicate_is_read_only(self):
         schedule_id = 73
@@ -2015,6 +2726,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.add_submitted_schedule(64)
         self.add_submitted_schedule(640)
         with self.db() as db:
+            db.execute("INSERT INTO vehicles VALUES (2,'TEST-002','Other vehicle','idle',1000,NULL,NULL)")
             operation_day = db.execute("SELECT date('now','localtime')").fetchone()[0]
             plan_data = json.dumps({operation_day: {'sites': [1]}})
             vehicle_days = json.dumps({operation_day: 1})
@@ -2027,17 +2739,19 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                         '巡检计划#64用车（原预约）','approved')""", (operation_day, operation_day))
             db.execute("""INSERT INTO vehicle_applications
                 (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
-                VALUES (1,2,? || ' 08:00:00',? || ' 18:00:00','巡检',
+                VALUES (2,2,? || ' 08:00:00',? || ' 18:00:00','巡检',
                         '巡检计划#640用车（另一计划）','approved')""", (operation_day, operation_day))
             db.execute("""INSERT INTO plan_resource_reservations
                 (schedule_id,part_id,planned_quantity,reserved_quantity,issued_quantity,status)
                 VALUES (64,8,2,0,0,'planned')""")
         requested = self.client.post('/api/plan-schedules/64/request-change',
                                      headers=self.headers('operator-token'),
-                                     json={'change_reason': '尝试调整同车时间'})
+                                     json={'change_reason': '尝试更换到冲突车辆'})
         self.assertEqual(requested.status_code, 200, requested.json)
         with self.db() as db:
-            db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=64")
+            db.execute("""UPDATE plan_schedules
+                SET status='change_submitted',vehicle_id=2,vehicle_days=? WHERE id=64""",
+                       (json.dumps({operation_day: 2}),))
         before = self.side_effect_snapshot(64)
         with self.db() as db:
             before_schedule = tuple(db.execute(
@@ -2067,6 +2781,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.add_submitted_schedule(65)
         self.add_submitted_schedule(650)
         with self.db() as db:
+            db.execute("INSERT INTO vehicles VALUES (2,'TEST-002','Other vehicle','idle',1000,NULL,NULL)")
             operation_day = db.execute("SELECT date('now','localtime')").fetchone()[0]
             next_day = (datetime.strptime(operation_day, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
             db.execute("""UPDATE plan_schedules SET status='approved',period_start=?,period_end=?,
@@ -2092,22 +2807,26 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             other_application_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
         requested = self.client.post('/api/plan-schedules/65/request-change',
                                      headers=self.headers('operator-token'),
-                                     json={'change_reason': '调整备注但保持今日用车'})
+                                     json={'change_reason': '更换到空闲车辆'})
         self.assertEqual(requested.status_code, 200, requested.json)
         with self.db() as db:
-            db.execute("UPDATE plan_schedules SET status='change_submitted',remarks='changed' WHERE id=65")
+            db.execute("""UPDATE plan_schedules
+                SET status='change_submitted',remarks='changed',vehicle_id=2,vehicle_days=?
+                WHERE id=65""", (json.dumps({operation_day: 2}),))
 
         response = self.client.post('/api/plan-schedules/65/approve',
                                     headers=self.headers('manager-token'))
 
         self.assertEqual(response.status_code, 200, response.json)
         with self.db() as db:
-            current_rows = db.execute("""SELECT status FROM vehicle_applications
+            current_rows = db.execute("""SELECT vehicle_id,status FROM vehicle_applications
                 WHERE reason LIKE ? ORDER BY id""", (app_module._ps_vehicle_reason_like(65),)).fetchall()
             other_status = db.execute(
                 'SELECT status FROM vehicle_applications WHERE id=?',
                 (other_application_id,)).fetchone()['status']
-        self.assertEqual([row['status'] for row in current_rows], ['cancelled', 'approved'])
+        self.assertEqual([(row['vehicle_id'], row['status']) for row in current_rows], [
+            (1, 'cancelled'), (2, 'approved'),
+        ])
         self.assertEqual(other_status, 'approved')
 
     def test_vehicle_adjustment_flag_survives_draft_and_clears_after_approved_rebooking(self):

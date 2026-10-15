@@ -95,19 +95,25 @@ class StationMonitoringScaleTest(unittest.TestCase):
         self.assertIsNotNone(summary['authentication']['last_authenticated_received_at'])
         listed = results['/api/station-monitoring/sites?scope=all']
         self.assertEqual(len(listed['items']), 36)
-        self.assertTrue(all(item['published_factor_count'] == 13 for item in listed['items']))
+        self.assertTrue(all(item['published_factor_count'] == 9 for item in listed['items']))
         overview = results['/api/station-monitoring/sites/1/overview']
         self.assertEqual(overview['site']['site_id'], 1)
-        self.assertEqual(len(overview['factors']), 13)
+        self.assertEqual(len(overview['factors']), 9)
 
     def test_production_shape_query_plans_use_bounded_read_indexes(self):
         with closing(sqlite3.connect(self.database)) as connection:
             raw_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
-                   SELECT endpoint_id,MAX(received_at) FROM ingest_raw_frames
-                   INDEXED BY idx_ingest_raw_authenticated_endpoint_received
-                   WHERE authentication_status='authenticated' AND endpoint_id IN (?)
-                   GROUP BY endpoint_id""",
+                   SELECT endpoint.id AS endpoint_id,(
+                       SELECT raw.received_at
+                       FROM ingest_raw_frames raw
+                            INDEXED BY idx_ingest_raw_authenticated_endpoint_received
+                       WHERE raw.authentication_status='authenticated'
+                         AND raw.endpoint_id=endpoint.id
+                       ORDER BY raw.received_at DESC LIMIT 1
+                   ) AS received_at
+                   FROM trusted_endpoints endpoint
+                   WHERE endpoint.id IN (?)""",
                 (1,),
             ).fetchall()
             recent_plan = connection.execute(
@@ -133,6 +139,10 @@ class StationMonitoringScaleTest(unittest.TestCase):
             ).fetchall()
         self.assertIn(
             'idx_ingest_raw_authenticated_endpoint_received',
+            ' '.join(str(row[3]) for row in raw_plan),
+        )
+        self.assertIn(
+            'CORRELATED SCALAR SUBQUERY',
             ' '.join(str(row[3]) for row in raw_plan),
         )
         self.assertIn(

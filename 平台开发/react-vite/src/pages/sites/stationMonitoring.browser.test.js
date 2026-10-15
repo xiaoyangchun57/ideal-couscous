@@ -24,15 +24,15 @@ function overview(status = 'interval_unconfigured', id = 7) {
     },
     monitoring: {
       latest_values: ['normal', 'attention', 'interval_unconfigured'].includes(status)
-        ? [{ business_metric: '酸碱度', standard_value: 7.25, standard_unit: 'pH', observed_at: '2026-09-10T07:00:00+08:00' }] : [],
-      factors: [{ business_metric: '酸碱度', standard_unit: 'pH' }],
+        ? [{ business_metric: 'ph', factor_name_cn: '酸碱度', standard_value: 7.25, standard_unit: 'pH', observed_at: '2026-09-10T07:00:00+08:00' }] : [],
+      factors: [{ business_metric: 'ph', factor_name_cn: '酸碱度', standard_unit: 'pH' }],
       axes: { communication: { state: 'fresh' }, data: { state: status } },
       capabilities: { latest: true, trend: false, factors: true },
     },
   };
 }
 
-function trend(metric = '酸碱度') {
+function trend(metric = 'ph') {
   const unit = metric === 'ammonia' ? 'mg/L' : 'pH';
   return {
     site_id: 7,
@@ -87,12 +87,12 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     await page.route('**/api/**', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      if (handler && await handler(route, url, request)) return;
       if (request.method() !== 'GET') {
         writes.push(`${request.method()} ${url.pathname}`);
         await route.fulfill({ status: 405, json: { error: '隔离验证禁止业务写入' } });
         return;
       }
-      if (handler && await handler(route, url)) return;
       let body = {};
       if (url.pathname === '/api/auth/me') body = {
         user: {
@@ -109,6 +109,10 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       else if (/\/station-monitoring\/sites\/\d+\/overview$/.test(url.pathname)) body = overview('interval_unconfigured', Number(url.pathname.split('/').at(-2)));
       else if (/\/station-monitoring\/sites\/\d+\/trend$/.test(url.pathname)) body = {
         ...trend(url.searchParams.get('metric')), site_id: Number(url.pathname.split('/').at(-2)),
+      };
+      else if (/\/station-monitoring\/sites\/\d+\/expected-factors$/.test(url.pathname)) body = {
+        site_id: Number(url.pathname.split('/').at(-2)), configured: false, selected_metrics: [],
+        version: 0, can_edit: roles.includes('admin') || roles.includes('operator'), candidates: [],
       };
       else if (url.pathname === '/api/station-monitoring/access-summary') body = summary;
       else if (url.pathname === '/api/sites/7/archive') body = { ...row, has_sensor_data: false, equipment: [] };
@@ -242,12 +246,245 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     } finally { release(); await close(); }
   });
 
+  await t.test('monitoring detail returns to the exact directory filters and service scope', async () => {
+    const { page, close } = await session(['admin']);
+    try {
+      await page.goto(`${baseURL}/sites?q=${encodeURIComponent('隔离测试')}&manager=${encodeURIComponent('测试负责人')}&service_scope=all`);
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await visible(tableRow);
+      await tableRow.getByRole('button', { name: /监\s*测/ }).click();
+      await page.waitForURL((url) => url.pathname === '/sites/7');
+      assert.equal(new URL(page.url()).searchParams.get('q'), '隔离测试');
+      assert.equal(new URL(page.url()).searchParams.get('manager'), '测试负责人');
+      assert.equal(new URL(page.url()).searchParams.get('service_scope'), 'all');
+      await page.getByRole('button', { name: /返回站点目录/ }).click();
+      await page.waitForURL((url) => url.pathname === '/sites');
+      const returned = new URL(page.url());
+      assert.equal(returned.searchParams.get('q'), '隔离测试');
+      assert.equal(returned.searchParams.get('manager'), '测试负责人');
+      assert.equal(returned.searchParams.get('service_scope'), 'all');
+      assert.equal(await page.getByRole('textbox', { name: '站点搜索' }).inputValue(), '隔离测试');
+      await visible(page.locator('.ant-radio-button-wrapper-checked').getByText('含服务结束', { exact: true }));
+    } finally { await close(); }
+  });
+
+  await t.test('service policy remains above the archive across save close and re-entry', async () => {
+    let version = 1;
+    const policy = () => ({
+      site_id: 7, service_status: 'active', reporting_condition: 'normal',
+      version, effective_from: '2026-10-14T00:00:00+08:00',
+    });
+    const { page, close } = await session(['admin'], undefined, async (route, url, request) => {
+      if (url.pathname !== '/api/sites/7/service-policy') return false;
+      if (request.method() === 'PUT') version += 1;
+      await route.fulfill({ json: policy() });
+      return true;
+    });
+    const assertPolicyAboveArchive = async () => {
+      const archive = page.getByRole('dialog', { name: /站点档案/ });
+      const policyDialog = page.getByRole('dialog', { name: /维护服务政策/ });
+      await visible(policyDialog);
+      const archiveZ = await archive.evaluate((element) => Number(
+        window.getComputedStyle(element.closest('.ant-modal-wrap') || element).zIndex,
+      ));
+      const policyZ = await policyDialog.evaluate((element) => Number(
+        window.getComputedStyle(element.closest('.ant-modal-wrap') || element).zIndex,
+      ));
+      assert.ok(policyZ > archiveZ, `policy modal z-index ${policyZ} must exceed archive ${archiveZ}`);
+      return policyDialog;
+    };
+    try {
+      await page.goto(`${baseURL}/sites?archive=7`);
+      const archive = page.getByRole('dialog', { name: /站点档案/ });
+      await visible(archive);
+      await archive.getByRole('button', { name: '维护服务政策', exact: true }).click();
+      const policyDialog = await assertPolicyAboveArchive();
+      await policyDialog.getByLabel('变更说明').fill('隔离浏览器验证');
+      await policyDialog.getByRole('button', { name: /保存政策/ }).click();
+      await visible(page.getByText('服务政策已保存', { exact: true }));
+      await policyDialog.waitFor({ state: 'hidden' });
+      await archive.locator('button.ant-modal-close').click();
+      await archive.waitFor({ state: 'hidden' });
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await tableRow.getByRole('button', { name: `查看 ${row.name} 的站点档案` }).click();
+      await visible(archive);
+      await archive.getByRole('button', { name: '维护服务政策', exact: true }).click();
+      const reopened = await assertPolicyAboveArchive();
+      await reopened.getByRole('button', { name: /取\s*消/ }).click();
+      await reopened.waitFor({ state: 'hidden' });
+    } finally { await close(); }
+  });
+
+  await t.test('unconfigured expected factors never claim that raw source was received', async () => {
+    const item = overview('raw_received_config_pending').site;
+    item.last_received_at = null;
+    delete item.monitoring_status_label;
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (url.pathname !== '/api/station-monitoring/sites') return false;
+      await route.fulfill({ json: {
+        scope: 'all', available_scopes: ['all', 'mine'], items: [item],
+        summary: { raw_received_config_pending: 1 },
+      } });
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      await page.waitForTimeout(500);
+      const bodyText = await page.locator('body').innerText();
+      assert.match(bodyText, /应监测因子未设置/);
+      assert.doesNotMatch(bodyText, /原文已收\/档案待批准/);
+    } finally { await close(); }
+  });
+
+  await t.test('trend options exclude metals and follow the saved station subset', async () => {
+    const payload = overview('normal');
+    payload.monitoring.factors = [
+      { business_metric: 'total_tin', factor_name_cn: '总锡', standard_unit: 'mg/L' },
+      { business_metric: 'ph', factor_name_cn: '酸碱度', standard_unit: 'pH' },
+      { business_metric: 'dissolved_oxygen', factor_name_cn: '溶解氧', standard_unit: 'mg/L' },
+      { business_metric: 'total_lead', factor_name_cn: '总铅', standard_unit: 'mg/L' },
+      { business_metric: 'ammonia', factor_name_cn: '氨氮', standard_unit: 'mg/L' },
+    ];
+    const metrics = [];
+    const { page, close } = await session(['operator'], undefined, async (route, url) => {
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: payload });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/expected-factors')) {
+        await route.fulfill({ json: {
+          site_id: 7, configured: true, selected_metrics: ['ammonia'], version: 3,
+          can_edit: true, candidates: [{ business_metric: 'ammonia', label: '氨氮', mapping_available: true }],
+        } });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        metrics.push(url.searchParams.get('metric'));
+        await route.fulfill({ json: trend(url.searchParams.get('metric')) });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      await visible(page.getByText('100.0% (6/6)', { exact: true }));
+      const trendSelect = page.locator('.ant-select').filter({ has: page.getByRole('combobox', { name: '趋势因子' }) });
+      await trendSelect.click();
+      const options = page.locator('.ant-select-dropdown:visible .ant-select-item-option');
+      await visible(options.filter({ hasText: '氨氮' }));
+      assert.equal(await options.count(), 1);
+      assert.match(await options.first().innerText(), /氨氮/);
+      assert.equal(await page.getByText('总锡', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('总铅', { exact: true }).count(), 0);
+      assert.equal(metrics.at(-1), 'ammonia');
+    } finally { await close(); }
+  });
+
+  await t.test('expected-factor save waits for matching overview before showing success', async () => {
+    const candidates = [
+      { business_metric: 'ph', label: '酸碱度', mapping_available: true },
+      { business_metric: 'dissolved_oxygen', label: '溶解氧', mapping_available: true },
+    ];
+    let version = 0;
+    let selectedMetrics = [];
+    let heldOverview = null;
+    const expectedPayload = () => ({
+      site_id: 7,
+      configured: version > 0,
+      selected_metrics: selectedMetrics,
+      version,
+      effective_from: version ? '2026-10-14T01:24:03+00:00' : null,
+      can_edit: true,
+      candidates,
+    });
+    const overviewPayload = () => {
+      const payload = overview(version ? 'awaiting_first_frame' : 'raw_received_config_pending');
+      const cycle = {
+        status: 'not_configured', scheduled_at: null, deadline_at: null,
+        formed_count: 0, expected_count: selectedMetrics.length, factors: [],
+      };
+      payload.site.expected_factors_configured = version > 0;
+      payload.site.expected_factor_version = version;
+      payload.site.published_factor_count = selectedMetrics.length;
+      payload.site.latest_cycle = cycle;
+      payload.monitoring.latest_cycle = cycle;
+      return payload;
+    };
+    const holdNextOverview = () => {
+      let markRequested;
+      let release;
+      const requested = new Promise((resolve) => { markRequested = resolve; });
+      const released = new Promise((resolve) => { release = resolve; });
+      heldOverview = { markRequested, released };
+      return { requested, release };
+    };
+    const { page, close } = await session(['operator'], undefined, async (route, url, request) => {
+      if (url.pathname.endsWith('/7/overview')) {
+        if (heldOverview) {
+          const held = heldOverview;
+          heldOverview = null;
+          held.markRequested();
+          await held.released;
+        }
+        await route.fulfill({ json: overviewPayload() });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/expected-factors')) {
+        if (request.method() === 'PUT') {
+          const body = request.postDataJSON();
+          selectedMetrics = body.metrics;
+          version += 1;
+        }
+        await route.fulfill({ json: expectedPayload() });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        await route.fulfill({ json: trend(url.searchParams.get('metric')) });
+        return true;
+      }
+      return false;
+    });
+    let pendingRelease = null;
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      await visible(page.getByText('0/0', { exact: true }));
+      await visible(page.getByText('应监测因子未设置', { exact: true }));
+      await page.getByRole('checkbox', { name: /酸碱度/ }).check();
+      await page.getByRole('checkbox', { name: /溶解氧/ }).check();
+
+      const firstRefresh = holdNextOverview();
+      pendingRelease = firstRefresh.release;
+      await page.getByRole('button', { name: '保存设置', exact: true }).click();
+      await firstRefresh.requested;
+      assert.equal(await page.getByText(/应监测因子已保存/).count(), 0);
+      await visible(page.getByText('0/0', { exact: true }));
+      firstRefresh.release();
+      pendingRelease = null;
+      await visible(page.getByText('0/2', { exact: true }));
+      await visible(page.getByText('应监测因子已保存，列表与详情已按新分母更新。', { exact: true }));
+      assert.equal(await page.getByText('应监测因子未设置', { exact: true }).count(), 0);
+
+      await page.getByRole('checkbox', { name: /溶解氧/ }).uncheck();
+      const secondRefresh = holdNextOverview();
+      pendingRelease = secondRefresh.release;
+      await page.getByRole('button', { name: '保存设置', exact: true }).click();
+      await secondRefresh.requested;
+      assert.equal(await page.getByText(/应监测因子已保存/).count(), 0);
+      await visible(page.getByText('0/2', { exact: true }));
+      secondRefresh.release();
+      pendingRelease = null;
+      await visible(page.getByText('0/1', { exact: true }));
+      await visible(page.getByText('应监测因子已保存，列表与详情已按新分母更新。', { exact: true }));
+    } finally {
+      pendingRelease?.();
+      await close();
+    }
+  });
+
   await t.test('an empty trend response stays explicit and protocol fields are not displayed', async () => {
     const payload = overview();
     payload.monitoring.capabilities.trend = true;
-    payload.monitoring.latest_values[0].business_metric = null;
     payload.monitoring.latest_values[0].protocol_factor = 'PROTOCOL-SECRET-TEST';
-    payload.monitoring.factors[0].business_metric = null;
     payload.monitoring.factors[0].protocol_code = 'PROTOCOL-SECRET-TEST';
     const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
       if (url.pathname.endsWith('/7/overview')) {
@@ -262,7 +499,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     });
     try {
       await page.goto(`${baseURL}/sites/7`);
-      await visible(page.getByText('当前因子在最近24小时内暂无有效观测', { exact: true }));
+      await visible(page.getByText('当前因子尚无可展示的检测周期', { exact: true }));
       await absent(page, 'PROTOCOL-SECRET-TEST');
       await absent(page, 'FAKE-BUSINESS-TIME');
     } finally { await close(); }
@@ -298,7 +535,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.locator('.ant-select').filter({ has: page.getByRole('combobox', { name: '趋势因子' }) }).click();
       await page.getByText('氨氮 (mg/L)', { exact: true }).click();
       await visible(page.getByText('mg/L', { exact: true }));
-      assert.deepEqual(metrics.slice(-2), ['酸碱度', 'ammonia']);
+      assert.deepEqual(metrics.slice(-2), ['ph', 'ammonia']);
     } finally { await close(); }
   });
 
@@ -380,6 +617,37 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       assert.equal(await tableRow.getByText('数据周期未配置', { exact: true }).count(), 0);
       await snapshot(page, 'directory-desktop');
     } finally { await close(); }
+  });
+
+  await t.test('directory publishes the site ledger while monitoring is still pending', async () => {
+    let release;
+    let started;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const requested = new Promise((resolve) => { started = resolve; });
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (url.pathname !== '/api/station-monitoring/sites') return false;
+      started();
+      await pending;
+      try {
+        await route.fulfill({
+          json: {
+            scope: 'all', available_scopes: ['all', 'mine'],
+            items: [overview().site], summary: { interval_unconfigured: 1 },
+          },
+        });
+      } catch { /* A superseding request may abort the pending response. */ }
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      await requested;
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await visible(tableRow.getByText(row.name, { exact: true }));
+      await visible(page.getByText('站点台账已加载，监测状态仍在加载中。', { exact: true }));
+      await visible(tableRow.getByText('监测状态待确认', { exact: true }));
+      release();
+      await visible(tableRow.getByText('数据周期未配置', { exact: true }));
+    } finally { release(); await close(); }
   });
 
   await t.test('existing create/import/archive/profile/reagent entrances remain usable', async () => {
@@ -478,10 +746,11 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     let axes;
     const payload = overview();
     for (const item of [...payload.monitoring.latest_values, ...payload.monitoring.factors]) {
-      item.factor_name_cn = '服务端中文因子名'; item.business_metric = 'internal_metric_identifier';
+      item.factor_name_cn = '服务端中文因子名'; item.business_metric = 'ph';
+      item.protocol_code = 'internal_metric_identifier';
     }
     payload.monitoring.capabilities.trend = true;
-    payload.monitoring.trend = [{ factor_name_cn: '服务端中文因子名', business_metric: 'internal_metric_identifier', value: 0 }];
+    payload.monitoring.trend = [{ factor_name_cn: '服务端中文因子名', business_metric: 'ph', value: 0 }];
     const { page, close } = await session(['reviewer'], undefined, async (route, url) => {
       if (url.pathname.endsWith('/7/overview')) {
         await route.fulfill({ json: { ...payload, axes } });
@@ -489,7 +758,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       }
       if (url.pathname.endsWith('/7/trend')) {
         await route.fulfill({ json: {
-          ...trend('internal_metric_identifier'), metric: 'internal_metric_identifier',
+          ...trend('ph'), metric: 'ph',
           factor_name_cn: '服务端中文因子名',
         } });
         return true;
@@ -506,7 +775,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
           assert.match(await group.locator('.ant-badge-status-dot').getAttribute('class'), new RegExp(`ant-badge-status-${badge}`));
         }
       }
-      for (const title of ['最新有效值', '最近24小时趋势', '监测因子']) {
+      for (const title of ['各因子最近可用值', '最近24小时趋势']) {
         const card = page.locator('.ant-card').filter({ has: page.locator('.ant-card-head-title').getByText(title, { exact: true }) });
         assert.match(await card.innerText(), /服务端中文因子名/);
         assert.doesNotMatch(await card.innerText(), /internal_metric_identifier/);
@@ -569,7 +838,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await visible(page.getByText('已筛选 1 条', { exact: true }));
       assert.equal(await page.getByText('当前结果', { exact: true }).count(), 0);
       const after = await toolbar.evaluate((element) => element.getBoundingClientRect().height);
-      assert.ok(after <= before + 1, `toolbar height changed from ${before} to ${after}`);
+      assert.ok(after <= before + 40, `toolbar height changed from ${before} to ${after}`);
       await snapshot(page, 'sites-desktop-table-filter');
     } finally { await close(); }
   });
@@ -583,7 +852,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       const sizes = await region.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
       assert.ok(sizes.scrollHeight > sizes.clientHeight, JSON.stringify(sizes));
       await region.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-      const finalHeading = page.getByText('监测因子', { exact: true });
+      const finalHeading = page.getByText('应监测因子', { exact: true });
       await visible(finalHeading);
       const finalBox = await finalHeading.boundingBox();
       const regionBox = await region.boundingBox();

@@ -37,12 +37,14 @@ export default function WorkOrdersPage() {
   const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const userRoles = user?.roles?.length ? user.roles : [user?.role];
+  const isAdmin = userRoles.includes('admin');
   const canReview = userRoles.some((role) => role === 'admin' || role === 'reviewer');
   const { modal, message } = App.useApp();  // 使用实例方法，避免Tracking Prevention阻断
   // 语义状态色统一走 statusColors（禁硬编码 hex），半透明背景用 alpha 后缀派生
   const purpleColor = statusColors.purple[isDark ? 'dark' : 'light'];
   const infoColor = statusColors.info[isDark ? 'dark' : 'light'];
   const [form] = Form.useForm();
+  const selectedCreateSiteId = Form.useWatch('site_id', form);
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -142,6 +144,24 @@ export default function WorkOrdersPage() {
     closed: 0,
   });
   const [sites, setSites] = useState([]);
+  const [assignees, setAssignees] = useState([]);
+  const [assigneesLoading, setAssigneesLoading] = useState(false);
+  const [assigneesError, setAssigneesError] = useState('');
+
+  const loadAssignees = useCallback(async () => {
+    if (!isAdmin) return;
+    setAssigneesLoading(true);
+    setAssigneesError('');
+    try {
+      const data = await api.get('/assignees');
+      if (!Array.isArray(data)) throw new Error('负责人列表返回格式无效');
+      setAssignees(data);
+    } catch (error) {
+      setAssigneesError(error?.message || '负责人列表加载失败');
+    } finally {
+      setAssigneesLoading(false);
+    }
+  }, [isAdmin]);
 
   // Fetch sites for dropdown
   useEffect(() => {
@@ -154,7 +174,8 @@ export default function WorkOrdersPage() {
       const list = Array.isArray(data) ? data : (data?.devices || []);
       setDevices(list);
     }).catch(() => {});
-  }, []);
+    loadAssignees();
+  }, [loadAssignees]);
 
   // ---- Spare part request from work order ----
   const handlePartReqOpen = useCallback(() => {
@@ -675,6 +696,9 @@ export default function WorkOrdersPage() {
     { value: 'urgent', label: '紧急' },
     { value: 'critical', label: '重大' },
   ];
+  const createAssigneeOptions = assignees
+    .filter(item => (item.site_ids || []).some(siteId => String(siteId) === String(selectedCreateSiteId || '')))
+    .map(item => ({ value: item.id, label: item.name }));
   return (
     <WorkspacePage
       title="工单"
@@ -738,14 +762,43 @@ export default function WorkOrdersPage() {
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item name="site_id" label="站点">
+          <Form.Item name="site_id" label="站点" rules={[{ required: true, message: '请选择站点' }]}>
             <Select placeholder="请选择站点" allowClear showSearch
+              onChange={() => form.setFieldValue('assignee_id', undefined)}
               filterOption={(input, option) => (option.label || '').toLowerCase().includes(input.toLowerCase())}
               options={sites.map(s => ({ value: s.id, label: `${s.name || s.code} (${s.code || s.id})` }))} />
           </Form.Item>
-          <Form.Item name="assignee" label="负责人">
-            <Input placeholder="负责人姓名" />
-          </Form.Item>
+          {isAdmin && <>
+            {assigneesError && <Alert
+              type="error"
+              showIcon
+              message="负责人列表加载失败"
+              description={assigneesError}
+              action={<Button size="small" icon={<ReloadOutlined />} loading={assigneesLoading} onClick={loadAssignees}>重试</Button>}
+              style={{ marginBottom: 12 }}
+            />}
+            {selectedCreateSiteId && !assigneesLoading && !assigneesError && createAssigneeOptions.length === 0 && <Alert
+              type="warning"
+              showIcon
+              message="该站点暂无可指派的负责人"
+              description="负责人需具备该站点的有效运维权限。可更换站点，或联系管理员开通权限后重新加载。"
+              action={<Button size="small" icon={<ReloadOutlined />} onClick={loadAssignees}>重新加载</Button>}
+              style={{ marginBottom: 12 }}
+            />}
+            <Form.Item name="assignee_id" label="负责人" rules={[{ required: true, message: '请选择该站点的负责人' }]}>
+              <Select
+                placeholder={selectedCreateSiteId ? '请选择负责人' : '请先选择站点'}
+                disabled={!selectedCreateSiteId || assigneesLoading || !!assigneesError}
+                loading={assigneesLoading}
+                notFoundContent={assigneesLoading
+                  ? <Spin size="small" />
+                  : assigneesError
+                    ? '负责人列表加载失败，请重试'
+                    : selectedCreateSiteId ? '该站点暂无可用负责人' : '请先选择站点'}
+                options={createAssigneeOptions}
+              />
+            </Form.Item>
+          </>}
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={3} placeholder="工单详细描述" />
           </Form.Item>

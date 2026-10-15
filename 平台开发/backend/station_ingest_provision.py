@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as local_time, timedelta, timezone
 import hashlib
 import json
 import os
@@ -74,6 +74,14 @@ def _nonnegative_integer(value: object, field: str, *, nullable: bool = False) -
     return value
 
 
+def _boolean(value: object, field: str, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ProvisionError(f"{field} must be a boolean")
+    return value
+
+
 def _reject_secret_fields(value: object) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -104,6 +112,7 @@ def load_configuration(path: Path) -> dict[str, Any]:
         {
             "station_code", "business_site_id", "rtu_asset_code", "instrument_asset_code", "timezone",
             "effective_from", "effective_to", "expected_granularity", "expected_interval_seconds", "mappings",
+            "existing_endpoint_only", "business_schedule",
         },
         "configuration",
     )
@@ -157,6 +166,68 @@ def load_configuration(path: Path) -> dict[str, Any]:
             "effective_to": mapping_to,
         })
     normalized_mappings.sort(key=lambda item: (item["protocol_code"], item["effective_from"], item["effective_to"] or ""))
+    schedule_document = document.get("business_schedule")
+    schedule = None
+    if schedule_document is not None:
+        if not isinstance(schedule_document, dict):
+            raise ProvisionError("business schedule is invalid")
+        _require_keys(
+            schedule_document,
+            {"interval_seconds", "anchor_local_time", "tolerance_seconds", "result_delay_seconds"},
+            {
+                "protocol_code", "timezone", "interval_seconds", "anchor_local_time",
+                "tolerance_seconds", "result_delay_seconds", "effective_from", "effective_to",
+            },
+            "business schedule",
+        )
+        schedule_timezone = _optional_text(
+            schedule_document.get("timezone", timezone_name), "business schedule timezone")
+        try:
+            ZoneInfo(schedule_timezone or "")
+        except ZoneInfoNotFoundError as exc:
+            raise ProvisionError("business schedule timezone is unavailable") from exc
+        interval_seconds = _positive_integer(
+            schedule_document["interval_seconds"], "business schedule interval_seconds")
+        if interval_seconds not in {3600, 14400}:
+            raise ProvisionError("business schedule interval_seconds must be 3600 or 14400")
+        anchor_text = _optional_text(
+            schedule_document["anchor_local_time"], "business schedule anchor_local_time")
+        try:
+            anchor = local_time.fromisoformat(anchor_text or "")
+        except ValueError as exc:
+            raise ProvisionError("business schedule anchor_local_time is invalid") from exc
+        if anchor.tzinfo is not None or anchor.microsecond:
+            raise ProvisionError("business schedule anchor_local_time is invalid")
+        tolerance_seconds = _nonnegative_integer(
+            schedule_document["tolerance_seconds"], "business schedule tolerance_seconds")
+        if tolerance_seconds > 3600:
+            raise ProvisionError("business schedule tolerance_seconds is too large")
+        result_delay_seconds = _nonnegative_integer(
+            schedule_document["result_delay_seconds"], "business schedule result_delay_seconds")
+        if result_delay_seconds > interval_seconds:
+            raise ProvisionError("business schedule result_delay_seconds is too large")
+        schedule_from = _utc_time(
+            schedule_document.get("effective_from", effective_from),
+            "business schedule effective_from")
+        schedule_to = _utc_time(
+            schedule_document.get("effective_to", effective_to),
+            "business schedule effective_to", nullable=True)
+        if schedule_to is not None and schedule_to <= schedule_from:
+            raise ProvisionError("business schedule effective period is invalid")
+        if schedule_from < effective_from or (
+                effective_to is not None and (schedule_to is None or schedule_to > effective_to)):
+            raise ProvisionError("business schedule period must be contained by the endpoint profile")
+        schedule = {
+            "protocol_code": _optional_text(
+                schedule_document.get("protocol_code"), "business schedule protocol_code"),
+            "timezone": schedule_timezone,
+            "interval_seconds": interval_seconds,
+            "anchor_local_time": anchor.replace(microsecond=0).isoformat(),
+            "tolerance_seconds": tolerance_seconds,
+            "result_delay_seconds": result_delay_seconds,
+            "effective_from": schedule_from,
+            "effective_to": schedule_to,
+        }
     return {
         "station_code": station_code,
         "business_site_id": site_id,
@@ -168,6 +239,9 @@ def load_configuration(path: Path) -> dict[str, Any]:
         "expected_granularity": granularity,
         "expected_interval_seconds": interval,
         "mappings": normalized_mappings,
+        "existing_endpoint_only": _boolean(
+            document.get("existing_endpoint_only"), "existing_endpoint_only"),
+        "business_schedule": schedule,
     }
 
 
@@ -242,6 +316,11 @@ def _validate_configuration_for_database(connection: sqlite3.Connection, configu
                 mapping["effective_from"], mapping["effective_to"], other["effective_from"], other["effective_to"],
             ):
                 raise ProvisionError("configuration contains overlapping factor mappings")
+    schedule = configuration.get("business_schedule")
+    if schedule and schedule["protocol_code"] is not None:
+        definition = defined.get(schedule["protocol_code"])
+        if definition is None or not definition["is_published"]:
+            raise ProvisionError("business schedule references an unpublished protocol factor")
     _verify_assets_when_available(connection, configuration)
 
 
@@ -263,9 +342,15 @@ def _mapping_expected(mapping: dict[str, Any]) -> dict[str, Any]:
     return dict(mapping, enabled=1)
 
 
+def _schedule_expected(schedule: dict[str, Any]) -> dict[str, Any]:
+    return dict(schedule, enabled=1)
+
+
 def _check_existing_configuration(connection: sqlite3.Connection, configuration: dict[str, Any], credential: bytes | None = None) -> sqlite3.Row | None:
     endpoint = connection.execute("SELECT * FROM trusted_endpoints WHERE station_code=?", (configuration["station_code"],)).fetchone()
     if endpoint is None:
+        if configuration.get("existing_endpoint_only"):
+            raise ProvisionError("configured existing endpoint does not exist")
         return None
     if endpoint["business_site_id"] != configuration["business_site_id"]:
         raise ProvisionError("station code is already bound to another business site")
@@ -298,6 +383,25 @@ def _check_existing_configuration(connection: sqlite3.Connection, configuration:
                 mapping["effective_from"], mapping["effective_to"],
             ):
                 raise ProvisionError("factor mapping overlaps an existing effective period")
+    schedule = configuration.get("business_schedule")
+    if schedule:
+        existing = connection.execute(
+            """SELECT * FROM monitoring_business_schedules
+               WHERE endpoint_id=? AND protocol_code IS ? AND effective_from=?""",
+            (endpoint["id"], schedule["protocol_code"], schedule["effective_from"]),
+        ).fetchone()
+        if existing is not None and not _row_matches(existing, _schedule_expected(schedule)):
+            raise ProvisionError("business schedule conflicts with the requested effective period")
+        for existing_period in connection.execute(
+            """SELECT effective_from,effective_to FROM monitoring_business_schedules
+               WHERE endpoint_id=? AND protocol_code IS ?""",
+            (endpoint["id"], schedule["protocol_code"]),
+        ):
+            if existing_period["effective_from"] != schedule["effective_from"] and _periods_overlap(
+                existing_period["effective_from"], existing_period["effective_to"],
+                schedule["effective_from"], schedule["effective_to"],
+            ):
+                raise ProvisionError("business schedule overlaps an existing effective period")
     return endpoint
 
 
@@ -987,11 +1091,13 @@ def verify_station_code_import(
     return summary
 
 
-def _apply(connection: sqlite3.Connection, configuration: dict[str, Any], credential: bytes) -> str:
+def _apply(connection: sqlite3.Connection, configuration: dict[str, Any], credential: bytes | None) -> str:
     endpoint = _check_existing_configuration(connection, configuration, credential)
     if endpoint is not None and (not endpoint["enabled"] or endpoint["endpoint_state"] == "disabled"):
         raise ProvisionError("disabled endpoint must not be silently re-enabled")
     if endpoint is None:
+        if not credential:
+            raise ProvisionError("credential input is required when creating an endpoint")
         cursor = connection.execute(
             """INSERT INTO trusted_endpoints(station_code,credential_hmac,business_site_id,endpoint_state)
                VALUES (?,?,?,'bound')""",
@@ -1028,6 +1134,24 @@ def _apply(connection: sqlite3.Connection, configuration: dict[str, Any], creden
                 (endpoint_id, mapping["protocol_code"], mapping["business_metric"], mapping["instrument_asset_code"],
                  mapping["expected_interval_seconds"], mapping["tolerance_seconds"], mapping["effective_from"], mapping["effective_to"]),
             )
+    schedule = configuration.get("business_schedule")
+    if schedule:
+        existing = connection.execute(
+            """SELECT 1 FROM monitoring_business_schedules
+               WHERE endpoint_id=? AND protocol_code IS ? AND effective_from=?""",
+            (endpoint_id, schedule["protocol_code"], schedule["effective_from"]),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from,effective_to,enabled)
+                   VALUES (?,?,?,?,?,?,?,?,?,1)""",
+                (endpoint_id, schedule["protocol_code"], schedule["timezone"],
+                 schedule["interval_seconds"], schedule["anchor_local_time"],
+                 schedule["tolerance_seconds"], schedule["result_delay_seconds"],
+                 schedule["effective_from"], schedule["effective_to"]),
+            )
     return "applied"
 
 
@@ -1037,7 +1161,8 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
         raise ProvisionError("action is invalid")
     if action in {"apply", "disable"} and not offline_confirmed:
         raise ProvisionError("offline confirmation is required before writing configuration")
-    if action == "apply" and credential is None:
+    if (action == "apply" and credential is None
+            and not configuration.get("existing_endpoint_only")):
         raise ProvisionError("credential input is required for apply")
     if action == "disable" and (not disable_confirmed or not isinstance(reason, str) or not reason.strip()):
         raise ProvisionError("disable requires explicit confirmation and a reason")
@@ -1063,7 +1188,7 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 _validate_configuration_for_database(connection, configuration)
-                result = _apply(connection, configuration, credential or b"")
+                result = _apply(connection, configuration, credential)
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -1090,6 +1215,15 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
                     ).fetchone()
                     if row is None or not _row_matches(row, _mapping_expected(mapping)):
                         raise ProvisionError("configured factor mapping does not exist")
+                schedule = configuration.get("business_schedule")
+                if schedule:
+                    row = connection.execute(
+                        """SELECT * FROM monitoring_business_schedules
+                           WHERE endpoint_id=? AND protocol_code IS ? AND effective_from=?""",
+                        (endpoint["id"], schedule["protocol_code"], schedule["effective_from"]),
+                    ).fetchone()
+                    if row is None or not _row_matches(row, _schedule_expected(schedule)):
+                        raise ProvisionError("configured business schedule does not exist")
                 credential_summary = str(endpoint["credential_hmac"] or "")
                 if len(credential_summary) != 64 or any(character not in "0123456789abcdef" for character in credential_summary.lower()):
                     raise ProvisionError("configured endpoint credential summary is invalid")
@@ -1099,6 +1233,7 @@ def execute(action: str, database: Path, configuration: dict[str, Any], *, crede
     return {
         "action": action, "business_site_id": configuration["business_site_id"],
         "mapping_count": len(configuration["mappings"]), "configuration_fingerprint": configuration_fingerprint(configuration),
+        "business_schedule": bool(configuration.get("business_schedule")),
         "result": result,
     }
 
@@ -1928,7 +2063,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ProvisionError("single-endpoint actions require --config only")
             configuration = load_configuration(arguments.config)
             credential = _read_credential_from_stdin() if arguments.action == "apply" and arguments.credential_stdin else None
-            if arguments.action == "apply" and not arguments.credential_stdin:
+            if (arguments.action == "apply" and not arguments.credential_stdin
+                    and not configuration.get("existing_endpoint_only")):
                 raise ProvisionError("apply requires --credential-stdin")
             outcome = execute(
                 arguments.action, arguments.database, configuration, credential=credential,

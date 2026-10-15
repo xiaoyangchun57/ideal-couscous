@@ -32,6 +32,9 @@ let modals = [];
 let scrollCalls = [];
 let switchTabs = 0;
 let navigationUrls = [];
+let navigationCalls = [];
+let chosenPaths = [];
+let chosenSourceTypes = [];
 
 global.getApp = () => app;
 global.Page = page => { definition = page; };
@@ -49,7 +52,17 @@ global.wx = {
   authorize: ({ success }) => success(),
   getLocation: ({ success }) => success({ latitude: 28.6, longitude: 115.7 }),
   switchTab: options => { switchTabs += 1; if (options.success) options.success(); },
-  navigateTo: options => { navigationUrls.push(options.url); }, reLaunch: () => {}, stopPullDownRefresh: () => {},
+  navigateTo: options => { navigationUrls.push(options.url); navigationCalls.push(options); },
+  chooseMedia: options => {
+    chosenSourceTypes.push(options.sourceType);
+    options.success({ tempFiles: chosenPaths.map(tempFilePath => ({ tempFilePath })) });
+  },
+  compressImage: options => options.success({ tempFilePath: options.src }),
+  saveFile: options => options.success({
+    savedFilePath: 'wxfile://usr/' + String(options.tempFilePath).split('/').pop(),
+  }),
+  getFileSystemManager: () => ({ readFile: options => options.success({ data: 'image' }) }),
+  previewImage: () => {}, reLaunch: () => {}, stopPullDownRefresh: () => {},
   setNavigationBarTitle: () => {}, pageScrollTo: options => { scrollCalls.push(options); },
   removeSavedFile: () => {},
 };
@@ -77,6 +90,9 @@ function resetStorage() {
   scrollCalls = [];
   switchTabs = 0;
   navigationUrls = [];
+  navigationCalls = [];
+  chosenPaths = [];
+  chosenSourceTypes = [];
 }
 
 function seedStation(page, overrides) {
@@ -102,6 +118,9 @@ const originals = {
   executionSiteTasks: api.executionSiteTasks,
   executionSiteReagents: api.executionSiteReagents,
   submitManualReport: api.submitManualReport,
+  uploadSitePhoto: api.uploadSitePhoto,
+  attachmentDetail: api.attachmentDetail,
+  deletePendingSitePhoto: api.deletePendingSitePhoto,
 };
 
 (async () => {
@@ -117,6 +136,10 @@ const originals = {
     }
     assert.equal((wxml.match(/bindtap="onSubmitReport"/g) || []).length, 1,
       'the report sheet has one visible submit action bound only to onSubmitReport');
+    assert.equal((wxml.match(/bindtap="onTakeReportPhoto"/g) || []).length, 1,
+      'the inspection report sheet exposes the trusted camera action');
+    assert.equal((wxml.match(/bindtap="onAddReportPhoto"/g) || []).length, 1,
+      'the inspection report sheet keeps a separate album-material action');
     assert.match(wxml, /wx:elif="\{\{stationStage\.code === 'local_pending'\}\}"[\s\S]{0,180}bindtap="onSyncNow"/);
     assert.doesNotMatch(wxml, /stationStage\.code === 'local_pending'[\s\S]{0,320}bindtap="onCheckOut"/);
     assert.match(wxml, /<!-- 校准信息 -->\s*<view class="ip-fp-section" wx:if="\{\{sheet\.requiresCalibration\}\}">/);
@@ -126,10 +149,185 @@ const originals = {
     assert.doesNotMatch(wxml, /整改要求：\{\{sheet\.item\.supplement_reason/);
 
     resetStorage();
+    const cameraReportPage = createPage();
+    seedStation(cameraReportPage);
+    cameraReportPage.onOpenReport();
+    const reportUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      reportUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 51, url: '/uploads/site_photos/report-camera.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-camera.jpg?ticket=camera-ticket',
+      });
+    };
+    const cameraTask = cameraReportPage.onTakeReportPhoto();
+    await flush();
+    const cameraNavigation = navigationCalls.at(-1);
+    assert.match(cameraNavigation.url, /capture_context=manual_report/);
+    cameraNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(cameraNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-camera.jpg', captureSession: 'report-camera-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await cameraTask;
+    assert.equal(reportUploads.length, 1);
+    assert.equal(reportUploads[0].siteId, 20);
+    assert.equal(reportUploads[0].metadata.capture_context, 'manual_report');
+    assert.equal(reportUploads[0].metadata.capture_session, 'report-camera-session');
+    assert.equal(reportUploads[0].metadata.capture_frame_ratio, '3:4');
+    assert.equal(reportUploads[0].metadata.display_watermark, true,
+      'older camera results without the field keep the visible watermark default');
+    assert.equal(cameraReportPage.data.reportSheet.photoSiteId, 20);
+    assert.deepEqual(cameraReportPage.data.reportSheet.photos, ['/uploads/site_photos/report-camera.jpg']);
+    assert.match(cameraReportPage.data.reportSheet.photoItems[0].displayUrl, /\?ticket=camera-ticket$/);
+
+    let attachmentReads = 0;
+    api.attachmentDetail = attachmentId => {
+      attachmentReads += 1;
+      assert.equal(attachmentId, 51);
+      return Promise.resolve({
+        id: 51,
+        stored_path: '/uploads/site_photos/report-camera.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-camera.jpg?ticket=refreshed-' + attachmentReads,
+      });
+    };
+    const cameraPhotoKey = cameraReportPage.data.reportSheet.photoItems[0].key;
+    await cameraReportPage.onReportPhotoMediaError({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 1);
+    assert.match(cameraReportPage.data.reportSheet.photoItems[0].displayUrl, /ticket=refreshed-1$/);
+    await cameraReportPage.onReportPhotoMediaError({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 1, 'inspection report media automatically refreshes at most once');
+    assert.equal(cameraReportPage.data.reportSheet.photoItems[0].mediaError, '照片加载失败，点击重试');
+    await cameraReportPage.onRetryReportPhotoMedia({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 2, 'inspection report media exposes an explicit retry');
+
+    const albumReportPage = createPage();
+    seedStation(albumReportPage);
+    albumReportPage.onOpenReport();
+    chosenPaths = ['/tmp/report-album.jpg'];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      reportUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 52, url: '/uploads/site_photos/report-album.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-album.jpg?ticket=album-ticket',
+      });
+    };
+    await albumReportPage.onAddReportPhoto();
+    assert.deepEqual(chosenSourceTypes.at(-1), ['album']);
+    assert.equal(reportUploads.at(-1).metadata.capture_source, 'unknown');
+    assert.equal(reportUploads.at(-1).metadata.capture_context, undefined);
+
+    // Failed trusted-camera uploads retain the capture session and retry identity.
+    resetStorage();
+    const failedUploadPage = createPage();
+    seedStation(failedUploadPage);
+    failedUploadPage.onOpenReport();
+    const retryUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      retryUploads.push({ siteId, image, key, metadata });
+      if (retryUploads.length === 1) return Promise.reject({ error: '网络响应丢失' });
+      return Promise.resolve({
+        id: 53, url: '/uploads/site_photos/report-retry.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-retry.jpg?ticket=retry-ticket',
+      });
+    };
+    const failedCaptureTask = failedUploadPage.onTakeReportPhoto();
+    await flush();
+    const failedNavigation = navigationCalls.at(-1);
+    failedNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(failedNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-retry.jpg', captureSession: 'report-retry-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+      displayWatermark: false,
+    });
+    await failedCaptureTask;
+    const failedPhoto = failedUploadPage.data.reportSheet.photoItems[0];
+    assert.equal(failedPhoto.status, 'failed');
+    assert.equal(failedPhoto.localPath, 'wxfile://usr/report-retry.jpg');
+    assert.equal(failedPhoto.metadata.capture_session, 'report-retry-session');
+    assert.equal(failedPhoto.metadata.display_watermark, false);
+    assert.equal(failedPhoto.metadata._idempotency_key, failedPhoto.idempotencyKey);
+    failedUploadPage.data.reportSheet.description = '泵房异响';
+    let blockedReportWrites = 0;
+    api.submitManualReport = () => { blockedReportWrites += 1; return Promise.resolve({}); };
+    await failedUploadPage.onSubmitReport();
+    assert.equal(blockedReportWrites, 0);
+    await failedUploadPage.onRetryReportPhoto({ currentTarget: { dataset: { key: failedPhoto.key } } });
+    assert.equal(retryUploads[1].key, retryUploads[0].key);
+    assert.equal(retryUploads[1].metadata.capture_session, 'report-retry-session');
+    assert.equal(retryUploads[1].metadata.display_watermark, false,
+      'manual report retry preserves the original photo watermark choice');
+    assert.equal(failedUploadPage.data.reportSheet.photoItems[0].status, 'uploaded');
+    assert.match(failedUploadPage.data.reportSheet.photoItems[0].displayUrl, /\?ticket=retry-ticket$/);
+    assert.deepEqual(failedUploadPage.data.reportSheet.photos, ['/uploads/site_photos/report-retry.jpg']);
+
+    // A capture-session rejection cannot reuse the old upload identity and requires a fresh camera capture.
+    resetStorage();
+    const expiredCapturePage = createPage();
+    seedStation(expiredCapturePage);
+    expiredCapturePage.onOpenReport();
+    const expiredUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      expiredUploads.push({ siteId, image, key, metadata });
+      if (expiredUploads.length === 1) {
+        return Promise.resolve({
+          success: true,
+          accepted_for_review: false,
+          code: 'CAPTURE_SESSION_REQUIRED',
+          reason: '异常上报现场拍摄授权无效、已过期或与当前站点不一致',
+          next_action: '请返回异常上报重新发起现场拍摄',
+        });
+      }
+      return Promise.resolve({
+        id: 54,
+        url: '/uploads/site_photos/report-recaptured.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-recaptured.jpg?ticket=recaptured-ticket',
+      });
+    };
+    const expiredTask = expiredCapturePage.onTakeReportPhoto();
+    await flush();
+    const expiredNavigation = navigationCalls.at(-1);
+    expiredNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(expiredNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-expired.jpg', captureSession: 'expired-report-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await expiredTask;
+    const expiredPhoto = expiredCapturePage.data.reportSheet.photoItems[0];
+    assert.equal(expiredPhoto.requiresNewCapture, true);
+    assert.equal(expiredPhoto.failureCode, 'CAPTURE_SESSION_REQUIRED');
+    assert.equal(expiredPhoto.error, '异常上报现场拍摄授权无效、已过期或与当前站点不一致');
+    assert.equal(expiredPhoto.nextAction, '请返回异常上报重新发起现场拍摄');
+    const recaptureTask = expiredCapturePage.onRetryReportPhoto({
+      currentTarget: { dataset: { key: expiredPhoto.key } },
+    });
+    await flush();
+    assert.equal(expiredUploads.length, 1, 'inspection never retries the rejected capture session');
+    assert.match(modals.at(-1).content, /请返回异常上报重新发起现场拍摄/);
+    const recaptureNavigation = navigationCalls.at(-1);
+    recaptureNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(recaptureNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-recaptured.jpg', captureSession: 'fresh-report-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await recaptureTask;
+    assert.equal(expiredUploads.length, 2);
+    assert.equal(expiredUploads[1].metadata.capture_session, 'fresh-report-session');
+    assert.notEqual(expiredUploads[1].key, expiredUploads[0].key);
+    assert.equal(expiredCapturePage.data.reportSheet.photoItems.length, 1);
+    assert.equal(expiredCapturePage.data.reportSheet.photoItems[0].status, 'uploaded');
+    assert.deepEqual(expiredCapturePage.data.reportSheet.photos, ['/uploads/site_photos/report-recaptured.jpg']);
+
+    resetStorage();
     const reportPage = createPage();
     seedStation(reportPage);
     reportPage.data.reportSheet = {
-      open: true, typeIndex: 1, description: '', photos: [], submitting: false
+      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '',
+      photos: [], photoSiteId: null, uploading: false, submitting: false
     };
     let reportWrites = 0;
     let reportRequest = deferred();
@@ -149,11 +347,18 @@ const originals = {
     reportPage.onSubmitReport();
     assert.equal(reportWrites, 0, 'reports without a ready photo do not call the write API');
     reportPage.data.reportSheet.photos = ['/uploads/site_photos/equipment.jpg'];
+    reportPage.data.reportSheet.photoSiteId = 20;
+    const immediateSetData = reportPage.setData;
+    reportPage.setData = (patch, done) => {
+      if (patch['reportSheet.submitting'] === true) return;
+      immediateSetData(patch, done);
+    };
     reportPage.onSubmitReport();
     reportPage.onSubmitReport();
     await flush();
     await flush();
-    assert.equal(reportWrites, 1, 'double taps issue one report request');
+    assert.equal(reportWrites, 1, 'double taps issue one report request before async setData is visible');
+    reportPage.setData = immediateSetData;
     reportRequest.reject({ error: '网络异常' });
     await flush();
     await flush();
@@ -176,8 +381,9 @@ const originals = {
     assert.equal(reportRefreshes, 1, 'only a confirmed work order refreshes the station data');
 
     reportPage.data.reportSheet = {
-      open: true, typeIndex: 1, description: '水泵异响',
-      photos: ['/uploads/site_photos/equipment.jpg'], submitting: false
+      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '水泵异响',
+      photos: ['/uploads/site_photos/equipment.jpg'], photoSiteId: 20,
+      uploading: false, submitting: false
     };
     api.submitManualReport = () => Promise.resolve({});
     reportPage.onSubmitReport();
@@ -266,6 +472,42 @@ const originals = {
     assert.equal(toasts.at(-1).title, '请填写现场说明或拍摄照片');
     itemPage.onCloseSheet();
     assert.deepEqual(scrollCalls.at(-1), { scrollTop: 187, duration: 0 });
+
+    resetStorage();
+    const cameraItemPage = createPage();
+    seedStation(cameraItemPage);
+    cameraItemPage.data.categories = [{ items: [{
+      item_id: 308, plan_id: 10, item_name: '相机水印契约', result: null,
+      required_photos: 1, evidence_attachments: [], requiresCalibration: false,
+    }] }];
+    cameraItemPage.onOpenItem({ currentTarget: { dataset: { id: 308 } } });
+    const inspectionUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      inspectionUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 61, url: '/uploads/site_photos/inspection-hidden-watermark.jpg',
+        display_url: '/uploads/site_photos/inspection-hidden-watermark.jpg',
+        accepted_for_review: true, supplemental: false,
+      });
+    };
+    const inspectionCaptureTask = cameraItemPage.onAddPhoto({
+      currentTarget: { dataset: { source: 'camera' } },
+    });
+    await flush();
+    const inspectionNavigation = navigationCalls.at(-1);
+    inspectionNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(inspectionNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/inspection-hidden-watermark.jpg',
+      captureSession: 'inspection-hidden-watermark-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+      displayWatermark: false,
+    });
+    await inspectionCaptureTask;
+    assert.equal(inspectionUploads.length, 1);
+    assert.equal(inspectionUploads[0].metadata.display_watermark, false);
+    assert.equal(inspectionUploads[0].metadata.capture_session,
+      'inspection-hidden-watermark-session');
 
     resetStorage();
     const supplementPage = createPage();

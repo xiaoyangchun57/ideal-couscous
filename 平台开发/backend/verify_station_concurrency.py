@@ -36,6 +36,7 @@ from station_monitoring import normalize_raw_frame
 
 PATHS = (
     '/api/dashboard/summary',
+    '/api/sites',
     '/api/station-monitoring/sites?scope=all',
     '/api/station-monitoring/access-summary',
     '/api/station-monitoring/sites/1/overview',

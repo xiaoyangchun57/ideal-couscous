@@ -129,25 +129,26 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
                  exception_reason))
             return cur.lastrowid
 
-    def assert_checkin_blocked(self, code):
+    def assert_checkin_allowed(self):
         response = self.workorder_checkin()
-        self.assertEqual(response.status_code, 409, response.json)
-        self.assertEqual(response.json['code'], code)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['location_verified'])
 
-    def test_workorder_arrival_requires_resource_preparation(self):
-        self.assert_checkin_blocked('WORKORDER_RESOURCE_PREPARATION_REQUIRED')
+    def test_workorder_arrival_does_not_require_a_separate_vehicle_request(self):
+        self.assert_checkin_allowed()
 
-    def test_workorder_arrival_rejects_pending_or_rejected_resource(self):
+    def test_pending_or_rejected_resource_does_not_block_independent_arrival(self):
         self.create_application(vehicle_id=1, status='pending')
-        self.assert_checkin_blocked('WORKORDER_RESOURCE_APPROVAL_REQUIRED')
+        self.assert_checkin_allowed()
 
         with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=NULL,check_in_user=NULL")
             db.execute("UPDATE vehicle_applications SET status='rejected'")
-        self.assert_checkin_blocked('WORKORDER_RESOURCE_APPROVAL_REQUIRED')
+        self.assert_checkin_allowed()
 
-    def test_approved_vehicle_requires_active_checkout_before_arrival(self):
+    def test_approved_vehicle_without_checkout_does_not_block_independent_arrival(self):
         self.create_application(vehicle_id=1, status='approved')
-        self.assert_checkin_blocked('WORKORDER_VEHICLE_CHECKOUT_REQUIRED')
+        self.assert_checkin_allowed()
 
     def test_active_vehicle_use_allows_arrival_for_the_requesting_operator(self):
         application_id = self.create_application(vehicle_id=1, status='approved')
@@ -165,22 +166,22 @@ class CrossModuleVehicleWorkorderTest(unittest.TestCase):
         arrived = self.workorder_checkin()
         self.assertEqual(arrived.status_code, 200, arrived.json)
 
-    def test_another_operators_approved_resource_cannot_unlock_arrival(self):
+    def test_another_operators_resource_is_irrelevant_to_assignees_arrival(self):
         application_id = self.create_application(applicant_id=3, vehicle_id=1, status='approved')
         with app_module.get_db() as db:
             db.execute("""INSERT INTO vehicle_use_records
                 (application_id,start_mileage,checked_out_at,status)
                 VALUES (?,1000,'2099-08-10 08:00:00','checked_out')""", (application_id,))
-        self.assert_checkin_blocked('WORKORDER_RESOURCE_PREPARATION_REQUIRED')
+        self.assert_checkin_allowed()
 
-    def test_returned_vehicle_journey_cannot_unlock_arrival(self):
+    def test_returned_vehicle_journey_does_not_block_independent_arrival(self):
         application_id = self.create_application(vehicle_id=1, status='returned')
         with app_module.get_db() as db:
             db.execute("""INSERT INTO vehicle_use_records
                 (application_id,start_mileage,end_mileage,checked_out_at,returned_at,status)
                 VALUES (?,1000,1010,'2099-08-10 08:00:00','2099-08-10 18:00:00','returned')""",
                 (application_id,))
-        self.assert_checkin_blocked('WORKORDER_RESOURCE_PREPARATION_REQUIRED')
+        self.assert_checkin_allowed()
 
     def test_submit_review_requires_arrival_even_from_web_or_legacy_client(self):
         response = self.client.post('/api/workorders/WO-CROSS-1/submit-review',

@@ -194,7 +194,30 @@ class HJ212IngestionContractTest(unittest.TestCase):
             )
             connection.commit()
 
+    def _set_ph_as_expected_factor(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            config_id = connection.execute(
+                "SELECT id FROM station_expected_factor_configs WHERE site_id=1 AND effective_to IS NULL"
+            ).fetchone()
+            if config_id:
+                return
+            config_id = connection.execute(
+                """INSERT INTO station_expected_factor_configs(
+                       site_id,version,effective_from,previous_metrics_json,
+                       selected_metrics_json,changed_by_user_id,idempotency_key,created_at)
+                   VALUES (1,1,'2020-01-01T00:00:00+00:00','[]','[\"ph\"]',0,
+                           'hj212-contract-ph','2020-01-01T00:00:00+00:00')"""
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO station_expected_factors(
+                       config_id,site_id,business_metric,display_order,effective_from)
+                   VALUES (?,1,'ph',0,'2020-01-01T00:00:00+00:00')""",
+                (config_id,),
+            )
+            connection.commit()
+
     def _public_ph_state(self, *, at_time="2026-09-11T07:00:00+00:00"):
+        self._set_ph_as_expected_factor()
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
             cycle = latest_cycle(connection, 1, at_time=at_time)
@@ -324,6 +347,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
 
     def test_2011_selected_and_conflict_rows_remain_process_candidates_only(self):
         self._keep_only_ph_configuration()
+        self._set_ph_as_expected_factor()
         frames = (
             (make_hj212(qn="20260911141000001", command="2011", data_time="20260911141000",
                         factors="w01001-Rtd=7.0,Flag=N"), "2026-09-11T06:10:05+00:00"),

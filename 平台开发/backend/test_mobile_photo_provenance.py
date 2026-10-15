@@ -142,6 +142,14 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
                 INSERT INTO sites VALUES (1,'测试站',28.071303,115.539684);
                 INSERT INTO sites VALUES (2,'其他站',29.0,116.0);
+                CREATE TABLE device_shadows (id INTEGER PRIMARY KEY, site_id INTEGER, status TEXT);
+                INSERT INTO device_shadows VALUES (10,1,'online');
+                CREATE TABLE reagent_records (id INTEGER PRIMARY KEY, site_id INTEGER);
+                INSERT INTO reagent_records VALUES (20,1);
+                CREATE TABLE vehicle_maintenance_records (id INTEGER PRIMARY KEY);
+                INSERT INTO vehicle_maintenance_records VALUES (30);
+                CREATE TABLE vehicle_refueling_records (id INTEGER PRIMARY KEY);
+                INSERT INTO vehicle_refueling_records VALUES (40);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 INSERT INTO user_sites VALUES (2,1);
                 CREATE TABLE users (
@@ -228,7 +236,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     source_type TEXT, source_id INTEGER, title TEXT, content TEXT,
                     is_read INTEGER DEFAULT 0
                 );
-                CREATE TABLE work_orders (id INTEGER PRIMARY KEY, order_no TEXT);
+                CREATE TABLE work_orders (id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER);
             ''')
             db.execute('INSERT INTO inspection_checkins VALUES (1,1,2,?,10)',
                        (now.strftime('%Y-%m-%d %H:%M:%S'),))
@@ -294,6 +302,17 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             'site_id': 1, 'plan_id': 10, 'item_id': item_id,
             'capture_source': capture_source, 'gps_lat': gps_lat, 'gps_lng': gps_lng,
         })
+
+    def create_manual_report_capture_session(self, *, prepare_only=False,
+                                             gps_lat=28.071303, gps_lng=115.539684):
+        payload = {
+            'site_id': 1, 'capture_context': 'manual_report',
+            'capture_source': 'camera', 'prepare_only': prepare_only,
+        }
+        if not prepare_only:
+            payload.update({'gps_lat': gps_lat, 'gps_lng': gps_lng})
+        return self.client.post(
+            '/api/mobile/photo-capture-session', headers=self.headers(), json=payload)
 
     def assert_no_upload_artifacts(self):
         with app_module.get_db() as db:
@@ -885,6 +904,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     if content_left > 0:
                         self.assertEqual(display.getpixel((0, display.height // 2)), (32, 34, 37))
                 watermark = display_meta['server_watermark']
+                self.assertTrue(watermark['rendered'])
                 self.assertEqual(watermark['labels'],
                                  ['站点', '检查项', '拍摄时间', '位置坐标', '防伪码'])
                 self.assertEqual(watermark['site_name'], '测试站')
@@ -903,6 +923,15 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         font = app_module._site_photo_watermark_font(24)
         glyphs = {bytes(font.getmask(char)) for char in '拍摄时间位置坐标防伪码'}
         self.assertGreaterEqual(len(glyphs), 8)
+
+        hidden_bytes, hidden_meta = app_module._create_site_photo_display_copy(
+            portrait_jpeg_bytes('white'), {'format': 'JPEG'}, facts,
+            render_watermark=False)
+        self.assertTrue(hidden_bytes)
+        self.assertFalse(hidden_meta['server_watermark']['rendered'])
+        self.assertEqual(hidden_meta['server_watermark']['rendered_lines'], [])
+        self.assertEqual(hidden_meta['server_watermark']['anti_counterfeit_code'],
+                         facts['anti_counterfeit_code'])
 
     def test_trusted_camera_frame_uses_center_cover_without_black_padding(self):
         self.assertEqual(app_module._trusted_camera_frame_contract({
@@ -1152,6 +1181,30 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(extra['watermark_fields']['item_name'], '浊度仪表读数')
         self.assertEqual(extra['capture_frame']['ratio'], '3:4')
         self.assertIsNone(extra['display_copy']['neutral_background'])
+        self.assertTrue(extra['display_watermark'])
+        self.assertTrue(server_watermark['rendered'])
+
+    def test_camera_upload_can_hide_visible_watermark_and_remain_qualified(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        response = self.upload(
+            portrait_jpeg_bytes('navy'), capture_source='camera',
+            capture_session=session.json['capture_session'], display_watermark=False,
+            _idempotency_key='camera-hidden-watermark')
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['accepted_for_review'])
+        with app_module.get_db() as db:
+            attachment = db.execute(
+                'SELECT evidence_qualification,watermark_code,extra_json '
+                'FROM operation_attachments WHERE id=?', (response.json['id'],)).fetchone()
+        extra = json.loads(attachment['extra_json'])
+        watermark = extra['display_copy']['server_watermark']
+        self.assertEqual(attachment['evidence_qualification'], 'qualified')
+        self.assertEqual(attachment['watermark_code'], session.json['anti_counterfeit_code'])
+        self.assertFalse(extra['display_watermark'])
+        self.assertFalse(watermark['rendered'])
+        self.assertEqual(watermark['rendered_lines'], [])
+        self.assertEqual(extra['watermark_fields']['code'], session.json['anti_counterfeit_code'])
 
     def test_camera_upload_uses_session_location_and_strict_idempotency(self):
         session = self.create_capture_session()
@@ -1314,6 +1367,140 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertIn('补充材料', album.json['error'])
         with app_module.get_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0], 0)
+
+    def test_manual_report_camera_session_needs_no_plan_order_or_checkin(self):
+        response = self.create_manual_report_capture_session()
+        self.assertEqual(response.status_code, 200, response.json)
+        token = response.json['capture_session']
+        with app_module.get_db() as db:
+            row = db.execute(
+                'SELECT plan_id,item_id,work_order_id,gps_lat,gps_lng '
+                'FROM photo_capture_sessions WHERE token_hash=?',
+                (app_module._hash_token(token),),
+            ).fetchone()
+        self.assertEqual((row['plan_id'], row['item_id'], row['work_order_id']),
+                         (None, None, None))
+        self.assertAlmostEqual(row['gps_lat'], 28.071303)
+        self.assertAlmostEqual(row['gps_lng'], 115.539684)
+
+    def test_manual_report_trusted_camera_upload_stays_pending_site_photo(self):
+        session = self.create_manual_report_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        response = self.upload(
+            portrait_jpeg_bytes('teal'),
+            plan_id=None, item_id=None, capture_context='manual_report',
+            capture_source='camera', capture_session=session.json['capture_session'],
+            gps_lat=28.071303, gps_lng=115.539684,
+            _idempotency_key='manual-report-trusted-camera',
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['url'].startswith('/uploads/site_photos/'))
+        self.assertEqual(response.json['capture_source'], 'camera')
+        self.assertEqual(response.json['item_id'], None)
+        self.assertTrue(response.json['pending_submission'])
+        self.assertFalse(response.json['supplemental'])
+        self.assertFalse(response.json['is_effective_evidence'])
+        with app_module.get_db() as db:
+            attachment = db.execute(
+                'SELECT source_type,source_id,site_id,item_id,item_name,extra_json '
+                'FROM operation_attachments WHERE id=?', (response.json['id'],)
+            ).fetchone()
+            capture = db.execute(
+                'SELECT used_at,attachment_id FROM photo_capture_sessions '
+                'WHERE token_hash=?',
+                (app_module._hash_token(session.json['capture_session']),),
+            ).fetchone()
+        self.assertEqual((attachment['source_type'], attachment['source_id'], attachment['site_id']),
+                         ('site_photo', 0, 1))
+        self.assertIsNone(attachment['item_id'])
+        self.assertEqual(attachment['item_name'], '异常上报现场')
+        self.assertEqual(json.loads(attachment['extra_json'])['capture_context'], 'manual_report')
+        self.assertTrue(capture['used_at'])
+        self.assertEqual(capture['attachment_id'], response.json['id'])
+
+    def test_manual_report_read_refreshes_protected_photo_media_ticket(self):
+        with app_module.get_db() as db:
+            db.executescript('''
+                ALTER TABLE users ADD COLUMN phone TEXT DEFAULT '';
+                CREATE TABLE manual_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, report_type TEXT,
+                    description TEXT, photo_urls TEXT, gps_lat REAL, gps_lng REAL,
+                    reporter_id INTEGER, reported_at TEXT, order_no TEXT,
+                    status TEXT DEFAULT 'open'
+                );
+                DROP TABLE work_orders;
+                CREATE TABLE work_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, order_no TEXT, site_id INTEGER,
+                    source TEXT, event_type TEXT, level TEXT, title TEXT,
+                    description TEXT, assignee TEXT, status TEXT
+                );
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, metric TEXT,
+                    value REAL, level TEXT, message TEXT, status TEXT,
+                    related_order_no TEXT, flow_type TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+        session = self.create_manual_report_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        uploaded = self.upload(
+            portrait_jpeg_bytes('green'), plan_id=None, item_id=None,
+            capture_context='manual_report', capture_source='camera',
+            capture_session=session.json['capture_session'],
+            gps_lat=28.071303, gps_lng=115.539684,
+            _idempotency_key='manual-report-media-read',
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        stored_path = uploaded.json['url']
+        created = self.client.post('/api/manual-reports', headers=self.headers(), json={
+            'site_id': 1, 'report_type': 'equipment', 'description': '泵房异响',
+            'photo_urls': [stored_path], 'gps_lat': 28.071303, 'gps_lng': 115.539684,
+        })
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(json.loads(created.json['photo_urls']), [stored_path])
+        self.assertEqual(created.json['photo_media'][0]['stored_path'], stored_path)
+        self.assertIn('?ticket=', created.json['photo_media'][0]['display_url'])
+
+        ticket_clock = int(app_module.time.time())
+        with mock.patch.object(app_module.time, 'time', return_value=ticket_clock):
+            first = self.client.get('/api/manual-reports', headers=self.headers())
+            self.assertEqual(first.status_code, 200, first.json)
+            self.assertEqual(json.loads(first.json[0]['photo_urls']), [stored_path])
+            first_display = first.json[0]['photo_media'][0]['display_url']
+            self.assertEqual(self.client.get(stored_path).status_code, 403)
+            first_media = self.client.get(first_display)
+            self.assertEqual(first_media.status_code, 200)
+            first_media.close()
+
+        with mock.patch.object(app_module.time, 'time', return_value=ticket_clock + 5):
+            refreshed = self.client.get('/api/manual-reports', headers=self.headers())
+            self.assertEqual(refreshed.status_code, 200, refreshed.json)
+            refreshed_display = refreshed.json[0]['photo_media'][0]['display_url']
+            self.assertNotEqual(refreshed_display, first_display)
+            refreshed_media = self.client.get(refreshed_display)
+            self.assertEqual(refreshed_media.status_code, 200)
+            refreshed_media.close()
+
+    def test_manual_report_upload_cannot_reuse_inspection_capture_session(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        response = self.upload(
+            portrait_jpeg_bytes('navy'),
+            plan_id=None, item_id=None, capture_context='manual_report',
+            capture_source='camera', capture_session=session.json['capture_session'],
+            gps_lat=28.071303, gps_lng=115.539684,
+            _idempotency_key='manual-report-wrong-session',
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['code'], 'CAPTURE_SESSION_REQUIRED')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+            row = db.execute(
+                'SELECT used_at,attachment_id FROM photo_capture_sessions '
+                'WHERE token_hash=?',
+                (app_module._hash_token(session.json['capture_session']),),
+            ).fetchone()
+        self.assertEqual((row['used_at'], row['attachment_id']), (None, None))
 
     def test_capture_session_rejects_non_finite_and_out_of_range_coordinates(self):
         invalid_coordinates = (
@@ -1948,7 +2135,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                                side_effect=sqlite3.OperationalError('forced insert failure')):
             response = self.client.post('/api/upload/attachment', headers=self.headers(), data={
                 'file': (io.BytesIO(jpeg_bytes()), 'maintenance.jpg'),
-                'source_type': 'maintenance', 'site_id': '1',
+                'source_type': 'maintenance', 'source_id': '10', 'site_id': '1',
             }, content_type='multipart/form-data')
         self.assertEqual(response.status_code, 500, response.json)
         self.assertEqual(response.json['code'], 'ATTACHMENT_UPLOAD_ROLLED_BACK')
@@ -1957,6 +2144,77 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         attachment_dir = os.path.join(self.upload_dir, 'attachments')
         self.assertFalse(os.path.isdir(attachment_dir) and any(
             files for _, _, files in os.walk(attachment_dir)))
+
+    def test_business_archive_material_is_visible_without_becoming_field_evidence(self):
+        response = self.client.post('/api/upload/attachment', headers=self.headers(), data={
+            'file': (io.BytesIO(jpeg_bytes()), 'maintenance.jpg'),
+            'source_type': 'maintenance', 'source_id': '10', 'site_id': '1',
+            'category': '养护记录',
+        }, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['material_kind'], 'archive_material')
+        aid = response.json['id']
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT capture_source,evidence_qualification,evidence_basis,
+                review_status FROM operation_attachments WHERE id=?""", (aid,)).fetchone()
+        self.assertEqual(dict(row), {
+            'capture_source': 'web_upload',
+            'evidence_qualification': 'archive',
+            'evidence_basis': 'business_archive',
+            'review_status': 'pending',
+        })
+
+        current = self.client.get('/api/attachments?current_archive=1', headers=self.headers())
+        self.assertEqual(current.status_code, 200, current.json)
+        self.assertEqual([item['id'] for item in current.json['items']], [aid])
+        self.assertEqual(current.json['items'][0]['material_kind'], 'archive_material')
+        self.assertEqual(current.json['items'][0]['is_effective_evidence'], 0)
+        self.assertEqual(current.json['evidence_issue_count'], 0)
+
+        history = self.client.get('/api/attachments?history_archive=1', headers=self.headers())
+        self.assertEqual(history.status_code, 200, history.json)
+        self.assertNotIn(aid, [item['id'] for item in history.json['items']])
+
+    def test_archive_upload_rejects_invalid_business_object_before_file_write(self):
+        response = self.client.post('/api/upload/attachment', headers=self.headers(), data={
+            'file': (io.BytesIO(jpeg_bytes()), 'missing-device.jpg'),
+            'source_type': 'maintenance', 'source_id': '999', 'site_id': '1',
+            'category': '养护记录',
+        }, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 400, response.json)
+        self.assertEqual(response.json['code'], 'ARCHIVE_MATERIAL_ASSOCIATION_INVALID')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+        attachment_dir = os.path.join(self.upload_dir, 'attachments')
+        self.assertFalse(os.path.isdir(attachment_dir) and any(
+            files for _, _, files in os.walk(attachment_dir)))
+
+    def test_legacy_calibration_material_recovers_to_current_archive_without_rewrite(self):
+        relative_path = 'calibration/legacy-calibration.jpg'
+        file_path = os.path.join(self.upload_dir, relative_path)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'wb') as target:
+            target.write(jpeg_bytes())
+        with app_module.get_db() as db:
+            cursor = db.execute("""INSERT INTO operation_attachments
+                (filename,stored_path,source_type,source_id,site_id,category,capture_source,
+                 review_status,evidence_qualification,evidence_basis,extra_json,is_deleted)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,0)""", (
+                'legacy-calibration.jpg', f'/uploads/{relative_path}', 'calibration', 1, 1,
+                '校准报告', 'web_upload', 'pending', 'ineligible', 'source_untrusted', '{}',
+            ))
+            aid = cursor.lastrowid
+
+        current = self.client.get('/api/attachments?current_archive=1', headers=self.headers())
+        self.assertEqual(current.status_code, 200, current.json)
+        restored = next(item for item in current.json['items'] if item['id'] == aid)
+        self.assertEqual(restored['material_kind'], 'archive_material')
+        self.assertEqual(restored['evidence_qualification'], 'ineligible')
+        with app_module.get_db() as db:
+            stored = db.execute(
+                'SELECT evidence_qualification,review_status FROM operation_attachments WHERE id=?',
+                (aid,)).fetchone()
+        self.assertEqual(tuple(stored), ('ineligible', 'pending'))
 
     def test_reserved_site_photo_alias_never_receives_or_serves_ticket(self):
         aid, stored_path, _ = self.create_pending_site_photo(

@@ -172,6 +172,9 @@ const api = {
     '/api/mobile/site-photos/delete', 'POST',
     typeof target === 'object' ? target : { url: target }, { queue: false }
   ),
+  attachmentDetail: (attachmentId) => request(
+    '/api/attachments/' + encodeURIComponent(attachmentId), 'GET', {}, { queue: false }
+  ),
   purgeRejectedInspectionPhoto: (attachmentId) => request(
     '/api/attachments/' + attachmentId + '/purge-rejected', 'POST', {}, { queue: false }
   ),

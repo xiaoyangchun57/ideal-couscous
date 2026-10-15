@@ -1,35 +1,38 @@
-# r24 operations and monitoring improvement candidate gate (2026-10-12)
+# r25 combined cross-module candidate gate (2026-10-15)
 
-Target candidate tag: `release-20261012-cross-module-freeze-r24`
+Target candidate tag: `release-20261015-cross-module-freeze-r25`
 
-r24 is the only candidate accepted by `deploy/release-candidates.json`; r23 and all earlier release candidates are immutable historical tags. Relative to the deployed r23 baseline, this candidate contains the reviewed downstream formal-observation consumers, inspection-photo upload and review-link closure, station filter retention and latest-value/precision corrections, notification read/write separation, bounded SQLite concurrency and monitoring-cache changes, and the approved miniprogram spacing/scope-control normalization. The still-unapproved station expected-factor contract is explicitly excluded and remains waiting for operations input.
+r25 is the only candidate accepted by `deploy/release-candidates.json`; r24 and all earlier release candidates are immutable historical tags. Relative to the deployed r23 baseline, r25 combines the reviewed r24 formal-observation, evidence, precision, notification, SQLite and UI-normalization scope with the later station expected-factor and service-policy contracts, HJ212 mapping and historical-value recovery, station panorama/status synchronization, protected plan history, workorder trusted capture and drafts, on-demand vehicle/parts applications, vehicle lifecycle correction, shared-camera watermark control, and the reviewed Web maintenance/assignment changes. The three station migrations `011`, `012` and `013` are included.
 
-## r24 final automated evidence
+## r25 candidate preparation result: READY FOR PRODUCT CODE REVIEW
 
 | Check | Result | Exit |
 | --- | --- | ---: |
-| Backend unittest discover | 858 tests discovered; full suite completed with `OK` and no failure/error | 0 |
-| Miniprogram Node tests | 51/51 current `*.test.js` files passed | 0 |
-| Combined JavaScript/Python syntax | 206 files passed | 0 |
-| React Node tests | 103/103 passed | 0 |
-| React ESLint | PASS with 0 errors and 1 existing unused-variable warning | 0 |
-| React production build | PASS; 1,751 modules transformed | 0 |
-| Candidate guard | 2/2 release-candidate tests passed; r24 accepted and r23 historical | 0 |
-| Candidate diff and boundary | PASS; no whitespace error, private data, runtime database, upload, log, cache or generated secret included | 0 |
+| Backend unittest discover | **REUSED, THEN TARGETED PASS**. The original 920-test run (2 skipped) retained 2 candidate failures after runner-context failures were cleared. The v2 correction reran both affected modules at 68/68 PASS and the snapshot/change-entry/ended-site adjacent protection at 16/16 PASS. Full discovery was not rerun | 0 (v2) |
+| Miniprogram Node tests | **REUSED, THEN TARGETED PASS**. The original 53-file summary was 265 checks: 264 PASS and 1 FAIL. After synchronizing the complete stale report-photo assertions with the reviewed camera/album wiring, `photoCaptureState.test.js` passed 29/29. All miniprogram tests were not rerun | 0 (v2) |
+| Combined JavaScript/Python syntax | **REUSED + TARGETED PASS**. The original 212-file syntax gate passed. The four modified Python/JavaScript files passed direct compile or syntax checks; the final miniprogram test correction passed a repeated `node --check` | 0 |
+| React Node tests | **REUSED, THEN TARGETED PASS**. The original 35-file run contained 184 checks: 180 PASS, 1 FAIL and 3 environment-gated skips. The corrected URL wiring test plus the adjacent vehicle permission/contract tests passed 13/13. The 3 browser checks remain NOT RUN | 0 (v2) |
+| React ESLint | **REUSED + TARGETED PASS**. The original full lint passed with 0 errors and 1 unused-variable warning. The only modified React test passed single-file ESLint 9.39.4 with no finding | 0 |
+| React production build | **REUSED**; 1,752 modules transformed. React business source did not change in v2, so the build was not rerun | 0 |
+| Candidate guard | **REUSED**; 2/2 release-candidate tests passed, r25 accepted and r24 historical. Candidate registration did not change in v2 | 0 |
+| Candidate diff and boundary | PASS for v2 tested source tree `19a776656da827d6873e4340f519e31fa6a540ea`; exactly 78 approved paths, including migrations `011`, `012` and `013`. No whitespace error, local API address, temporary evidence, runtime database, upload, private configuration, cache, log or generated secret is included | 0 |
 
-The previously accepted isolated 10-user concurrency evidence is retained and was not repeated: 116,909 requests completed without timeout, 5xx response or SQLite lock error. The final gate intentionally did not repeat the earlier 5/30-minute load runs because no later change invalidated that evidence.
+The original full-gate failures remain recorded above as executed facts; they are not rewritten as a newly executed all-suite PASS. The v2 product decision authorized only the four bounded corrections and direct adjacent verification, so the full 920-test backend discovery, all miniprogram and React tests, the full syntax gate, the production build and long-running concurrency/load checks were not repeated. The final Review tree differs from the tested source tree only by this evidence update.
 
-## r24 Review and UI evidence boundary
+The first backend command supplied a repository archive without Git metadata and a global `PRIVATE_UPLOAD_DIR`; those runner choices caused four runtime-context failures and six photo-provenance failures and are not candidate conclusions. The same v1 candidate source was then tested from a Git worktree with a temporary branch and without that global upload override. Those runner-affected scopes passed before v2 began. The v2 tests likewise used an isolated Git worktree, temporary databases and temporary upload paths and did not touch the user's fixed acceptance service or database.
 
-- Development code Review: **PASS**. The final notification test correction changes only the obsolete test expectation; real notification GET requests remain read-only and cleanup remains in the idempotent background maintenance job.
-- Design static Review: **PASS** for the approved scope switch, spacing/token, card, Sheet, status-chip and station-detail normalization.
-- Existing r23 production UI evidence remains valid for the authenticated-frame to formal-observation and station-display chain, and the later isolated production-shaped acceptance covered the 36-station/24-factor downstream analysis and review path.
-- New r24 design changes in real WeChat UI: **NOT RUN**.
-- Physical-device camera/upload actions after this exact frozen snapshot: **NOT RUN**.
-- Landscape watermark direction remains the user-accepted portrait-only limitation: **SKIPPED**.
-- Station expected-factor completeness contract: **NOT INCLUDED / WAITING OPERATIONS INPUT**. This release must not claim that one configured factor proves a station's business factor set is complete.
+The previously accepted isolated concurrency and load evidence is retained and was not repeated. The single-station Fuzhou JSON remains a test dependency only and is not an instruction to apply or replay production configuration. Candidate preparation has produced a local commit for product code Review only; no r25 tag, package, push or deployment has been created.
 
-No package, Git push, SSH/SCP, server mutation, production database operation or deployment is part of this candidate-freeze evidence. Production deployment is performed only by the independent release task from the immutable annotated tag.
+## r25 Review and UI evidence boundary
+
+- Development code Review: **PASS**, including the v30 late-detail protection for unsaved workorder resolution notes.
+- Design static Review: **PASS** through v11 for the two complete workorder resource sheets and the previously approved UI scope.
+- Real WeChat UI: **PASS** on 2026-10-15 for the vehicle and parts sheets; previously accepted workorder photo, plan record, watermark, vehicle/admin and Web results remain retained evidence.
+- Station expected-factor, service-policy, time/status synchronization and protected-history work have reviewed code and bounded local UI evidence; production-shaped cross-account and live-station verification remains deployment follow-up.
+- Physical-device actions after the final candidate commit, production HJ212 receipt, production database migration and deployment smoke tests: **NOT RUN**.
+- The 300-meter location misclassification and landscape watermark direction remain explicitly deferred. Historical rows without usable raw payload remain separately tracked.
+
+A local candidate commit is authorized after the final boundary check and is the product Review input. No candidate tag, package, Git push, SSH/SCP, server mutation, production database operation or deployment was created or performed. Product must review the exact commit/tree before deciding whether to freeze r25.
 
 ---
 

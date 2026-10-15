@@ -38,7 +38,7 @@ class StartedPlanChangeTest(unittest.TestCase):
             );
             CREATE TABLE plan_schedules (
                 id INTEGER PRIMARY KEY, plan_data TEXT, schedule_type TEXT, user_id INTEGER,
-                version INTEGER, tasks_generated INTEGER
+                version INTEGER, tasks_generated INTEGER, previous_plan_data TEXT
             );
             INSERT INTO users VALUES (7, '现场运维');
             INSERT INTO user_sites VALUES (7, 1);
@@ -53,7 +53,8 @@ class StartedPlanChangeTest(unittest.TestCase):
                 (plan_id, site_id, item_name, result, execution_status)
                 VALUES (10, 1, '已完成检查', 'normal', 'active');
             INSERT INTO plan_schedules VALUES
-                (5, '{"2026-07-28":{"sites":[1,2]}}', 'weekly', 7, 2, 1);
+                (5, '{"2026-07-28":{"sites":[1,2]}}', 'weekly', 7, 2, 1,
+                 '{"2026-07-28":{"sites":[1]}}');
         ''')
         self.db.commit()
 

@@ -380,7 +380,20 @@ function DeviceLedgerTab() {
   }, [form, editingDevice, fetchDevices]);
 
   const typeOptions = Object.entries(deviceTypeMap).map(([value, label]) => ({ value, label }));
-  const siteOptions = sites.map(s => ({ value: s.id, label: s.name || s.code }));
+  const siteOptions = useMemo(
+    () => sites.map(s => ({ value: s.id, label: s.name || s.code })),
+    [sites],
+  );
+  const deviceFormSiteOptions = useMemo(() => {
+    if (!editingDevice?.site_id
+        || siteOptions.some(option => Number(option.value) === Number(editingDevice.site_id))) {
+      return siteOptions;
+    }
+    return [...siteOptions, {
+      value: editingDevice.site_id,
+      label: editingDevice.site_name || `站点 #${editingDevice.site_id}`,
+    }];
+  }, [editingDevice, siteOptions]);
 
   const columns = [
     {
@@ -666,7 +679,7 @@ function DeviceLedgerTab() {
           </Form.Item>
           <Form.Item name="site_id" label="所属站点" rules={[{ required: true, message: '请选择所属站点' }]}
             tooltip={editingDevice ? '可调整设备所属站点' : undefined}>
-            <Select placeholder="请选择站点" options={siteOptions} showSearch
+            <Select placeholder="请选择站点" options={deviceFormSiteOptions} showSearch
               filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
           </Form.Item>
           <Form.Item name="device_model" label="设备型号">

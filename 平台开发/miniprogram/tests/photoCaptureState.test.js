@@ -423,10 +423,11 @@ test('formal capture cannot fall back to chooseMedia while supplement stays albu
   delete global.wx;
 });
 
-test('camera, supplement and report picker expose clear opening feedback', () => {
+test('camera, supplement and report actions expose clear opening feedback', () => {
   assert.equal(photoActionOpeningTitle('camera'), '正在打开相机');
   assert.equal(photoActionOpeningTitle('supplement'), '正在打开补充材料');
-  assert.equal(photoActionOpeningTitle('media_picker'), '正在打开相机/相册');
+  assert.equal(photoActionOpeningTitle('report_camera'), '正在打开相机/相册');
+  assert.equal(photoActionOpeningTitle('report_album'), '正在打开相机/相册');
 });
 
 test('one page allows only one photo action and permits the next after success', async () => {
@@ -499,11 +500,14 @@ test('inspection photo card separates camera evidence and supplement materials',
   assert.match(wxml, /catchtap="onRetryLocalPhoto"[^>]*data-kind="required"/);
   assert.match(wxml, /catchtap="onSaveLocalPhotoAsSupplement"/);
   assert.doesNotMatch(wxml, /data-source="watermark_album"/);
-  assert.match(wxml, /class="report-photo-item photo-add-item" bindtap="onAddReportPhoto"/);
+  assert.match(wxml, /disabled="\{\{reportSheet\.uploading \|\| reportSheet\.submitting\}\}"[^>]*bindtap="onTakeReportPhoto">现场拍照<\/button>/);
+  assert.match(wxml, /disabled="\{\{reportSheet\.uploading \|\| reportSheet\.submitting\}\}"[^>]*bindtap="onAddReportPhoto">从相册选择<\/button>/);
   const pageSource = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.js'), 'utf8');
   assert.match(pageSource, /onDelSupplementPhoto\(e\)[\s\S]{0,900}attachment_id: attachmentId/);
-  assert.match(pageSource, /onAddReportPhoto\(\)[\s\S]*?runPhotoActionOnce\(this, 'media_picker'/);
-  assert.match(pageSource, /validateReportPhotoPaths\(paths\)/);
+  assert.match(pageSource, /onAddReportPhoto\(\)[\s\S]*?runPhotoActionOnce\(this, 'report_album'/);
+  assert.match(pageSource, /onTakeReportPhoto\(\)[\s\S]*?runPhotoActionOnce\(this, 'report_camera'/);
+  assert.match(pageSource,
+    /onAddReportPhoto\(\)[\s\S]*?uploadReportPhotoPaths\(paths, context, \{ capture_source: 'unknown' \}\)/);
   assert.match(pageSource, /handlePhotoActionFailure\(error, message => new Promise/);
   assert.match(pageSource, /onAddPhoto\(e\)[\s\S]*?runPhotoActionOnce\(this, captureSource/);
   assert.match(pageSource, /_openTrustedCamera\(sheet\)[\s\S]{0,1600}wx\.navigateTo\(/);
@@ -599,33 +603,33 @@ test('report errors keep their reason and hold the lock until the prompt finishe
     let shownMessage = '';
     let finishes = 0;
     let retryCalls = 0;
-    const first = runPhotoActionOnce(owner, 'media_picker', () => Promise.reject(item.error)
+    const first = runPhotoActionOnce(owner, 'report_album', () => Promise.reject(item.error)
       .catch(error => handlePhotoActionFailure(error, message => new Promise(resolve => {
         shownMessage = message;
         releasePrompt = resolve;
       }))), null, () => { finishes += 1; });
     await new Promise(resolve => setImmediate(resolve));
     assert.match(shownMessage, item.expected);
-    const duplicate = runPhotoActionOnce(owner, 'camera', () => { retryCalls += 1; });
+    const duplicate = runPhotoActionOnce(owner, 'report_camera', () => { retryCalls += 1; });
     assert.strictEqual(duplicate, first);
     assert.equal(retryCalls, 0);
     assert.equal(finishes, 0, 'modal acknowledgement must precede lock release');
     releasePrompt();
     await first;
     assert.equal(finishes, 1);
-    await runPhotoActionOnce(owner, 'camera', () => { retryCalls += 1; });
+    await runPhotoActionOnce(owner, 'report_camera', () => { retryCalls += 1; });
     assert.equal(retryCalls, 1);
   }
 
   let cancelPrompts = 0;
   const cancelOwner = {};
-  await runPhotoActionOnce(cancelOwner, 'media_picker', () => handlePhotoActionFailure(
+  await runPhotoActionOnce(cancelOwner, 'report_album', () => handlePhotoActionFailure(
     { errMsg: 'chooseMedia:fail cancel' },
     () => { cancelPrompts += 1; },
   ));
   assert.equal(cancelPrompts, 0);
   let retried = 0;
-  await runPhotoActionOnce(cancelOwner, 'media_picker', () => { retried += 1; });
+  await runPhotoActionOnce(cancelOwner, 'report_album', () => { retried += 1; });
   assert.equal(retried, 1);
 });
 

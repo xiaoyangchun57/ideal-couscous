@@ -169,6 +169,25 @@ class WorkorderFlowProjectionTest(unittest.TestCase):
                                     headers={'Authorization': 'Bearer other-token'})
         self.assertEqual(forbidden.status_code, 403, forbidden.json)
 
+    def test_in_progress_action_requires_arrival_before_review_submission(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='in_progress',check_in_time=NULL,check_in_user=NULL WHERE id=10")
+        before_arrival = self.client.get('/api/workorders/WO-20260902-101',
+                                         headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(before_arrival.status_code, 200, before_arrival.json)
+        self.assertEqual(before_arrival.json['actions']['primary'], 'check_in')
+        self.assertFalse(before_arrival.json['checked_in'])
+
+        with app_module.get_db() as db:
+            check_in_time = app_module.datetime.now().strftime('%Y-%m-%d 09:00:00')
+            db.execute("UPDATE work_orders SET check_in_time=?,check_in_user='现场人员' WHERE id=10",
+                       (check_in_time,))
+        after_arrival = self.client.get('/api/workorders/WO-20260902-101',
+                                        headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(after_arrival.status_code, 200, after_arrival.json)
+        self.assertEqual(after_arrival.json['actions']['primary'], 'submit_review')
+        self.assertTrue(after_arrival.json['checked_in'])
+
     def test_rework_photo_projection_distinguishes_evidence_cycles(self):
         item = {'id': 100, 'photo_urls': '["/uploads/original.jpg"]', 'required_photos': 4, 'review_status': 3,
                 'evidence_status': 'supplement_required', 'rework_required_at': '2026-09-02'}

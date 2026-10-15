@@ -382,7 +382,7 @@ Page({
       source: 'completed_plan_detail',
     };
     app.globalData.executionTarget = target;
-    wx.switchTab({
+    wx.navigateTo({
       url: '/pages/inspection/inspection',
       fail: () => {
         if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;

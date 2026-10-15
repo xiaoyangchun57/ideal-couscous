@@ -901,19 +901,27 @@
         </picker>
         <view class="field-label">异常描述</view>
         <textarea class="textarea-field" placeholder="请描述异常情况" value="{{reportSheet.description}}" bindinput="onReportDescription" maxlength="500" />
-        <view class="field-label">现场照片（最多 6 张）</view>
+        <view class="field-label">现场照片（1 至 6 张）</view>
         <view class="report-photo-grid">
-          <view class="report-photo-item" wx:for="{{reportSheet.photos}}" wx:key="*this">
-            <image class="photo-img" src="{{item}}" mode="aspectFill" bindtap="onPreviewReportPhoto" data-url="{{item}}" />
-            <text class="photo-del" catchtap="onRemoveReportPhoto" data-url="{{item}}">×</text>
-          </view>
-          <view class="report-photo-item photo-add-item" bindtap="onAddReportPhoto" wx:if="{{reportSheet.photos.length < 6}}">
-            <text class="photo-add-icon">+</text>
-            <text class="photo-add-text">添加照片</text>
+          <view class="report-photo-entry" wx:for="{{reportSheet.photoItems}}" wx:key="key">
+            <view class="report-photo-item">
+              <image class="photo-img" src="{{item.displayUrl || item.localPath}}" mode="aspectFill" binderror="onReportPhotoMediaError" bindtap="onPreviewReportPhoto" data-key="{{item.key}}" />
+              <text wx:if="{{item.status === 'uploading'}}" class="report-photo-state">上传中</text>
+              <text wx:elif="{{item.status === 'failed'}}" class="report-photo-state report-photo-retry" catchtap="onRetryReportPhoto" data-key="{{item.key}}">{{item.requiresNewCapture ? '授权失效，重新拍摄' : '失败，重试'}}</text>
+              <text wx:elif="{{item.mediaRefreshing}}" class="report-photo-state">正在刷新</text>
+              <text wx:elif="{{item.mediaError}}" class="report-photo-state report-photo-retry" catchtap="onRetryReportPhotoMedia" data-key="{{item.key}}">加载失败，点击重试</text>
+              <text class="photo-del" catchtap="onRemoveReportPhoto" data-key="{{item.key}}">×</text>
+            </view>
+            <text wx:if="{{item.status === 'failed' && item.error}}" class="report-photo-message report-photo-error">{{item.error}}</text>
+            <text wx:if="{{item.status === 'failed' && item.nextAction}}" class="report-photo-message">{{item.nextAction}}</text>
           </view>
         </view>
+        <view class="report-photo-actions" wx:if="{{reportSheet.photoItems.length < 6}}">
+          <button class="report-photo-action report-photo-action-primary" disabled="{{reportSheet.uploading || reportSheet.submitting}}" loading="{{reportSheet.uploading}}" bindtap="onTakeReportPhoto">现场拍照</button>
+          <button class="report-photo-action" disabled="{{reportSheet.uploading || reportSheet.submitting}}" bindtap="onAddReportPhoto">从相册选择</button>
+        </view>
       </scroll-view>
-      <button class="btn-primary" style="margin-top:24rpx;" loading="{{reportSheet.submitting}}" disabled="{{reportSheet.submitting}}" bindtap="onSubmitReport">提交上报</button>
+      <button class="btn-primary" style="margin-top:24rpx;" loading="{{reportSheet.submitting}}" disabled="{{reportSheet.uploading || reportSheet.submitting}}" bindtap="onSubmitReport">提交上报</button>
     </view>
 
     <!-- 整改资源 Sheet -->

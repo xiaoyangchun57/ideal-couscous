@@ -26,6 +26,9 @@ MIGRATIONS = (
     ("20260922_008_station_master_refresh", Path(__file__).with_name("migrations") / "20260922_008_station_master_refresh.sql"),
     ("20261011_009_station_monitoring_read_indexes", Path(__file__).with_name("migrations") / "20261011_009_station_monitoring_read_indexes.sql"),
     ("20261012_010_pending_normalization_index", Path(__file__).with_name("migrations") / "20261012_010_pending_normalization_index.sql"),
+    ("20261013_011_station_expected_factors", Path(__file__).with_name("migrations") / "20261013_011_station_expected_factors.sql"),
+    ("20261013_012_hj212_numeric_factor_definitions", Path(__file__).with_name("migrations") / "20261013_012_hj212_numeric_factor_definitions.sql"),
+    ("20261013_013_station_service_policy", Path(__file__).with_name("migrations") / "20261013_013_station_service_policy.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -36,6 +39,9 @@ MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_win
 STATION_MASTER_REFRESH_MIGRATION_VERSION = "20260922_008_station_master_refresh"
 STATION_MONITORING_READ_INDEX_MIGRATION_VERSION = "20261011_009_station_monitoring_read_indexes"
 PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION = "20261012_010_pending_normalization_index"
+STATION_EXPECTED_FACTORS_MIGRATION_VERSION = "20261013_011_station_expected_factors"
+HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION = "20261013_012_hj212_numeric_factor_definitions"
+STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -75,6 +81,9 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_business_observations",
     "site_name_aliases",
     "station_master_refresh_audits",
+    "station_expected_factor_configs",
+    "station_expected_factors",
+    "station_service_policy_events",
 })
 
 
@@ -317,6 +326,27 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     if not pending_index_migration or pending_index_migration[0] != migration_checksum(
             PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION):
         raise MigrationError("pending normalization index migration is missing or incompatible")
+    expected_factors_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_EXPECTED_FACTORS_MIGRATION_VERSION,),
+    ).fetchone()
+    if not expected_factors_migration or expected_factors_migration[0] != migration_checksum(
+            STATION_EXPECTED_FACTORS_MIGRATION_VERSION):
+        raise MigrationError("station expected-factor migration is missing or incompatible")
+    numeric_factor_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION,),
+    ).fetchone()
+    if not numeric_factor_migration or numeric_factor_migration[0] != migration_checksum(
+            HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION):
+        raise MigrationError("HJ212 numeric-factor migration is missing or incompatible")
+    service_policy_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_SERVICE_POLICY_MIGRATION_VERSION,),
+    ).fetchone()
+    if not service_policy_migration or service_policy_migration[0] != migration_checksum(
+            STATION_SERVICE_POLICY_MIGRATION_VERSION):
+        raise MigrationError("station service-policy migration is missing or incompatible")
     required_read_indexes = {
         "idx_ingest_raw_authenticated_endpoint_received",
         "idx_ingest_raw_authenticated_received",
@@ -346,6 +376,48 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     )
     if expected_pending_index_clause not in normalized_pending_index_sql:
         raise MigrationError("pending normalization partial index is missing or incompatible")
+    expected_factor_tables = {"station_expected_factor_configs", "station_expected_factors"}
+    if expected_factor_tables - existing:
+        raise MigrationError("station expected-factor tables are missing")
+    _require_unique_columns(connection, "station_expected_factor_configs", ("site_id", "version"))
+    _require_unique_columns(connection, "station_expected_factor_configs", ("site_id", "idempotency_key"))
+    _require_unique_columns(connection, "station_expected_factors", ("config_id", "business_metric"))
+    expected_factor_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_expected_factors)")
+    }
+    if {"site_id", "business_metric", "display_order", "effective_from"} - expected_factor_columns:
+        raise MigrationError("station expected-factor item contract is missing or incompatible")
+    current_expected_index = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_station_expected_factor_current'"
+    ).fetchone()
+    normalized_current_expected_sql = "".join(
+        str(current_expected_index[0] if current_expected_index else "").upper().split())
+    if ("CREATEUNIQUEINDEX" not in normalized_current_expected_sql or
+            "ONSTATION_EXPECTED_FACTOR_CONFIGS(SITE_ID)" not in normalized_current_expected_sql or
+            "WHEREEFFECTIVE_TOISNULL" not in normalized_current_expected_sql):
+        raise MigrationError("station expected-factor current-version index is missing or incompatible")
+    if "station_service_policy_events" not in existing:
+        raise MigrationError("station service-policy table is missing")
+    service_policy_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_service_policy_events)")
+    }
+    required_service_policy_columns = {
+        "site_id", "version", "previous_service_status", "service_status",
+        "previous_reporting_condition", "reporting_condition", "effective_from",
+        "reason", "changed_by_user_id", "idempotency_key", "request_fingerprint",
+        "created_at",
+    }
+    if required_service_policy_columns - service_policy_columns:
+        raise MigrationError("station service-policy contract is missing or incompatible")
+    _require_unique_columns(connection, "station_service_policy_events", ("site_id", "version"))
+    _require_unique_columns(
+        connection, "station_service_policy_events", ("site_id", "idempotency_key"))
+    required_service_policy_indexes = {
+        "idx_station_service_policy_site_version",
+        "idx_station_service_policy_site_effective",
+    }
+    if required_service_policy_indexes - existing_indexes:
+        raise MigrationError("station service-policy indexes are missing")
     required_master_tables = {"site_name_aliases", "station_master_refresh_audits"}
     if required_master_tables - existing:
         raise MigrationError("station master refresh tables are missing")

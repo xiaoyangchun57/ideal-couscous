@@ -58,6 +58,11 @@ test('current concentrated rework keeps list identity columns and vehicle permis
   assert.match(vehicles, /_idempotency_key: documentIdempotencyKey\.current/);
   assert.match(vehicles, /sort\(\(left, right\) => Number\(right\.id/);
   assert.match(vehicles, /\{isAdmin && <Form\.Item name="plate_no"/);
-  assert.match(vehicles, /\{isAdmin && <Form\.Item name="status"/);
+  const adminCorrectionStart = vehicles.indexOf('{isAdmin && <>');
+  const adminCorrectionEnd = vehicles.indexOf('</>}', adminCorrectionStart);
+  assert.ok(adminCorrectionStart >= 0 && adminCorrectionEnd > adminCorrectionStart);
+  const adminCorrection = vehicles.slice(adminCorrectionStart, adminCorrectionEnd);
+  assert.match(adminCorrection, /管理员纠错/);
+  assert.match(adminCorrection, /<Form\.Item name="status"/);
   assert.match(users, /users\/\$\{record\.id\}\/permanent/);
 });

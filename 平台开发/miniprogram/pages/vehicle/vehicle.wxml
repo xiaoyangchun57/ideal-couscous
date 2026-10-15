@@ -24,6 +24,14 @@
     <text class="vh-alert-text">车辆安排已超期，关联巡检计划尚未完成，请延续用车时间；车辆归还前不会重新进入可申请列表。</text>
   </view>
 
+  <view class="vh-alert" wx:if="{{activeUse && activeUse.plan_deleted}}">
+    <text class="vh-alert-text">关联计划已删除，请完成还车以释放车辆</text>
+  </view>
+
+  <view class="vh-alert" wx:if="{{activeUse && activeUse.plan_status === 'unknown'}}">
+    <text class="vh-alert-text">{{activeUse.plan_issue_message}}</text>
+  </view>
+
   <!-- 当前行程卡（有活动行程） -->
   <view class="vh-hero" wx:if="{{activeUse}}">
     <view class="vh-hero-top">
@@ -31,11 +39,11 @@
       <view class="vh-status-pill vh-status-pill--active">使用中</view>
     </view>
     <text class="vh-hero-plate">{{activeUse.vehicle_label}}</text>
-    <text class="vh-hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.can_return ? '计划末日，可还车' : ('计划行程至 ' + activeUse.trip_end_date)}}</text></text>
+    <text class="vh-hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.plan_deleted ? '关联计划已删除，可还车' : (activeUse.can_return ? '计划末日，可还车' : (activeUse.plan_status === 'unknown' ? '关联计划异常' : ('计划行程至 ' + activeUse.trip_end_date)))}}</text></text>
 
     <!-- 主动作 -->
     <view class="vh-hero-primary">
-      <view class="vh-btn-primary" bindtap="onVehiclePrimaryAction">{{activeUse.needs_extension ? '延续用车' : (activeUse.can_return ? '还车' : '查看计划')}}</view>
+      <view class="vh-btn-primary" bindtap="onVehiclePrimaryAction">{{activeUse.needs_extension ? '延续用车' : (activeUse.can_return ? '还车' : (activeUse.plan_status === 'unknown' ? '核对异常' : '查看计划'))}}</view>
     </view>
 
     <!-- 途中快捷操作 -->

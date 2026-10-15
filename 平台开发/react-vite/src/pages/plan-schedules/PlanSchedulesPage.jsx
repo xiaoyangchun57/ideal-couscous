@@ -18,7 +18,9 @@ import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
-import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
+import {
+  mergePlanEditSites, planEditSitesForDate, replaceReworkWithSchedule, resolveReworkScheduleId,
+} from './planScheduleNavigation';
 import {
   DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
 } from './planRecommendationScope';
@@ -483,8 +485,7 @@ export default function PlanSchedulesPage() {
       const [siteRows, vehicleRows, partRows, scopeResult] = await Promise.all(requests);
       if (!mountedRef.current || requestId !== editorRequestRef.current) return;
       const authorizedIds = scopeResult?.site_ids ? new Set(scopeResult.site_ids.map(Number)) : null;
-      setEditSites((Array.isArray(siteRows) ? siteRows : siteRows?.sites || [])
-        .filter(site => !authorizedIds || authorizedIds.has(Number(site.id))));
+      setEditSites(mergePlanEditSites(siteRows, schedule, authorizedIds));
       setEditItemOptions({});
       setEditVehicles((Array.isArray(vehicleRows) ? vehicleRows : []).filter(vehicle => vehicle.status !== 'retired'));
       setEditParts(Array.isArray(partRows) ? partRows : []);
@@ -500,6 +501,10 @@ export default function PlanSchedulesPage() {
 
   const selectedEditSiteIds = useMemo(() => [...new Set(Object.values(editDraft?.plan_data || {})
     .flatMap(day => Array.isArray(day?.sites) ? day.sites.map(Number) : []))], [editDraft?.plan_data]);
+  const editSiteById = useMemo(
+    () => new Map(editSites.map(site => [Number(site.id), site])),
+    [editSites],
+  );
 
   useEffect(() => {
     if (!editOpen || !editDraft?.schedule_type) return undefined;
@@ -529,7 +534,8 @@ export default function PlanSchedulesPage() {
           const selected = { ...(day?.inspection_items || {}) };
           (day?.sites || []).forEach(siteId => {
             const key = String(siteId);
-            if (!(key in selected)) {
+            const site = editSiteById.get(Number(siteId));
+            if (!(key in selected) && !site?.is_historical_ended) {
               selected[key] = (options[Number(siteId)] || []).map(item => Number(item.id));
               changed = true;
             }
@@ -545,7 +551,7 @@ export default function PlanSchedulesPage() {
       setEditItemsReady(false);
     });
     return () => { cancelled = true; };
-  }, [editOpen, editDraft?.schedule_type, selectedEditSiteIds.join(','), editItemsReloadKey]);
+  }, [editOpen, editDraft?.schedule_type, editSiteById, selectedEditSiteIds.join(','), editItemsReloadKey]);
 
   const updateEditDay = useCallback((date, patch) => {
     setEditDraft(current => current ? {
@@ -1507,7 +1513,8 @@ export default function PlanSchedulesPage() {
                       <Select mode="multiple" showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
                         value={day.sites || []} placeholder="选择当日巡检站点"
                         onChange={sites => updateEditDay(date, { sites })}
-                        options={editSites.map(site => ({ value: Number(site.id), label: site.name }))} />
+                        options={planEditSitesForDate(editSites, date)
+                          .map(site => ({ value: Number(site.id), label: site.name }))} />
                       {(day.sites || []).map(siteId => {
                         const choices = editItemOptions[Number(siteId)] || [];
                         const selected = day.inspection_items?.[String(siteId)] || [];

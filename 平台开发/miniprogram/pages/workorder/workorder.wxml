@@ -57,8 +57,8 @@
   <view class="bottom-spacer"></view>
 
   <!-- ===== 工单详情 Sheet ===== -->
-  <view class="om-sheet-mask" wx:if="{{sheet.open}}" catchtap="onClose"></view>
-  <view class="om-sheet workorder-detail-sheet" wx:if="{{sheet.open}}">
+  <view class="om-sheet-mask" wx:if="{{sheet.open}}" hidden="{{vehicleApply.open || partsApply.open}}" catchtap="onClose"></view>
+  <view class="om-sheet workorder-detail-sheet" wx:if="{{sheet.open}}" hidden="{{vehicleApply.open || partsApply.open}}">
     <view class="om-sheet-dismiss workorder-detail-close" catchtap="onClose">
       <view class="ico ico-close"></view>
     </view>
@@ -74,12 +74,13 @@
         </view>
       </view>
 
-      <!-- 当前阶段说明 -->
-      <view class="wos-phase">
+      <!-- 当前阶段说明：色调只由服务端 actions.primary / 数据状态决定，不自行推导到场状态 -->
+      <view class="wos-phase {{detailError ? 'wos-phase--error' : (sheet.item.detailStale ? 'wos-phase--stale' : ((sheet.item.actions.primary === 'accept' || sheet.item.actions.primary === 'check_in' || sheet.item.actions.primary === 'start' || sheet.item.actions.primary === 'submit_review') ? 'wos-phase--action' : ''))}}">
         <text class="wos-phase-label">当前阶段</text>
         <view class="wos-phase-content">
           <text class="wos-phase-text">{{detailError || sheet.item.action_summary || '状态信息暂不可用，请刷新后重试'}}</text>
         </view>
+        <button wx:if="{{sheet.item.detailStale}}" class="btn-ghost btn-sm" loading="{{detailLoading}}" bindtap="onRefreshWorkorderDetail">刷新详情</button>
       </view>
 
       <!-- 分隔 -->
@@ -102,7 +103,15 @@
         <view class="wos-field">
           <view class="wos-field-header">
             <text class="wos-field-label">处置影像（{{sheet.item.images_arr ? sheet.item.images_arr.length : 0}}/6）</text>
-            <button class="btn-ghost btn-sm wos-upload-btn" bindtap="onUploadImage">上传</button>
+            <button class="btn-ghost btn-sm wos-upload-btn" bindtap="onUploadImage">拍照</button>
+          </view>
+          <view class="wos-photo-draft" wx:if="{{workorderPhotoDraft}}">
+            <image class="wos-photo-draft-image" src="{{workorderPhotoDraft.path}}" mode="aspectFill"></image>
+            <view class="wos-photo-draft-body">
+              <text class="wos-photo-draft-status" wx:if="{{workorderPhotoDraft.status === 'processing'}}">照片处理中，请稍候</text>
+              <text class="wos-photo-draft-error" wx:else>{{workorderPhotoDraft.error || '上传失败，请重试'}}</text>
+              <button wx:if="{{workorderPhotoDraft.status === 'failed'}}" class="btn-ghost btn-sm wos-photo-retry" bindtap="onRetryWorkorderPhoto">重试上传</button>
+            </view>
           </view>
           <view class="wos-img-grid" wx:if="{{sheet.item.images_arr && sheet.item.images_arr.length > 0}}">
             <view wx:for="{{sheet.item.images_arr}}" wx:for-item="imgItem" wx:key="*this" class="wos-img-wrap">
@@ -147,12 +156,15 @@
 
       <view class="wos-group">
         <view class="wos-group-title">关联资源</view>
-        <text wx:if="{{sheet.item.relatedUnavailable}}" class="wos-empty">关联备件和回收记录暂不可用</text>
+        <block wx:if="{{sheet.item.relatedUnavailable}}">
+          <text class="wos-empty">关联资源暂不可用</text>
+          <button class="btn-ghost btn-sm" loading="{{relatedLoading}}" bindtap="onRefreshRelated">刷新关联资源</button>
+        </block>
         <block wx:elif="{{sheet.item.related}}">
+          <text class="wos-info-value" wx:if="{{sheet.item.related.vehicles.length}}">关联用车申请 {{sheet.item.related.vehicles.length}} 条</text>
           <text class="wos-info-value" wx:if="{{sheet.item.related.parts.length}}">关联备件申请 {{sheet.item.related.parts.length}} 条</text>
           <text class="wos-info-value" wx:if="{{sheet.item.related.recycles.length}}">关联设备回收 {{sheet.item.related.recycles.length}} 条</text>
-          <text class="wos-empty" wx:if="{{!sheet.item.related.parts.length && !sheet.item.related.recycles.length}}">暂无关联备件或回收记录</text>
-          <text class="wos-empty">车辆关联尚未接入</text>
+          <text class="wos-empty" wx:if="{{!sheet.item.related.vehicles.length && !sheet.item.related.parts.length && !sheet.item.related.recycles.length}}">暂无关联资源记录</text>
         </block>
         <text wx:else class="wos-empty">正在读取关联资源</text>
       </view>
@@ -209,6 +221,7 @@
       <!-- in_progress 处置中 -->
       <block wx:elif="{{sheet.item.actions.primary === 'submit_review' && !sheet.item.detailStale}}">
         <button class="btn-primary btn-lg" loading="{{acting}}" disabled="{{!sheet.item.has_images}}" bindtap="doReview">提交核验</button>
+        <text class="wos-action-hint" wx:if="{{!sheet.item.has_images}}">需先上传 1 张处置影像后才能提交核验</text>
         <view class="wos-sub-actions" wx:if="{{sheet.item.actions.can_apply_resources}}">
           <button class="btn-ghost wos-sub-btn" bindtap="onApplyVehicle">申请用车</button>
           <button class="btn-ghost wos-sub-btn" bindtap="onApplyParts">申请备件</button>
@@ -220,7 +233,7 @@
 
   <!-- ===== 用车申请 Sheet ===== -->
   <view class="sheet-mask" wx:if="{{vehicleApply.open}}" catchtap="onCloseVehicle"></view>
-  <view class="sheet" wx:if="{{vehicleApply.open}}">
+  <view class="sheet wo-vehicle-apply-sheet" wx:if="{{vehicleApply.open}}">
     <view class="sheet-handle"></view>
 
     <!-- Sheet 头部 -->
@@ -232,12 +245,27 @@
     </view>
 
     <scroll-view class="sheet-scroll" scroll-y="{{true}}" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <!-- 上下文：关联工单 -->
       <view class="wo-detail-card">
         <view class="wo-detail-row">
           <text class="wo-detail-label">关联工单</text>
           <text class="wo-detail-value">{{sheet.item.order_no}}</text>
         </view>
-        <picker wx:if="{{!vehicleApply.noVehicleRequired}}" mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
+      </view>
+
+      <!-- 决策行先行：默认无需，答案字段在下方条件展开，避免无关字段与提交误导 -->
+      <view class="wo-toggle-row">
+        <view class="wo-toggle-left">
+          <text class="wo-toggle-title">是否需要另行申请车辆</text>
+          <text class="wo-toggle-hint">默认无需，可直接返回工单继续处置</text>
+        </view>
+        <!-- switch 开启色为设计系统 success 绿（switch.json）；微信 switch 的 color 仅接受颜色值，不支持 var() -->
+        <switch checked="{{vehicleApply.requiresVehicle}}" bindchange="onVehicleRequirementChange" color="#34c759" />
+      </view>
+
+      <!-- 需要车辆：才展开车辆选择与事由，沿原申请/审批接口（wx:if 保留在元素自身，资源申请测试契约） -->
+      <view class="wo-detail-card wo-detail-card--extra" wx:if="{{vehicleApply.requiresVehicle}}">
+        <picker wx:if="{{vehicleApply.requiresVehicle}}" mode="selector" range="{{vehicleOptions}}" range-key="label" value="{{vehicleApply.index}}" bindchange="onVehiclePick">
           <view class="wo-detail-row wo-detail-row-clickable">
             <text class="wo-detail-label">选择车辆</text>
             <view class="wo-detail-value-right">
@@ -248,36 +276,28 @@
         </picker>
       </view>
 
-      <view class="wo-toggle-row">
-        <view class="wo-toggle-left">
-          <text class="wo-toggle-title">本工单无需用车</text>
-          <text class="wo-toggle-hint">仅限站点可步行到达等明确情形</text>
-        </view>
-        <switch checked="{{vehicleApply.noVehicleRequired}}" bindchange="onNoVehicleRequired" color="#007aff" />
-      </view>
-
-      <view class="wo-detail-field" wx:if="{{vehicleApply.noVehicleRequired}}">
-        <text class="wo-detail-field-label">无需用车原因</text>
-        <textarea class="wo-detail-textarea" placeholder="请说明无需车辆的具体原因" value="{{vehicleApply.exceptionReason}}" bindinput="onVehicleExceptionReason" maxlength="200"></textarea>
-      </view>
-
-      <view class="wo-detail-field">
+      <view class="wo-detail-field" wx:if="{{vehicleApply.requiresVehicle}}">
         <text class="wo-detail-field-label">用车事由</text>
-        <textarea class="wo-detail-textarea" placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea>
+        <textarea class="wo-detail-textarea" auto-height placeholder="请说明用车事由" value="{{vehicleApply.reason}}" bindinput="onVehicleReason" maxlength="200"></textarea>
       </view>
 
       <view class="sheet-content-spacer"></view>
     </scroll-view>
 
-    <view class="wo-detail-actions">
-      <button class="btn-primary-main" bindtap="submitVehicle">提交申请</button>
-      <button class="btn-secondary-outline wo-detail-btn-gap" bindtap="onCloseVehicle">取消</button>
+    <!-- 无需车辆：仅一个满宽主操作（纯返回工单，不发申请） -->
+    <view class="sheet-bottom-bar sheet-bottom-bar--single" wx:if="{{!vehicleApply.requiresVehicle}}">
+      <button class="btn-primary btn-lg" bindtap="onCloseVehicle">返回工单继续处置</button>
+    </view>
+    <!-- 需要车辆：取消（ghost）+ 提交申请（primary），主次 1:2 -->
+    <view class="sheet-bottom-bar" wx:else>
+      <button class="btn-ghost btn-lg" bindtap="onCloseVehicle">取消</button>
+      <button class="btn-primary btn-lg" loading="{{vehicleApply.submitting}}" disabled="{{vehicleApply.submitting}}" bindtap="submitVehicle">提交申请</button>
     </view>
   </view>
 
   <!-- ===== 备件申请 Sheet ===== -->
   <view class="sheet-mask" wx:if="{{partsApply.open}}" catchtap="onCloseParts"></view>
-  <view class="sheet" wx:if="{{partsApply.open}}">
+  <view class="sheet parts-apply-sheet" wx:if="{{partsApply.open}}">
     <view class="sheet-handle"></view>
 
     <!-- Sheet 头部 -->
@@ -365,7 +385,7 @@
       <!-- 申请事由 -->
       <view class="wop-group">
         <view class="wos-group-title">申请事由</view>
-        <textarea class="wos-textarea" placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea>
+        <textarea class="wos-textarea" auto-height placeholder="请说明申请事由" value="{{partsApply.reason}}" bindinput="onPartsReason" maxlength="200"></textarea>
       </view>
 
       <view class="sheet-content-spacer"></view>

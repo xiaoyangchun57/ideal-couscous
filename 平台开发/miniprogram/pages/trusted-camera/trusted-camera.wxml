@@ -20,6 +20,19 @@
   </view>
 
   <view class="camera-controls">
+    <view class="camera-watermark {{capturing ? 'is-disabled' : ''}}">
+      <view class="camera-watermark-text">
+        <text class="camera-watermark-title">显示水印</text>
+        <text class="camera-watermark-hint">关闭仅隐藏照片画面水印，拍摄信息与可信校验仍会记录</text>
+      </view>
+      <switch
+        class="camera-watermark-switch"
+        checked="{{displayWatermark}}"
+        disabled="{{capturing}}"
+        color="#0a84ff"
+        bindchange="onDisplayWatermarkChange"
+      />
+    </view>
     <view class="camera-status {{errorText ? 'is-error' : ''}}">
       <text>{{statusText}}</text>
       <text wx:if="{{previewReady}}" class="preview-ready">相机画面已就绪</text>

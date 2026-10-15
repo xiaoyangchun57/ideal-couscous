@@ -54,13 +54,21 @@ test('monitoring pages cancel superseded requests and ignore stale responses', (
 
 test('site directory reuses an identity-scoped snapshot and keeps refresh non-blocking', () => {
   const sites = source('./SitesPage.jsx');
-  assert.match(sites, /stationDirectorySnapshotKey\(user, monitoringScope, token\)/);
+  assert.match(sites, /stationDirectorySnapshotKey\(\s*user, monitoringScope, token, serviceScope/);
   assert.match(sites, /readSiteDirectorySnapshot\(monitoringRequestKey\)/);
   assert.match(sites, /writeSiteDirectorySnapshot\(\s*monitoringRequestKey/);
   assert.match(sites, /setRefreshing\(loadMode === 'refresh'\)/);
   assert.match(sites, /loading=\{directoryLoading\}/);
-  assert.match(sites, /正在后台核对最新站点与监测状态/);
+  assert.match(sites, /站点台账已加载，监测状态仍在加载中/);
   assert.match(sites, /previousSnapshot\?\.rows \|\| \[\]/);
+  assert.match(sites, /resultSnapshot/);
+  assert.match(sites, /当前展示上次成功结果，状态待更新/);
+  assert.match(sites, /监测结果更新时间/);
+  const baseSnapshotCommit = sites.indexOf('const baseSnapshot = storeSnapshot');
+  const monitoringAwait = sites.indexOf('await monitoringResultPromise');
+  assert.ok(baseSnapshotCommit >= 0 && monitoringAwait > baseSnapshotCommit,
+    'the site ledger must publish before waiting for monitoring');
+  assert.doesNotMatch(sites, /Promise\.allSettled\(requests\)/);
 });
 
 test('closed monitoring capability hides entries and makes the site ledger skip monitoring requests', () => {
@@ -70,8 +78,8 @@ test('closed monitoring capability hides entries and makes the site ledger skip 
   const navigation = source('../../config/navigation.jsx');
   const search = source('../../components/GlobalSearch.jsx');
 
-  assert.match(sites, /if \(monitoringPublic\) requests\.push\(api\.stationMonitoringSites/);
-  assert.match(sites, /monitoringPublic && <Button[^]*?>监测<\/Button>/);
+  assert.match(sites, /const monitoringResultPromise = monitoringPublic[^]*api\.stationMonitoringSites/);
+  assert.match(sites, /monitoringPublic && <Button[^]*?record\.service_status === 'ended' \? '历史' : '监测'/);
   assert.match(sites, /isAdmin && monitoringPublic && <Button[^]*?>接入观察<\/Button>/);
   assert.match(sites, /\.\.\.\(monitoringPublic \? \[\{[^]*?label: '数据接入状态'/);
   assert.match(sites, /\{monitoringPublic && \([^]*?<ArchiveTrendPanel/);
@@ -91,6 +99,51 @@ test('single-site monitoring stays a data fact page without archive or device-he
     assert.doesNotMatch(detail, new RegExp(removed));
   }
   assert.deepEqual(Object.keys((await import('./stationMonitoring.js')).AXIS_META), ['communication', 'data']);
+});
+
+test('single-site monitoring edits only the explicit nine-factor station denominator', () => {
+  const detail = source('./SiteMonitoringPage.jsx');
+  const api = source('../../services/api.js');
+  assert.match(detail, /api\.stationExpectedFactors\(siteId/);
+  assert.match(detail, /api\.updateStationExpectedFactors\(siteId/);
+  assert.match(detail, /idempotency_key: expectedSaveKeyRef\.current\.key/);
+  assert.match(detail, /expectedFactorVersion: next\.version/);
+  assert.match(detail, /应监测因子未设置/);
+  assert.match(detail, /至少选择一项应监测因子/);
+  assert.match(detail, /当前账号仅可查看/);
+  assert.match(api, /stationExpectedFactors:/);
+  assert.match(api, /updateStationExpectedFactors:/);
+  const refreshedOverview = detail.indexOf('const refreshed = await load({');
+  const savedNotice = detail.indexOf("setExpectedNotice(next.replayed");
+  assert.ok(refreshedOverview >= 0 && savedNotice > refreshedOverview,
+    'save success must wait for the matching overview version');
+});
+
+test('site service policy stays in the station archive and isolates current/all list snapshots', () => {
+  const sites = source('./SitesPage.jsx');
+  const api = source('../../services/api.js');
+
+  assert.match(sites, /service_scope=\$\{serviceScope\}/);
+  assert.match(sites, /当前服务站点/);
+  assert.match(sites, /含服务结束/);
+  assert.match(sites, /searchParams\.get\('service_scope'\) === 'all'/);
+  assert.match(sites, /monitoringDetailPath\(record\.id\)/);
+  assert.match(sites, /zIndex=\{1100\}/);
+  assert.match(sites, /维护服务政策/);
+  assert.match(sites, /服务结束，不参与当前到报评价/);
+  assert.match(sites, /当前输入已保留/);
+  assert.match(sites, /expected_version: Number\(servicePolicyData\.version \|\| 0\)/);
+  assert.match(sites, /idempotency_key: servicePolicyRetryRef\.current\.key/);
+  assert.match(sites, /我确认该站点将退出当前服务范围、到报分母和新缺报提醒/);
+  assert.match(api, /stationServicePolicy:/);
+  assert.match(api, /updateStationServicePolicy:/);
+});
+
+test('monitoring detail returns with directory query state and limits trend candidates', () => {
+  const detail = source('./SiteMonitoringPage.jsx');
+  assert.match(detail, /const returnQuery = searchParams\.toString\(\)/);
+  assert.match(detail, /monitoringTrendFactors\(/);
+  assert.match(detail, /options=\{trendFactors\.map/);
 });
 
 test('access observation does not consume sensitive endpoint identity fields', () => {

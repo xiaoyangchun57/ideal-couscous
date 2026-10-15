@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -55,7 +56,7 @@ class ManualReportEvidenceTest(unittest.TestCase):
                 );
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, stored_path TEXT, site_id INTEGER, uploader_id INTEGER,
-                    source_type TEXT, source_id INTEGER, description TEXT
+                    source_type TEXT, source_id INTEGER, description TEXT, extra_json TEXT DEFAULT '{}'
                 );
             ''')
             db.execute("""INSERT INTO users (id,role,real_name,status,phone)
@@ -63,8 +64,9 @@ class ManualReportEvidenceTest(unittest.TestCase):
             db.execute('INSERT INTO user_sites VALUES (9, 7)')
             db.execute("INSERT INTO user_roles VALUES (9, 'operator')")
             db.execute("""INSERT INTO operation_attachments
-                (stored_path, site_id, uploader_id, source_type, source_id, description)
-                VALUES ('/uploads/site_photos/a.jpg', 7, 9, 'site_photo', 0, 'pending')""")
+                (stored_path, site_id, uploader_id, source_type, source_id, description, extra_json)
+                VALUES ('/uploads/site_photos/a.jpg', 7, 9, 'site_photo', 0, 'pending',
+                        '{"material_role":"pending_manual_report","capture_context":"manual_report"}')""")
         self.client = app_module.app.test_client()
 
     def tearDown(self):
@@ -84,8 +86,13 @@ class ManualReportEvidenceTest(unittest.TestCase):
         report_id = response.json['id']
         db = sqlite3.connect(self.db_path)
         try:
-            attachment = db.execute('SELECT source_type, source_id FROM operation_attachments').fetchone()
-            self.assertEqual(tuple(attachment), ('manual_report', report_id))
+            attachment = db.execute(
+                'SELECT source_type, source_id, extra_json FROM operation_attachments'
+            ).fetchone()
+            self.assertEqual(tuple(attachment[:2]), ('manual_report', report_id))
+            metadata = json.loads(attachment[2])
+            self.assertEqual(metadata['material_role'], 'formal')
+            self.assertEqual(metadata['capture_context'], 'manual_report')
             assignee = db.execute('SELECT assignee FROM work_orders').fetchone()[0]
             self.assertEqual(assignee, 'Operator')
         finally:

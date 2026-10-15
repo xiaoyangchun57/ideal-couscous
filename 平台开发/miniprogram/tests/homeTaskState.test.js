@@ -39,30 +39,42 @@ test('all miniprogram workorder surfaces consume the server display title', () =
   assert.doesNotMatch(workorderView, /class="(?:wo-title|wos-title)">\{\{(?:item|sheet\.item)\.title\}\}/);
 });
 
-test('today actions expose at most one exact workorder and one independent alert', () => {
+test('today actions expose every actionable exact workorder and one independent alert', () => {
   const actions = homeActions(
-    [{ order_no: 'WO-1', status: 'pending', title: '[自动] 泵站处置', display_title: '泵站处置' }, { order_no: 'WO-2' }],
+    [
+      { order_no: 'WO-1', status: 'pending', title: '[自动] 泵站处置', display_title: '泵站处置' },
+      { order_no: 'MR-2', status: 'accepted', source: 'manual_report', display_title: '感官异常' },
+      { order_no: 'WO-3', status: 'reviewing', display_title: '核验中事项' },
+      { order_no: 'WO-4', status: 'closed', display_title: '已完成事项' },
+    ],
     [{ id: 8, level: 'red', metric: 'ph' }, { id: 9 }]
   );
-  assert.equal(actions.length, 2);
+  assert.equal(actions.length, 3);
   assert.equal(actions[0].kind, 'workorder');
   assert.equal(actions[0].target.objectId, 'WO-1');
   assert.equal(actions[0].statusLabel, '待受理');
   assert.equal(actions[0].statusTone, 'info');
   assert.equal(actions[0].title, '泵站处置');
-  assert.equal(actions[1].kind, 'alert');
-  assert.equal(actions[1].target.objectId, 8);
-  assert.equal(actions[1].statusCls, 'red');
-  assert.equal(actions[1].statusLabel, 'I级');
-  assert.equal(actions[1].statusTone, 'danger');
+  assert.equal(actions[1].kind, 'workorder');
+  assert.equal(actions[1].target.objectId, 'MR-2');
+  assert.equal(actions[1].title, '感官异常');
+  assert.equal(actions[2].kind, 'alert');
+  assert.equal(actions[2].target.objectId, 8);
+  assert.equal(actions[2].statusCls, 'red');
+  assert.equal(actions[2].statusLabel, 'I级');
+  assert.equal(actions[2].statusTone, 'danger');
+  assert.equal(actions.some(action => action.target.objectId === 'WO-3'), false);
+  assert.equal(actions.some(action => action.target.objectId === 'WO-4'), false);
   assert.deepEqual(homeActions([], []), []);
 
   const levels = ['red', 'orange', 'yellow', 'blue'].map((level, index) => homeActions([], [{ id: index + 1, level }])[0].statusLabel);
   assert.deepEqual(levels, ['I级', 'II级', 'III级', 'IV级']);
   const alertTones = ['red', 'orange', 'yellow', 'blue'].map((level, index) => homeActions([], [{ id: index + 1, level }])[0].statusTone);
   assert.deepEqual(alertTones, ['danger', 'warning', 'warning', 'info']);
-  const workorderTones = ['pending', 'in_progress', 'reviewing', 'closed', 'unknown'].map(status => homeActions([{ order_no: status, status }], [])[0].statusTone);
-  assert.deepEqual(workorderTones, ['info', 'warning', 'warning', 'success', 'neutral']);
+  const workorderTones = ['pending', 'accepted', 'dispatched', 'in_progress']
+    .map(status => homeActions([{ order_no: status, status }], [])[0].statusTone);
+  assert.deepEqual(workorderTones, ['info', 'info', 'info', 'warning']);
+  assert.deepEqual(homeActions([{ order_no: 'done', status: 'resolved' }], []), []);
 });
 
 test('today package has an explicit empty state and no future-plan projection', () => {

@@ -11,6 +11,7 @@ import {
   monitoringStatusView,
   monitoringSummaryItems,
   monitoringDefaultTrendMetric,
+  monitoringTrendFactors,
   monitoringCoverageLabel,
   monitoringTrendChartOption,
   monitoringTrendView,
@@ -35,6 +36,7 @@ test('monitoring status metadata covers the eight product states', () => {
     'data_unavailable',
   ]);
   assert.deepEqual(Object.keys(AXIS_META), ['communication', 'data']);
+  assert.equal(MONITORING_STATUS_META.raw_received_config_pending.label, '应监测因子未设置');
 });
 
 test('monitoring status never falls back to the legacy station status', () => {
@@ -149,6 +151,9 @@ test('site directory snapshot survives page re-entry but is isolated by session 
   assert.deepEqual(restored.rows.map((item) => item.id), [9]);
   assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(user, 'all', 'session-a')), null);
   assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(
+    user, 'mine', 'session-a', 'all')),
+  null);
+  assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(
     { ...user, roles: ['operator'] }, 'mine', 'session-a')),
   null);
   assert.equal(readSiteDirectorySnapshot(stationDirectorySnapshotKey(
@@ -193,6 +198,26 @@ test('trend defaults to a configured factor with a latest valid value', () => {
   assert.equal(monitoringDefaultTrendMetric(factors, [{ business_metric: 'ammonia' }]), 'ammonia');
   assert.equal(monitoringDefaultTrendMetric(factors, []), 'ph');
   assert.equal(monitoringDefaultTrendMetric([], [{ business_metric: 'ph' }]), '');
+});
+
+test('trend factors stay within the nine station metrics and honor the saved site subset', () => {
+  const factors = [
+    { business_metric: 'total_tin' },
+    { business_metric: 'ph' },
+    { business_metric: 'dissolved_oxygen' },
+    { business_metric: 'total_lead' },
+    { business_metric: 'ammonia' },
+    { business_metric: 'ph' },
+  ];
+  assert.deepEqual(
+    monitoringTrendFactors(factors).map((item) => item.business_metric),
+    ['ph', 'dissolved_oxygen', 'ammonia'],
+  );
+  assert.deepEqual(
+    monitoringTrendFactors(factors, ['dissolved_oxygen', 'ammonia'], true)
+      .map((item) => item.business_metric),
+    ['dissolved_oxygen', 'ammonia'],
+  );
 });
 
 test('data reception and observation axes preserve server labels and status visual semantics', () => {

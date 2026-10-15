@@ -58,6 +58,7 @@ function projectWorkorder(item) {
   if (!item) return null;
   const value = maps.workorderCn(item);
   const objectId = String(value.order_no || '').trim();
+  if (!objectId) return null;
   return {
     key: `workorder:${objectId || 'unavailable'}`,
     kind: 'workorder',
@@ -121,7 +122,11 @@ function projectRework(site) {
 function homeActions(workorders, alerts, sites) {
   const reworkActions = (Array.isArray(sites) ? sites : [])
     .map(projectRework).filter(Boolean);
-  return [...reworkActions, projectWorkorder(first(workorders)), projectAlert(first(alerts))].filter(Boolean);
+  const actionableStatuses = new Set(['pending', 'accepted', 'dispatched', 'in_progress']);
+  const workorderActions = (Array.isArray(workorders) ? workorders : [])
+    .filter(item => actionableStatuses.has(String(item && item.status || '').toLowerCase()))
+    .map(projectWorkorder).filter(Boolean);
+  return [...reworkActions, ...workorderActions, projectAlert(first(alerts))].filter(Boolean);
 }
 
 function homePackage(workPackage, summary) {

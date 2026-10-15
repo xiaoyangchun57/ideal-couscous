@@ -102,7 +102,10 @@ function decorateUse(item) {
     is_returned: isReturnedUse(item),
     needs_extension: !!item.needs_extension,
     use_expired: !!item.use_expired,
-    plan_completed: !!item.plan_completed
+    plan_completed: !!item.plan_completed,
+    plan_deleted: !!item.plan_deleted,
+    plan_status: item.plan_status || '',
+    plan_issue_message: item.plan_issue_message || ''
   });
 }
 
@@ -520,6 +523,9 @@ Page({
   onVehiclePrimaryAction() {
     if (this.data.activeUse && this.data.activeUse.needs_extension) this.onOpenExtension();
     else if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
+    else if (this.data.activeUse && this.data.activeUse.plan_status === 'unknown') {
+      wx.showToast({ title: this.data.activeUse.plan_issue_message || '关联计划数据异常，请联系管理员核对', icon: 'none' });
+    }
     else this.onOpenPlanChange();
   },
   onOpenExtension(e) {

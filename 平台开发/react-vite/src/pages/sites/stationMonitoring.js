@@ -1,7 +1,7 @@
 export const MONITORING_STATUS_META = {
   not_connected: { label: '未接入', color: 'default' },
   awaiting_first_frame: { label: '等待首帧', color: 'blue' },
-  raw_received_config_pending: { label: '原文已收/档案待批准', color: 'gold' },
+  raw_received_config_pending: { label: '应监测因子未设置', color: 'gold' },
   waiting_first_valid: { label: '等待首个有效观测', color: 'blue' },
   interval_unconfigured: { label: '数据周期未配置', color: 'default' },
   normal: { label: '数据正常', color: 'green' },
@@ -25,7 +25,7 @@ function normalizedCapabilities(user = {}) {
     .map(([key, value]) => [key, value]);
 }
 
-export function stationDirectorySnapshotKey(user = {}, scope, sessionKey = '') {
+export function stationDirectorySnapshotKey(user = {}, scope, sessionKey = '', serviceScope = 'current') {
   const identity = user.id ?? user.username;
   if (identity == null || !scope || !sessionKey) return null;
   return JSON.stringify({
@@ -35,6 +35,7 @@ export function stationDirectorySnapshotKey(user = {}, scope, sessionKey = '') {
     roles: normalizedRoles(user),
     capabilities: normalizedCapabilities(user),
     scope,
+    serviceScope,
   });
 }
 
@@ -214,6 +215,22 @@ export function axisView(key, axis = {}) {
 
 export function monitoringFactorName(item = {}) {
   return item.factor_name_cn || item.business_name || item.label || item.business_metric || '未命名业务因子';
+}
+
+const STATION_TREND_METRICS = new Set([
+  'dissolved_oxygen', 'ph', 'turbidity', 'water_temp', 'conductivity',
+  'codmn', 'total_nitrogen', 'total_phosphorus', 'ammonia',
+]);
+
+export function monitoringTrendFactors(factors = [], selectedMetrics = [], configured = false) {
+  const selected = new Set(configured ? selectedMetrics : STATION_TREND_METRICS);
+  const seen = new Set();
+  return factors.filter((item) => {
+    const metric = item?.business_metric;
+    if (!STATION_TREND_METRICS.has(metric) || !selected.has(metric) || seen.has(metric)) return false;
+    seen.add(metric);
+    return true;
+  });
 }
 
 export function formatMonitoringTime(value) {

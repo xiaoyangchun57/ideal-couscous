@@ -3,8 +3,7 @@ const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
 const {
-  chooseInspectionPhotos, fileToBase64, captureFlushedPhoto,
-  isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
+  fileToBase64, captureFlushedPhoto, photoCaptureErrorMessage,
 } = require('../../utils/photos.js');
 const { resolveUploadUrl, uploadStoragePath } = require('../../utils/url.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
@@ -34,15 +33,16 @@ Page({
       { key: 'reviewing', label: '待核验' },
       { key: 'closed', label: '已完成' }
     ],
-    sheet: { open: false, item: null }, detailLoading: false, detailError: '', isAdmin: false, acting: false,
+    sheet: { open: false, item: null }, detailLoading: false, detailError: '', relatedLoading: false, isAdmin: false, acting: false,
     resolutionNote: '',
+    workorderPhotoDraft: null,
     online: true, syncCount: 0,
     // 关联下拉选项（可选，不指定则纯文字兜底）
     vehicleOptions: [{ id: 0, label: '暂无可用车辆' }],
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
     // 极简申请弹层（含关联下标）
-    vehicleApply: { open: false, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' },
+    vehicleApply: { open: false, requiresVehicle: false, reason: '', index: 0, submitting: false, requestKey: '' },
     partsFulfillmentOptions: [
       { key: 'stock', label: '使用现有库存' },
       { key: 'local_purchase', label: '附近紧急购买' },
@@ -52,10 +52,17 @@ Page({
   },
 
   onLoad(options) {
+    this._alive = true;
+    this._workorderPhotoDrafts = Object.create(null);
     const orderNo = String(options && options.order_no || '').trim();
     if (orderNo && orderNo.length <= 100) app.globalData.selWorkorderNo = orderNo;
     const notificationId = Number(options && options.notification_id);
     this._resultNotificationId = Number.isInteger(notificationId) && notificationId > 0 ? notificationId : null;
+  },
+
+  onUnload() {
+    this._alive = false;
+    this._trustedCameraRequest = null;
   },
 
   onShow() {
@@ -125,7 +132,12 @@ Page({
     if (!orderNo) return;
     const requestId = (this._detailRequest || 0) + 1;
     this._detailRequest = requestId;
-    this.setData({ sheet: { open: true, item: seed || null }, detailLoading: true, detailError: '' });
+    this.setData({
+      sheet: { open: true, item: seed || null },
+      detailLoading: true,
+      detailError: '',
+      workorderPhotoDraft: this._photoDraftForOrder(orderNo),
+    });
     api.workorderDetail(orderNo).then(item => {
       if (this._detailRequest !== requestId) return null;
       const mapped = maps.workorderCn(item || {});
@@ -136,13 +148,21 @@ Page({
         }) },
         detailLoading: false,
         resolutionNote: mapped.remark || '',
+         workorderPhotoDraft: this._photoDraftForOrder(orderNo),
       });
       this._markResultNotificationRead();
       return api.workorderRelated(orderNo).catch(() => ({ unavailable: true }));
     }).then(related => {
       if (!related || this._detailRequest !== requestId || !this.data.sheet.item
           || String(this.data.sheet.item.order_no) !== orderNo) return;
-      this.setData({ 'sheet.item.related': related, 'sheet.item.relatedUnavailable': !!related.unavailable });
+      this.setData({
+        'sheet.item.related': {
+          parts: Array.isArray(related.parts) ? related.parts : [],
+          recycles: Array.isArray(related.recycles) ? related.recycles : [],
+          vehicles: Array.isArray(related.vehicles) ? related.vehicles : [],
+        },
+        'sheet.item.relatedUnavailable': !!related.unavailable,
+      });
     }).catch(err => {
       if (this._detailRequest !== requestId) return;
       const hasSeed = !!(seed && seed.order_no);
@@ -185,15 +205,98 @@ Page({
     if (this.data.acting) { wx.showToast({ title: '操作提交中，请稍候', icon: 'none' }); return; }
     this.setData({ 'sheet.open': false });
   },
-  onCloseVehicle() { this.setData({ 'vehicleApply.open': false }); },
+  onCloseVehicle() {
+    if (this.data.vehicleApply.submitting) { wx.showToast({ title: '提交中，请稍候', icon: 'none' }); return; }
+    this.setData({ 'vehicleApply.open': false });
+  },
   onCloseParts() {
     if (this.data.partsApply.submitting) { wx.showToast({ title: '提交中，请稍候', icon: 'none' }); return; }
     this.setData({ 'partsApply.open': false });
   },
   onResolutionNote(e) { this.setData({ resolutionNote: e.detail.value }); },
 
+  _refreshRelated(orderNo) {
+    return api.workorderRelated(orderNo).then(related => {
+      const item = this.data.sheet && this.data.sheet.item;
+      if (!item || String(item.order_no || '') !== String(orderNo || '')) return related;
+      this.setData({
+        'sheet.item.related': {
+          parts: Array.isArray(related && related.parts) ? related.parts : [],
+          recycles: Array.isArray(related && related.recycles) ? related.recycles : [],
+          vehicles: Array.isArray(related && related.vehicles) ? related.vehicles : [],
+        },
+        'sheet.item.relatedUnavailable': false,
+      });
+      return related;
+    }).catch(error => {
+      const item = this.data.sheet && this.data.sheet.item;
+      if (item && String(item.order_no || '') === String(orderNo || '')) {
+        this.setData({ 'sheet.item.relatedUnavailable': true });
+      }
+      throw error;
+    });
+  },
+
+  _refreshOpenWorkorderDetail(orderNo, successTip) {
+    const current = this.data.sheet && this.data.sheet.item;
+    return api.workorderDetail(orderNo).then(item => {
+      const openItem = this.data.sheet && this.data.sheet.item;
+      if (!openItem || String(openItem.order_no || '') !== String(orderNo || '')) return null;
+      const mapped = maps.workorderCn(item || {});
+      const flowEvents = Array.isArray(mapped.flow_events) ? mapped.flow_events : [];
+      this.setData({
+        sheet: { open: true, item: Object.assign({}, mapped, {
+          related: openItem.related || (current && current.related),
+          relatedUnavailable: !!openItem.relatedUnavailable,
+          flowEvents,
+          flowUnavailable: !Array.isArray(mapped.flow_events),
+          detailStale: false,
+        }) },
+        detailLoading: false,
+        detailError: '',
+        acting: false,
+        workorderPhotoDraft: this._photoDraftForOrder(orderNo),
+      });
+      if (successTip) wx.showToast({ title: successTip, icon: 'success' });
+      this._refreshRelated(orderNo).catch(() => {});
+      return mapped;
+    });
+  },
+
+  onRefreshWorkorderDetail() {
+    const item = this.data.sheet && this.data.sheet.item;
+    if (!item || !item.order_no || this.data.detailLoading) return;
+    this.setData({ detailLoading: true, detailError: '正在刷新工单详情' });
+    this._refreshOpenWorkorderDetail(item.order_no)
+      .catch(error => {
+        this.setData({
+          detailLoading: false,
+          detailError: (error && error.error) || '详情刷新失败，签到结果已保留，请稍后重试',
+          'sheet.item.detailStale': true,
+        });
+        wx.showToast({ title: '详情刷新失败，请稍后重试', icon: 'none' });
+      });
+  },
+
+  onRefreshRelated() {
+    const item = this.data.sheet && this.data.sheet.item;
+    if (!item || !item.order_no || this.data.relatedLoading) return Promise.resolve();
+    this.setData({ relatedLoading: true });
+    return this._refreshRelated(item.order_no)
+      .then(() => {
+        this.setData({ relatedLoading: false });
+        wx.showToast({ title: '关联资源已刷新', icon: 'success' });
+      })
+      .catch(error => {
+        this.setData({ relatedLoading: false });
+        wx.showToast({ title: (error && error.error) || '关联资源刷新失败', icon: 'none' });
+      });
+  },
+
   afterAction(tip) {
-    this.setData({ acting: false, 'sheet.open': false, vehicleApply: { open: false, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' }, partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0 } });
+    this.setData({ acting: false, 'sheet.open': false,
+      vehicleApply: { open: false, requiresVehicle: false, reason: '', index: 0, submitting: false, requestKey: '' },
+      partsApply: { open: false, fulfillmentIndex: 0, fulfillment_type: 'stock', part_name: '', specification: '', estimated_amount: '', quantity: 1, reason: '', index: 0, submitting: false, requestKey: '' } });
     wx.showToast({ title: tip, icon: 'success' });
     this.load();
   },
@@ -213,15 +316,34 @@ Page({
     const item = this.data.sheet.item;
     if (!item || item.detailStale || item.actions && item.actions.primary !== 'check_in') { wx.showToast({ title: (item && item.block_reason) || '请刷新后重试', icon: 'none' }); return; }
     wx.showLoading({ title: '定位中' });
-    requestLocation().then(gps => {
+    return requestLocation().then(gps => {
       wx.hideLoading();
       const payload = { order_no: item.order_no, site_id: item.site_id, site_name: item.site_name, check_time: nowStr() };
       payload.lat = gps.lat;
       payload.lng = gps.lng;
+      this.setData({ acting: true });
       api.checkIn(payload)
         .then(() => {
-          wx.showToast({ title: '已到场签到', icon: 'success' });
-          this.setData({ 'sheet.item.check_in_time': nowStr(), 'sheet.item.checked_in': true });
+          const checkedInAt = nowStr();
+          this.setData({
+            acting: false,
+            detailLoading: true,
+            detailError: '签到已成功，正在刷新工单动作',
+            'sheet.item.check_in_time': checkedInAt,
+            'sheet.item.checked_in': true,
+            'sheet.item.detailStale': true,
+          });
+          return this._refreshOpenWorkorderDetail(item.order_no, '已到场签到')
+            .catch(error => {
+              this.setData({
+                acting: false,
+                detailLoading: false,
+                detailError: (error && error.error)
+                  ? `签到已成功；${error.error}` : '签到已成功，但详情刷新失败，请点击刷新详情',
+                'sheet.item.detailStale': true,
+              });
+              wx.showToast({ title: '签到成功，请刷新详情', icon: 'none' });
+            });
         })
         .catch((err) => this.handleWriteFailure(err, '签到失败'));
     }).catch(error => {
@@ -245,61 +367,169 @@ Page({
       .catch((err) => this.handleWriteFailure(err, '操作失败', 'sheet.open'));
   },
 
-  // 处置影像上传（追加到工单 images）
+  _photoDraftForOrder(orderNo) {
+    const drafts = this._workorderPhotoDrafts || Object.create(null);
+    return drafts[String(orderNo || '')] || null;
+  },
+
+  _setWorkorderPhotoDraft(draft) {
+    if (!draft || !draft.orderNo) return;
+    if (!this._workorderPhotoDrafts) this._workorderPhotoDrafts = Object.create(null);
+    this._workorderPhotoDrafts[draft.orderNo] = draft;
+    const item = this.data.sheet && this.data.sheet.item;
+    if (item && String(item.order_no) === draft.orderNo) {
+      this.setData({ workorderPhotoDraft: draft });
+    }
+  },
+
+  _clearWorkorderPhotoDraft(orderNo, idempotencyKey) {
+    const key = String(orderNo || '');
+    const draft = this._photoDraftForOrder(key);
+    if (!draft || (idempotencyKey && draft.idempotencyKey !== idempotencyKey)) return;
+    delete this._workorderPhotoDrafts[key];
+    const item = this.data.sheet && this.data.sheet.item;
+    if (item && String(item.order_no) === key) this.setData({ workorderPhotoDraft: null });
+  },
+
+  _matchesCurrentWorkorder(context) {
+    const item = this.data.sheet && this.data.sheet.item;
+    return this._alive !== false && !!item && !!this.data.sheet.open
+      && String(item.order_no || '') === context.orderNo
+      && String(item.site_id || '') === context.siteId;
+  },
+
+  _openTrustedCamera(item) {
+    const orderNo = String(item.order_no || '').trim();
+    const siteId = String(item.site_id || '').trim();
+    if (!orderNo || !siteId) {
+      wx.showToast({ title: '工单站点信息不完整，请刷新后重试', icon: 'none' });
+      return;
+    }
+    const requestId = 'workorder_camera_' + orderNo + '_' + Date.now()
+      + '_' + ((this._trustedCameraSequence || 0) + 1);
+    this._trustedCameraSequence = (this._trustedCameraSequence || 0) + 1;
+    const context = { requestId, orderNo, siteId };
+    this._trustedCameraRequest = context;
+    const label = '工单 ' + orderNo + ' · ' + String(item.display_title || '工单事项');
+    const url = '/pages/trusted-camera/trusted-camera?request_id=' + encodeURIComponent(requestId)
+      + '&site_id=' + encodeURIComponent(siteId)
+      + '&order_no=' + encodeURIComponent(orderNo)
+      + '&site_name=' + encodeURIComponent(String(item.site_name || ''))
+      + '&item_name=' + encodeURIComponent(label);
+    wx.navigateTo({
+      url,
+      events: {
+        trustedCameraCaptured: capture => this._handleTrustedCameraCaptured(capture, context),
+        trustedCameraCancelled: () => {
+          if (this._trustedCameraRequest === context) this._trustedCameraRequest = null;
+        },
+      },
+      fail: () => {
+        if (this._trustedCameraRequest === context) this._trustedCameraRequest = null;
+        wx.showToast({ title: '现场相机打开失败，请重试', icon: 'none' });
+      },
+    });
+  },
+
+  _handleTrustedCameraCaptured(capture, context) {
+    if (!capture || String(capture.requestId || '') !== context.requestId
+        || this._trustedCameraRequest !== context || !this._matchesCurrentWorkorder(context)) return;
+    this._trustedCameraRequest = null;
+    if (!capture.path || !capture.captureSession) {
+      wx.showToast({ title: '拍摄结果不完整，请重新拍摄', icon: 'none' });
+      return;
+    }
+    const localId = String(capture.path).replace(/[^a-zA-Z0-9_-]/g, '').slice(-24);
+    const idempotencyKey = 'workorder_photo_' + context.orderNo + '_' + Date.now()
+      + '_' + localId;
+    const draft = {
+      requestId: context.requestId,
+      orderNo: context.orderNo,
+      siteId: context.siteId,
+      path: capture.path,
+      idempotencyKey,
+      metadata: {
+        capture_source: 'camera',
+        capture_session: capture.captureSession,
+        gps_lat: capture.gpsLat,
+        gps_lng: capture.gpsLng,
+        taken_at: nowStr(),
+        capture_client: 'trusted_camera_v1',
+        capture_frame_orientation: capture.frameOrientation,
+        capture_frame_ratio: capture.frameRatio,
+        capture_frame_mode: capture.frameMode,
+        display_watermark: capture.displayWatermark !== false,
+      },
+      status: 'processing',
+      error: '',
+    };
+    this._setWorkorderPhotoDraft(draft);
+    this._uploadWorkorderPhotoDraft(draft);
+  },
+
+  _uploadWorkorderPhotoDraft(draft) {
+    const stored = this._photoDraftForOrder(draft && draft.orderNo);
+    if (!draft || !stored || stored.idempotencyKey !== draft.idempotencyKey) return;
+    const processing = Object.assign({}, draft, { status: 'processing', error: '' });
+    this._setWorkorderPhotoDraft(processing);
+    fileToBase64(processing.path)
+      .then(image => api.uploadWorkorderImage(
+        processing.orderNo, image, processing.idempotencyKey, processing.metadata
+      ))
+      .then(result => {
+        if (this._photoDraftForOrder(processing.orderNo) !== processing) return;
+        const url = resolveUploadUrl(result && result.url);
+        if (typeof url !== 'string' || !url) {
+          throw { error: '影像上传结果无效，请重试' };
+        }
+        this._clearWorkorderPhotoDraft(processing.orderNo, processing.idempotencyKey);
+        const context = { orderNo: processing.orderNo, siteId: processing.siteId };
+        if (!this._matchesCurrentWorkorder(context)) return;
+        const arr = (this.data.sheet.item.images_arr || []).slice();
+        if (!arr.includes(url)) arr.push(url);
+        this.setData({
+          'sheet.item.images_arr': arr,
+          'sheet.item.has_images': arr.length > 0,
+          'sheet.item.images': JSON.stringify(arr),
+        });
+      })
+      .catch(error => {
+        const current = this._photoDraftForOrder(processing.orderNo);
+        if (!current || current.idempotencyKey !== processing.idempotencyKey) return;
+        const message = photoCaptureErrorMessage(error);
+        this._setWorkorderPhotoDraft(Object.assign({}, processing, {
+          status: 'failed', error: message,
+        }));
+        if (this._matchesCurrentWorkorder(processing)) {
+          wx.showToast({ title: message, icon: 'none' });
+        }
+      });
+  },
+
+  onRetryWorkorderPhoto() {
+    const item = this.data.sheet && this.data.sheet.item;
+    const draft = this.data.workorderPhotoDraft;
+    if (!item || !draft || draft.status !== 'failed'
+        || String(item.order_no || '') !== draft.orderNo
+        || String(item.site_id || '') !== draft.siteId) return;
+    this._uploadWorkorderPhotoDraft(draft);
+  },
+
+  // 处置影像拍摄（受信相机返回后追加到工单 images）
   onUploadImage() {
     const item = this.data.sheet.item;
     if (!item) return;
     const remain = 6 - (item.images_arr ? item.images_arr.length : 0);
     if (remain <= 0) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
-    requestLocation().catch(error => { throw Object.assign({}, error || {}, { capturePhase: 'location' }); })
-      .then(gps => api.createPhotoCaptureSession({
-        site_id: item.site_id, order_no: item.order_no,
-        gps_lat: gps.lat, gps_lng: gps.lng,
-      }).then(session => chooseInspectionPhotos(1, 'camera')
-        .then(paths => ({ paths, session, gps }))))
-      .then(({ paths, session, gps }) => {
-        if (!paths.length) return;
-        wx.showLoading({ title: '上传中' });
-        const tasks = paths.map((p, index) => {
-          const localId = String(p || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(-24);
-          const idempotencyKey = 'workorder_photo_' + item.order_no + '_' + Date.now()
-            + '_' + index + '_' + localId;
-          return fileToBase64(p).then(b64 => api.uploadWorkorderImage(
-          item.order_no, b64, idempotencyKey, {
-            capture_source: 'camera', capture_session: session.capture_session, taken_at: nowStr(),
-            ...(gps ? { gps_lat: gps.lat, gps_lng: gps.lng } : {}),
-          }
-        ).then(r => resolveUploadUrl(r.url)));
-        });
-        Promise.allSettled(tasks).then(results => {
-          wx.hideLoading();
-          const urls = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
-          if (urls.length) {
-            const arr = (this.data.sheet.item.images_arr || []).concat(urls);
-            this.setData({ 'sheet.item.images_arr': arr, 'sheet.item.has_images': arr.length > 0, 'sheet.item.images': JSON.stringify(arr) });
-          }
-          if (results.some(r => r.status === 'rejected')) {
-            this.setData({ syncCount: queueCount() });
-            const firstFailure = results.find(r => r.status === 'rejected');
-            const message = queueCount() ? '部分影像待同步'
-              : photoCaptureErrorMessage(firstFailure && firstFailure.reason);
-            wx.showToast({ title: message, icon: 'none' });
-          }
-        }).catch(() => wx.hideLoading());
-      }).catch((error) => {
-        wx.hideLoading();
-        if (isPhotoSelectionCancelled(error)) return;
-        const locationFailure = error && error.capturePhase === 'location';
-        const openSettings = locationFailure
-          ? shouldOpenLocationSettings(error) : shouldOpenCameraSettings(error);
-        wx.showModal({
-          title: locationFailure ? '无法获取位置' : '现场拍摄未启动',
-          content: locationFailure ? locationErrorMessage(error) : photoCaptureErrorMessage(error),
-          showCancel: false,
-          confirmText: openSettings ? '去设置' : '知道了',
-          success: () => { if (openSettings) wx.openSetting({}); },
-        });
+    const draft = this._photoDraftForOrder(item.order_no);
+    if (draft) {
+      wx.showToast({
+        title: draft.status === 'failed' ? '请先重试未上传的照片' : '照片正在处理中',
+        icon: 'none',
       });
+      return;
+    }
+    this._openTrustedCamera(item);
   },
 
   onPreviewImage(e) {
@@ -338,6 +568,18 @@ Page({
   doReview() {
     const item = this.data.sheet.item;
     if (!item || item.detailStale || item.actions && item.actions.primary !== 'submit_review') { wx.showToast({ title: (item && item.block_reason) || '请刷新后重试', icon: 'none' }); return; }
+    const draft = this.data.workorderPhotoDraft;
+    const currentDraft = draft
+      && String(item.order_no || '') === draft.orderNo
+      && String(item.site_id || '') === draft.siteId ? draft : null;
+    if (currentDraft) {
+      wx.showToast({
+        title: currentDraft.status === 'failed'
+          ? '有照片上传失败，请先重试上传' : '照片仍在处理中，请完成上传后提交',
+        icon: 'none',
+      });
+      return;
+    }
     if (!item.has_images) { wx.showToast({ title: '请先上传处置影像', icon: 'none' }); return; }
     const resolutionNote = (this.data.resolutionNote || '').trim();
     if (!resolutionNote) { wx.showToast({ title: '请填写现场处置说明', icon: 'none' }); return; }
@@ -407,29 +649,51 @@ Page({
   onRetryPartsInventory() { this.loadPartsInventory(); },
 
   // ---- 工单资源申请弹层 ----
-  onApplyVehicle() { this.setData({ vehicleApply: { open: true, reason: '', index: 0, noVehicleRequired: false, exceptionReason: '' } }); },
+  onApplyVehicle() {
+    this.setData({ vehicleApply: {
+      open: true, requiresVehicle: false, reason: '', index: 0,
+      submitting: false, requestKey: 'vehicle_workorder_' + Date.now(),
+    } });
+  },
+  onVehicleRequirementChange(e) {
+    if (this.data.vehicleApply.submitting) return;
+    this.setData({ 'vehicleApply.requiresVehicle': !!e.detail.value });
+  },
   onVehicleReason(e) { this.setData({ 'vehicleApply.reason': e.detail.value }); },
   onVehiclePick(e) { this.setData({ 'vehicleApply.index': parseInt(e.detail.value, 10) }); },
-  onNoVehicleRequired(e) { this.setData({ 'vehicleApply.noVehicleRequired': !!e.detail.value }); },
-  onVehicleExceptionReason(e) { this.setData({ 'vehicleApply.exceptionReason': e.detail.value }); },
   submitVehicle() {
     const va = this.data.vehicleApply;
+    if (va.submitting) return;
+    if (!va.requiresVehicle) {
+      this.setData({ 'vehicleApply.open': false });
+      return Promise.resolve(false);
+    }
     const reason = (va.reason || '').trim();
     if (!reason) { wx.showToast({ title: '请填写用车事由', icon: 'none' }); return; }
     const item = this.data.sheet.item;
     const opt = this.data.vehicleOptions[va.index];
-    const vehicle_id = (!va.noVehicleRequired && opt && opt.id) ? opt.id : null;
-    const exceptionReason = (va.exceptionReason || '').trim();
-    if (!va.noVehicleRequired && !vehicle_id) { wx.showToast({ title: '请选择可用车辆', icon: 'none' }); return; }
-    if (va.noVehicleRequired && !exceptionReason) { wx.showToast({ title: '请填写无需用车原因', icon: 'none' }); return; }
+    const vehicle_id = opt && opt.id ? opt.id : null;
+    if (!vehicle_id) { wx.showToast({ title: '请选择可用车辆', icon: 'none' }); return; }
+    this.setData({ 'vehicleApply.submitting': true });
     wx.showLoading({ title: '提交中' });
-    api.applyVehicle({
+    return api.applyVehicle({
       site_id: item.site_id, work_order_no: item.order_no, reason, vehicle_id,
-      no_vehicle_required: va.noVehicleRequired,
-      vehicle_exception_reason: va.noVehicleRequired ? exceptionReason : ''
+      _idempotency_key: va.requestKey,
     })
-      .then(() => { wx.hideLoading(); wx.showToast({ title: '用车申请已提交', icon: 'success' }); this.setData({ 'vehicleApply.open': false }); })
-      .catch((err) => { wx.hideLoading(); this.handleWriteFailure(err, '提交失败', 'vehicleApply.open'); });
+      .then(() => this._refreshRelated(item.order_no).then(() => true).catch(() => false))
+      .then(relatedRefreshed => {
+        wx.hideLoading();
+        this.setData({ 'vehicleApply.open': false, 'vehicleApply.submitting': false });
+        wx.showToast({
+          title: relatedRefreshed ? '用车申请已提交' : '申请成功，关联资源刷新失败',
+          icon: relatedRefreshed ? 'success' : 'none',
+        });
+      })
+      .catch((err) => {
+        wx.hideLoading();
+        this.setData({ 'vehicleApply.submitting': false });
+        this.handleWriteFailure(err, '提交失败');
+      });
   },
 
   onApplyParts() {
@@ -474,9 +738,17 @@ Page({
     if (result.error) { wx.showToast({ title: result.error, icon: 'none' }); return; }
     this.setData({ 'partsApply.submitting': true });
     wx.showLoading({ title: '提交中' });
-    api.applyParts(Object.assign({ site_id: item.site_id, work_order_no: item.order_no,
+    return api.applyParts(Object.assign({ site_id: item.site_id, work_order_no: item.order_no,
       _idempotency_key: pa.requestKey }, result.payload))
-      .then(() => { wx.hideLoading(); wx.showToast({ title: '已提交审批', icon: 'success' }); this.setData({ 'partsApply.open': false, 'partsApply.submitting': false }); })
+      .then(() => this._refreshRelated(item.order_no).then(() => true).catch(() => false))
+      .then(relatedRefreshed => {
+        wx.hideLoading();
+        this.setData({ 'partsApply.open': false, 'partsApply.submitting': false });
+        wx.showToast({
+          title: relatedRefreshed ? '已提交审批' : '申请成功，关联资源刷新失败',
+          icon: relatedRefreshed ? 'success' : 'none',
+        });
+      })
       .catch((err) => { wx.hideLoading(); this.setData({ 'partsApply.submitting': false }); this.handleWriteFailure(err, '提交失败'); });
   }
 });

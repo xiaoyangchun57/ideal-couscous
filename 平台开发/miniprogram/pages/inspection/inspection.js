@@ -3,7 +3,7 @@ const { RESULT, INSPECTION_CATEGORY, linkedWorkorderCn, map } = require('../../s
 const { getSites, getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
 const {
-  chooseAndCompress, chooseInspectionPhotos, fileToBase64, persistFile, persistFileStrict,
+  chooseReportAlbumPhotos, chooseInspectionPhotos, fileToBase64, persistFile, persistFileStrict,
   captureFlushedPhoto,
   isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
   collectInspectionPhotoUploadResults, processPhotoUploadIssues,
@@ -28,6 +28,11 @@ const executionTarget = require('../../utils/executionTarget.js');
 const { buildDeparturePreparation, quantityOrNull } = require('../../utils/departurePreparation.js');
 const { hasInspectionFieldRecord, resolveLocalSubmitFlush } = require('../../utils/inspectionSubmissionState.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
+const {
+  createPendingReportPhoto, errorMessage, failedReportPhoto, normalizeReportPhotoItems,
+  reportPhotoDisplayUrls, reportPhotoSheetPatch, refreshedReportPhoto,
+  reportCaptureMetadata, uploadedReportPhoto,
+} = require('../../utils/reportPhotoDraft.js');
 const { inventoryOptions, inventoryErrorMessage, buildPartsPayload } = require('../../utils/partsApplication.js');
 const { buildCheckinPayload, reworkResourcePresentation } = require('../../utils/reworkFlow.js');
 
@@ -40,6 +45,22 @@ const REPORT_TYPES = [
   { value: 'violation', label: '违规操作' },
   { value: 'pollution', label: '污染事件' },
 ];
+
+function emptyInspectionReportSheet(siteId, siteName) {
+  const normalizedSiteId = Number(siteId);
+  return {
+    open: false,
+    siteId: Number.isInteger(normalizedSiteId) && normalizedSiteId > 0 ? normalizedSiteId : null,
+    siteName: String(siteName || ''),
+    typeIndex: 0,
+    description: '',
+    photos: [],
+    photoItems: [],
+    photoSiteId: null,
+    uploading: false,
+    submitting: false,
+  };
+}
 
 const PARTS_FULFILLMENT_OPTIONS = [
   { key: 'stock', label: '库存领用' },
@@ -321,7 +342,7 @@ Page({
     reagentAction: '暂无记录',
     photoProgress: { req: 0, taken: 0, missing: 0 },
     reportTypes: REPORT_TYPES,
-    reportSheet: { open: false, typeIndex: 0, description: '', photos: [], submitting: false },
+    reportSheet: emptyInspectionReportSheet(),
     reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
     sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], photoMedia: [], localPhotos: [], localPhotoMeta: [], rejectedMedia: [], supplementPhotos: [], supplementMedia: [], supplementLocalPhotos: [], supplementLocalMeta: [], supplementOnly: false, originalPhotoCount: 0, photoResultTitle: '', photoResultMessage: '' },
     submitting: false,
@@ -372,10 +393,16 @@ Page({
 
   onLoad(options) {
     this._alive = true;
+    this._reportPageUnloaded = false;
     this._loadOptions = options || {};
+    this._reportDraftVersion = 0;
+    this._reportTrustedCameraSequence = 0;
   },
 
   onUnload() {
+    this._reportPageUnloaded = true;
+    this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
+    this._reportTrustedCameraRequest = null;
     this.onHide();
   },
 
@@ -642,6 +669,8 @@ Page({
     this._rawExecutionPackages = [];
     this._allEntryPackages = [];
     this._closedResult = null;
+    this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
+    this._reportTrustedCameraRequest = null;
     this.setData({
       viewMode: 'execute',
       viewPhase: 'entry',
@@ -691,8 +720,7 @@ Page({
       reagents: [],
       reagentAction: '暂无记录',
       photoProgress: { req: 0, taken: 0, missing: 0 },
-      'reportSheet.open': false,
-      'reportSheet.submitting': false,
+      reportSheet: emptyInspectionReportSheet(),
       'reagentSheet.open': false,
       'reagentSheet.submitting': false,
       'sheet.open': false,
@@ -2212,93 +2240,455 @@ Page({
   },
 
   onSelectSite(e) {
-    const id = e.currentTarget.dataset.id;
+    const id = Number(e.currentTarget.dataset.id);
+    const reportSheet = this.data.reportSheet || emptyInspectionReportSheet();
+    if (normalizeReportPhotoItems(reportSheet).length && Number(reportSheet.siteId) !== id) {
+      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
+      return;
+    }
+    if (Number(reportSheet.siteId) !== id) {
+      this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
+      this._reportTrustedCameraRequest = null;
+    }
     this.setData({ selSiteId: id, stationStage: null, reagents: [], reagentAction: '加载中…',
       categories: [], total: 0, completed: 0, completionPercent: 0, progressFillStyle: 'width:0%', abnormalCount: 0,
-      photoProgress: { req: 0, taken: 0, missing: 0 } });
+      photoProgress: { req: 0, taken: 0, missing: 0 },
+      reportSheet: Number(reportSheet.siteId) === id
+        ? reportSheet : emptyInspectionReportSheet(id),
+    });
     this.loadTasks(id);
   },
 
   onOpenReport() {
-    if (!this.data.selSiteId) return;
-    this.setData({ reportSheet: { open: true, typeIndex: 0, description: '', photos: [], submitting: false } });
+    const siteId = Number(this.data.selSiteId);
+    if (!siteId) return;
+    const site = this.data.selSite || this.data.site
+      || (this.data.sites || []).find(row => Number(row.id || row.site_id) === siteId) || {};
+    const current = this.data.reportSheet || emptyInspectionReportSheet();
+    const sameSite = Number(current.siteId) === siteId;
+    if (!sameSite && normalizeReportPhotoItems(current).length) {
+      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
+      return;
+    }
+    const next = sameSite ? Object.assign({}, current) : emptyInspectionReportSheet(siteId);
+    next.open = true;
+    next.siteId = siteId;
+    next.siteName = String(site.name || site.site_name || next.siteName || '');
+    next.uploading = false;
+    next.submitting = false;
+    this.setData({ reportSheet: next });
   },
-  onCloseReport() { this.setData({ 'reportSheet.open': false }); },
+  onCloseReport() {
+    const sheet = this.data.reportSheet || {};
+    if (sheet.submitting || sheet.uploading) {
+      wx.showToast({ title: sheet.submitting ? '正在提交上报，请稍候' : '照片上传中，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({ 'reportSheet.open': false });
+  },
   onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
   onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value }); },
-  onAddReportPhoto() {
-    const current = this.data.reportSheet.photos || [];
-    const remaining = 6 - current.length;
-    if (remaining <= 0) { wx.showToast({ title: '最多上传 6 张照片', icon: 'none' }); return; }
-    return runPhotoActionOnce(this, 'media_picker', () => chooseAndCompress(remaining)
-      .then(paths => {
-        const selectedPaths = validateReportPhotoPaths(paths);
-        wx.showLoading({ title: '上传中', mask: true });
-        return Promise.allSettled(selectedPaths.map((path, index) => {
-          const idempotencyKey = photoIdempotencyKey(this.data.selSiteId, path, index);
-          return fileToBase64(path).then(image => api.uploadSitePhoto(
-            this.data.selSiteId, image, idempotencyKey, { _idempotency_key: idempotencyKey }
-          ));
+
+  reportPhotoContext(options) {
+    const sheet = this.data.reportSheet || {};
+    const siteId = Number(sheet.siteId);
+    if (sheet.submitting || sheet.uploading) return null;
+    if (!siteId || siteId !== Number(this.data.selSiteId)) {
+      wx.showToast({ title: '当前上报站点已变化，请重新进入上报', icon: 'none' });
+      return null;
+    }
+    const photoItems = normalizeReportPhotoItems(sheet);
+    const remaining = 6 - photoItems.length;
+    if (remaining <= 0 && !(options && options.allowFull)) {
+      wx.showToast({ title: '最多上传 6 张照片', icon: 'none' });
+      return null;
+    }
+    return {
+      siteId,
+      siteName: String(sheet.siteName || ''),
+      photoItems,
+      remaining,
+      draftVersion: this._reportDraftVersion || 0,
+    };
+  },
+
+  reportPhotoContextIsCurrent(context) {
+    const sheet = this.data.reportSheet || {};
+    return !this._reportPageUnloaded && !!sheet.open
+      && Number(sheet.siteId) === context.siteId
+      && Number(this.data.selSiteId) === context.siteId
+      && (this._reportDraftVersion || 0) === context.draftVersion;
+  },
+
+  uploadReportPhotoPaths(paths, context, metadata) {
+    return Promise.resolve(paths).then(validateReportPhotoPaths)
+      .then(validPaths => Promise.all(validPaths.map(path => persistFile(path))))
+      .then(savedPaths => {
+      if (!this.reportPhotoContextIsCurrent(context)) return { stale: true };
+      wx.showLoading({ title: '上传中', mask: true });
+      const pending = savedPaths.map((path, index) => {
+        const idempotencyKey = photoIdempotencyKey(context.siteId, path, index);
+        return createPendingReportPhoto(path, idempotencyKey, metadata);
+      });
+      const replaced = context.replaceKey
+        ? context.photoItems.find(item => item.key === context.replaceKey) : null;
+      const baseItems = context.replaceKey
+        ? context.photoItems.filter(item => item.key !== context.replaceKey) : context.photoItems;
+      this.setData(reportPhotoSheetPatch(baseItems.concat(pending), context.siteId));
+      if (replaced) this.cleanupReportLocalPhoto(replaced.localPath);
+      return this.uploadReportPhotoItems(pending, context);
+    });
+  },
+
+  uploadReportPhotoItems(pending, context) {
+    return Promise.allSettled(pending.map(item => fileToBase64(item.localPath)
+      .then(image => api.uploadSitePhoto(
+        context.siteId, image, item.idempotencyKey, item.metadata
+      )))).then(results => {
+        const successful = results.filter(result => (
+          result.status === 'fulfilled' && result.value && result.value.url
+        ));
+        if (!this.reportPhotoContextIsCurrent(context)) {
+          return Promise.allSettled(successful.map(result => (
+            api.deletePendingSitePhoto(String(result.value.url).trim())
+          ))).then(() => ({ stale: true }));
+        }
+        const outcomeByKey = new Map(pending.map((item, index) => {
+          const result = results[index];
+          const next = result.status === 'fulfilled'
+            ? uploadedReportPhoto(item, result.value)
+            : failedReportPhoto(item, result.reason);
+          return [item.key, next];
         }));
-      }).then(results => {
-        if (!Array.isArray(results)) return;
-        const uploaded = results.filter(row => row.status === 'fulfilled' && row.value && row.value.url)
-          .map(row => resolveUploadUrl(row.value.url));
-        const photos = current.concat(uploaded.filter(url => current.indexOf(url) === -1));
-        this.setData({ 'reportSheet.photos': photos });
-        if (uploaded.length !== results.length) wx.showToast({ title: uploaded.length ? '部分照片上传失败' : '照片上传失败', icon: 'none' });
-      }).catch(error => handlePhotoActionFailure(error, message => new Promise(resolve => {
+        const currentItems = normalizeReportPhotoItems(this.data.reportSheet);
+        const merged = currentItems.map(item => outcomeByKey.get(item.key) || item);
+        this.setData(reportPhotoSheetPatch(merged, context.siteId));
+        const failed = merged.filter(item => outcomeByKey.has(item.key) && item.status === 'failed');
+        pending.forEach(item => {
+          const outcome = outcomeByKey.get(item.key);
+          if (outcome && outcome.status === 'uploaded') this.cleanupReportLocalPhoto(item.localPath);
+        });
+        if (failed.length) {
+          const captureExpired = failed.some(item => item.requiresNewCapture);
+          wx.showToast({
+            title: captureExpired ? '拍摄授权已失效，请重新拍摄'
+              : (failed.length === pending.length ? '照片上传失败，可重试或移除' : '部分照片上传失败，可重试'),
+            icon: 'none',
+          });
+        }
+        return { uploaded: pending.length - failed.length, failed: failed.length };
+      });
+  },
+
+  cleanupReportLocalPhoto(path) {
+    if (!path || typeof wx.removeSavedFile !== 'function' || path.indexOf('wxfile://usr/') !== 0) return;
+    wx.removeSavedFile({ filePath: path, fail() {} });
+  },
+
+  refreshReportPhotoMedia(key, explicit) {
+    const sheet = this.data.reportSheet || {};
+    const items = normalizeReportPhotoItems(sheet);
+    const target = items.find(item => item.key === key);
+    const siteId = Number(sheet.siteId);
+    const draftVersion = this._reportDraftVersion || 0;
+    if (!target || target.status !== 'uploaded') return Promise.resolve(target || null);
+    if (!target.attachmentId) {
+      const next = items.map(item => item.key === key
+        ? Object.assign({}, item, { mediaError: '照片展示地址无法刷新，请移除后重新上传' }) : item);
+      this.setData(reportPhotoSheetPatch(next, Number(sheet.siteId)));
+      return Promise.reject({ error: '照片展示地址无法刷新，请移除后重新上传' });
+    }
+    this._reportMediaRefreshPromises = this._reportMediaRefreshPromises || {};
+    if (this._reportMediaRefreshPromises[key]) return this._reportMediaRefreshPromises[key];
+    if (!explicit && target.mediaAutoRefreshUsed) {
+      const next = items.map(item => item.key === key
+        ? Object.assign({}, item, { mediaError: '照片加载失败，点击重试', mediaRefreshing: false }) : item);
+      this.setData(reportPhotoSheetPatch(next, Number(sheet.siteId)));
+      return Promise.reject({ error: '照片加载失败，点击重试' });
+    }
+    const loading = Object.assign({}, target, {
+      mediaRefreshing: true,
+      mediaError: '',
+      mediaAutoRefreshUsed: explicit ? target.mediaAutoRefreshUsed : true,
+    });
+    this.setData(reportPhotoSheetPatch(
+      items.map(item => item.key === key ? loading : item), Number(sheet.siteId)
+    ));
+    let refreshPromise;
+    refreshPromise = api.attachmentDetail(target.attachmentId).then(response => {
+      const currentSheet = this.data.reportSheet || {};
+      const currentItems = normalizeReportPhotoItems(currentSheet);
+      const current = currentItems.find(item => item.key === key);
+      if (this._reportPageUnloaded
+          || (this._reportDraftVersion || 0) !== draftVersion
+          || Number(currentSheet.siteId) !== siteId || !current) return { stale: true };
+      const refreshed = current && refreshedReportPhoto(current, response, !explicit);
+      if (!refreshed) throw { error: '照片展示地址已变化，请重试' };
+      this.setData(reportPhotoSheetPatch(
+        currentItems.map(item => item.key === key ? refreshed : item), Number(currentSheet.siteId)
+      ));
+      return refreshed;
+    }).catch(error => {
+      const currentSheet = this.data.reportSheet || {};
+      const currentItems = normalizeReportPhotoItems(currentSheet);
+      if (this._reportPageUnloaded
+          || (this._reportDraftVersion || 0) !== draftVersion
+          || Number(currentSheet.siteId) !== siteId
+          || !currentItems.some(item => item.key === key)) return { stale: true };
+      const next = currentItems.map(item => item.key === key ? Object.assign({}, item, {
+        mediaRefreshing: false,
+        mediaError: errorMessage(error) || '照片加载失败，点击重试',
+      }) : item);
+      this.setData(reportPhotoSheetPatch(next, Number(currentSheet.siteId)));
+      wx.showToast({ title: '照片加载失败，点击重试', icon: 'none' });
+      throw error;
+    }).finally(() => {
+      if (this._reportMediaRefreshPromises[key] === refreshPromise) {
+        delete this._reportMediaRefreshPromises[key];
+      }
+    });
+    this._reportMediaRefreshPromises[key] = refreshPromise;
+    return refreshPromise;
+  },
+
+  onReportPhotoMediaError(e) {
+    const key = e.currentTarget.dataset.key;
+    return this.refreshReportPhotoMedia(key, false).catch(() => null);
+  },
+
+  onRetryReportPhotoMedia(e) {
+    const key = e.currentTarget.dataset.key;
+    return this.refreshReportPhotoMedia(key, true).catch(() => null);
+  },
+
+  onRetryReportPhoto(e) {
+    const key = e.currentTarget.dataset.key;
+    const sheet = this.data.reportSheet || {};
+    if (!key || sheet.uploading || sheet.submitting) return;
+    const items = normalizeReportPhotoItems(sheet);
+    const target = items.find(item => item.key === key && item.status === 'failed');
+    if (target && target.requiresNewCapture) return this.confirmReportPhotoRecapture(target);
+    if (!target || !target.localPath || !target.idempotencyKey) {
+      wx.showToast({ title: '原照片已失效，请移除后重新拍摄', icon: 'none' });
+      return;
+    }
+    const context = this.reportPhotoContext({ allowFull: true });
+    if (!context) return;
+    const uploading = Object.assign({}, target, { status: 'uploading', error: '' });
+    this.setData(Object.assign(
+      { 'reportSheet.uploading': true },
+      reportPhotoSheetPatch(items.map(item => item.key === key ? uploading : item), context.siteId)
+    ));
+    return this.uploadReportPhotoItems([uploading], context)
+      .then(result => this.finishReportPhotoAction(result),
+        error => this.finishReportPhotoAction(null, error));
+  },
+
+  finishReportPhotoAction(result, error) {
+    if (!this._reportPageUnloaded) this.setData({ 'reportSheet.uploading': false });
+    return error ? { error } : result;
+  },
+
+  onAddReportPhoto() {
+    const context = this.reportPhotoContext();
+    if (!context) return;
+    this.setData({ 'reportSheet.uploading': true });
+    return runPhotoActionOnce(this, 'report_album', () => chooseReportAlbumPhotos(context.remaining)
+      .then(paths => this.uploadReportPhotoPaths(paths, context, { capture_source: 'unknown' }))
+      .catch(error => handlePhotoActionFailure(error, message => new Promise(resolve => {
         wx.hideLoading();
         wx.showModal({
           title: '照片处理未完成', content: message, showCancel: false,
           success: resolve, fail: resolve,
         });
-      }))), title => wx.showLoading({ title, mask: true }), () => wx.hideLoading());
+      }))), title => wx.showLoading({ title, mask: true }), () => wx.hideLoading())
+      .then(result => this.finishReportPhotoAction(result),
+        error => this.finishReportPhotoAction(null, error));
+  },
+
+  openReportTrustedCamera(context) {
+    const sequence = (this._reportTrustedCameraSequence || 0) + 1;
+    this._reportTrustedCameraSequence = sequence;
+    context.requestId = 'inspection_manual_report_' + context.siteId + '_' + Date.now() + '_' + sequence;
+    this._reportTrustedCameraRequest = context;
+    this._trustedCameraActive = true;
+    const url = '/pages/trusted-camera/trusted-camera?request_id=' + encodeURIComponent(context.requestId)
+      + '&site_id=' + encodeURIComponent(String(context.siteId))
+      + '&capture_context=manual_report'
+      + '&site_name=' + encodeURIComponent(context.siteName)
+      + '&item_name=' + encodeURIComponent('异常上报现场');
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (handler, value) => {
+        if (settled) return;
+        settled = true;
+        if (this._reportTrustedCameraRequest === context) this._reportTrustedCameraRequest = null;
+        handler(value);
+      };
+      wx.navigateTo({
+        url,
+        events: {
+          trustedCameraCaptured: capture => {
+            if (!capture || String(capture.requestId || '') !== context.requestId
+                || this._reportTrustedCameraRequest !== context
+                || !this.reportPhotoContextIsCurrent(context)) {
+              settle(reject, { error: '拍摄结果与当前上报草稿不一致，请重新拍摄' });
+              return;
+            }
+            settle(resolve, capture);
+          },
+          trustedCameraCancelled: result => {
+            if (!result || String(result.requestId || '') !== context.requestId) return;
+            settle(reject, { errMsg: 'trustedCamera:fail cancel' });
+          },
+        },
+        fail: error => {
+          this._trustedCameraActive = false;
+          settle(reject, error || { error: '现场相机页面打开失败' });
+        },
+      });
+    });
+  },
+
+  captureAndUploadReportPhoto(context) {
+    return this.openReportTrustedCamera(context).then(capture => {
+      if (!capture.path || !capture.captureSession) {
+        throw { error: '拍摄结果不完整，请重新拍摄' };
+      }
+      return this.uploadReportPhotoPaths([capture.path], context, reportCaptureMetadata(capture));
+    });
+  },
+
+  confirmReportPhotoRecapture(target) {
+    return new Promise(resolve => {
+      wx.showModal({
+        title: '拍摄授权已失效',
+        content: target.error + (target.nextAction ? '\n' + target.nextAction : ''),
+        confirmText: '重新拍摄',
+        cancelText: '保留照片',
+        success: result => resolve(!!result.confirm),
+        fail: () => resolve(false),
+      });
+    }).then(confirm => {
+      if (!confirm) return { cancelled: true };
+      const context = this.reportPhotoContext({ allowFull: true });
+      if (!context) return { cancelled: true };
+      context.replaceKey = target.key;
+      this.setData({ 'reportSheet.uploading': true });
+      return runPhotoActionOnce(this, 'report_camera', () => this.captureAndUploadReportPhoto(context)
+        .catch(error => handlePhotoActionFailure(error, message => new Promise(resolve => {
+          wx.hideLoading();
+          wx.showModal({
+            title: '照片处理未完成', content: message, showCancel: false,
+            success: resolve, fail: resolve,
+          });
+        }))), title => wx.showLoading({ title, mask: true }), () => wx.hideLoading())
+        .then(result => this.finishReportPhotoAction(result),
+          error => this.finishReportPhotoAction(null, error));
+    });
+  },
+
+  onTakeReportPhoto() {
+    const context = this.reportPhotoContext();
+    if (!context) return;
+    this.setData({ 'reportSheet.uploading': true });
+    return runPhotoActionOnce(this, 'report_camera', () => this.captureAndUploadReportPhoto(context)
+      .catch(error => handlePhotoActionFailure(error, message => new Promise(resolve => {
+        wx.hideLoading();
+        wx.showModal({
+          title: '照片处理未完成', content: message, showCancel: false,
+          success: resolve, fail: resolve,
+        });
+      }))), title => wx.showLoading({ title, mask: true }), () => wx.hideLoading())
+      .then(result => this.finishReportPhotoAction(result),
+        error => this.finishReportPhotoAction(null, error));
   },
   onPreviewReportPhoto(e) {
-    const photos = this.data.reportSheet.photos || [];
-    const current = e.currentTarget.dataset.url;
-    if (current) wx.previewImage({ current, urls: photos });
+    const key = e.currentTarget.dataset.key;
+    const items = normalizeReportPhotoItems(this.data.reportSheet || {});
+    const target = items.find(item => item.key === key);
+    if (!target) return;
+    if (target.status !== 'uploaded') {
+      const urls = reportPhotoDisplayUrls(items);
+      const current = target.displayUrl || target.localPath;
+      if (current && urls.indexOf(current) !== -1) wx.previewImage({ current, urls });
+      return;
+    }
+    return this.refreshReportPhotoMedia(key, true).then(() => {
+      const refreshedItems = normalizeReportPhotoItems(this.data.reportSheet || {});
+      const refreshed = refreshedItems.find(item => item.key === key);
+      const urls = reportPhotoDisplayUrls(refreshedItems);
+      if (refreshed && refreshed.displayUrl && urls.indexOf(refreshed.displayUrl) !== -1) {
+        wx.previewImage({ current: refreshed.displayUrl, urls });
+      }
+    }).catch(() => null);
   },
   onRemoveReportPhoto(e) {
-    const url = e.currentTarget.dataset.url;
-    if (!url) return;
-    const storagePath = uploadStoragePath(url);
+    const key = e.currentTarget.dataset.key;
+    const sheet = this.data.reportSheet || {};
+    const items = normalizeReportPhotoItems(sheet);
+    const target = items.find(item => item.key === key);
+    if (!target || sheet.submitting || sheet.uploading) return;
+    const removeLocal = () => {
+      this.cleanupReportLocalPhoto(target.localPath);
+      const next = items.filter(item => item.key !== key);
+      this.setData(reportPhotoSheetPatch(next, Number(sheet.siteId)));
+      return { success: true };
+    };
+    if (target.status !== 'uploaded') return Promise.resolve(removeLocal());
+    const storagePath = uploadStoragePath(target.storedPath);
     if (!storagePath) {
       wx.showToast({ title: '照片地址无效，请重新上传', icon: 'none' });
       return;
     }
     return deletePendingReportPhotoOnce(
-      this, url, storagePath,
+      this, target.displayUrl, storagePath,
       path => api.deletePendingSitePhoto(path),
       () => this.data.reportSheet.photos || []
-    ).then(photos => {
-      this.setData({ 'reportSheet.photos': photos });
-      return { success: true };
-    }).catch(err => {
-      wx.showToast({ title: (err && err.error) || '照片删除失败，请重试', icon: 'none' });
-      return { success: false, error: err };
+    ).then(removeLocal).catch(error => {
+      wx.showToast({ title: errorMessage(error), icon: 'none' });
+      return { success: false, error };
     });
   },
   onSubmitReport() {
-    const rs = this.data.reportSheet;
+    const rs = this.data.reportSheet || {};
+    if (rs.submitting || this._reportSubmitPromise) {
+      return this._reportSubmitPromise || Promise.resolve({ duplicate: true });
+    }
     const reportType = (REPORT_TYPES[rs.typeIndex] || REPORT_TYPES[0]).value;
-    if (!rs.description.trim() || !rs.photos.length) { wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' }); return; }
-    if (rs.submitting) return;
+    const description = String(rs.description || '').trim();
+    const photoItems = normalizeReportPhotoItems(rs);
+    const unfinished = photoItems.find(item => item.status !== 'uploaded');
+    if (unfinished) {
+      wx.showToast({ title: unfinished.status === 'failed' ? '请重试或移除上传失败照片' : '照片仍在上传，请稍候', icon: 'none' });
+      return Promise.resolve({ invalid: true });
+    }
+    if (!description || !(rs.photos || []).length) {
+      wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' });
+      return Promise.resolve({ invalid: true });
+    }
+    if (rs.uploading) return Promise.resolve({ busy: true });
+    const siteId = Number(rs.siteId);
+    if (!siteId || siteId !== Number(this.data.selSiteId)
+        || Number(rs.photoSiteId) !== siteId) {
+      wx.showToast({ title: '照片与当前站点不一致，请重新上传', icon: 'none' });
+      return Promise.resolve({ invalid: true });
+    }
     const preparedPhotos = prepareReportPhotoStoragePaths(rs.photos);
     if (!preparedPhotos.ok) {
       const title = preparedPhotos.reason === 'invalid_count'
         ? '请上传 1 至 6 张现场照片'
         : '照片地址无效，请重新上传';
       wx.showToast({ title, icon: 'none' });
-      return;
+      return Promise.resolve({ invalid: true });
     }
+    const draftVersion = this._reportDraftVersion || 0;
     this.setData({ 'reportSheet.submitting': true });
-    requestLocation().catch(() => null)
+    const submitPromise = requestLocation().catch(() => null)
       .then(gps => api.submitManualReport({
-        site_id: this.data.selSiteId,
+        site_id: siteId,
         report_type: reportType,
-        description: rs.description.trim(),
+        description,
         photo_urls: preparedPhotos.paths,
         gps_lat: gps && gps.lat,
         gps_lng: gps && gps.lng,
@@ -2306,14 +2696,29 @@ Page({
       .then(res => {
         const orderNo = String(res && res.order_no || '').trim();
         if (!orderNo) throw { error: '工单编号未返回，请重试' };
-        this.setData({ 'reportSheet.open': false, 'reportSheet.submitting': false });
+        if (this._reportPageUnloaded
+            || (this._reportDraftVersion || 0) !== draftVersion) {
+          return { success: true, orderNo, stale: true };
+        }
+        this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
+        this.setData({ reportSheet: emptyInspectionReportSheet() });
         wx.showModal({ title: '异常已上报', content: `已生成工单：${orderNo}`, showCancel: false });
-        this.loadTasks(this.data.selSiteId);
+        this.loadTasks(siteId);
+        return { success: true, orderNo };
       })
       .catch(err => {
-        this.setData({ 'reportSheet.submitting': false });
-        wx.showModal({ title: '上报失败', content: (err && err.error) || '提交未完成，请检查网络后重试', showCancel: false });
+        if (!this._reportPageUnloaded
+            && (this._reportDraftVersion || 0) === draftVersion) {
+          this.setData({ 'reportSheet.submitting': false });
+          wx.showModal({ title: '上报失败', content: (err && err.error) || '提交未完成，请检查网络后重试', showCancel: false });
+        }
+        return { success: false, error: err };
+      })
+      .finally(() => {
+        if (this._reportSubmitPromise === submitPromise) this._reportSubmitPromise = null;
       });
+    this._reportSubmitPromise = submitPromise;
+    return submitPromise;
   },
 
   hasSiteCheckIn(siteId) {
@@ -2835,6 +3240,7 @@ Page({
           metadata.capture_frame_orientation = capture.frameOrientation;
           metadata.capture_frame_ratio = capture.frameRatio;
           metadata.capture_frame_mode = capture.frameMode;
+          metadata.display_watermark = capture.displayWatermark !== false;
         }
         const supplemental = captureSource === 'supplement';
         const localPathsKey = supplemental ? 'supplementLocalPhotos' : 'localPhotos';

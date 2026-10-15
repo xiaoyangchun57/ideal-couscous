@@ -50,6 +50,7 @@ Page({
     sessionReady: false,
     ready: false,
     capturing: false,
+    displayWatermark: true,
     statusText: '正在确认位置与拍摄信息',
     errorText: '',
     showSettings: false,
@@ -61,18 +62,36 @@ Page({
     this._prepareVersion = 0;
     this._entryStartedAt = Date.now();
     this._requestId = String(options && options.request_id || '');
-    this._context = {
-      siteId: Number(options && options.site_id),
-      planId: Number(options && options.plan_id),
-      itemId: Number(options && options.item_id),
-    };
+    const orderNo = String(options && options.order_no || '').trim();
+    const siteId = Number(options && options.site_id);
+    const planId = Number(options && options.plan_id);
+    const itemId = Number(options && options.item_id);
+    const captureContext = String(options && options.capture_context || '').trim();
+    const inspectionMode = siteId > 0 && planId > 0 && itemId > 0 && !orderNo;
+    const workorderMode = siteId > 0 && !!orderNo && !(planId > 0) && !(itemId > 0);
+    const manualReportMode = siteId > 0 && captureContext === 'manual_report'
+      && !orderNo && !(planId > 0) && !(itemId > 0);
+    this._context = { siteId, planId, itemId, orderNo, captureContext };
+    this._contextValid = inspectionMode || workorderMode || manualReportMode;
     this._eventChannel = this.getOpenerEventChannel ? this.getOpenerEventChannel() : null;
     this.setData({
       siteName: decodeOption(options && options.site_name),
       itemName: decodeOption(options && options.item_name),
+      displayWatermark: true,
     });
     this._applyFrameLayout();
-    this._prepareCaptureSession();
+    if (this._contextValid) {
+      this._prepareCaptureSession();
+    } else {
+      const message = '拍摄业务信息不完整，请返回原业务页面重试';
+      this.setData({
+        preparing: false,
+        sessionReady: false,
+        ready: false,
+        errorText: message,
+        statusText: message,
+      });
+    }
   },
 
   onReady() {
@@ -135,6 +154,7 @@ Page({
   },
 
   _prepareCaptureSession() {
+    if (!this._contextValid) return;
     const version = (this._prepareVersion || 0) + 1;
     this._prepareVersion = version;
     this._session = null;
@@ -148,13 +168,20 @@ Page({
       statusText: this.data.previewReady
         ? '正在确认位置与拍摄信息' : '正在启动相机预览',
     });
-    const sessionTask = api.createPhotoCaptureSession({
+    const payload = {
       site_id: this._context.siteId,
-      plan_id: this._context.planId,
-      item_id: this._context.itemId,
       capture_source: 'camera',
       prepare_only: true,
-    });
+    };
+    if (this._context.orderNo) {
+      payload.order_no = this._context.orderNo;
+    } else if (this._context.captureContext === 'manual_report') {
+      payload.capture_context = 'manual_report';
+    } else {
+      payload.plan_id = this._context.planId;
+      payload.item_id = this._context.itemId;
+    }
+    const sessionTask = api.createPhotoCaptureSession(payload);
     const locationTask = requestLocation();
     Promise.all([sessionTask, locationTask])
       .then(([session, location]) => api.bindPhotoCaptureSessionLocation({
@@ -194,6 +221,11 @@ Page({
     wx.openSetting({});
   },
 
+  onDisplayWatermarkChange(event) {
+    if (this.data.capturing || this._captureCommitted) return;
+    this.setData({ displayWatermark: !(event && event.detail && event.detail.value === false) });
+  },
+
   onTakePhoto() {
     if (this.data.capturing || this._captureCommitted) return;
     if (!this.data.ready || !this._session || !this._verifiedLocation) {
@@ -201,6 +233,7 @@ Page({
       return;
     }
     const camera = this._cameraContext || wx.createCameraContext();
+    const displayWatermark = this.data.displayWatermark !== false;
     this.setData({ capturing: true, ready: false, statusText: '正在拍摄' });
     camera.takePhoto({
       quality: 'high',
@@ -221,6 +254,7 @@ Page({
             frameOrientation: this.data.frameOrientation,
             frameRatio: this.data.frameRatio,
             frameMode: 'center_cover',
+            displayWatermark,
             previewElapsedMs: this.data.previewElapsedMs,
           });
         }
