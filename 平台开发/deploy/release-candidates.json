@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_line": "cross-module-freeze",
   "candidate_tags": [
-    "release-20261015-cross-module-freeze-r25"
+    "release-20261017-cross-module-freeze-v2-r26"
   ],
   "historical_tags": [
     "release-20260810-cross-module-freeze",
@@ -28,6 +28,8 @@
     "release-20260930-station-ingest-limited-r21",
     "release-20261011-cross-module-freeze-r22",
     "release-20261011-cross-module-freeze-r23",
-    "release-20261012-cross-module-freeze-r24"
+    "release-20261012-cross-module-freeze-r24",
+    "release-20261015-cross-module-freeze-r25",
+    "release-20261017-cross-module-freeze-r26"
   ]
 }
