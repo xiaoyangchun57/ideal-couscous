@@ -21,6 +21,7 @@ import {
   readSiteDirectorySnapshot,
   siteDirectoryLoadMode,
   stationDirectorySnapshotKey,
+  validateMonitoringDirectoryPayload,
   writeSiteDirectorySnapshot,
 } from './stationMonitoring.js';
 
@@ -56,6 +57,26 @@ test('monitoring merge preserves the legacy site status and retains last success
   const retained = mergeMonitoringSites(legacy, null, first);
   assert.equal(retained[0].monitoring_status, 'normal');
   assert.equal(retained[0].monitoring_reason, '有效观测在周期内');
+});
+
+test('monitoring directory rejects scope total and site-set mismatches', () => {
+  const sites = [{ id: 7 }, { id: 8 }];
+  const valid = {
+    scope: 'all', available_scopes: ['mine', 'all'],
+    service_scope: 'current', available_service_scopes: ['current', 'all'],
+    items: [{ site_id: 7 }, { site_id: 8 }], summary: { total: 2 },
+  };
+  assert.equal(validateMonitoringDirectoryPayload(
+    sites, valid, { scope: 'all', serviceScope: 'current' }).ok, true);
+  assert.equal(validateMonitoringDirectoryPayload(
+    sites, { ...valid, service_scope: 'all' },
+    { scope: 'all', serviceScope: 'current' }).ok, false);
+  assert.equal(validateMonitoringDirectoryPayload(
+    sites, { ...valid, summary: { total: 36 } },
+    { scope: 'all', serviceScope: 'current' }).ok, false);
+  assert.equal(validateMonitoringDirectoryPayload(
+    sites, { ...valid, items: [{ site_id: 7 }, { site_id: 9 }] },
+    { scope: 'all', serviceScope: 'current' }).ok, false);
 });
 
 test('summary and axes expose explicit unavailable and unknown states', () => {
@@ -167,7 +188,16 @@ test('site directory snapshot survives page re-entry but is isolated by session 
 
 test('communication and latest cycle remain independent while trend gaps stay null', () => {
   assert.equal(communicationStatusView({ status: 'normal' }).label, '接收正常');
-  assert.equal(cycleStatusView({ status: 'incomplete' }).label, '结果不完整');
+  assert.equal(cycleStatusView({ status: 'incomplete' }).label, '结果缺项');
+  assert.equal(cycleStatusView({
+    status: 'not_configured', reason_code: 'expected_factors_unconfigured',
+  }).label, '应监测因子未设置');
+  assert.equal(cycleStatusView({
+    status: 'not_configured', reason_code: 'time_configuration_missing',
+  }).label, '时间配置缺失');
+  assert.equal(cycleStatusView({
+    status: 'not_configured', reason_code: 'no_evaluable_period',
+  }).label, '暂无可评价时段');
   const trend = monitoringTrendView({
     points: [
       { scheduled_at: '2026-10-09T00:00:00+08:00', status: 'value', value: 7.1 },

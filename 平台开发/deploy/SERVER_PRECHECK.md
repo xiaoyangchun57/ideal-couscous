@@ -36,6 +36,32 @@ Before deployment:
    `sha256sum -c SHA256SUMS-<timestamp>.txt`. Retention applies to the database,
    public display archive, private original archive, optional ingest archive,
    and checksum manifest as one timestamped recovery set.
+10. Keep Web and the station receiver stopped while the one-shot
+    `station-ingest-cutover` Compose dependency runs. It applies migration 014,
+    backfills historical bounded summaries, verifies endpoint/latest-authenticated
+    and receipt-window counts, and writes the durable cutover marker. A non-zero
+    exit blocks both services; do not bypass it or run the backfill from Web startup.
+    The successful JSON output must contain `status=completed`, zero
+    `latest_authenticated_mismatches`, and matching expected/actual receipt counts.
+    From the immutable release directory, the independent release task runs:
+    ```bash
+    docker compose --profile station-ingest stop water-monitor station-ingest
+    docker compose run --rm station-ingest-cutover
+    docker compose run --rm --no-deps station-ingest-cutover \
+      python station_ingest_cutover.py verify --database /app/backend/data/water.db
+    docker compose --profile station-ingest up -d water-monitor station-ingest
+    ```
+    Do not run the final `up` command after either one-shot command returns non-zero.
+    Re-running `station-ingest-cutover` after a completed marker must report
+    `backfill=already-completed` rather than scan historical raw frames again.
+11. After the cutover succeeds, install the unique six-hour maintenance runner with
+    `sudo bash deploy/install-station-ingest-retention-timer.sh <verified-FN-mirror-path>`.
+    The timer retries failures up to three times at ten-minute intervals. The Python
+    runner holds a cross-process lease for the whole cycle, writes failed runs to
+    `station_ingest_retention_runs` when SQLite is available, and emits daemon alert
+    messages plus a failed systemd unit otherwise. Confirm the host monitor alerts on
+    that unit before release. The scheduled command runs only `maintain-once`; it never
+    runs `compact-copy` or the first historical compaction automatically.
 
 ## Consistent restore
 

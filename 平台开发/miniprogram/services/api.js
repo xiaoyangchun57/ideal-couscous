@@ -147,6 +147,10 @@ const api = {
 
   // 提交检查项；photo_urls 必须为 JSON 字符串
   submitItem: (payload) => request('/api/mobile/submit-item', 'POST', payload, { queue: false }),
+  correctInspectionItemPhotos: (itemId, payload) => request(
+    '/api/mobile/inspection-items/' + itemId + '/photos/correct', 'POST', payload,
+    { queue: false, retry: 0 }
+  ),
 
   // 到站打卡
   checkIn: (payload, managedByOutbox) =>

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const api = require('../services/api.js');
+const { presentLatestCycle } = require('../utils/stationMonitoringPresentation.js');
 
 let definition;
 global.getApp = () => ({ globalData: {} });
@@ -30,8 +31,9 @@ const makePage = () => {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(wxml, /最后收到报文/);
     assert.match(wxml, /接收：/);
-    assert.match(wxml, /周期：/);
-    assert.match(wxml, /最近检测周期/);
+    assert.match(wxml, /结果：/);
+    assert.match(wxml, /最近一期结果/);
+    assert.match(wxml, /已到 .*应到/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
     assert.doesNotMatch(wxml, /RTU|仪器状态|最后通信/);
     const calls = [];
@@ -39,7 +41,11 @@ const makePage = () => {
       calls.push(options);
       return Promise.resolve({
         scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
-        items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
+        items: [{
+          id: 1, site_id: 1, name: '本人站', is_responsible: true,
+          monitoring_status_label: '等待首帧',
+          latest_cycle: { status: 'incomplete', arrived_count: 2, formed_count: 1, expected_count: 3 },
+        }]
       });
     };
     const page = makePage();
@@ -48,6 +54,14 @@ const makePage = () => {
     assert.deepEqual(calls[0], { scope: 'mine', keyword: '' }, 'first request must use mine');
     assert.equal(page.data.canViewAll, true, 'scope switch follows server capability');
     assert.equal(page.data.sites[0].is_responsible, true);
+    assert.equal(page.data.sites[0].latest_cycle.arrived_count_display, 2, 'arrived count takes precedence over legacy formed count');
+    assert.equal(page.data.sites[0].latest_cycle.status_label, '结果缺项');
+    assert.equal(presentLatestCycle({ formed_count: 4, expected_count: 5 }).arrived_count_display, 4);
+    assert.equal(presentLatestCycle({ status: 'complete' }).status_label, '结果完整');
+    assert.equal(presentLatestCycle({ status: 'pending' }).status_label, '结果形成中');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'expected_factors_unconfigured' }).status_label, '应监测因子未设置');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'time_configuration_missing' }).status_label, '时间配置缺失');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'no_evaluable_period' }).status_label, '暂无可评价时段');
 
     let staticCalls = 0;
     let closedMonitoringCalls = 0;

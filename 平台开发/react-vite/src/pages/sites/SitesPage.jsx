@@ -10,7 +10,7 @@ import {
   ReloadOutlined, DownloadOutlined, UploadOutlined,
   FileTextOutlined, CloudServerOutlined, ApiOutlined, InboxOutlined,
   PlusOutlined, ExperimentOutlined, CheckCircleOutlined,
-  CloseCircleOutlined,
+  CloseCircleOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
@@ -26,7 +26,7 @@ import dayjs from 'dayjs';
 import {
   communicationStatusView, cycleStatusView, hasAdminRole, mergeMonitoringSites,
   formatMonitoringTime, monitoringStatusView, monitoringSummaryItems, readSiteDirectorySnapshot, siteDirectoryLoadMode,
-  stationDirectorySnapshotKey, writeSiteDirectorySnapshot,
+  stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
 } from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
@@ -162,6 +162,7 @@ export default function SitesPage() {
   const [servicePolicyLoading, setServicePolicyLoading] = useState(false);
   const [servicePolicySaving, setServicePolicySaving] = useState(false);
   const [servicePolicyData, setServicePolicyData] = useState(null);
+  const [servicePolicySite, setServicePolicySite] = useState(null);
   const [servicePolicyForm] = Form.useForm();
   const servicePolicyRetryRef = useRef({ fingerprint: '', key: '' });
   const selectedServiceStatus = Form.useWatch('service_status', servicePolicyForm);
@@ -200,7 +201,9 @@ export default function SitesPage() {
       setMonitoringScopeFacts(null);
     }
     const monitoringResultPromise = monitoringPublic
-      ? api.stationMonitoringSites({ scope: monitoringScope, signal: controller.signal }).then(
+      ? api.stationMonitoringSites({
+        scope: monitoringScope, serviceScope, signal: controller.signal,
+      }).then(
         (value) => ({ status: 'fulfilled', value }),
         (reason) => ({ status: 'rejected', reason }),
       )
@@ -264,6 +267,21 @@ export default function SitesPage() {
         return;
       }
       const monitoringPayload = monitoringResult.value;
+      const monitoringContract = validateMonitoringDirectoryPayload(
+        rows, monitoringPayload, { scope: monitoringScope, serviceScope },
+      );
+      if (!monitoringContract.ok) {
+        setMonitoringError(monitoringContract.error);
+        storeSnapshot({
+          ...baseSnapshot,
+          resultSnapshot: {
+            ...(baseSnapshot.resultSnapshot || {}),
+            state: baseSnapshot.resultSnapshot?.source_updated_at ? 'stale' : 'error',
+            refreshing: false,
+          },
+        });
+        return;
+      }
       storeSnapshot({
         key: monitoringRequestKey,
         rows: mergeMonitoringSites(rows, monitoringPayload, baseSnapshot.rows),
@@ -272,6 +290,9 @@ export default function SitesPage() {
           scope: monitoringPayload?.scope ?? null,
           availableScopes: Array.isArray(monitoringPayload?.available_scopes)
             ? monitoringPayload.available_scopes : [],
+          serviceScope: monitoringPayload?.service_scope ?? null,
+          availableServiceScopes: Array.isArray(monitoringPayload?.available_service_scopes)
+            ? monitoringPayload.available_service_scopes : [],
         },
         resultSnapshot: {
           ...(monitoringPayload?.result_snapshot || {}),
@@ -498,14 +519,16 @@ export default function SitesPage() {
     }
   }, [archiveData, fetchSites, openArchive, profileForm]);
 
-  const openServicePolicy = useCallback(async () => {
-    if (!archiveData) return;
+  const openServicePolicy = useCallback(async (targetSite = null) => {
+    const site = targetSite?.id ? targetSite : archiveData;
+    if (!site) return;
+    setServicePolicySite({ id: site.id, name: site.name || '' });
     setServicePolicyOpen(true);
     setServicePolicyLoading(true);
     setServicePolicyData(null);
     servicePolicyRetryRef.current = { fingerprint: '', key: '' };
     try {
-      const policy = await api.stationServicePolicy(archiveData.id);
+      const policy = await api.stationServicePolicy(site.id);
       setServicePolicyData(policy);
       servicePolicyForm.setFieldsValue({
         service_status: policy.service_status || 'active',
@@ -516,13 +539,15 @@ export default function SitesPage() {
     } catch (error) {
       message.error(error?.message || '服务政策加载失败');
       setServicePolicyOpen(false);
+      setServicePolicySite(null);
     } finally {
       setServicePolicyLoading(false);
     }
   }, [archiveData, servicePolicyForm]);
 
   const saveServicePolicy = useCallback(async () => {
-    if (!archiveData || !servicePolicyData) return;
+    const targetSite = servicePolicySite || archiveData;
+    if (!targetSite || !servicePolicyData) return;
     const values = await servicePolicyForm.validateFields();
     const payload = {
       service_status: values.service_status,
@@ -535,12 +560,12 @@ export default function SitesPage() {
     if (servicePolicyRetryRef.current.fingerprint !== fingerprint) {
       servicePolicyRetryRef.current = {
         fingerprint,
-        key: `site-policy-${archiveData.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        key: `site-policy-${targetSite.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       };
     }
     setServicePolicySaving(true);
     try {
-      const saved = await api.updateStationServicePolicy(archiveData.id, {
+      const saved = await api.updateStationServicePolicy(targetSite.id, {
         ...payload,
         idempotency_key: servicePolicyRetryRef.current.key,
       });
@@ -548,14 +573,15 @@ export default function SitesPage() {
       message.success(saved.unchanged ? '服务政策未变化' : '服务政策已保存');
       setServicePolicyOpen(false);
       servicePolicyRetryRef.current = { fingerprint: '', key: '' };
-      await loadArchive(archiveData.id);
+      if (archiveData?.id === targetSite.id) await loadArchive(targetSite.id);
       fetchSites();
+      setServicePolicySite(null);
     } catch (error) {
       message.error(error?.message || '服务政策保存失败，当前输入已保留');
     } finally {
       setServicePolicySaving(false);
     }
-  }, [archiveData, fetchSites, loadArchive, servicePolicyData, servicePolicyForm]);
+  }, [archiveData, fetchSites, loadArchive, servicePolicyData, servicePolicyForm, servicePolicySite]);
 
   // 试剂库存：新增 / 编辑（更换时间 + 可用天数 + 余量）
   const openReagentUpd = (row) => {
@@ -771,7 +797,7 @@ export default function SitesPage() {
           return <Space direction="vertical" size={0}><Tag color={statusView.color}>{statusView.label}</Tag><Text type="secondary" ellipsis={{ tooltip: statusView.reason }} style={{ fontSize: 12, maxWidth: 130 }}>{statusView.reason}</Text><Badge color={communicationView.color} text={communicationView.label} /><Text type="secondary" style={{ fontSize: 12 }}>{record.communication?.last_received_at ? dayjs(record.communication.last_received_at).format('MM-DD HH:mm') : '暂无报文'}</Text></Space>;
         },
       }, {
-        title: '最近检测周期',
+        title: '最近一期结果',
         dataIndex: 'latest_cycle',
         key: 'latest_cycle',
         width: 170,
@@ -781,7 +807,8 @@ export default function SitesPage() {
           }
           const view = cycleStatusView(record.latest_cycle);
           const cycle = record.latest_cycle || {};
-          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} /><Text type="secondary" style={{ fontSize: 12 }}>{cycle.scheduled_at ? `${dayjs(cycle.scheduled_at).format('MM-DD HH:mm')} · ${cycle.formed_count || 0}/${cycle.expected_count || 0}` : '暂无周期'}</Text></Space>;
+          const arrivedCount = cycle.arrived_count ?? cycle.formed_count ?? 0;
+          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} /><Text type="secondary" style={{ fontSize: 12 }}>{cycle.scheduled_at ? `${dayjs(cycle.scheduled_at).format('MM-DD HH:mm')} · 已到 ${arrivedCount}/${cycle.expected_count || 0}` : view.label}</Text></Space>;
         },
       }, {
         title: '关键时间',
@@ -806,14 +833,18 @@ export default function SitesPage() {
       {
         title: '操作',
         key: 'actions',
-        width: 110,
+        width: isAdmin ? 205 : 110,
         fixed: 'right',
         render: (_, record) => (
-          <Space size={0}>{monitoringPublic && <Button type="link" size="small" onClick={() => navigate(monitoringDetailPath(record.id))}>{record.service_status === 'ended' ? '历史' : '监测'}</Button>}<Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
+          <Space size={0}>
+            {monitoringPublic && <Button type="link" size="small" onClick={() => navigate(monitoringDetailPath(record.id))}>{record.service_status === 'ended' ? '历史' : '监测'}</Button>}
+            {isAdmin && <Button type="link" size="small" icon={<SettingOutlined />} onClick={() => openServicePolicy(record)}>服务状态</Button>}
+            <Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button>
+          </Space>
         ),
       },
     ],
-    [monitoringDetailPath, monitoringPublic, navigate, openArchive],
+    [isAdmin, monitoringDetailPath, monitoringPublic, navigate, openArchive, openServicePolicy],
   );
 
   // ========================================================================
@@ -945,7 +976,7 @@ export default function SitesPage() {
                 <Button type="link" icon={<HoverGifIcon name="pencil" size={14} />} onClick={openProfileEdit} style={{ paddingInline: 0, marginTop: 8 }}>
                   完善基础档案
                 </Button>
-                <Button type="link" onClick={openServicePolicy} style={{ paddingInline: 0, marginTop: 8 }}>
+                <Button type="link" onClick={() => openServicePolicy()} style={{ paddingInline: 0, marginTop: 8 }}>
                   维护服务政策
                 </Button>
               </Space>
@@ -1533,7 +1564,7 @@ export default function SitesPage() {
         />
       ) : null}
       {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
-        监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}
+        监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}；服务范围：{monitoringScopeFacts.serviceScope === 'all' ? '含服务结束' : monitoringScopeFacts.serviceScope === 'current' ? '当前服务站点' : '服务端未提供'}
       </Text>}
       {monitoringPublic && activeSiteSnapshot?.resultSnapshot?.state === 'stale' ? <Alert
         type="warning"
@@ -1553,7 +1584,7 @@ export default function SitesPage() {
           ? '站点台账已更新，正在核对最新监测状态；当前暂保留上次成功结果。'
           : '站点台账已加载，监测状态仍在加载中。'}
       </Text> : null}
-      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
+      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope) || monitoringScopeFacts.serviceScope !== serviceScope || !monitoringScopeFacts.availableServiceScopes?.includes(serviceScope)) && (
         <Alert type="warning" showIcon message="监测范围尚未确认"
           description="服务端未确认本次请求范围，监测结果仅按实际返回的站点投影展示。"
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>} />
@@ -1662,11 +1693,12 @@ export default function SitesPage() {
       </Modal>
 
       <Modal
-        title={`维护服务政策${archiveData?.name ? ` · ${archiveData.name}` : ''}`}
+        title={`维护服务政策${servicePolicySite?.name || archiveData?.name ? ` · ${servicePolicySite?.name || archiveData?.name}` : ''}`}
         open={servicePolicyOpen}
         onCancel={() => {
           if (servicePolicySaving) return;
           setServicePolicyOpen(false);
+          setServicePolicySite(null);
           servicePolicyRetryRef.current = { fingerprint: '', key: '' };
         }}
         onOk={saveServicePolicy}

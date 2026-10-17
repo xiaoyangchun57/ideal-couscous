@@ -114,6 +114,7 @@ import base64
 import secrets
 import tempfile
 import calendar
+from pathlib import Path
 from io import BytesIO
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
@@ -124,6 +125,7 @@ from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos as _validate_submission_photos
 from hj212_parser import FrameError as HJ212FrameError, parse_hj212_frame
+from station_ingest_retention import RetentionError, read_raw_evidence
 
 
 def validate_submission_photos(result, required_photos, photo_urls):
@@ -4855,6 +4857,7 @@ _tokens = {}
 # 站点范围缓存：token -> [site_id,...]，避免每个/api/请求都查 user_sites（消除并发读时的锁等待卡顿）
 _site_ids_cache = {}
 AUTH_SESSION_HOURS = max(1, int(os.environ.get('AUTH_SESSION_HOURS', str(30 * 24))))
+AUTH_LAST_SEEN_BUSY_TIMEOUT_MS = 50
 LOGIN_FAILURE_LIMIT = max(3, int(os.environ.get('LOGIN_FAILURE_LIMIT', '5')))
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(os.environ.get('LOGIN_ATTEMPT_WINDOW_SECONDS', '900')))
 LOGIN_LOCK_BASE_SECONDS = max(10, int(os.environ.get('LOGIN_LOCK_BASE_SECONDS', '60')))
@@ -4875,6 +4878,30 @@ def _hash_pw(pw):
 
 def _hash_token(token):
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _sqlite_busy(exc):
+    message = str(exc).lower()
+    return 'database is locked' in message or 'database table is locked' in message
+
+
+def _touch_auth_session_last_seen(db, session_id, seen_at):
+    """Best-effort activity metadata must not turn every authorized read into a blocking write."""
+    try:
+        db.execute(f'PRAGMA busy_timeout={AUTH_LAST_SEEN_BUSY_TIMEOUT_MS}')
+        db.execute(
+            'UPDATE auth_sessions SET last_seen_at=? WHERE id=?',
+            (seen_at, session_id),
+        )
+        db.commit()
+        return True
+    except sqlite3.OperationalError as exc:
+        db.rollback()
+        if not _sqlite_busy(exc):
+            raise
+        return False
+    finally:
+        db.execute('PRAGMA busy_timeout=3000')
 
 
 def _table_exists(db, table_name):
@@ -5051,11 +5078,8 @@ def _authenticate_token(token):
         site_ids = [row['site_id'] for row in site_rows]
         last_seen = session['last_seen_at'] or session['issued_at']
         if last_seen <= (now - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S'):
-            db.execute(
-                "UPDATE auth_sessions SET last_seen_at=? WHERE id=?",
-                (now.strftime('%Y-%m-%d %H:%M:%S'), session['id']),
-            )
-            db.commit()
+            _touch_auth_session_last_seen(
+                db, session['id'], now.strftime('%Y-%m-%d %H:%M:%S'))
         _tokens[token] = user
         _site_ids_cache[token] = site_ids
         return user, site_ids, None
@@ -19389,7 +19413,9 @@ def _pending_inspection_attachment_has_business_reference(db, attachment):
     return False
 
 
-def _recoverable_pending_inspection_attachment(db, sha256_hash, site_id, uploader_id):
+def _recoverable_pending_inspection_attachment(
+        db, sha256_hash, site_id, uploader_id, plan_id, item_id,
+        rework_required_at, match_context=True):
     """Find one exact, current-user temporary photo that is still safe to rebind."""
     rows = db.execute("""SELECT * FROM operation_attachments
         WHERE sha256_hash=? AND site_id=? AND uploader_id=?
@@ -19398,7 +19424,13 @@ def _recoverable_pending_inspection_attachment(db, sha256_hash, site_id, uploade
           AND COALESCE(review_status,'pending') NOT IN ('voided','superseded')
           AND json_valid(extra_json)
           AND json_extract(extra_json,'$.material_role')='pending_inspection'
-        ORDER BY id""", (sha256_hash, site_id, uploader_id)).fetchall()
+          AND (?=0 OR (
+              CAST(json_extract(extra_json,'$.plan_id') AS INTEGER)=?
+              AND CAST(json_extract(extra_json,'$.item_id') AS INTEGER)=?
+              AND COALESCE(json_extract(extra_json,'$.rework_required_at'),'')=?))
+        ORDER BY id""", (
+            sha256_hash, site_id, uploader_id, int(bool(match_context)), plan_id, item_id,
+            str(rework_required_at or ''))).fetchall()
     for row in rows:
         if not _pending_inspection_attachment_has_business_reference(db, row):
             return row
@@ -19555,6 +19587,29 @@ def _server_capture_evidence_matches(db, attachment, required_cycle=''):
         and str(session['anti_counterfeit_code'] or '') == str(
             (attachment['watermark_code'] if 'watermark_code' in keys else '') or '')
     )
+
+
+def _inspection_submission_evidence_matches(
+        db, attachment, required_cycle='', allow_formal=False):
+    """Accept either a trusted camera session or an album photo from this item cycle."""
+    keys = set(attachment.keys())
+    try:
+        extra = json.loads(attachment['extra_json'] or '{}') if 'extra_json' in keys else {}
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(extra, dict):
+        return False
+    material_role = str(extra.get('material_role') or '')
+    if allow_formal and material_role == 'formal':
+        return True
+    if _server_capture_evidence_matches(db, attachment, required_cycle):
+        return True
+    if ('capture_source' not in keys or attachment['capture_source'] != 'album'
+            or 'evidence_basis' not in keys
+            or attachment['evidence_basis'] != 'inspection_album'):
+        return False
+    return (material_role == 'pending_inspection'
+            and str(extra.get('rework_required_at') or '') == str(required_cycle or ''))
 
 
 def _attachment_original_file(attachment):
@@ -19843,7 +19898,9 @@ def _evaluate_attachment_flag(db, att):
     site = None
     if att.get('site_id'):
         site = db.execute('SELECT gps_lat, gps_lng FROM sites WHERE id=?', (att['site_id'],)).fetchone()
-    if alat is not None and alng is not None and site and site['gps_lat'] is not None:
+    provenance_checks = att.get('capture_source') != 'album'
+    if (provenance_checks and alat is not None and alng is not None
+            and site and site['gps_lat'] is not None):
         d = _haversine(alat, alng, float(site['gps_lat']), float(site['gps_lng']))
         if d is None:
             reasons.append('GPS坐标无效')
@@ -19854,7 +19911,7 @@ def _evaluate_attachment_flag(db, att):
     # 2) 时间异常：未来 或 与任务参考日期偏差超阈值
     ta = att.get('taken_at')
     t = _parse_dt(ta)
-    if ta:
+    if provenance_checks and ta:
         t = _parse_dt(ta)
         if t:
             now = datetime.now()
@@ -19867,7 +19924,8 @@ def _evaluate_attachment_flag(db, att):
                     if t < ref - timedelta(days=STALE_REF_DAYS) or t > ref + timedelta(days=STALE_REF_DAYS):
                         reasons.append('拍摄时间与任务日期偏差超3天')
                         rule = rule or 'time'
-    if (alat is None or alng is None or t is None) and att.get('capture_source') != 'watermark_album':
+    if (provenance_checks and (alat is None or alng is None or t is None)
+            and att.get('capture_source') != 'watermark_album'):
         reasons.append('\u7f3a\u5c11\u73b0\u573a\u62cd\u6444GPS\u6216\u65f6\u95f4\u4fe1\u606f')
         rule = rule or 'metadata_missing'
     # 3) 关联巡检项标记为异常
@@ -24809,10 +24867,13 @@ def mobile_site_tasks(site_id):
             freq_cn, needs_frequency_maintenance = _mobile_frequency_display(item['frequency'])
             evidence, effective_evidence = _item_attachment_history(db, item)
             photo_state = _mobile_inspection_photo_state(item, evidence)
+            correction_allowed, correction_reason = _inspection_photo_correction_capability(
+                db, item, user)
             categories[cat]['items'].append({
                 'item_id': item['id'],
                 'plan_id': item['plan_id'],
                 'item_name': item['item_name'],
+                'category': cat,
                 'frequency': item['frequency'] or '',
                 'frequency_cn': freq_cn,
                 'needs_frequency_maintenance': needs_frequency_maintenance,
@@ -24828,6 +24889,8 @@ def mobile_site_tasks(site_id):
                 'evidence_attachments': evidence,
                 'voided_evidence': [row for row in evidence if row.get('review_status') == 'voided'],
                 'effective_evidence_count': len(effective_evidence),
+                'photo_correction_allowed': correction_allowed,
+                'photo_correction_block_reason': correction_reason,
                 **photo_state,
             })
 
@@ -24884,6 +24947,63 @@ def _mobile_inspection_category_label(category):
     """Return a human-readable category without hiding new, legitimate categories."""
     category = (category or '').strip()
     return _MOBILE_INSPECTION_CATEGORY_LABELS.get(category, category or '其他检查')
+
+
+def _inspection_photo_correction_capability(db, item, user):
+    """Return the authoritative pre-review photo-correction capability."""
+    item = dict(item or {})
+    user = dict(user or {})
+    if not item.get('id') or item.get('result') is None:
+        return False, '检查项尚未提交'
+    if str(item.get('execution_status') or 'active') != 'active':
+        return False, '检查项已取消'
+    if item.get('check_out_time'):
+        return False, '本站已离站，照片只能回看'
+    evidence_status = str(item.get('evidence_status') or '')
+    if (evidence_status in ('supplement_required', 'replacement_submitted')
+            or item.get('rework_required_at') or int(item.get('review_status') or 0) == 3):
+        return False, '整改轮次请按补拍流程处理'
+    if item.get('reviewer_id') is not None or str(item.get('review_time') or '').strip():
+        return False, '审核人员已处理，照片只能回看'
+    if int(item.get('review_status') or 0) not in (1, 2):
+        return False, '检查项当前不允许修改照片'
+
+    execution = db.execute("""SELECT p.assignee_id,p.status AS plan_status,
+            ps.status AS schedule_status
+        FROM insp_plans p LEFT JOIN plan_schedules ps ON ps.id=p.plan_schedule_id
+        WHERE p.id=?""", (item.get('plan_id'),)).fetchone()
+    if (not execution or int(execution['assignee_id'] or 0) != int(user.get('id') or 0)
+            or execution['plan_status'] not in ('active', 'completed')
+            or (execution['schedule_status'] is not None
+                and execution['schedule_status'] != 'approved')):
+        return False, '当前账号已无该计划的现场操作权限'
+    if not db.execute('SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+                      (user.get('id'), item.get('site_id'))).fetchone():
+        return False, '当前账号已无该站点现场操作权限'
+
+    if _table_exists(db, 'operation_attachments'):
+        columns = {row['name'] for row in db.execute(
+            'PRAGMA table_info(operation_attachments)').fetchall()}
+        review_terms = []
+        if 'reviewer_id' in columns:
+            review_terms.append('reviewer_id IS NOT NULL')
+        if 'reviewed_at' in columns:
+            review_terms.append("COALESCE(reviewed_at,'')!=''")
+        if review_terms:
+            links = ["(source_type='inspection' AND source_id=?)"]
+            params = [item.get('id')]
+            if 'item_id' in columns:
+                links.append('item_id=?')
+                params.append(item.get('id'))
+            reviewed = db.execute(f"""SELECT 1 FROM operation_attachments
+                WHERE site_id=? AND COALESCE(is_deleted,0)=0
+                  AND COALESCE(review_status,'pending')
+                      NOT IN ('rejected','voided','superseded')
+                  AND ({' OR '.join(links)}) AND ({' OR '.join(review_terms)}) LIMIT 1""",
+                [item.get('site_id')] + params).fetchone()
+            if reviewed:
+                return False, '相关照片已由审核人员处理，只能回看'
+    return True, ''
 
 
 def _mobile_inspection_photo_state(item, evidence):
@@ -25019,7 +25139,8 @@ def _pending_inspection_photo_urls(db, plan_id, site_id, uploader_id):
     return grouped
 
 
-def _mobile_execution_categories(db, plan_id, site_id, uploader_id=None, rework_only=False):
+def _mobile_execution_categories(db, plan_id, site_id, uploader_id=None, rework_only=False,
+                                 user=None):
     """将一个已批准执行包中的单站检查项整形成移动端可直接渲染的数据。"""
     where = "plan_id=? AND site_id=? AND COALESCE(execution_status, 'active')='active'"
     if rework_only:
@@ -25047,8 +25168,11 @@ def _mobile_execution_categories(db, plan_id, site_id, uploader_id=None, rework_
         categories[category]['completed'] += item_completed
         evidence, effective_evidence = _item_attachment_history(db, item)
         photo_state = _mobile_inspection_photo_state(item, evidence)
+        correction_allowed, correction_reason = _inspection_photo_correction_capability(
+            db, item, user or {})
         categories[category]['items'].append({
             'item_id': item['id'], 'plan_id': plan_id, 'item_name': item['item_name'],
+            'category': category,
             # Capability is a canonical category fact, never inferred from a user-facing title.
             'requiresCalibration': category == 'qaqc_calibration',
             'frequency': item['frequency'] or '',
@@ -25070,6 +25194,8 @@ def _mobile_execution_categories(db, plan_id, site_id, uploader_id=None, rework_
             'effective_evidence_count': len(effective_evidence),
             'pending_photo_urls': pending_photos.get(int(item['id']), []),
             'supplement_display_message': _mobile_supplement_display_message(item, photo_state),
+            'photo_correction_allowed': correction_allowed,
+            'photo_correction_block_reason': correction_reason,
             **photo_state,
         })
     return list(categories.values()), total, completed
@@ -25576,7 +25702,8 @@ def mobile_execution_site_tasks(plan_id, site_id):
             return jsonify({'error': '站点不存在'}), 404
         rework_only = scope == 'rework'
         categories, total, completed = _mobile_execution_categories(
-            db, plan_id, site_id, None if review_only else user['id'], rework_only=rework_only)
+            db, plan_id, site_id, None if review_only else user['id'], rework_only=rework_only,
+            user=user)
         if not total:
             return jsonify({'error': '该站点当前没有可处理的整改事项' if rework_only
                             else '该站点不在当前执行包中'}), 404
@@ -26083,7 +26210,8 @@ def _inspection_photo_upload_context(db, item_id, site_id, plan_id, user):
     current_retake = bool(required_at and evidence_status == 'supplement_required')
     initial_open = item['result'] is None and review_status == 0
     pending_review = review_status == 1
-    if not (initial_open or pending_review or current_retake):
+    correction_open, _ = _inspection_photo_correction_capability(db, item, user)
+    if not (initial_open or pending_review or current_retake or correction_open):
         if review_status == 2:
             return None, ('该检查项已通过审核，现场证据已冻结',
                           'INSPECTION_ITEM_APPROVED', 409)
@@ -26230,10 +26358,10 @@ def mobile_submit_item():
             required_cycle = str(rework_required_at or '')
             for stored_path in new_photos:
                 evidence = resolved_by_path.get(_attachment_storage_path(stored_path))
-                if not evidence or not _server_capture_evidence_matches(
+                if not evidence or not _inspection_submission_evidence_matches(
                         db, evidence, required_cycle):
                     return jsonify({
-                        'error': '补拍照片不属于当前返场补拍，请在站点范围内重新拍摄',
+                        'error': '补拍照片不属于当前返场补拍，请重新拍摄或从相册上传',
                         'code': 'RETAKE_EVIDENCE_CYCLE_MISMATCH',
                     }), 409
             photo_error = validate_submission_photos(
@@ -26288,10 +26416,10 @@ def mobile_submit_item():
         if attachment_error:
             return jsonify({'error': attachment_error,
                             'code': 'INSPECTION_PHOTO_CONTEXT_MISMATCH'}), 409
-        if any(not _server_capture_evidence_matches(db, photo, '')
+        if any(not _inspection_submission_evidence_matches(db, photo, '')
                for photo in resolved_photos):
             return jsonify({
-                'error': '必需现场照片必须由当前检查项的现场拍照入口生成',
+                'error': '必需照片必须由当前检查项的现场拍照或相册上传入口生成',
                 'code': 'INSPECTION_PHOTO_TRUST_REQUIRED',
             }), 409
         if not _bind_inspection_attachments(
@@ -26395,6 +26523,208 @@ def mobile_submit_item():
                     'review_status': int(stored_item['review_status'] or 0) if stored_item else 0,
                     'photo_urls': submitted_photos, 'actual_photos': len(submitted_photos)}
         _mobile_idempotency_store(db, idempotency_key, 'submit-item', response)
+        db.commit()
+        return jsonify(response)
+
+
+@app.route('/api/mobile/inspection-items/<int:item_id>/photos/correct', methods=['POST'])
+@login_required
+def mobile_correct_inspection_item_photos(item_id):
+    """Replace only the pre-review formal-photo set while retaining void audit."""
+    data = request.get_json(silent=True) or {}
+    idempotency_key = str(data.get('_idempotency_key') or '').strip()
+    if not idempotency_key or len(idempotency_key) > 160:
+        return jsonify({'error': '缺少有效的幂等键'}), 400
+    raw_photos = data.get('photo_urls', [])
+    if isinstance(raw_photos, str):
+        try:
+            raw_photos = json.loads(raw_photos)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_photos = None
+    if not isinstance(raw_photos, list):
+        return jsonify({'error': '照片列表格式错误'}), 400
+    selected_photos = []
+    selected_keys = set()
+    for value in raw_photos:
+        if not isinstance(value, str) or not _attachment_storage_path(value):
+            return jsonify({'error': '照片地址无效，请重新上传'}), 400
+        key = _attachment_storage_path(value)
+        if key in selected_keys:
+            return jsonify({'error': '同一张照片不能重复计数'}), 400
+        selected_keys.add(key)
+        selected_photos.append(value)
+    endpoint = f'inspection-photo-correction:{item_id}'
+    payload_hash = _mobile_idempotency_payload_hash(data)
+
+    with get_db() as db:
+        cached, conflict = _mobile_idempotency_strict_get(
+            db, idempotency_key, endpoint, payload_hash)
+        if conflict:
+            return conflict
+        if cached is not None:
+            return jsonify(cached)
+        if not _table_exists(db, 'attachment_void_audits'):
+            return jsonify({'error': '当前附件审计结构不完整，不能修改正式照片'}), 503
+        db.commit()
+        db.execute('BEGIN IMMEDIATE')
+        cached, conflict = _mobile_idempotency_strict_get(
+            db, idempotency_key, endpoint, payload_hash)
+        if conflict:
+            db.rollback()
+            return conflict
+        if cached is not None:
+            db.rollback()
+            return jsonify(cached)
+
+        item = db.execute('SELECT * FROM insp_plan_items WHERE id=?', (item_id,)).fetchone()
+        if not item:
+            db.rollback()
+            return jsonify({'error': '检查项不存在'}), 404
+        allowed, reason = _inspection_photo_correction_capability(
+            db, item, g.current_user)
+        if not allowed:
+            db.rollback()
+            return jsonify({'error': reason, 'code': 'INSPECTION_PHOTO_CORRECTION_BLOCKED'}), 409
+        photo_error = validate_submission_photos(
+            item['result'], item['required_photos'] if 'required_photos' in item.keys() else 0,
+            selected_photos)
+        if photo_error:
+            db.rollback()
+            return jsonify({'error': photo_error}), 400
+        resolved_photos, attachment_error = _inspection_submission_attachments(
+            db, item, g.current_user['id'], selected_photos)
+        if attachment_error:
+            db.rollback()
+            return jsonify({'error': attachment_error,
+                            'code': 'INSPECTION_PHOTO_CONTEXT_MISMATCH'}), 409
+        try:
+            current_photo_urls = json.loads(item['photo_urls'] or '[]')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            current_photo_urls = []
+        if not isinstance(current_photo_urls, list):
+            current_photo_urls = []
+        current_photo_keys = {
+            _attachment_storage_path(value) for value in current_photo_urls
+            if isinstance(value, str) and _attachment_storage_path(value)
+        }
+        for photo in resolved_photos:
+            if not _inspection_submission_evidence_matches(
+                    db, photo, '', allow_formal=True):
+                db.rollback()
+                return jsonify({
+                    'error': '照片必须由当前检查项的现场拍照或相册上传入口生成',
+                    'code': 'INSPECTION_PHOTO_TRUST_REQUIRED',
+                }), 409
+            try:
+                metadata = json.loads(photo['extra_json'] or '{}')
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if (str(metadata.get('material_role') or '') == 'formal'
+                    and _attachment_storage_path(photo['stored_path'])
+                    not in current_photo_keys):
+                db.rollback()
+                return jsonify({
+                    'error': '已提交照片不属于当前正式照片集合，请刷新后重试',
+                    'code': 'INSPECTION_PHOTO_CONTEXT_MISMATCH',
+                }), 409
+        selected_photos = [row['stored_path'] for row in resolved_photos]
+        selected_keys = {_attachment_storage_path(value) for value in selected_photos}
+
+        history, _ = _item_attachment_history(db, item)
+        current_rows = []
+        for row in history:
+            try:
+                metadata = json.loads(row.get('extra_json') or '{}')
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            if (str(metadata.get('material_role') or '') == 'formal'
+                    and str(row.get('evidence_qualification') or 'review') == 'qualified'
+                    and str(row.get('review_status') or 'pending').lower()
+                        not in ('rejected', 'voided', 'superseded')):
+                current_rows.append(row)
+        removed_rows = [row for row in current_rows
+                        if _attachment_storage_path(row.get('stored_path')) not in selected_keys]
+
+        if not _bind_inspection_attachments(
+                db, item, g.current_user['id'], selected_photos, resolved_photos):
+            db.rollback()
+            return jsonify({
+                'error': '照片已保留，但正式关联写入失败，请重试',
+                'code': 'INSPECTION_ATTACHMENT_BIND_FAILED',
+            }), 409
+
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        actor_name = _current_actor_name('')
+        voided_ids = []
+        attachment_columns = {row['name'] for row in db.execute(
+            'PRAGMA table_info(operation_attachments)').fetchall()}
+        for attachment in removed_rows:
+            assignments = ["review_status='voided'"]
+            params = []
+            for column, value in (
+                    ('voided_at', now), ('voided_by', g.current_user['id']),
+                    ('void_reason', '执行人提交后照片更正')):
+                if column in attachment_columns:
+                    assignments.append(f'{column}=?')
+                    params.append(value)
+            params.append(attachment['id'])
+            db.execute(f"""UPDATE operation_attachments SET {','.join(assignments)}
+                WHERE id=? AND COALESCE(is_deleted,0)=0
+                  AND COALESCE(review_status,'pending') NOT IN ('rejected','voided','superseded')""",
+                params)
+            if db.execute('SELECT changes()').fetchone()[0] != 1:
+                db.rollback()
+                return jsonify({'error': '照片状态已变化，请刷新后重试',
+                                'code': 'INSPECTION_PHOTO_CORRECTION_CONFLICT'}), 409
+            before_state = {
+                'review_status': attachment.get('review_status'),
+                'stored_path': attachment.get('stored_path'),
+                'photo_urls': json.loads(item['photo_urls'] or '[]'),
+            }
+            db.execute("""INSERT INTO attachment_void_audits
+                (attachment_id, original_source_type, original_source_id, original_site_id,
+                 original_plan_id, original_item_id, original_item_name, original_site_name,
+                 original_uploader_id, original_uploader_name, original_archive_name,
+                 original_review_status, original_reviewer_id, original_reviewed_at,
+                 original_risk_snapshot, original_state, replacement_item_id,
+                 replacement_plan_id, replacement_required, operator_id, operator_name,
+                 reason, voided_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    attachment['id'], attachment.get('source_type') or '',
+                    attachment.get('source_id'), attachment.get('site_id'), item['plan_id'],
+                    item['id'], item['item_name'] or '', attachment.get('site_name') or '',
+                    attachment.get('uploader_id'), attachment.get('uploader_name') or '',
+                    attachment.get('archive_name') or '', attachment.get('review_status') or '',
+                    attachment.get('reviewer_id'), attachment.get('reviewed_at'),
+                    json.dumps({'flag_reason': attachment.get('flag_reason') or '',
+                                'flag_rule': attachment.get('flag_rule') or ''},
+                               ensure_ascii=False, sort_keys=True),
+                    json.dumps(before_state, ensure_ascii=False, sort_keys=True), item['id'],
+                    item['plan_id'], 0, g.current_user['id'], actor_name,
+                    '执行人提交后照片更正', now))
+            voided_ids.append(attachment['id'])
+
+        db.execute("""UPDATE insp_plan_items SET photo_urls=?, actual_photos=?
+            WHERE id=? AND check_out_time IS NULL
+              AND reviewer_id IS NULL AND COALESCE(review_time,'')=''""",
+            (json.dumps(selected_photos, ensure_ascii=False), len(selected_photos), item_id))
+        if db.execute('SELECT changes()').fetchone()[0] != 1:
+            db.rollback()
+            return jsonify({'error': '审核或离站状态已变化，请刷新后重试',
+                            'code': 'INSPECTION_PHOTO_CORRECTION_CONFLICT'}), 409
+        _open_inspection_site_review(db, item['plan_id'], item['site_id'])
+        stored = db.execute('SELECT review_status FROM insp_plan_items WHERE id=?',
+                            (item_id,)).fetchone()
+        response = {
+            'success': True,
+            'item_id': item_id,
+            'photo_urls': selected_photos,
+            'actual_photos': len(selected_photos),
+            'review_status': int(stored['review_status'] or 0) if stored else 0,
+            'voided_attachment_ids': voided_ids,
+        }
+        _mobile_idempotency_strict_store(
+            db, idempotency_key, endpoint, payload_hash, response)
         db.commit()
         return jsonify(response)
 
@@ -26709,7 +27039,7 @@ def mobile_upload_site_photo():
     gps_lng = data.get('gps_lng')
     client_taken_at = data.get('taken_at')
     capture_session_token = data.get('capture_session')
-    capture_source = data.get('capture_source') or 'unknown'
+    capture_source = str(data.get('capture_source') or 'unknown').strip()
     display_watermark = data.get('display_watermark') is not False
     capture_client = str(data.get('capture_client') or '').strip()
     capture_context = str(data.get('capture_context') or '').strip()
@@ -26717,9 +27047,9 @@ def mobile_upload_site_photo():
     plan_id = data.get('plan_id')
     requested_item_name = (data.get('item_name') or '').strip()
     keep_as_supplement = bool(data.get('keep_as_supplement'))
-    if capture_source in ('watermark_album', 'album'):
+    if capture_source == 'watermark_album':
         capture_source = 'supplement'
-    if capture_source not in ('camera', 'supplement', 'unknown'):
+    if capture_source not in ('camera', 'album', 'supplement', 'unknown'):
         capture_source = 'unknown'
     capture_frame = None
     if capture_source == 'camera':
@@ -26743,6 +27073,12 @@ def mobile_upload_site_photo():
                             'code': 'CAPTURE_CONTEXT_REQUIRED'}), 400
     else:
         manual_report_capture = False
+    if capture_source == 'album' and (
+            item_id in (None, '') or plan_id in (None, '') or capture_context):
+        return jsonify({
+            'error': '相册上传仅用于绑定当前巡检计划和检查项',
+            'code': 'INSPECTION_ALBUM_CONTEXT_REQUIRED',
+        }), 400
     if not site_id or not image:
         return jsonify({'error': '缺少站点ID或图片数据'}), 400
     denied = _site_access_denied(site_id, '上传影像')
@@ -26862,10 +27198,13 @@ def mobile_upload_site_photo():
                 db.rollback()
                 return jsonify(cached)
             recovery_attachment = (_recoverable_pending_inspection_attachment(
-                db, sha256_hash, int(site_id), uploader['id'])
+                db, sha256_hash, int(site_id), uploader['id'], plan_id,
+                inspection_item['id'], rework_required_at if is_retake else '',
+                match_context=capture_source != 'camera')
                 if inspection_item is not None else None)
             recovery_attachment_id = recovery_attachment['id'] if recovery_attachment else 0
             recovery_source_attachment = None
+            cross_context_duplicate_id = None
             if recovery_attachment and capture_source == 'camera':
                 try:
                     recovery_context = _json.loads(recovery_attachment['extra_json'] or '{}')
@@ -26879,18 +27218,19 @@ def mobile_upload_site_photo():
                     int(recovery_plan_id or 0) == int(plan_id or 0)
                     and int(recovery_item_id or 0) == int(
                         inspection_item['id'] if inspection_item else 0))
-                # Same-context reuse is a duplicate.  A wrong-item pending photo may be
-                # reclaimed, but the new session must create a new watermarked display.
+                # Same-context reuse is a duplicate. A different item receives its own
+                # attachment and server watermark without changing the first item's row.
                 if same_context:
                     recovery_attachment_id = 0
                 else:
-                    recovery_source_attachment = recovery_attachment
+                    cross_context_duplicate_id = recovery_attachment_id
                 recovery_attachment = None
             duplicate = db.execute(f"""SELECT id, stored_path, taken_at, site_id
                 FROM operation_attachments
                 WHERE sha256_hash=? AND id!=? AND {_protected_photo_duplicate_sql()}
                 ORDER BY id LIMIT 1""", (sha256_hash, recovery_attachment_id)).fetchone()
             duplicate_id = duplicate['id'] if duplicate else None
+            recorded_duplicate_id = duplicate_id or cross_context_duplicate_id
             similar = None
             if perceptual_hash:
                 candidates = db.execute(f"""SELECT id, perceptual_hash FROM operation_attachments
@@ -27029,7 +27369,24 @@ def mobile_upload_site_photo():
                 duplicate_id
                 or (similar['id'] if similar else None)
                 or (watermark_code_duplicate['id'] if watermark_code_duplicate else None))
-            if capture_source == 'supplement':
+            if capture_source == 'album':
+                assessment = {
+                    'qualification': 'qualified',
+                    'basis': 'inspection_album',
+                    'taken_at': original_taken_at,
+                    'reason': '相册照片已按当前检查项接收',
+                    'next_action': '',
+                    'facts': {
+                        'capture_source': 'album',
+                        'received_at': now_str,
+                        'site_id': int(site_id),
+                        'plan_id': plan_id,
+                        'item_id': inspection_item['id'],
+                        'uploader_id': uploader['id'],
+                        'duplicate_of_id': duplicate_evidence_id,
+                    },
+                }
+            elif capture_source == 'supplement':
                 assessment = {
                     'qualification': 'ineligible',
                     'basis': 'supplement',
@@ -27094,6 +27451,8 @@ def mobile_upload_site_photo():
                              else 'pending_manual_report' if manual_report_capture
                              else 'supplement')
             extra['material_role'] = material_role
+            if capture_source == 'album':
+                extra['rework_required_at'] = rework_required_at if is_retake else ''
             extra_json = _json.dumps(extra, ensure_ascii=False)
             item_category = (inspection_item['category'] if inspection_item and 'category' in inspection_item.keys() else '') or '现场照片'
             recognized_category = requested_item_name or (match['recognized_category'] if match else '')
@@ -27191,7 +27550,8 @@ def mobile_upload_site_photo():
                      description, 'site_photo', 0, site_id,
                      uploader['id'], uploader.get('real_name', ''),
                      gps_lat, gps_lng, taken_at, now_str, item_category, capture_source,
-                     sha256_hash, duplicate_id, perceptual_hash, watermark_fields.get('code', ''),
+                     sha256_hash, recorded_duplicate_id, perceptual_hash,
+                     watermark_fields.get('code', ''),
                      ocr.get('text', ''), recognized_category,
                      match['match_status'] if match else 'manual', match['match_confidence'] if match else None,
                      0, match['requirement_id'] if match else None,
@@ -27233,8 +27593,8 @@ def mobile_upload_site_photo():
                                  strict=bool(recovery_attachment))
             risk_reasons = list(watermark_reasons)
             risk_rule = 'watermark' if watermark_reasons else ''
-            if duplicate_id:
-                risk_reasons.append(f'与历史影像#{duplicate_id}完全相同')
+            if recorded_duplicate_id:
+                risk_reasons.append(f'与历史影像#{recorded_duplicate_id}完全相同')
                 risk_rule = risk_rule or 'duplicate'
             elif similar:
                 risk_reasons.append(f'与历史影像#{similar["id"]}高度相似')
@@ -27282,7 +27642,8 @@ def mobile_upload_site_photo():
                 'evidence_next_action': assessment['next_action'],
                 'evidence_evaluation_id': evaluation_id,
                 'gps_lat': gps_lat, 'gps_lng': gps_lng,
-                'duplicate': bool(duplicate_id), 'duplicate_of_id': duplicate_id,
+                'duplicate': bool(recorded_duplicate_id),
+                'duplicate_of_id': recorded_duplicate_id,
                 'near_duplicate': bool(similar),
                 'watermark_status': ocr.get('status'),
                 'watermark_error_code': ocr.get('error_code') or '',
@@ -38311,6 +38672,13 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
             ).fetchone()
     responsibility = (responsibility if responsibility is not None
                       else _site_responsibility(db, site_id))
+    if expected_factor_selection is _MONITORING_UNSET:
+        expected_factor_selection = monitoring_expected_factor_selections_batch(
+            db, [site_id], at_time=now).get(site_id)
+    expected_factor_count = len(expected_factor_selection.get('items') or []) \
+        if expected_factor_selection else 0
+    unavailable_reason = ('time_configuration_missing' if expected_factor_selection
+                          else 'expected_factors_unconfigured')
     base = {
         'id': site['id'], 'site_id': site['id'], 'code': site['code'], 'name': site['name'],
         'type': site['type'], 'district': site['district'] or '', 'address': site['address'] or '',
@@ -38322,30 +38690,30 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
         'last_transport_received_at': None, 'recent_authentication_failures': 0,
         'last_valid_observation_at': None, 'published_factor_count': 0,
         'monitoring_status': 'not_connected', 'monitoring_load_state': 'ready',
+        'expected_factors_configured': bool(expected_factor_selection),
+        'expected_factor_version': (
+            expected_factor_selection.get('version') if expected_factor_selection else 0),
         'communication': {'status': 'not_connected', 'last_received_at': None},
-        'latest_cycle': {'status': 'not_configured', 'scheduled_at': None,
-                         'expected_count': 0, 'formed_count': 0, 'missing_count': 0,
+        'latest_cycle': {'status': 'not_configured', 'reason_code': unavailable_reason,
+                         'scheduled_at': None, 'expected_count': expected_factor_count,
+                         'arrived_count': 0,
+                         'formed_count': 0, 'missing_count': 0,
                          'review_required_count': 0, 'sufficient_for_business': False},
     }
     if not profile:
         return base
-    if expected_factor_selection is _MONITORING_UNSET:
-        expected_factor_selection = monitoring_expected_factor_selections_batch(
-            db, [site_id], at_time=now).get(site_id)
-    base['expected_factors_configured'] = bool(expected_factor_selection)
-    base['expected_factor_version'] = (
-        expected_factor_selection.get('version') if expected_factor_selection else 0)
     if raw is _MONITORING_UNSET:
         raw = db.execute(
-            """SELECT MAX(received_at) AS received_at FROM ingest_raw_frames
-               WHERE endpoint_id=? AND authentication_status='authenticated'""", (profile['endpoint_id'],)
+            """SELECT latest_authenticated_at AS received_at
+               FROM station_ingest_current_state WHERE endpoint_id=?
+               ORDER BY latest_authenticated_at DESC LIMIT 1""", (profile['endpoint_id'],)
         ).fetchone()
     if auth_diagnostic is _MONITORING_UNSET:
         station_code = (profile['endpoint_station_code']
                         if 'endpoint_station_code' in profile.keys() else None)
         auth_diagnostic = (db.execute(
             """SELECT COUNT(*) AS failure_count, MAX(received_at) AS last_transport_received_at
-               FROM ingest_raw_frames
+               FROM station_ingest_recent_receipts
                WHERE station_code=? AND authentication_status='credential_failed'
                  AND received_at>=?""",
             (station_code, _monitoring_auth_diagnostic_cutoff()),
@@ -38430,7 +38798,12 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
     configs = configs if configs is not None else monitoring_factor_configurations(db, site_id)
     values = values if values is not None else monitoring_latest_values(db, site_id)
     if last_communication is None:
-        row = db.execute("SELECT MAX(received_at) AS received_at FROM ingest_raw_frames WHERE endpoint_id=? AND authentication_status='authenticated'", (profile['endpoint_id'],)).fetchone()
+        row = db.execute(
+            """SELECT latest_authenticated_at AS received_at
+               FROM station_ingest_current_state WHERE endpoint_id=?
+               ORDER BY latest_authenticated_at DESC LIMIT 1""",
+            (profile['endpoint_id'],),
+        ).fetchone()
         last_communication = row['received_at'] if row else None
     profile_data = dict(profile)
     communication = _monitoring_freshness(last_communication, 1800)
@@ -38645,7 +39018,10 @@ def _mobile_static_site_payload(site, *, can_calibrate=False, is_responsible=Fal
 
 
 def _mobile_responsible_site_rows(db, scope, keyword, responsible_ids):
-    where = [_active_master_site_predicate(db), _current_service_site_predicate(db)]
+    where = [
+        _active_master_site_predicate(db),
+        _current_service_site_predicate(db, 'sites'),
+    ]
     params = []
     if scope == 'mine':
         if not responsible_ids:
@@ -38694,7 +39070,7 @@ def mobile_responsible_sites():
                 'all': db.execute(
                     'SELECT COUNT(*) FROM sites WHERE '
                     + _active_master_site_predicate(db) + ' AND '
-                    + _current_service_site_predicate(db)
+                    + _current_service_site_predicate(db, 'sites')
                 ).fetchone()[0] if is_admin else None,
             },
             'items': items,
@@ -38910,17 +39286,10 @@ def _station_monitoring_latest_authenticated_receipts(db, endpoint_ids):
     if not endpoint_ids:
         return {}
     marks = ','.join('?' * len(endpoint_ids))
-    rows = db.execute(f"""SELECT endpoint.id AS endpoint_id,(
-            SELECT raw.received_at
-            FROM ingest_raw_frames raw
-                 INDEXED BY idx_ingest_raw_authenticated_endpoint_received
-            WHERE raw.authentication_status='authenticated'
-              AND raw.endpoint_id=endpoint.id
-            ORDER BY raw.received_at DESC
-            LIMIT 1
-        ) AS received_at
-        FROM trusted_endpoints endpoint
-        WHERE endpoint.id IN ({marks})""", endpoint_ids).fetchall()
+    rows = db.execute(f"""SELECT endpoint_id,latest_authenticated_at AS received_at
+        FROM station_ingest_current_state
+        WHERE endpoint_id IN ({marks}) AND latest_authenticated_at IS NOT NULL""",
+        endpoint_ids).fetchall()
     return {
         row['endpoint_id']: row for row in rows
         if row['received_at'] is not None
@@ -38959,7 +39328,7 @@ def _station_monitoring_batch_projections(db, site_rows):
         code_marks = ','.join('?' * len(station_codes))
         auth_rows = db.execute(f"""SELECT station_code,COUNT(*) AS failure_count,
                 MAX(received_at) AS last_transport_received_at
-            FROM ingest_raw_frames INDEXED BY idx_ingest_raw_station_auth_received
+            FROM station_ingest_recent_receipts
             WHERE station_code IN ({code_marks}) AND authentication_status='credential_failed'
               AND received_at>=? GROUP BY station_code""",
             [*station_codes, _monitoring_auth_diagnostic_cutoff()]).fetchall()
@@ -39092,19 +39461,32 @@ def _station_expected_factor_mapping_metrics(db, site_id, at_time):
     return {row['business_metric'] for row in rows}
 
 
-def _station_hj212_endpoint_evidence(db, endpoint_id, *, limit=200):
-    rows = db.execute("""SELECT raw.raw_frame
-        FROM ingest_raw_frames raw
-        JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
-        WHERE raw.endpoint_id=? AND raw.authentication_status='authenticated'
-          AND protocol.protocol_family='hj212' AND length(raw.raw_frame)>0
-          AND instr(CAST(raw.raw_frame AS TEXT), 'CN=2061')>0
-        ORDER BY raw.id DESC LIMIT ?""", (endpoint_id, limit)).fetchall()
+def _station_hj212_endpoint_evidence_ids(db, endpoint_id, *, limit=200):
+    return tuple(int(row['raw_id']) for row in db.execute("""SELECT raw_id FROM (
+            SELECT raw.id AS raw_id
+            FROM ingest_raw_frames raw
+                 INDEXED BY idx_ingest_raw_authenticated_endpoint_received
+            JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+            WHERE raw.endpoint_id=? AND raw.authentication_status='authenticated'
+              AND protocol.protocol_family='hj212'
+            UNION
+            SELECT evidence.source_raw_frame_id AS raw_id
+            FROM monitoring_archive_evidence_refs evidence
+            WHERE evidence.endpoint_id=? AND evidence.authentication_status='authenticated'
+              AND evidence.protocol_family='hj212'
+        ) ORDER BY raw_id DESC LIMIT ?""", (endpoint_id, endpoint_id, limit)).fetchall())
+
+
+def _station_hj212_endpoint_evidence(db, endpoint_id, *, limit=200, raw_ids=None):
+    raw_ids = (_station_hj212_endpoint_evidence_ids(db, endpoint_id, limit=limit)
+               if raw_ids is None else tuple(raw_ids))
     factor_codes = set()
     has_four_hour_boundary_formal = False
-    for row in rows:
+    for raw_id in raw_ids:
         try:
-            frame = parse_hj212_frame(row['raw_frame'])
+            frame = parse_hj212_frame(read_raw_evidence(db, raw_id))
+        except RetentionError as exc:
+            raise RetentionError("HJ212 historical evidence is unavailable; retry after archive recovery") from exc
         except HJ212FrameError:
             continue
         if frame.command != '2061':
@@ -39121,14 +39503,32 @@ def _station_hj212_endpoint_evidence(db, endpoint_id, *, limit=200):
                 and formal_factors:
             has_four_hour_boundary_formal = True
     return {
-        'has_hj212': bool(rows),
+        'has_hj212': bool(raw_ids),
         'factor_codes': factor_codes,
         'has_four_hour_boundary_formal': has_four_hour_boundary_formal,
+        'raw_ids': raw_ids,
+    }
+
+
+def _station_expected_bound_endpoint_ids(db, site_id):
+    return tuple(int(row['id']) for row in db.execute("""SELECT id FROM trusted_endpoints
+        WHERE business_site_id=? AND enabled=1 AND endpoint_state='bound'
+        ORDER BY id""", (site_id,)).fetchall())
+
+
+def _prepare_station_expected_hj212_evidence(db, site_id):
+    endpoint_ids = _station_expected_bound_endpoint_ids(db, site_id)
+    return {
+        'endpoint_ids': endpoint_ids,
+        'by_endpoint': {
+            endpoint_id: _station_hj212_endpoint_evidence(db, endpoint_id)
+            for endpoint_id in endpoint_ids
+        },
     }
 
 
 def _ensure_station_expected_hj212_profiles(
-        db, site_id, selected_metrics, effective_from):
+        db, site_id, selected_metrics, effective_from, *, evidence_by_endpoint=None):
     """Create a profile only from a bound endpoint plus retained formal HJ212 evidence."""
     endpoints = db.execute("""SELECT id FROM trusted_endpoints
         WHERE business_site_id=? AND enabled=1 AND endpoint_state='bound'
@@ -39153,7 +39553,9 @@ def _ensure_station_expected_hj212_profiles(
                     '端点 profile 与当前站点归属冲突，不能静默改绑',
                 )
             continue
-        evidence = _station_hj212_endpoint_evidence(db, endpoint_id)
+        evidence = (evidence_by_endpoint or {}).get(endpoint_id)
+        if evidence is None:
+            evidence = _station_hj212_endpoint_evidence(db, endpoint_id)
         if not evidence['has_hj212']:
             continue
         definitions = db.execute("""SELECT DISTINCT business_metric
@@ -39228,7 +39630,7 @@ def _ensure_station_expected_hj212_profiles(
 
 
 def _ensure_station_expected_hj212_standard_mappings(
-        db, site_id, selected_metrics, effective_from):
+        db, site_id, selected_metrics, effective_from, *, evidence_by_endpoint=None):
     """Add canonical HJ212 mappings and only endpoint-evidenced approved aliases."""
     requested = [metric for metric in _STATION_EXPECTED_HJ212_STANDARD_MAPPINGS
                  if metric in selected_metrics]
@@ -39251,10 +39653,16 @@ def _ensure_station_expected_hj212_standard_mappings(
                     AND (evidence.effective_to IS NULL OR evidence.effective_to>?)
                ) OR EXISTS (
                   SELECT 1 FROM ingest_raw_frames raw
+                  INDEXED BY idx_ingest_raw_authenticated_endpoint_received
                   JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
                   WHERE raw.endpoint_id=profile.endpoint_id
                     AND raw.authentication_status='authenticated'
                     AND protocol.protocol_family='hj212'
+               ) OR EXISTS (
+                  SELECT 1 FROM monitoring_archive_evidence_refs evidence
+                  WHERE evidence.endpoint_id=profile.endpoint_id
+                    AND evidence.authentication_status='authenticated'
+                    AND evidence.protocol_family='hj212'
                ))
         ORDER BY profile.endpoint_id,profile.effective_from DESC""", (
             site_id, effective_from, effective_from, site_id,
@@ -39269,8 +39677,10 @@ def _ensure_station_expected_hj212_standard_mappings(
     if not by_endpoint:
         return None
     for endpoint_id, profile in by_endpoint.items():
-        observed_codes = _station_hj212_endpoint_evidence(
-            db, endpoint_id)['factor_codes']
+        evidence = (evidence_by_endpoint or {}).get(endpoint_id)
+        if evidence is None:
+            evidence = _station_hj212_endpoint_evidence(db, endpoint_id)
+        observed_codes = evidence['factor_codes']
         missing_mappings = []
         for metric in requested:
             canonical_code = _STATION_EXPECTED_HJ212_STANDARD_MAPPINGS[metric]
@@ -39454,38 +39864,42 @@ def _station_monitoring_batch_projections_cached(db, site_rows):
                 inflight.set()
 
 
-def _station_monitoring_sites_body(db, scope, keyword, user):
+def _station_monitoring_sites_body(db, scope, service_scope, keyword, user):
     is_admin = _has_any_role(user, 'admin')
-    responsible_ids = _current_service_site_ids(db, _active_master_site_ids(
-        db, _active_operator_site_ids(db, user['id'])))
+    responsible_ids = _active_master_site_ids(
+        db, _active_operator_site_ids(db, user['id']))
+    if service_scope == 'current':
+        responsible_ids = _current_service_site_ids(db, responsible_ids)
     mine_count = len(responsible_ids)
+    all_where = [_active_master_site_predicate(db, 's')]
+    if service_scope == 'current':
+        all_where.append(_current_service_site_predicate(db, 's'))
     all_count = db.execute(
-        'SELECT COUNT(*) FROM sites WHERE '
-        + _active_master_site_predicate(db) + ' AND '
-        + _current_service_site_predicate(db)
+        'SELECT COUNT(*) FROM sites s WHERE ' + ' AND '.join(all_where)
     ).fetchone()[0] if is_admin else None
-    where = [_active_master_site_predicate(db), _current_service_site_predicate(db)]
+    where = list(all_where)
     params = []
     if scope == 'mine':
         if not responsible_ids:
             site_rows = []
         else:
-            where.append('id IN (' + ','.join('?' * len(responsible_ids)) + ')')
+            where.append('s.id IN (' + ','.join('?' * len(responsible_ids)) + ')')
             params.extend(responsible_ids)
     if keyword and (scope != 'mine' or responsible_ids):
         escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        where.append("(name LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')")
+        where.append("(s.name LIKE ? ESCAPE '\\' OR s.code LIKE ? ESCAPE '\\')")
         params.extend((f'%{escaped}%', f'%{escaped}%'))
     if scope != 'mine' or responsible_ids:
-        order = 'name, id'
+        order = 's.name, s.id'
         if scope == 'all' and responsible_ids:
             responsible_marks = ','.join('?' * len(responsible_ids))
-            order = f'CASE WHEN id IN ({responsible_marks}) THEN 0 ELSE 1 END, name, id'
+            order = f'CASE WHEN s.id IN ({responsible_marks}) THEN 0 ELSE 1 END, s.name, s.id'
             params.extend(responsible_ids)
         clause = (' WHERE ' + ' AND '.join(where)) if where else ''
         site_rows = db.execute(
-            'SELECT id, code, name, type, district, address, river, basin, gps_lat AS lat, '
-            'gps_lng AS lng, manager, phone FROM sites' + clause + ' ORDER BY ' + order,
+            'SELECT s.id, s.code, s.name, s.type, s.district, s.address, s.river, '
+            's.basin, s.gps_lat AS lat, s.gps_lng AS lng, s.manager, s.phone '
+            'FROM sites s' + clause + ' ORDER BY ' + order,
             params,
         ).fetchall()
     items = _station_monitoring_batch_projections_cached(db, site_rows)
@@ -39500,6 +39914,8 @@ def _station_monitoring_sites_body(db, scope, keyword, user):
     return {
         'scope': scope,
         'available_scopes': ['mine', 'all'] if is_admin else ['mine'],
+        'service_scope': service_scope,
+        'available_service_scopes': ['current', 'all'] if is_admin else ['current'],
         'scope_counts': {'mine': mine_count, 'all': all_count},
         'summary': dict(total=len(items), **counts),
         'items': items,
@@ -39523,13 +39939,15 @@ def _station_monitoring_cache_entry(db, body):
 
 
 def _refresh_station_monitoring_sites_cache(
-        cache_key, scope, keyword, user, site_ids, refresh_token, refresh_event):
+        cache_key, scope, service_scope, keyword, user, site_ids, refresh_token,
+        refresh_event):
     try:
         with app.app_context():
             g.current_user = dict(user)
             g.user_site_ids = list(site_ids)
             with get_db() as db:
-                body = _station_monitoring_sites_body(db, scope, keyword, g.current_user)
+                body = _station_monitoring_sites_body(
+                    db, scope, service_scope, keyword, g.current_user)
                 entry = _station_monitoring_cache_entry(db, body)
         with _station_monitoring_list_cache_lock:
             cached = _station_monitoring_list_cache.get(cache_key)
@@ -39551,7 +39969,8 @@ def _refresh_station_monitoring_sites_cache(
             refresh_event.set()
 
 
-def _station_monitoring_sites_cold_body(cache_key, scope, keyword, user):
+def _station_monitoring_sites_cold_body(
+        cache_key, scope, service_scope, keyword, user):
     while True:
         owner = False
         with _station_monitoring_list_cache_lock:
@@ -39568,7 +39987,8 @@ def _station_monitoring_sites_cold_body(cache_key, scope, keyword, user):
             continue
         try:
             with get_db() as db:
-                body = _station_monitoring_sites_body(db, scope, keyword, user)
+                body = _station_monitoring_sites_body(
+                    db, scope, service_scope, keyword, user)
                 entry = _station_monitoring_cache_entry(db, body)
             with _station_monitoring_list_cache_lock:
                 _station_monitoring_list_cache[cache_key] = entry
@@ -39591,16 +40011,28 @@ def station_monitoring_sites():
     scope = (request.args.get('scope') or 'mine').strip().lower()
     if scope not in {'mine', 'all'}:
         return jsonify({'error': '站点范围参数无效', 'code': 'INVALID_MONITORING_SCOPE'}), 400
+    service_scope = (request.args.get('service_scope') or 'current').strip().lower()
+    if service_scope not in {'current', 'all'}:
+        return jsonify({
+            'error': '服务范围参数无效',
+            'code': 'INVALID_MONITORING_SERVICE_SCOPE',
+        }), 400
     is_admin = _has_any_role(g.current_user, 'admin')
     if scope == 'all' and not is_admin:
         return jsonify({'error': '无权查看全部站点', 'code': 'FORBIDDEN_MONITORING_SCOPE'}), 403
+    if service_scope == 'all' and not is_admin:
+        return jsonify({
+            'error': '无权查看已结束服务站点',
+            'code': 'FORBIDDEN_MONITORING_SERVICE_SCOPE',
+        }), 403
     keyword = (request.args.get('keyword') or '').strip()
     cache_key = (
         os.path.abspath(DB_PATH), _station_monitoring_cache_generation,
         g.current_user.get('id'),
         tuple(_normalize_user_roles(
             g.current_user.get('roles') or [g.current_user.get('role')])),
-        tuple(sorted(getattr(g, 'user_site_ids', None) or [])), scope, keyword,
+        tuple(sorted(getattr(g, 'user_site_ids', None) or [])), scope,
+        service_scope, keyword,
     )
     now = time.monotonic()
     refresh = False
@@ -39624,7 +40056,7 @@ def station_monitoring_sites():
         if refresh:
             threading.Thread(
                 target=_refresh_station_monitoring_sites_cache,
-                args=(cache_key, scope, keyword, dict(g.current_user),
+                args=(cache_key, scope, service_scope, keyword, dict(g.current_user),
                       tuple(getattr(g, 'user_site_ids', None) or []), refresh_token,
                       refresh_event),
                 name='station-monitoring-cache-refresh', daemon=True,
@@ -39639,7 +40071,7 @@ def station_monitoring_sites():
         }
         return jsonify(response_body)
     return jsonify(_station_monitoring_sites_cold_body(
-        cache_key, scope, keyword, dict(g.current_user)))
+        cache_key, scope, service_scope, keyword, dict(g.current_user)))
 
 
 def _station_monitoring_overview_projection_body(site_id, version):
@@ -39794,8 +40226,57 @@ def update_station_monitoring_expected_factors(site_id):
         }), 400
     selected_json = json.dumps(metrics, ensure_ascii=False, separators=(',', ':'))
     user_id = g.current_user.get('id')
+
+    # Resolve retained HJ212 evidence before acquiring the SQLite write lock. The
+    # transaction below still re-reads every mutable authorization and version
+    # precondition before it writes.
     with get_db() as db:
-        db.execute('BEGIN IMMEDIATE')
+        if not db.execute('SELECT 1 FROM sites WHERE id=?', (site_id,)).fetchone():
+            return jsonify({
+                'error': '站点不存在', 'code': 'MONITORING_SITE_NOT_FOUND',
+            }), 404
+        if not _station_expected_factor_can_edit(db, site_id, {'id': user_id}):
+            return jsonify({
+                'error': '当前角色无权设置该站点应监测因子',
+                'code': 'EXPECTED_FACTORS_FORBIDDEN',
+            }), 403
+        replay = db.execute(
+            'SELECT * FROM station_expected_factor_configs '
+            'WHERE site_id=? AND idempotency_key=?',
+            (site_id, idempotency_key),
+        ).fetchone()
+        if replay:
+            if replay['selected_metrics_json'] != selected_json:
+                return jsonify({
+                    'error': '同一保存重试标识不能用于不同选择',
+                    'code': 'EXPECTED_FACTORS_IDEMPOTENCY_CONFLICT',
+                }), 409
+            return jsonify(_station_expected_factor_payload(
+                db, site_id, {'id': user_id}, config=replay, replayed=True))
+        current = db.execute(
+            'SELECT * FROM station_expected_factor_configs '
+            'WHERE site_id=? AND effective_to IS NULL',
+            (site_id,),
+        ).fetchone()
+        current_version = int(current['version']) if current else 0
+        if expected_version != current_version:
+            return jsonify({
+                'error': '应监测因子已被其他操作更新，请刷新后重试',
+                'code': 'EXPECTED_FACTORS_VERSION_CONFLICT',
+                'current_version': current_version,
+            }), 409
+        prepared_evidence = _prepare_station_expected_hj212_evidence(db, site_id)
+
+    with get_db() as db:
+        try:
+            db.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_busy(exc):
+                raise
+            return jsonify({
+                'error': '系统正在提交其他数据，请保留当前选择并使用原保存重试标识重试',
+                'code': 'EXPECTED_FACTORS_BUSY',
+            }), 503
         site = db.execute('SELECT id FROM sites WHERE id=?', (site_id,)).fetchone()
         if not site:
             db.rollback()
@@ -39837,6 +40318,12 @@ def update_station_monitoring_expected_factors(site_id):
                 'code': 'EXPECTED_FACTORS_VERSION_CONFLICT',
                 'current_version': current_version,
             }), 409
+        if _station_expected_bound_endpoint_ids(db, site_id) != prepared_evidence['endpoint_ids']:
+            db.rollback()
+            return jsonify({
+                'error': '站点接入关系刚刚发生变化，请使用原保存重试标识再次提交',
+                'code': 'EXPECTED_FACTORS_PREREQUISITE_CHANGED',
+            }), 409
         previous_rows = db.execute(
             'SELECT business_metric,effective_from FROM station_expected_factors '
             'WHERE config_id=? ORDER BY display_order,business_metric',
@@ -39855,7 +40342,8 @@ def update_station_monitoring_expected_factors(site_id):
                 now_dt = current_from + timedelta(microseconds=1)
         effective_from = now_dt.isoformat(timespec='microseconds')
         profile_error = _ensure_station_expected_hj212_profiles(
-            db, site_id, metrics, effective_from)
+            db, site_id, metrics, effective_from,
+            evidence_by_endpoint=prepared_evidence['by_endpoint'])
         if profile_error:
             db.rollback()
             error_code, error_message = profile_error
@@ -39864,7 +40352,8 @@ def update_station_monitoring_expected_factors(site_id):
                 'code': error_code,
             }), 409
         mapping_error = _ensure_station_expected_hj212_standard_mappings(
-            db, site_id, metrics, effective_from)
+            db, site_id, metrics, effective_from,
+            evidence_by_endpoint=prepared_evidence['by_endpoint'])
         if mapping_error:
             db.rollback()
             return jsonify({
@@ -39933,23 +40422,24 @@ def station_monitoring_access_summary():
         raw_sites = db.execute("""SELECT COUNT(*) FROM trusted_endpoints endpoint
             WHERE endpoint.enabled=1 AND endpoint.endpoint_state='bound'
               AND endpoint.business_site_id IS NOT NULL AND EXISTS (
-                  SELECT 1 FROM ingest_raw_frames frame
-                  INDEXED BY idx_ingest_raw_authenticated_endpoint_received
-                  WHERE frame.endpoint_id=endpoint.id
-                    AND frame.authentication_status='authenticated')""").fetchone()[0]
+                  SELECT 1 FROM station_ingest_current_state state
+                  WHERE state.endpoint_id=endpoint.id
+                    AND state.latest_authenticated_at IS NOT NULL)""").fetchone()[0]
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         auth_cutoff = _monitoring_auth_diagnostic_cutoff()
-        auth_rows = db.execute("""SELECT authentication_status,COUNT(*) AS frame_count,
-                MAX(received_at) AS last_received_at
-            FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
-            WHERE received_at>=? GROUP BY authentication_status""", (auth_cutoff,)).fetchall()
+        auth_cutoff_hour = datetime.fromisoformat(auth_cutoff).replace(
+            minute=0, second=0, microsecond=0).isoformat()
+        auth_rows = db.execute("""SELECT authentication_status,SUM(receipt_count) AS frame_count,
+                MAX(last_received_at) AS last_received_at
+            FROM station_ingest_receipt_hourly
+            WHERE bucket_hour>=? AND last_received_at>=?
+            GROUP BY authentication_status""", (auth_cutoff_hour, auth_cutoff)).fetchall()
         auth_by_status = {row['authentication_status']: row for row in auth_rows}
         last_transport = db.execute(
-            'SELECT MAX(received_at) FROM ingest_raw_frames').fetchone()[0]
+            'SELECT MAX(latest_received_at) FROM station_ingest_current_state').fetchone()[0]
         last_authenticated = db.execute(
-            """SELECT MAX(received_at) AS received_at FROM ingest_raw_frames
-               INDEXED BY idx_ingest_raw_authenticated_received
-               WHERE authentication_status='authenticated'""").fetchone()
+            """SELECT MAX(latest_authenticated_at) AS received_at
+               FROM station_ingest_current_state""").fetchone()
         configured_sites = db.execute("""SELECT COUNT(DISTINCT profile.business_site_id) FROM monitoring_endpoint_profiles profile
             JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id AND endpoint.enabled=1 AND endpoint.endpoint_state='bound' AND endpoint.business_site_id IS NOT NULL
               AND endpoint.business_site_id=profile.business_site_id
@@ -40213,6 +40703,8 @@ def station_monitoring_quality_issues():
 if __name__ == '__main__':
     if os.environ.get('APP_RUNTIME_PROFILE') == 'production':
         _validate_private_upload_storage()
+        from station_ingest_cutover import require_cutover_ready
+        require_cutover_ready(Path(DB_PATH))
     else:
         os.makedirs(_private_site_photo_root(), exist_ok=True)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)

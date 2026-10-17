@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -417,6 +417,164 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ("HJ212:w01001", "on_time", "selected"),
             ("HJ212:w01010", "on_time", "selected"),
         ])
+
+    def test_2011_same_content_is_bounded_within_one_four_hour_slot(self):
+        self._keep_only_ph_configuration()
+        observed = datetime(2026, 9, 11, 12, 0, 0)
+        received = datetime(2026, 9, 11, 4, 0, 5, tzinfo=timezone.utc)
+        for index in range(240):
+            data_time = (observed + timedelta(minutes=index)).strftime("%Y%m%d%H%M%S")
+            qn = f"20260911{120000 + index:09d}"
+            value = "7.10" if index % 2 == 0 else "7.1"
+            self.assertTrue(self.server._process_raw_result(
+                make_hj212(qn=qn, data_time=data_time,
+                           factors=f"w01001-Rtd={value},Flag=N"),
+                (received + timedelta(minutes=index)).isoformat(),
+            ).keep_connection)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            raw_ids = [row[0] for row in connection.execute(
+                "SELECT id FROM ingest_raw_frames ORDER BY id")]
+            slot = connection.execute(
+                """SELECT slot_started_at,receipt_count,first_received_at,last_received_at,
+                          canonical_raw_frame_id,last_authentication_status
+                   FROM station_ingest_slot_summaries"""
+            ).fetchone()
+            receipt_count = connection.execute(
+                "SELECT SUM(receipt_count) FROM station_ingest_receipt_hourly"
+            ).fetchone()[0]
+            state = connection.execute(
+                """SELECT latest_authenticated_at,latest_authenticated_raw_frame_id
+                   FROM station_ingest_current_state"""
+            ).fetchone()
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts"
+            ).fetchone()[0], 1)
+        self.assertEqual(raw_ids, [1])
+        self.assertEqual(slot, (
+            "2026-09-11T04:00:00+00:00", 240,
+            "2026-09-11T04:00:05+00:00", "2026-09-11T07:59:05+00:00", 1,
+            "authenticated",
+        ))
+        self.assertEqual(receipt_count, 240)
+        self.assertEqual(state, ("2026-09-11T07:59:05+00:00", 1))
+        self.assertEqual(normalize_raw_frame(self.database, 1), "accepted")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM observation_batches"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM observation_values"
+            ).fetchone()[0], 1)
+
+    def test_2011_new_signature_and_new_slot_each_keep_one_complete_sample(self):
+        self._keep_only_ph_configuration()
+        cases = (
+            ("20260911120000", "7.1", "20260911120000001", "2026-09-11T04:00:05+00:00"),
+            ("20260911120100", "7.2", "20260911120100001", "2026-09-11T04:01:05+00:00"),
+            ("20260911120200", "7.2", "20260911120200001", "2026-09-11T04:02:05+00:00"),
+            ("20260911160000", "7.1", "20260911160000001", "2026-09-11T08:00:05+00:00"),
+        )
+        for data_time, value, qn, received_at in cases:
+            self.server._process_raw_result(
+                make_hj212(qn=qn, data_time=data_time,
+                           factors=f"w01001-Rtd={value},Flag=N"),
+                received_at,
+            )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            summaries = connection.execute(
+                """SELECT slot_started_at,receipt_count FROM station_ingest_slot_summaries
+                   ORDER BY slot_started_at,first_received_at"""
+            ).fetchall()
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames"
+            ).fetchone()[0], 3)
+        self.assertEqual(summaries, [
+            ("2026-09-11T04:00:00+00:00", 1),
+            ("2026-09-11T04:00:00+00:00", 2),
+            ("2026-09-11T08:00:00+00:00", 1),
+        ])
+
+    def test_2011_factor_aliases_share_the_normalized_business_signature(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_id = connection.execute(
+                "SELECT id FROM trusted_endpoints WHERE station_code=?", (self.station,)
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01009',60,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.commit()
+        frames = (
+            make_hj212(qn="20260911120000001", data_time="20260911120000",
+                       factors="005-Rtd=7.25,Flag=N"),
+            make_hj212(qn="20260911120100001", data_time="20260911120100",
+                       factors="w01009-Rtd=7.250,Flag=N"),
+        )
+        for index, raw in enumerate(frames):
+            self.server._process_raw_result(
+                raw, f"2026-09-11T04:0{index}:05+00:00")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT receipt_count FROM station_ingest_slot_summaries"
+            ).fetchone()[0], 2)
+
+    def test_existing_transport_dedup_evidence_seeds_missing_slot_summary(self):
+        self._keep_only_ph_configuration()
+        raw = make_hj212(
+            qn="20260911120000001", data_time="20260911120000",
+            factors="w01001-Rtd=7.1,Flag=N",
+        )
+        self.server._process_raw_result(raw, "2026-09-11T04:00:05+00:00")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM station_ingest_slot_summaries")
+            connection.commit()
+
+        self.server._process_raw_result(raw, "2026-09-11T04:01:05+00:00")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                """SELECT receipt_count,first_received_at,last_received_at
+                   FROM station_ingest_slot_summaries"""
+            ).fetchone(), (2, "2026-09-11T04:00:05+00:00", "2026-09-11T04:01:05+00:00"))
+
+    def test_abnormal_unknown_mapping_and_2061_never_use_slot_suppression(self):
+        frames = (
+            make_hj212(qn="20260911120000001", data_time="20260911120000",
+                       factors="w01001-Rtd=7.1,Flag=F"),
+            make_hj212(qn="20260911120100001", data_time="20260911120100",
+                       factors="w01001-Rtd=7.1,Flag=F"),
+            make_hj212(qn="20260911120200001", data_time="20260911120200",
+                       factors="w99999-Rtd=1.0,Flag=N"),
+            make_hj212(qn="20260911120300001", data_time="20260911120300",
+                       factors="w99999-Rtd=1.0,Flag=N"),
+            make_hj212(qn="20260911120400001", command="2061", data_time="20260911120000",
+                       factors="w01001-Avg=7.1,Flag=N"),
+            make_hj212(qn="20260911120500001", command="2061", data_time="20260911120000",
+                       factors="w01001-Avg=7.1,Flag=N"),
+        )
+        for index, raw in enumerate(frames):
+            self.server._process_raw_result(
+                raw, f"2026-09-11T04:0{index}:05+00:00")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames"
+            ).fetchone()[0], 6)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_slot_summaries"
+            ).fetchone()[0], 0)
 
     def test_2011_result_time_and_2061_sample_time_share_the_confirmed_slot(self):
         realtime = make_hj212(

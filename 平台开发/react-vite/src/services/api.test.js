@@ -125,7 +125,7 @@ test('getStrict distinguishes a timeout', async () => {
   });
 });
 
-test('monitoring directory encodes scope without losing caller cancellation', async () => {
+test('monitoring directory encodes permission and service scopes without losing caller cancellation', async () => {
   for (const scope of ['all', 'mine', 'scope & injected=all']) {
     const controller = new AbortController();
     let requested;
@@ -137,11 +137,14 @@ test('monitoring directory encodes scope without losing caller cancellation', as
         reject(error);
       }));
     };
-    const pending = api.stationMonitoringSites({ scope, signal: controller.signal });
+    const pending = api.stationMonitoringSites({
+      scope, serviceScope: 'all & injected=current', signal: controller.signal,
+    });
     controller.abort();
     await assert.rejects(pending, (error) => error.code === 'REQUEST_ABORTED');
     const query = new URL(requested, 'http://web-test.invalid').searchParams;
     assert.equal(query.get('scope'), scope);
+    assert.equal(query.get('service_scope'), 'all & injected=current');
     assert.equal(query.has('injected'), false);
   }
 });

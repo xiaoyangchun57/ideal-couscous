@@ -3,11 +3,10 @@ const { RESULT, INSPECTION_CATEGORY, linkedWorkorderCn, map } = require('../../s
 const { getSites, getUser } = require('../../utils/auth.js');
 const { nowStr } = require('../../utils/util.js');
 const {
-  chooseReportAlbumPhotos, chooseInspectionPhotos, fileToBase64, persistFile, persistFileStrict,
+  chooseReportAlbumPhotos, chooseInspectionPhotos, fileToBase64, persistFile,
   captureFlushedPhoto,
   isPhotoSelectionCancelled, photoCaptureErrorMessage, shouldOpenCameraSettings,
   collectInspectionPhotoUploadResults, processPhotoUploadIssues,
-  retainRejectedPhotoAsSupplement,
   setInspectionPhotoIssueMessage,
   runPhotoActionOnce,
   validateReportPhotoPaths, handlePhotoActionFailure,
@@ -136,6 +135,35 @@ function mergeSupplementPhotos(current, additions) {
   return merged;
 }
 
+function mergeInspectionPhotoUrls(current, additions) {
+  const merged = [];
+  const indexes = new Map();
+  (Array.isArray(current) ? current : []).concat(Array.isArray(additions) ? additions : [])
+    .forEach(value => {
+      if (typeof value !== 'string' || !value.trim()) return;
+      const key = uploadStoragePath(value) || value.trim();
+      if (indexes.has(key)) {
+        merged[indexes.get(key)] = value;
+        return;
+      }
+      indexes.set(key, merged.length);
+      merged.push(value);
+    });
+  return merged;
+}
+
+function inspectionPhotoStoragePaths(values) {
+  const paths = [];
+  const seen = new Set();
+  (Array.isArray(values) ? values : []).forEach(value => {
+    const path = uploadStoragePath(value);
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    paths.push(path);
+  });
+  return paths;
+}
+
 function inspectionPhotoRetryDraftKey(item) {
   const user = getUser() || {};
   const planId = item && Number(item.plan_id);
@@ -176,22 +204,6 @@ function appendInspectionPhotoRetryDraft(item, path, metadata, supplemental) {
   if (photos.indexOf(path) === -1) {
     photos.push(path);
     metadataList.push(metadata || {});
-  }
-  draft[photoKey] = photos;
-  draft[metadataKey] = metadataList;
-  saveInspectionPhotoRetryDraft(item, draft);
-}
-
-function removeInspectionPhotoRetryDraft(item, path, supplemental) {
-  const draft = inspectionPhotoRetryDraft(item);
-  const photoKey = supplemental ? 'supplementLocalPhotos' : 'localPhotos';
-  const metadataKey = supplemental ? 'supplementLocalMeta' : 'localPhotoMeta';
-  const photos = Array.isArray(draft[photoKey]) ? draft[photoKey].slice() : [];
-  const metadataList = Array.isArray(draft[metadataKey]) ? draft[metadataKey].slice() : [];
-  const index = photos.indexOf(path);
-  if (index !== -1) {
-    photos.splice(index, 1);
-    metadataList.splice(index, 1);
   }
   draft[photoKey] = photos;
   draft[metadataKey] = metadataList;
@@ -2987,7 +2999,13 @@ Page({
 
   onOpenItem(e) {
     const readOnly = this.data.viewMode === 'review' || this.data.viewMode === 'readonly';
-    if (!readOnly && !this.hasSiteCheckIn(this.data.selSiteId)) {
+    const id = e.currentTarget.dataset.id;
+    let target = null;
+    (this.data.categories || []).forEach(cat => (cat.items || []).forEach(it => { if (it.item_id === id) target = it; }));
+    if (!target) return;
+    const submitted = target.result !== null && target.result !== undefined && target.result !== '';
+    const checkedIn = this.hasSiteCheckIn(this.data.selSiteId);
+    if (!readOnly && !checkedIn && !submitted) {
       wx.showModal({
         title: '请先到站打卡',
         content: '完成到站打卡后才能填写检查项。现在去打卡？',
@@ -2996,16 +3014,8 @@ Page({
       });
       return;
     }
-    const id = e.currentTarget.dataset.id;
-    let target = null;
-    (this.data.categories || []).forEach(cat => (cat.items || []).forEach(it => { if (it.item_id === id) target = it; }));
-    if (!target) return;
-    const reviewStatus = Number(target.review_status || 0);
     const supplementRequired = target.evidence_status === 'supplement_required';
-    if (!readOnly && target.result && reviewStatus === 2 && !supplementRequired) {
-      wx.showToast({ title: '该检查项已通过审核，不能再次上传或提交', icon: 'none' });
-      return;
-    }
+    const submittedReadOnly = !readOnly && submitted && (!supplementRequired || !checkedIn);
     if (target.sync_pending || localStore.getPendingSubmit(target.item_id, target.plan_id)) {
       wx.showToast({ title: '该检查项已本地保存，等待同步完成', icon: 'none' });
       return;
@@ -3044,8 +3054,29 @@ Page({
     const supplementPhotos = inspectionSupplementPhotos(target);
     this._inspectionSheetScrollTop = Number(this._inspectionParentScrollTop) || 0;
     this.setData({
-      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', requiresCalibration: target.requiresCalibration === true, photos: photos.map(resolveUploadUrl), photoMedia: [], pendingPhotos: photoState.pendingPhotos.map(resolveUploadUrl), localPhotos: retryLocalPhotos, localPhotoMeta: retryLocalMeta, rejectedMedia: [], supplementPhotos, supplementMedia: [], supplementLocalPhotos, supplementLocalMeta, requiredPhotos, replacementRequiredPhotos: photoInfo.required, replacementPhotoStatus: target.replacement_photo_status || 'not_applicable', replacementBlockReason: target.replacement_block_reason || '', originalPhotoCount: photoState.formalPhotos.length, supplementOnly: !!(target.result && reviewStatus === 1) || supplementRequired, voidedEvidenceCount: (target.voided_evidence || []).length, rejectedEvidence, purgeTarget: null, purgeCount: 0, purgeError: '', purgeLoading: false, photoResultTitle: '', photoResultMessage: '', photoInfo }
+      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', requiresCalibration: target.requiresCalibration === true, photos: photos.map(resolveUploadUrl), photoMedia: [], pendingPhotos: photoState.pendingPhotos.map(resolveUploadUrl), localPhotos: retryLocalPhotos, localPhotoMeta: retryLocalMeta, rejectedMedia: [], supplementPhotos, supplementMedia: [], supplementLocalPhotos, supplementLocalMeta, requiredPhotos, replacementRequiredPhotos: photoInfo.required, replacementPhotoStatus: target.replacement_photo_status || 'not_applicable', replacementBlockReason: target.replacement_block_reason || '', originalPhotoCount: photoState.formalPhotos.length, supplementOnly: supplementRequired, readOnly: readOnly || submittedReadOnly, photoCorrection: false, correctionIdempotencyKey: '', voidedEvidenceCount: (target.voided_evidence || []).length, rejectedEvidence, purgeTarget: null, purgeCount: 0, purgeError: '', purgeLoading: false, photoResultTitle: '', photoResultMessage: '', photoInfo }
     }, () => this._prepareProtectedMediaForSheet());
+  },
+
+  onStartPhotoCorrection() {
+    const sheet = this.data.sheet || {};
+    const item = sheet.item || {};
+    if (!item.photo_correction_allowed) {
+      wx.showToast({
+        title: item.photo_correction_block_reason || '当前照片只能回看',
+        icon: 'none',
+      });
+      return;
+    }
+    const next = Object.assign({}, sheet, {
+      readOnly: false,
+      photoCorrection: true,
+      supplementOnly: false,
+      correctionIdempotencyKey: '',
+    });
+    next.photoInfo = inspectionSheetPhotoRequirement(
+      next, next.photos, next.pendingPhotos, next.localPhotos);
+    this.setData({ sheet: next });
   },
 
   onOpenRejectedPurge(e) {
@@ -3132,10 +3163,10 @@ Page({
     this._disposeProtectedMedia(true);
     this.setData({ 'sheet.open': false }, () => this._restoreInspectionScroll());
   },
-  onSetResult(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.result': e.currentTarget.dataset.r }); },
-  onRemark(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.remark': e.detail.value }); },
-  onCalibrator(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.calibrator': e.detail.value }); },
-  onCalValues(e) { if (!this.data.sheet.supplementOnly) this.setData({ 'sheet.calValues': e.detail.value }); },
+  onSetResult(e) { if (!this.data.sheet.supplementOnly && !this.data.sheet.photoCorrection) this.setData({ 'sheet.result': e.currentTarget.dataset.r }); },
+  onRemark(e) { if (!this.data.sheet.supplementOnly && !this.data.sheet.photoCorrection) this.setData({ 'sheet.remark': e.detail.value }); },
+  onCalibrator(e) { if (!this.data.sheet.supplementOnly && !this.data.sheet.photoCorrection) this.setData({ 'sheet.calibrator': e.detail.value }); },
+  onCalValues(e) { if (!this.data.sheet.supplementOnly && !this.data.sheet.photoCorrection) this.setData({ 'sheet.calValues': e.detail.value }); },
 
   _showInspectionPhotoEditBlocked(sheet) {
     const current = sheet || this.data.sheet || {};
@@ -3174,7 +3205,8 @@ Page({
         + '&plan_id=' + planId
         + '&item_id=' + itemId
         + '&site_name=' + encodeURIComponent(siteName)
-        + '&item_name=' + encodeURIComponent(itemName);
+        + '&item_name=' + encodeURIComponent(itemName)
+        + '&item_category=' + encodeURIComponent(item.category || '');
       wx.navigateTo({
         url,
         events: {
@@ -3204,11 +3236,11 @@ Page({
   onAddPhoto(e) {
     const sheet = this.data.sheet;
     if (this._showInspectionPhotoEditBlocked(sheet)) return;
-    const materialCount = sheet.photos.length + sheet.localPhotos.length
-      + (sheet.supplementPhotos || []).length + (sheet.supplementLocalPhotos || []).length;
-    if (materialCount >= 6) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
+    if (sheet.photoCorrection) this.setData({ 'sheet.correctionIdempotencyKey': '' });
+    const formalPhotoCount = sheet.photos.length + sheet.localPhotos.length;
+    if (formalPhotoCount >= 6) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
     const captureSource = e && e.currentTarget.dataset.source === 'camera'
-      ? 'camera' : 'supplement';
+      ? 'camera' : 'album';
     return runPhotoActionOnce(this, captureSource, () => {
       let verifiedLocation = null;
       const captureTask = captureSource === 'camera'
@@ -3220,7 +3252,7 @@ Page({
               capture,
             };
           })
-        : chooseInspectionPhotos(6 - materialCount, 'supplement')
+        : chooseInspectionPhotos(6 - formalPhotoCount, 'album')
           .then(paths => ({ paths, session: null, capture: null }));
       return captureTask.then(({ paths, session, capture }) => {
         if (!paths || !paths.length) return;
@@ -3313,8 +3345,8 @@ Page({
           return;
         }
         const currentSheet = this.data.sheet || sheet;
-        const allRemote = Array.from(new Set((currentSheet.photos || []).concat(urls)));
-        const allPending = Array.from(new Set((currentSheet.pendingPhotos || []).concat(urls)));
+        const allRemote = mergeInspectionPhotoUrls(currentSheet.photos, urls);
+        const allPending = mergeInspectionPhotoUrls(currentSheet.pendingPhotos, urls);
         const currentLocal = (currentSheet.localPhotos || []).slice();
         const currentLocalMeta = (currentSheet.localPhotoMeta || []).slice();
         const allLocal = [];
@@ -3379,85 +3411,19 @@ Page({
             });
             return;
           }
-          const failedPhoto = issue.value;
-          const canKeep = !!failedPhoto.rejected.can_keep_as_supplement;
           wx.showModal({
-            title: captureSource === 'camera' ? '现场照片未通过校验' : '补充材料未保存',
+            title: captureSource === 'camera' ? '现场照片未通过校验' : '相册照片未保存',
             content: fixedMessage,
             confirmText: captureSource === 'camera' ? '重新拍摄' : '重新选择',
-            showCancel: canKeep,
-            cancelText: '转为补充材料',
-            success: modalResult => resolve(modalResult.cancel && canKeep ? 'supplement' : 'retry'),
+            showCancel: false,
+            success: () => resolve('retry'),
             fail: () => resolve('retry'),
           });
         });
-        const retainSupplement = failedPhoto => {
-          return retainRejectedPhotoAsSupplement(failedPhoto, {
-            persist: persistFileStrict,
-            upload: (image, keepKey, supplementMetadata) => api.uploadSitePhoto(
-              siteId, image, keepKey, supplementMetadata),
-            onPersisted: draft => {
-              appendInspectionPhotoRetryDraft(
-                sheet.item, draft.localPath, draft.metadata, true);
-              if (!isCurrentInspectionPhotoContext(this, sheet.item)) return;
-              const localPhotos = (this.data.sheet.supplementLocalPhotos || []).slice();
-              const localMeta = (this.data.sheet.supplementLocalMeta || []).slice();
-              if (localPhotos.indexOf(draft.localPath) === -1) {
-                localPhotos.push(draft.localPath);
-                localMeta.push(inspectionLocalPhotoMetadata(draft.metadata, 'failed'));
-                this.setData({
-                  'sheet.supplementLocalPhotos': localPhotos,
-                  'sheet.supplementLocalMeta': localMeta,
-                });
-              }
-            },
-            cleanup: localPath => new Promise((resolve, reject) => wx.removeSavedFile({
-              filePath: localPath, success: resolve, fail: reject,
-            })),
-          }).then(outcome => {
-            if (outcome.supplementUrl) {
-              removeInspectionPhotoRetryDraft(sheet.item, outcome.localPath, true);
-              if (!isCurrentInspectionPhotoContext(this, sheet.item)) return;
-              const localPhotos = (this.data.sheet.supplementLocalPhotos || []).slice();
-              const localMeta = (this.data.sheet.supplementLocalMeta || []).slice();
-              const localIndex = localPhotos.indexOf(outcome.localPath);
-              if (localIndex !== -1) {
-                localPhotos.splice(localIndex, 1);
-                localMeta.splice(localIndex, 1);
-              }
-              const response = outcome.response || {};
-              const displayUrl = resolveUploadUrl(response.display_url || outcome.supplementUrl);
-              const supplements = mergeSupplementPhotos(
-                this.data.sheet.supplementPhotos, [{
-                  id: Number(response.id) || 0,
-                  url: displayUrl,
-                  storagePath: response.url || uploadStoragePath(displayUrl),
-                }]);
-              this.setData({
-                'sheet.supplementPhotos': supplements,
-                'sheet.supplementLocalPhotos': localPhotos,
-                'sheet.supplementLocalMeta': localMeta,
-              }, () => this._prepareProtectedMediaForSheet());
-              wx.showToast({ title: '已保存为补充材料', icon: 'none' });
-              return;
-            }
-            if (isCurrentInspectionPhotoContext(this, sheet.item)) {
-              wx.showToast({ title: '文件已保留，可在补充材料中重试', icon: 'none' });
-            }
-          }).catch(error => {
-            if (isCurrentInspectionPhotoContext(this, sheet.item)) {
-              wx.showToast({
-                title: (error && (error.error || error.message))
-                  || '原照片保存失败，请立即重新选择补充材料',
-                icon: 'none',
-              });
-            }
-          });
-        };
         if (!uploadResult.issues.length) {
           this.setData({ 'sheet.photoResultTitle': '', 'sheet.photoResultMessage': '' });
         }
-        return processPhotoUploadIssues(uploadResult.issues, promptIssue, retainSupplement)
+        return processPhotoUploadIssues(uploadResult.issues, promptIssue)
           .then(() => {
             const localCount = locals.length + supplementLocals.length;
             if (localCount && !urls.length && !supplementAttachments.length) {
@@ -3509,7 +3475,7 @@ Page({
     this.setData(updates);
   },
 
-  _retryInspectionLocalPhoto(kind, index, forceSupplement) {
+  _retryInspectionLocalPhoto(kind, index) {
     const sheet = this.data.sheet || {};
     const supplementalLocal = kind === 'supplement';
     const paths = supplementalLocal
@@ -3524,15 +3490,6 @@ Page({
     delete metadata.uploadStatusLabel;
     let idempotencyKey = metadata._idempotency_key
       || photoIdempotencyKey(this.data.selSiteId, path, index);
-    if (forceSupplement) {
-      idempotencyKey = `${idempotencyKey}:supplement`;
-      metadata.capture_source = 'supplement';
-      metadata._idempotency_key = idempotencyKey;
-      delete metadata.capture_session;
-      delete metadata.gps_lat;
-      delete metadata.gps_lng;
-      delete metadata.taken_at;
-    }
     return runPhotoActionOnce(this, 'retry_upload', () => {
       metadataList[index] = inspectionLocalPhotoMetadata(originalMetadata, 'uploading');
       const uploadingUpdate = {};
@@ -3588,9 +3545,8 @@ Page({
           }]);
           updates['sheet.supplementPhotos'] = supplementPhotos;
         } else {
-          const photos = Array.from(new Set((sheet.photos || []).concat(displayUrl)));
-          const pendingPhotos = Array.from(new Set(
-            (sheet.pendingPhotos || []).concat(displayUrl)));
+          const photos = mergeInspectionPhotoUrls(sheet.photos, [displayUrl]);
+          const pendingPhotos = mergeInspectionPhotoUrls(sheet.pendingPhotos, [displayUrl]);
           updates['sheet.photos'] = photos;
           updates['sheet.pendingPhotos'] = pendingPhotos;
           updates.categories = categories;
@@ -3641,12 +3597,7 @@ Page({
 
   onRetryLocalPhoto(e) {
     return this._retryInspectionLocalPhoto(
-      e.currentTarget.dataset.kind || 'required', Number(e.currentTarget.dataset.idx), false);
-  },
-
-  onSaveLocalPhotoAsSupplement(e) {
-    return this._retryInspectionLocalPhoto(
-      e.currentTarget.dataset.kind || 'required', Number(e.currentTarget.dataset.idx), true);
+      e.currentTarget.dataset.kind || 'required', Number(e.currentTarget.dataset.idx));
   },
 
   onDelPhoto(e) {
@@ -3671,6 +3622,7 @@ Page({
         this.setData({
           'sheet.photos': nextPhotos,
           'sheet.pendingPhotos': pendingPhotos,
+          'sheet.correctionIdempotencyKey': '',
           categories,
           'sheet.photoInfo': inspectionSheetPhotoRequirement(
             this.data.sheet, nextPhotos, pendingPhotos, this.data.sheet.localPhotos),
@@ -3679,9 +3631,9 @@ Page({
         wx.showToast({ title: (error && error.error) || '照片删除失败，请重试', icon: 'none' });
       });
     }
-    if (item && item.result) api.deletePhoto(item.item_id, idx); // 已提交则通知后端删除
+    if (item && item.result && !this.data.sheet.photoCorrection) api.deletePhoto(item.item_id, idx);
     photos.splice(idx, 1);
-    this.setData({ 'sheet.photos': photos, 'sheet.photoInfo': inspectionSheetPhotoRequirement(
+    this.setData({ 'sheet.photos': photos, 'sheet.correctionIdempotencyKey': '', 'sheet.photoInfo': inspectionSheetPhotoRequirement(
       this.data.sheet, photos, this.data.sheet.pendingPhotos, this.data.sheet.localPhotos)
     }, () => this._prepareProtectedMediaForSheet());
   },
@@ -3694,6 +3646,7 @@ Page({
     const removed = localPhotos.splice(idx, 1)[0];
     localPhotoMeta.splice(idx, 1);
     this.setData({ 'sheet.localPhotos': localPhotos, 'sheet.localPhotoMeta': localPhotoMeta,
+      'sheet.correctionIdempotencyKey': '',
       'sheet.photoInfo': inspectionSheetPhotoRequirement(
         this.data.sheet, this.data.sheet.photos, this.data.sheet.pendingPhotos, localPhotos) });
     saveInspectionSheetPhotoRetryDraft(this.data.sheet, { localPhotos, localPhotoMeta });
@@ -3797,6 +3750,7 @@ Page({
 
   onSubmitItem(event, localSyncConfirmed) {
     const s = this.data.sheet;
+    if (s && s.photoCorrection) return this.onSavePhotoCorrection();
     if (!s.item || this._submittingItem) return;
     if (this._showInspectionPhotoEditBlocked(s)) return;
     if (Number(s.item.review_status || 0) === 2 && s.item.evidence_status !== 'supplement_required') {
@@ -3859,7 +3813,7 @@ Page({
     }
     this._submittingItem = true;
     this.setData({ submitting: true });
-    const photoUrls = JSON.stringify(s.photos);
+    const photoUrls = JSON.stringify(inspectionPhotoStoragePaths(s.photos));
     const localPhotos = s.localPhotos.slice();
     const localPhotoMeta = (s.localPhotoMeta || []).slice();
     requestLocation().catch(() => null).then(gps => {
@@ -3917,6 +3871,47 @@ Page({
           const applied = this._afterSubmit(s, true);
           if (applied) wx.showToast({ title: '已本地保存，联网自动同步', icon: 'none' });
         });
+    });
+  },
+
+  onSavePhotoCorrection() {
+    const sheet = this.data.sheet || {};
+    const item = sheet.item || {};
+    if (!sheet.photoCorrection || this._submittingPhotoCorrection) return;
+    if ((sheet.localPhotos || []).length) {
+      wx.showToast({ title: '有照片尚未上传成功，请先重试或删除', icon: 'none' });
+      return;
+    }
+    const photoInfo = inspectionSheetPhotoRequirement(
+      sheet, sheet.photos, sheet.pendingPhotos, sheet.localPhotos);
+    if (!photoInfo.ready) {
+      wx.showToast({ title: photoInfo.blockReason || '照片数量不足', icon: 'none' });
+      return;
+    }
+    const idempotencyKey = sheet.correctionIdempotencyKey
+      || ['inspection-photo-correction', item.item_id, Date.now()].join('-');
+    const photoUrls = inspectionPhotoStoragePaths(sheet.photos);
+    this._submittingPhotoCorrection = true;
+    this.setData({ submitting: true, 'sheet.correctionIdempotencyKey': idempotencyKey });
+    return api.correctInspectionItemPhotos(item.item_id, {
+      photo_urls: photoUrls,
+      _idempotency_key: idempotencyKey,
+    }).then(response => {
+      this._submittingPhotoCorrection = false;
+      if (!isCurrentInspectionPhotoContext(this, item)) return;
+      this.setData({ submitting: false, 'sheet.open': false }, () => this._restoreInspectionScroll());
+      if (this.data.selSiteId) this.loadTasks(this.data.selSiteId);
+      wx.showToast({ title: '照片修改已保存', icon: 'success' });
+      return response;
+    }).catch(error => {
+      this._submittingPhotoCorrection = false;
+      if (!isCurrentInspectionPhotoContext(this, item)) return;
+      this.setData({ submitting: false });
+      wx.showModal({
+        title: '照片修改未保存',
+        content: (error && (error.error || error.message)) || '请保留当前页面并重试',
+        showCancel: false,
+      });
     });
   },
 

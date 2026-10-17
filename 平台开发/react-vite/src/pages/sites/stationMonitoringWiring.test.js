@@ -54,7 +54,11 @@ test('monitoring pages cancel superseded requests and ignore stale responses', (
 
 test('site directory reuses an identity-scoped snapshot and keeps refresh non-blocking', () => {
   const sites = source('./SitesPage.jsx');
+  const monitoring = source('./stationMonitoring.js');
   assert.match(sites, /stationDirectorySnapshotKey\(\s*user, monitoringScope, token, serviceScope/);
+  assert.match(sites, /serviceScope, signal: controller\.signal/);
+  assert.match(sites, /validateMonitoringDirectoryPayload\(/);
+  assert.match(monitoring, /监测汇总与当前站点列表数量不一致/);
   assert.match(sites, /readSiteDirectorySnapshot\(monitoringRequestKey\)/);
   assert.match(sites, /writeSiteDirectorySnapshot\(\s*monitoringRequestKey/);
   assert.match(sites, /setRefreshing\(loadMode === 'refresh'\)/);
@@ -107,6 +111,14 @@ test('single-site monitoring edits only the explicit nine-factor station denomin
   assert.match(detail, /api\.stationExpectedFactors\(siteId/);
   assert.match(detail, /api\.updateStationExpectedFactors\(siteId/);
   assert.match(detail, /idempotency_key: expectedSaveKeyRef\.current\.key/);
+  assert.match(detail, /err\?\.code === 'REQUEST_TIMEOUT' \|\| err\?\.code === 'NETWORK_ERROR'/);
+  assert.match(detail, /setExpectedErrorTitle\('保存结果待确认'\)/);
+  assert.match(detail, /err\?\.code === 'EXPECTED_FACTORS_BUSY'/);
+  assert.match(detail, /setExpectedErrorTitle\('配置保存暂时繁忙'\)/);
+  assert.match(detail, /expectedRetrySave \? saveExpectedFactors : loadExpectedFactors/);
+  assert.match(detail, /expectedOutcomeUncertain \? '再次提交确认' : expectedRetrySave \? '重试保存' : '刷新配置'/);
+  assert.match(detail, /最近一期结果/);
+  assert.match(detail, /已到\/应到/);
   assert.match(detail, /expectedFactorVersion: next\.version/);
   assert.match(detail, /应监测因子未设置/);
   assert.match(detail, /至少选择一项应监测因子/);
@@ -119,7 +131,7 @@ test('single-site monitoring edits only the explicit nine-factor station denomin
     'save success must wait for the matching overview version');
 });
 
-test('site service policy stays in the station archive and isolates current/all list snapshots', () => {
+test('site service policy has a direct admin row entry and isolates current/all list snapshots', () => {
   const sites = source('./SitesPage.jsx');
   const api = source('../../services/api.js');
 
@@ -130,6 +142,8 @@ test('site service policy stays in the station archive and isolates current/all 
   assert.match(sites, /monitoringDetailPath\(record\.id\)/);
   assert.match(sites, /zIndex=\{1100\}/);
   assert.match(sites, /维护服务政策/);
+  assert.match(sites, /isAdmin && <Button[^]*?openServicePolicy\(record\)[^]*?>服务状态<\/Button>/);
+  assert.match(sites, /const \[servicePolicySite, setServicePolicySite\] = useState\(null\)/);
   assert.match(sites, /服务结束，不参与当前到报评价/);
   assert.match(sites, /当前输入已保留/);
   assert.match(sites, /expected_version: Number\(servicePolicyData\.version \|\| 0\)/);

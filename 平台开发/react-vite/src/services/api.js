@@ -237,9 +237,10 @@ export const api = {
     },
   }),
   trackEvent: (eventName, context) => api.track(eventName, context),
-  stationMonitoringSites: ({ scope, ...options } = {}) => {
+  stationMonitoringSites: ({ scope, serviceScope, ...options } = {}) => {
     const params = new URLSearchParams();
     if (scope !== undefined) params.set('scope', scope);
+    if (serviceScope !== undefined) params.set('service_scope', serviceScope);
     const query = params.toString();
     return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
   },

@@ -2,6 +2,8 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -15,6 +17,7 @@ import station_monitoring as monitoring_module
 from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
 from sl651_server import IngestionStorage, StationIngestServer, credential_hmac
+from station_ingest_retention import bootstrap_retention_state, reduce_legacy_indexes
 from station_monitoring import latest_cycle, latest_values, normalize_raw_frame
 
 
@@ -205,6 +208,119 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 (configs[1]['id'],),
             ).fetchone()[0]
             self.assertEqual(first_ph, second_ph)
+
+    def test_hj212_evidence_preparation_does_not_hold_the_sqlite_write_lock(self):
+        self.install_hj212_profile()
+        headers = self.headers('expected-operator')
+        entered = threading.Event()
+        release = threading.Event()
+        result = {}
+        original = web_app._station_hj212_endpoint_evidence
+
+        def paused_evidence(db, endpoint_id, *, limit=200, raw_ids=None):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('test did not release evidence preparation')
+            return original(db, endpoint_id, limit=limit, raw_ids=raw_ids)
+
+        def save_expected_factors():
+            with web_app.app.test_client() as client:
+                result['response'] = client.put(
+                    f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
+                    headers=headers,
+                    json={
+                        'metrics': ['ph'],
+                        'version': 0,
+                        'idempotency_key': 'prepare-outside-write-lock',
+                    },
+                )
+
+        with mock.patch.object(
+                web_app, '_station_hj212_endpoint_evidence', side_effect=paused_evidence):
+            worker = threading.Thread(target=save_expected_factors)
+            worker.start()
+            self.assertTrue(entered.wait(2), 'save did not reach evidence preparation')
+            contender = sqlite3.connect(self.database, timeout=0.2)
+            try:
+                contender.execute('BEGIN IMMEDIATE')
+                contender.rollback()
+            finally:
+                contender.close()
+                release.set()
+            worker.join(5)
+
+        self.assertFalse(worker.is_alive())
+        response = result['response']
+        self.assertEqual(response.status_code, 200, response.get_json())
+
+    def test_retry_replays_committed_save_after_response_generation_is_interrupted(self):
+        headers = self.headers('expected-operator')
+        path = f'/api/station-monitoring/sites/{self.site_id}/expected-factors'
+        request = {
+            'metrics': ['ph'],
+            'version': 0,
+            'idempotency_key': 'committed-response-interrupted',
+        }
+        original = web_app._station_expected_factor_payload
+        interrupted = False
+
+        def interrupt_once(*args, **kwargs):
+            nonlocal interrupted
+            payload = original(*args, **kwargs)
+            if not interrupted:
+                interrupted = True
+                raise ConnectionResetError('simulated response interruption after commit')
+            return payload
+
+        previous_propagate = web_app.app.config.get('PROPAGATE_EXCEPTIONS')
+        web_app.app.config['PROPAGATE_EXCEPTIONS'] = False
+        try:
+            with mock.patch.object(
+                    web_app, '_station_expected_factor_payload', side_effect=interrupt_once):
+                first = self.client.put(path, headers=headers, json=request)
+                retry = self.client.put(path, headers=headers, json=request)
+        finally:
+            web_app.app.config['PROPAGATE_EXCEPTIONS'] = previous_propagate
+
+        self.assertEqual(first.status_code, 500)
+        self.assertEqual(retry.status_code, 200, retry.get_json())
+        self.assertTrue(retry.get_json()['replayed'])
+        with sqlite3.connect(self.database) as db:
+            rows = db.execute(
+                'SELECT id,version FROM station_expected_factor_configs '
+                'WHERE site_id=? AND idempotency_key=?',
+                (self.site_id, request['idempotency_key']),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], 1)
+
+    def test_busy_writer_returns_retryable_response_without_partial_configuration(self):
+        headers = self.headers('expected-operator')
+        path = f'/api/station-monitoring/sites/{self.site_id}/expected-factors'
+        request = {
+            'metrics': ['ph'],
+            'version': 0,
+            'idempotency_key': 'busy-writer-retry',
+        }
+        writer = sqlite3.connect(self.database, timeout=0.1)
+        writer.execute('BEGIN IMMEDIATE')
+        try:
+            blocked = self.client.put(path, headers=headers, json=request)
+        finally:
+            writer.rollback()
+            writer.close()
+
+        self.assertEqual(blocked.status_code, 503, blocked.get_json())
+        self.assertEqual(blocked.get_json()['code'], 'EXPECTED_FACTORS_BUSY')
+        with sqlite3.connect(self.database) as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM station_expected_factor_configs WHERE site_id=?',
+                (self.site_id,),
+            ).fetchone()[0], 0)
+
+        retry = self.client.put(path, headers=headers, json=request)
+        self.assertEqual(retry.status_code, 200, retry.get_json())
+        self.assertEqual(retry.get_json()['version'], 1)
 
     def test_preheated_overview_and_list_follow_saved_version_immediately(self):
         endpoint_id, _, _, _ = self.install_hj212_profile()
@@ -852,6 +968,59 @@ class StationExpectedFactorsTest(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM monitoring_factor_mappings WHERE protocol_code='HJ212:w21001'"
             ).fetchone()[0], 0)
+
+    def test_expected_factor_save_uses_endpoint_index_with_representative_history(self):
+        endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
+        accepted = server._process_raw_result(make_hj212(
+            station=station, password=password, qn='20261016080500001',
+            data_time='20261016080000', factors='w01019-Rtd=1.2,w01019-Flag=N',
+        ), '2026-10-16T00:05:00+00:00')
+        self.assertTrue(accepted.keep_connection)
+        with sqlite3.connect(self.database) as db:
+            unrelated_endpoint = db.execute("""INSERT INTO trusted_endpoints(
+                    station_code,credential_hmac,business_site_id,enabled,endpoint_state)
+                VALUES ('EXPECTED-LARGE-HISTORY','credential',?,1,'bound')""",
+                (self.other_site_id,)).lastrowid
+            db.execute("""WITH RECURSIVE sequence(value) AS (
+                    SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<20000
+                )
+                INSERT INTO ingest_raw_frames(
+                    endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                    crc_status,authentication_status,disposition,persistence_state)
+                SELECT ?,'EXPECTED-LARGE-HISTORY','2026-10-15T00:00:00+00:00',
+                       printf('%064x',value),X'78',1,'valid','authenticated','accepted','persisted'
+                FROM sequence""", (unrelated_endpoint,))
+            db.execute("""INSERT INTO ingest_frame_protocols(raw_frame_id,protocol_family,parser_version)
+                SELECT id,'hj212','large-history-test' FROM ingest_raw_frames
+                WHERE endpoint_id=?""", (unrelated_endpoint,))
+            db.commit()
+        bootstrap_retention_state(
+            self.database, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
+        reduce_legacy_indexes(
+            self.database, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
+        with sqlite3.connect(self.database) as db:
+            plan = db.execute("""EXPLAIN QUERY PLAN SELECT raw.id
+                FROM ingest_raw_frames raw
+                     INDEXED BY idx_ingest_raw_authenticated_endpoint_received
+                JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+                WHERE raw.endpoint_id=? AND raw.authentication_status='authenticated'
+                  AND protocol.protocol_family='hj212'
+                ORDER BY raw.id DESC LIMIT 200""", (endpoint_id,)).fetchall()
+        detail = ' '.join(str(row[3]) for row in plan)
+        self.assertIn('idx_ingest_raw_authenticated_endpoint_received', detail)
+        self.assertNotIn('SCAN raw', detail)
+
+        started = time.perf_counter()
+        response = self.client.put(
+            f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
+            headers=self.headers('expected-operator'), json={
+                'metrics': ['codmn'], 'version': 0,
+                'idempotency_key': 'large-history-indexed-save',
+            })
+        elapsed = time.perf_counter() - started
+        self.expected_factor_save_elapsed = elapsed
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertLess(elapsed, 5.0, f'indexed expected-factor save took {elapsed:.3f}s')
 
 
 if __name__ == '__main__':

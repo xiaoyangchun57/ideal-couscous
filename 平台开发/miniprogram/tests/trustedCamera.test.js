@@ -41,7 +41,7 @@ global.wx = {
 };
 
 delete require.cache[pagePath];
-const { trustedCameraFrameLayout } = require(pagePath);
+const { trustedCameraFrameLayout, inspectionWatermarkDefault } = require(pagePath);
 
 function makePage() {
   const page = Object.assign({}, pageDefinition, {
@@ -68,11 +68,16 @@ async function main() {
     assert.equal(trustedCameraFrameLayout({ windowWidth: 390, windowHeight: 844 }).ratio, '3:4');
     assert.equal(trustedCameraFrameLayout({ windowWidth: 844, windowHeight: 390 }).ratio, '3:4');
     assert.equal(trustedCameraFrameLayout({ windowWidth: 844, windowHeight: 390 }).orientation, 'portrait');
+    assert.equal(inspectionWatermarkDefault('log_books'), false);
+    assert.equal(inspectionWatermarkDefault('台账登记'), false);
+    assert.equal(inspectionWatermarkDefault('equipment_ops'), true);
+    assert.equal(inspectionWatermarkDefault(''), true);
 
     const page = makePage();
     page.onLoad({
       request_id: 'request-1', site_id: '1', plan_id: '10', item_id: '100',
       site_name: encodeURIComponent('测试站'), item_name: encodeURIComponent('浊度仪表读数'),
+      item_category: encodeURIComponent('log_books'),
     });
     assert.deepEqual(sessionPayloads[0], {
       site_id: 1, plan_id: 10, item_id: 100,
@@ -94,7 +99,8 @@ async function main() {
       capture_session: 'prepared-token', gps_lat: 28.071303, gps_lng: 115.539684,
     });
     assert.equal(page.data.ready, true);
-    assert.equal(page.data.displayWatermark, true, 'each camera entry defaults to a visible watermark');
+    assert.equal(page.data.displayWatermark, false,
+      'structured log-book categories default to no visible watermark');
 
     page.onReady();
     page.onDisplayWatermarkChange({ detail: { value: false } });

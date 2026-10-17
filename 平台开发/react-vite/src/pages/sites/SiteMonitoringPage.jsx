@@ -59,13 +59,14 @@ function LatestValues({ values }) {
 function LatestCycle({ cycle }) {
   const view = cycleStatusView(cycle);
   const factors = Array.isArray(cycle?.factors) ? cycle.factors : [];
+  const arrivedCount = cycle?.arrived_count ?? cycle?.formed_count ?? 0;
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} items={[
-        { key: 'status', label: '周期状态', children: <Tag color={view.color}>{view.label}</Tag> },
-        { key: 'slot', label: '检测时点', children: formatMonitoringTime(cycle?.scheduled_at) },
-        { key: 'deadline', label: '缺测截止', children: formatMonitoringTime(cycle?.deadline_at) },
-        { key: 'count', label: '完整度', children: `${cycle?.formed_count || 0}/${cycle?.expected_count || 0}` },
+        { key: 'status', label: '结果状态', children: <Tag color={view.color}>{view.label}</Tag> },
+        { key: 'slot', label: '结果时点', children: formatMonitoringTime(cycle?.scheduled_at) },
+        { key: 'deadline', label: '结果截止', children: formatMonitoringTime(cycle?.deadline_at) },
+        { key: 'count', label: '已到/应到', children: `${arrivedCount}/${cycle?.expected_count || 0}` },
         { key: 'last-complete', label: '最近完整时点（辅助）', children: formatMonitoringTime(cycle?.latest_complete_cycle_at) },
       ]} />
       {factors.length ? <List size="small" dataSource={factors} renderItem={(item) => {
@@ -77,7 +78,7 @@ function LatestCycle({ cycle }) {
           </Space>
           <Text>{item.status === 'value' ? `${item.value} ${item.standard_unit || ''}` : '—'}</Text>
         </List.Item>;
-      }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无检测周期配置" />}
+      }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={view.label} />}
     </Space>
   );
 }
@@ -96,6 +97,9 @@ export default function SiteMonitoringPage() {
   const [expectedConfig, setExpectedConfig] = useState(null);
   const [expectedDraft, setExpectedDraft] = useState([]);
   const [expectedError, setExpectedError] = useState('');
+  const [expectedErrorTitle, setExpectedErrorTitle] = useState('应监测因子配置加载失败');
+  const [expectedOutcomeUncertain, setExpectedOutcomeUncertain] = useState(false);
+  const [expectedRetrySave, setExpectedRetrySave] = useState(false);
   const [expectedNotice, setExpectedNotice] = useState('');
   const [expectedLoading, setExpectedLoading] = useState(true);
   const [expectedSaving, setExpectedSaving] = useState(false);
@@ -114,9 +118,13 @@ export default function SiteMonitoringPage() {
     if (expectedSiteIdRef.current !== siteId) {
       setExpectedConfig(null);
       setExpectedDraft([]);
+      expectedSaveKeyRef.current = { signature: '', key: '' };
+      setExpectedOutcomeUncertain(false);
+      setExpectedRetrySave(false);
     }
     setExpectedLoading(true);
     setExpectedError('');
+    setExpectedErrorTitle('应监测因子配置加载失败');
     setExpectedNotice('');
     try {
       const next = await api.stationExpectedFactors(siteId, { signal: controller.signal });
@@ -125,7 +133,6 @@ export default function SiteMonitoringPage() {
         throw new Error('服务端返回的应监测因子配置与当前站点不匹配，请重试');
       }
       expectedSiteIdRef.current = siteId;
-      expectedSaveKeyRef.current = { signature: '', key: '' };
       setExpectedConfig(next);
       setExpectedDraft(Array.isArray(next.selected_metrics) ? next.selected_metrics : []);
     } catch (err) {
@@ -262,20 +269,39 @@ export default function SiteMonitoringPage() {
         throw new Error('服务端返回的保存结果与当前站点不匹配，请重试');
       }
       expectedSaveKeyRef.current = { signature: '', key: '' };
+      setExpectedOutcomeUncertain(false);
+      setExpectedRetrySave(false);
       const refreshed = await load({
         expectedFactorVersion: next.version,
       });
       setExpectedConfig(next);
       setExpectedDraft(Array.isArray(next.selected_metrics) ? next.selected_metrics : metrics);
       if (!refreshed) {
+        setExpectedErrorTitle('配置已保存，监测状态刷新失败');
         setExpectedError('因子配置已保存，但监测状态刷新失败；当前勾选已保留，请重试页面刷新。');
         return;
       }
-      setExpectedNotice(next.replayed ? '已确认此前保存结果，无需重复写入。' : '应监测因子已保存，列表与详情已按新分母更新。');
+      setExpectedNotice(next.replayed ? '已确认此前保存结果，无需重复写入。' : '应监测因子已保存；最近一期结果将按新范围继续形成。');
     } catch (err) {
       if (err?.code === 'EXPECTED_FACTORS_VERSION_CONFLICT') {
+        setExpectedOutcomeUncertain(false);
+        setExpectedRetrySave(false);
+        setExpectedErrorTitle('配置版本冲突');
         setExpectedError('配置已被其他操作更新；当前勾选已保留，请先刷新配置再确认。');
+      } else if (err?.code === 'REQUEST_TIMEOUT' || err?.code === 'NETWORK_ERROR') {
+        setExpectedOutcomeUncertain(true);
+        setExpectedRetrySave(true);
+        setExpectedErrorTitle('保存结果待确认');
+        setExpectedError('保存响应已中断，配置可能已经提交。当前勾选和本次重试标识均已保留，请再次提交以确认结果，不会重复生成配置。');
+      } else if (err?.code === 'EXPECTED_FACTORS_BUSY') {
+        setExpectedOutcomeUncertain(false);
+        setExpectedRetrySave(true);
+        setExpectedErrorTitle('配置保存暂时繁忙');
+        setExpectedError('本次尚未写入，当前勾选和重试标识均已保留，请直接重试保存。');
       } else {
+        setExpectedOutcomeUncertain(false);
+        setExpectedRetrySave(false);
+        setExpectedErrorTitle('应监测因子保存失败');
         setExpectedError(err?.message || '保存失败，当前勾选已保留，可直接重试');
       }
     } finally {
@@ -341,7 +367,7 @@ export default function SiteMonitoringPage() {
           />
         </Card>
 
-        <Card title="最近检测周期" extra={<Tag color={cycleStatusView(latestCycle).color}>{cycleStatusView(latestCycle).label}</Tag>}>
+        <Card title="最近一期结果" extra={<Tag color={cycleStatusView(latestCycle).color}>{cycleStatusView(latestCycle).label}</Tag>}>
           <LatestCycle cycle={latestCycle} />
         </Card>
 
@@ -385,9 +411,11 @@ export default function SiteMonitoringPage() {
           {expectedError ? <Alert
             type="warning"
             showIcon
-            message="应监测因子未保存"
+            message={expectedErrorTitle}
             description={expectedError}
-            action={<Button size="small" onClick={loadExpectedFactors}>刷新配置</Button>}
+            action={<Button size="small" onClick={expectedRetrySave ? saveExpectedFactors : loadExpectedFactors}>
+              {expectedOutcomeUncertain ? '再次提交确认' : expectedRetrySave ? '重试保存' : '刷新配置'}
+            </Button>}
             style={{ marginBottom: 12 }}
           /> : null}
           {expectedNotice ? <Alert type="success" showIcon message={expectedNotice} style={{ marginBottom: 12 }} /> : null}

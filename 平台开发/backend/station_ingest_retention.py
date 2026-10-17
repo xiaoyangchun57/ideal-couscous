@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
+from typing import Any
 
 
 class RetentionError(RuntimeError):
@@ -24,6 +26,67 @@ LONG_TERM_MINIMUM_TOTAL_BYTES = 100 * 1024 ** 3
 LONG_TERM_MINIMUM_FREE_BYTES = 10 * 1024 ** 3
 VALIDATION_MINIMUM_TOTAL_BYTES = 20 * 1024 ** 3
 VALIDATION_MINIMUM_FREE_BYTES = 5 * 1024 ** 3
+DETAIL_RETENTION = timedelta(hours=72)
+HOT_RELATION_RETENTION = timedelta(hours=168)
+RECENT_RECEIPT_RETENTION = timedelta(hours=72)
+DEDUP_DIRECTORY_RETENTION = timedelta(days=90)
+CLOUD_ARCHIVE_RETENTION = timedelta(days=90)
+ERROR_SUMMARY_RETENTION = timedelta(days=30)
+RECEIPT_SUMMARY_RETENTION = timedelta(days=30)
+SLOT_SUMMARY_RETENTION = timedelta(days=90)
+RAW_ARCHIVE_FORMAT_VERSION = 2
+LEGACY_RAW_INDEXES = (
+    "idx_ingest_raw_endpoint_received",
+    "idx_ingest_raw_frame_hash",
+    "idx_ingest_raw_disposition_received",
+    "idx_ingest_parse_pending",
+    "idx_ingest_raw_authenticated_received",
+    "idx_ingest_raw_station_auth_received",
+)
+
+
+class MaintenanceLock:
+    """Hold one cross-process maintenance lease for the complete periodic run."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+b")
+        self.handle.seek(0, os.SEEK_END)
+        if self.handle.tell() == 0:
+            self.handle.write(b"\0")
+            self.handle.flush()
+        self.handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.handle.close()
+            self.handle = None
+            raise RetentionError("station-ingestion maintenance is already running") from exc
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if self.handle is None:
+            return
+        try:
+            self.handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +115,76 @@ def storage_policy_for_mode(root: Path, mode: str) -> StoragePolicy:
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _batches(items: list[Any], size: int = 500):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _archive_read_path(
+    local_path: str | Path, mirror_path: str | Path | None, mirror_verified_at: str | None,
+) -> Path:
+    local = Path(local_path)
+    if local.is_file():
+        return local
+    if mirror_verified_at and mirror_path and Path(mirror_path).is_file():
+        return Path(mirror_path)
+    raise RetentionError("archived evidence storage is unavailable; retry after storage recovery")
+
+
+def _mirror_archive_path(local_path: str | Path, local_root: Path, mirror_root: Path) -> Path:
+    try:
+        relative = Path(local_path).resolve().relative_to(Path(local_root).resolve())
+    except ValueError as exc:
+        raise RetentionError("archive path is outside the configured local storage root") from exc
+    target = Path(mirror_root) / relative
+    if target.resolve() == Path(local_path).resolve():
+        raise RetentionError("mirror archive path must differ from local archive path")
+    return target
+
+
+def _verify_archive_copy(path: Path, expected_digest: str, expected_count: int) -> None:
+    digest = hashlib.sha256()
+    count = 0
+    try:
+        with gzip.open(path, "rb") as stream:
+            for line in stream:
+                digest.update(line)
+                count += 1
+    except OSError as exc:
+        raise RetentionError("mirror archive cannot be read") from exc
+    if digest.hexdigest() != expected_digest or count != expected_count:
+        raise RetentionError("mirror archive content verification failed")
+
+
+def _read_archived_payload(
+    archive_path: Path, record_index: int, record_sha256: str, frame_sha256: str,
+    content_sha256: str, *, content_verified: bool,
+) -> bytes:
+    selected = None
+    content_digest = hashlib.sha256()
+    try:
+        with gzip.open(archive_path, "rb") as stream:
+            for index, line in enumerate(stream):
+                content_digest.update(line)
+                if index == record_index:
+                    selected = line
+                    if content_verified:
+                        break
+        if not content_verified and content_digest.hexdigest() != content_sha256:
+            raise RetentionError("archived raw evidence part digest mismatch")
+        if selected is None or hashlib.sha256(selected).hexdigest() != record_sha256:
+            raise RetentionError("archived raw evidence record is unavailable")
+        item = json.loads(selected.decode("ascii"))
+        payload = base64.b64decode(item["frame_b64"], validate=True)
+    except RetentionError:
+        raise
+    except (OSError, ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetentionError("archived raw evidence cannot be read; retry after storage recovery") from exc
+    if hashlib.sha256(payload).hexdigest() != frame_sha256:
+        raise RetentionError("archived raw evidence frame digest mismatch")
+    return payload
 
 
 def _record_health(connection: sqlite3.Connection, status: str, detail: str) -> None:
@@ -144,12 +277,31 @@ def aggregate_hourly(database: Path, day: str) -> int:
         return len(rows)
 
 
+def _archive_item(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "endpoint_id": row["endpoint_id"],
+        "station_code": row["station_code"],
+        "received_at": row["received_at"],
+        "sha256": row["frame_sha256"],
+        "logical_key_sha256": row["logical_key_sha256"],
+        "body_length": row["body_length"],
+        "crc_status": row["crc_status"],
+        "authentication_status": row["authentication_status"],
+        "disposition": row["disposition"],
+        "duplicate_of_raw_frame_id": row["duplicate_of_raw_frame_id"],
+        "persistence_state": row["persistence_state"],
+        "protocol_family": row["protocol_family"] or "unknown",
+        "parser_version": row["parser_version"] or "unknown",
+        "frame_b64": base64.b64encode(row["raw_frame"]).decode("ascii"),
+    }
+
+
 def _archive_records(rows: list[sqlite3.Row]) -> tuple[list[bytes], str]:
     lines = []
     digest = hashlib.sha256()
     for row in rows:
-        item = {"id": row["id"], "received_at": row["received_at"], "sha256": row["frame_sha256"],
-                "frame_b64": base64.b64encode(row["raw_frame"]).decode("ascii")}
+        item = _archive_item(row)
         line = (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
         lines.append(line)
         digest.update(line)
@@ -194,10 +346,12 @@ def archive_raw_day(database: Path, day: str, policy: StoragePolicy) -> int:
         with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                """SELECT raw.id,raw.received_at,raw.frame_sha256,raw.raw_frame FROM ingest_raw_frames raw
-                   LEFT JOIN monitoring_raw_archive_part_frames archive_link ON archive_link.raw_frame_id=raw.id
+                """SELECT raw.*,protocol.protocol_family,protocol.parser_version
+                   FROM ingest_raw_frames raw
+                   LEFT JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+                   LEFT JOIN monitoring_archive_evidence_refs evidence ON evidence.source_raw_frame_id=raw.id
                    WHERE raw.received_at>=? AND raw.received_at<? AND raw.persistence_state='persisted'
-                     AND length(raw.raw_frame)>0 AND archive_link.raw_frame_id IS NULL ORDER BY raw.id""",
+                     AND length(raw.raw_frame)>0 AND evidence.source_raw_frame_id IS NULL ORDER BY raw.id""",
                 (f"{start_day.isoformat()}T00:00:00+00:00", f"{end_day.isoformat()}T00:00:00+00:00"),
             ).fetchall()
         if not rows:
@@ -218,17 +372,81 @@ def archive_raw_day(database: Path, day: str, policy: StoragePolicy) -> int:
             archive_id = int(cursor.lastrowid) if cursor.lastrowid else int(connection.execute(
                 "SELECT id FROM monitoring_raw_archive_parts WHERE archive_path=?", (str(archive_path),)
             ).fetchone()[0])
-            for row in rows:
-                connection.execute(
-                    "INSERT OR IGNORE INTO monitoring_raw_archive_part_frames(raw_frame_id,archive_part_id,frame_sha256) VALUES (?,?,?)",
-                    (row["id"], archive_id, row["frame_sha256"]),
-                )
-                linked = connection.execute(
-                    "SELECT archive_part_id,frame_sha256 FROM monitoring_raw_archive_part_frames WHERE raw_frame_id=?", (row["id"],)
-                ).fetchone()
-                if linked is None or linked[0] != archive_id or linked[1] != row["frame_sha256"]:
+            connection.execute(
+                """INSERT OR REPLACE INTO monitoring_raw_archive_part_metadata(
+                       archive_part_id,format_version,verified_at,first_raw_frame_id,last_raw_frame_id,
+                       first_received_at,last_received_at,record_count,mirror_path,mirror_verified_at,
+                       local_deleted_at)
+                   VALUES (?,?,?,?,?,?,?,?,
+                       (SELECT mirror_path FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?),
+                       (SELECT mirror_verified_at FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?),
+                       (SELECT local_deleted_at FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?))""",
+                (archive_id, RAW_ARCHIVE_FORMAT_VERSION, _now(), rows[0]["id"], rows[-1]["id"],
+                 rows[0]["received_at"], rows[-1]["received_at"], len(rows),
+                 archive_id, archive_id, archive_id),
+            )
+            connection.executemany(
+                """INSERT OR IGNORE INTO monitoring_raw_archive_part_frames(
+                       raw_frame_id,archive_part_id,frame_sha256) VALUES (?,?,?)""",
+                ((row["id"], archive_id, row["frame_sha256"]) for row in rows),
+            )
+            for batch in _batches(rows):
+                identifiers = [int(row["id"]) for row in batch]
+                marks = ",".join("?" * len(identifiers))
+                linked = {int(item[0]): (int(item[1]), str(item[2])) for item in connection.execute(
+                    f"""SELECT raw_frame_id,archive_part_id,frame_sha256
+                        FROM monitoring_raw_archive_part_frames WHERE raw_frame_id IN ({marks})""",
+                    identifiers,
+                )}
+                if any(linked.get(int(row["id"])) != (archive_id, str(row["frame_sha256"]))
+                       for row in batch):
                     raise RetentionError("raw archive index conflicts with existing evidence")
-                connection.execute("UPDATE ingest_raw_frames SET raw_frame=X'' WHERE id=?", (row["id"],))
+            evidence_rows = []
+            evidence_created_at = _now()
+            for record_index, row in enumerate(rows):
+                item = _archive_item(row)
+                context = dict(item)
+                context.pop("frame_b64")
+                record_sha256 = hashlib.sha256(lines[record_index]).hexdigest()
+                evidence_rows.append((
+                    row["id"], archive_id, record_index, record_sha256, row["frame_sha256"],
+                    row["received_at"], row["endpoint_id"], row["station_code"],
+                    row["protocol_family"] or "unknown", row["parser_version"] or "unknown",
+                    row["logical_key_sha256"], row["crc_status"], row["authentication_status"],
+                    row["disposition"], row["body_length"],
+                    json.dumps(context, sort_keys=True, separators=(",", ":")), evidence_created_at,
+                ))
+            connection.executemany(
+                """INSERT INTO monitoring_archive_evidence_refs(
+                       source_raw_frame_id,archive_part_id,archive_record_index,record_sha256,
+                       frame_sha256,received_at,endpoint_id,station_code,protocol_family,parser_version,
+                       logical_key_sha256,crc_status,authentication_status,disposition,body_length,
+                       context_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(source_raw_frame_id) DO UPDATE SET
+                       archive_part_id=excluded.archive_part_id,
+                       archive_record_index=excluded.archive_record_index,
+                       record_sha256=excluded.record_sha256,
+                       frame_sha256=excluded.frame_sha256,
+                       context_json=excluded.context_json""",
+                evidence_rows,
+            )
+            updated_at = _now()
+            for batch in _batches(rows):
+                identifiers = [int(row["id"]) for row in batch]
+                marks = ",".join("?" * len(identifiers))
+                connection.execute(
+                    f"""UPDATE station_ingest_dedup_keys
+                       SET canonical_evidence_ref_id=(SELECT id FROM monitoring_archive_evidence_refs
+                                                     WHERE source_raw_frame_id=canonical_raw_frame_id),
+                           updated_at=?
+                       WHERE canonical_raw_frame_id IN ({marks})""",
+                    (updated_at, *identifiers),
+                )
+                connection.execute(
+                    f"UPDATE ingest_raw_frames SET raw_frame=X'' WHERE id IN ({marks})",
+                    identifiers,
+                )
             _record_health(connection, "healthy", "archive completed")
             connection.commit()
         return len(rows)
@@ -242,24 +460,1188 @@ def archive_raw_day(database: Path, day: str, policy: StoragePolicy) -> int:
         raise RetentionError("raw archive could not be completed") from exc
 
 
+def read_raw_evidence(connection: sqlite3.Connection, raw_id: int) -> bytes:
+    """Return online or archived raw bytes, failing explicitly when evidence is unavailable."""
+    online = connection.execute(
+        "SELECT raw_frame,frame_sha256 FROM ingest_raw_frames WHERE id=?", (raw_id,)
+    ).fetchone()
+    if online is not None and bytes(online[0] or b""):
+        payload = bytes(online[0])
+        if hashlib.sha256(payload).hexdigest() != str(online[1]):
+            raise RetentionError("online raw evidence digest mismatch")
+        return payload
+    reference = connection.execute(
+        """SELECT evidence.archive_record_index,evidence.record_sha256,evidence.frame_sha256,
+                  part.archive_path,part.content_sha256,metadata.verified_at,
+                  metadata.mirror_path,metadata.mirror_verified_at
+           FROM monitoring_archive_evidence_refs evidence
+           JOIN monitoring_raw_archive_parts part ON part.id=evidence.archive_part_id
+           LEFT JOIN monitoring_raw_archive_part_metadata metadata
+             ON metadata.archive_part_id=part.id
+           WHERE evidence.source_raw_frame_id=?""",
+        (raw_id,),
+    ).fetchone()
+    if reference is None:
+        raise RetentionError("archived raw evidence reference is unavailable; retry after archive repair")
+    archive_path = _archive_read_path(reference[3], reference[6], reference[7])
+    return _read_archived_payload(
+        archive_path, int(reference[0]), str(reference[1]), str(reference[2]),
+        str(reference[4]), content_verified=bool(reference[5]),
+    )
+
+
+def backfill_archive_evidence_refs(database: Path) -> int:
+    """Verify legacy archive parts and add recoverable per-record references."""
+    with closing(sqlite3.connect(str(database), timeout=30)) as connection:
+        connection.row_factory = sqlite3.Row
+        parts = connection.execute(
+            """SELECT part.*,metadata.mirror_path,metadata.mirror_verified_at
+               FROM monitoring_raw_archive_parts part
+               LEFT JOIN monitoring_raw_archive_part_metadata metadata
+                 ON metadata.archive_part_id=part.id
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM monitoring_raw_archive_part_metadata metadata
+                   WHERE metadata.archive_part_id=part.id)
+                  OR EXISTS (
+                   SELECT 1 FROM monitoring_raw_archive_part_frames frame
+                   LEFT JOIN monitoring_archive_evidence_refs evidence
+                     ON evidence.source_raw_frame_id=frame.raw_frame_id
+                   WHERE frame.archive_part_id=part.id AND evidence.id IS NULL)
+               ORDER BY part.id"""
+        ).fetchall()
+    inserted = 0
+    for part in parts:
+        records: dict[int, tuple[int, bytes, dict[str, Any]]] = {}
+        content_digest = hashlib.sha256()
+        try:
+            archive_path = _archive_read_path(
+                part["archive_path"], part["mirror_path"], part["mirror_verified_at"])
+            with gzip.open(archive_path, "rb") as stream:
+                for record_index, line in enumerate(stream):
+                    content_digest.update(line)
+                    item = json.loads(line.decode("ascii"))
+                    raw_id = int(item["id"])
+                    if raw_id in records:
+                        raise RetentionError("raw archive part contains duplicate record identities")
+                    records[raw_id] = (record_index, line, item)
+        except RetentionError:
+            raise
+        except (OSError, ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RetentionError("legacy raw archive part cannot be read") from exc
+        if (content_digest.hexdigest() != str(part["content_sha256"])
+                or len(records) != int(part["frame_count"])):
+            raise RetentionError("legacy raw archive part verification failed")
+        raw_ids = sorted(records)
+        if not raw_ids:
+            raise RetentionError("raw archive part is empty")
+        marks = ",".join("?" * len(raw_ids))
+        with closing(sqlite3.connect(str(database), timeout=30)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""SELECT raw.*,protocol.protocol_family,protocol.parser_version,
+                            frame.archive_part_id,frame.frame_sha256 AS archived_frame_sha256
+                     FROM ingest_raw_frames raw
+                     JOIN monitoring_raw_archive_part_frames frame ON frame.raw_frame_id=raw.id
+                     LEFT JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+                     WHERE raw.id IN ({marks})""",
+                raw_ids,
+            ).fetchall()
+        by_id = {int(row["id"]): row for row in rows}
+        if set(by_id) != set(raw_ids):
+            raise RetentionError("legacy raw archive context is incomplete")
+        prepared = []
+        format_version = RAW_ARCHIVE_FORMAT_VERSION
+        for raw_id in raw_ids:
+            record_index, line, item = records[raw_id]
+            row = by_id[raw_id]
+            if int(row["archive_part_id"]) != int(part["id"]):
+                raise RetentionError("legacy raw archive mapping conflicts with its part")
+            payload = base64.b64decode(item["frame_b64"], validate=True)
+            frame_sha256 = hashlib.sha256(payload).hexdigest()
+            if (frame_sha256 != str(item["sha256"])
+                    or frame_sha256 != str(row["frame_sha256"])
+                    or frame_sha256 != str(row["archived_frame_sha256"])):
+                raise RetentionError("legacy raw archive frame digest mismatch")
+            if "protocol_family" not in item:
+                format_version = 1
+            context = {
+                "id": raw_id,
+                "endpoint_id": row["endpoint_id"],
+                "station_code": row["station_code"],
+                "received_at": row["received_at"],
+                "sha256": row["frame_sha256"],
+                "logical_key_sha256": row["logical_key_sha256"],
+                "body_length": row["body_length"],
+                "crc_status": row["crc_status"],
+                "authentication_status": row["authentication_status"],
+                "disposition": row["disposition"],
+                "duplicate_of_raw_frame_id": row["duplicate_of_raw_frame_id"],
+                "persistence_state": row["persistence_state"],
+                "protocol_family": row["protocol_family"] or "unknown",
+                "parser_version": row["parser_version"] or "unknown",
+            }
+            prepared.append((
+                raw_id, int(part["id"]), record_index, hashlib.sha256(line).hexdigest(),
+                frame_sha256, row["received_at"], row["endpoint_id"], row["station_code"],
+                context["protocol_family"], context["parser_version"], row["logical_key_sha256"],
+                row["crc_status"], row["authentication_status"], row["disposition"],
+                row["body_length"], json.dumps(context, sort_keys=True, separators=(",", ":")), _now(),
+            ))
+        ordered_rows = sorted(by_id.values(), key=lambda row: (str(row["received_at"]), int(row["id"])))
+        with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT OR REPLACE INTO monitoring_raw_archive_part_metadata(
+                       archive_part_id,format_version,verified_at,first_raw_frame_id,last_raw_frame_id,
+                       first_received_at,last_received_at,record_count,mirror_path,mirror_verified_at,
+                       local_deleted_at)
+                   VALUES (?,?,?,?,?,?,?,?,
+                       (SELECT mirror_path FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?),
+                       (SELECT mirror_verified_at FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?),
+                       (SELECT local_deleted_at FROM monitoring_raw_archive_part_metadata WHERE archive_part_id=?))""",
+                (part["id"], format_version, _now(), min(raw_ids), max(raw_ids),
+                 ordered_rows[0]["received_at"], ordered_rows[-1]["received_at"],
+                 len(prepared), part["id"], part["id"], part["id"]),
+            )
+            before = connection.total_changes
+            connection.executemany(
+                """INSERT OR IGNORE INTO monitoring_archive_evidence_refs(
+                       source_raw_frame_id,archive_part_id,archive_record_index,record_sha256,
+                       frame_sha256,received_at,endpoint_id,station_code,protocol_family,parser_version,
+                       logical_key_sha256,crc_status,authentication_status,disposition,body_length,
+                       context_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                prepared,
+            )
+            inserted += connection.total_changes - before
+            connection.execute(
+                """UPDATE station_ingest_dedup_keys
+                   SET canonical_evidence_ref_id=(
+                       SELECT evidence.id FROM monitoring_archive_evidence_refs evidence
+                       WHERE evidence.source_raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id),
+                       updated_at=?
+                   WHERE canonical_evidence_ref_id IS NULL AND canonical_raw_frame_id IN (
+                       SELECT source_raw_frame_id FROM monitoring_archive_evidence_refs
+                       WHERE archive_part_id=?)""",
+                (_now(), part["id"]),
+            )
+            connection.commit()
+    return inserted
+
+
+def _source_key(endpoint_id: int | None, station_code: str | None) -> str:
+    if endpoint_id is not None:
+        return f"endpoint:{endpoint_id}"
+    if station_code:
+        return f"station:{station_code}"
+    return "transport:unidentified"
+
+
+def _cutoff(now: datetime, delta: timedelta) -> str:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now.astimezone(timezone.utc) - delta).replace(microsecond=0).isoformat()
+
+
+def bootstrap_retention_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
+    """Build bounded state/directories from the existing hot history in one explicit transaction."""
+    now = now or datetime.now(timezone.utc)
+    recent_cutoff = _cutoff(now, RECENT_RECEIPT_RETENTION)
+    dedup_cutoff = _cutoff(now, DEDUP_DIRECTORY_RETENTION)
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM station_ingest_recent_receipts")
+        connection.execute("DELETE FROM station_ingest_current_state")
+        connection.execute("DELETE FROM station_ingest_receipt_hourly")
+        connection.execute("DELETE FROM station_ingest_error_hourly")
+        connection.execute("DELETE FROM station_ingest_dedup_keys")
+        connection.execute(
+            """INSERT INTO station_ingest_recent_receipts(
+                   raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
+               SELECT id,
+                      CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                           WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                           ELSE 'transport:unidentified' END,
+                      endpoint_id,station_code,received_at,authentication_status
+               FROM ingest_raw_frames WHERE received_at>=?""",
+            (recent_cutoff,),
+        )
+        connection.execute(
+            """INSERT INTO station_ingest_receipt_hourly(
+                   source_key,endpoint_id,station_code,authentication_status,bucket_hour,
+                   receipt_count,first_received_at,last_received_at,last_complete_raw_frame_id,updated_at)
+               SELECT CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                           WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                           ELSE 'transport:unidentified' END,
+                      endpoint_id,station_code,authentication_status,
+                      strftime('%Y-%m-%dT%H:00:00+00:00',received_at),
+                      COUNT(*),MIN(received_at),MAX(received_at),MAX(id),?
+               FROM ingest_raw_frames WHERE received_at>=?
+               GROUP BY 1,endpoint_id,station_code,authentication_status,5""",
+            (_now(), _cutoff(now, RECEIPT_SUMMARY_RETENTION)),
+        )
+        connection.execute(
+            """WITH ranked AS (
+                   SELECT id,endpoint_id,station_code,received_at,authentication_status,
+                          CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                               WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                               ELSE 'transport:unidentified' END AS source_key,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                                                ELSE 'transport:unidentified' END
+                              ORDER BY received_at DESC,id DESC) AS latest_rank,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                                                ELSE 'transport:unidentified' END,
+                                           CASE WHEN authentication_status='authenticated' THEN 1 ELSE 0 END
+                              ORDER BY received_at DESC,id DESC) AS auth_rank,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                                                ELSE 'transport:unidentified' END,
+                                           CASE WHEN authentication_status='credential_failed' THEN 1 ELSE 0 END
+                              ORDER BY received_at DESC,id DESC) AS credential_rank
+                   FROM ingest_raw_frames
+               ), sources AS (
+                   SELECT source_key,
+                          MAX(endpoint_id) AS endpoint_id,MAX(station_code) AS station_code,
+                          MAX(CASE WHEN latest_rank=1 THEN received_at END) AS latest_received_at,
+                          MAX(CASE WHEN latest_rank=1 THEN id END) AS latest_raw_frame_id,
+                          MAX(CASE WHEN authentication_status='authenticated' AND auth_rank=1 THEN received_at END)
+                              AS latest_authenticated_at,
+                          MAX(CASE WHEN authentication_status='authenticated' AND auth_rank=1 THEN id END)
+                              AS latest_authenticated_raw_frame_id,
+                          MAX(CASE WHEN authentication_status='credential_failed' AND credential_rank=1 THEN received_at END)
+                              AS latest_credential_failed_at,
+                          MAX(CASE WHEN authentication_status='credential_failed' AND credential_rank=1 THEN id END)
+                              AS latest_credential_failed_raw_frame_id
+                   FROM ranked GROUP BY source_key
+               )
+               INSERT INTO station_ingest_current_state(
+                   source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
+                   latest_authenticated_at,latest_authenticated_raw_frame_id,
+                   latest_credential_failed_at,latest_credential_failed_raw_frame_id,updated_at)
+               SELECT source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
+                      latest_authenticated_at,latest_authenticated_raw_frame_id,
+                      latest_credential_failed_at,latest_credential_failed_raw_frame_id,?
+               FROM sources""",
+            (_now(),),
+        )
+        error_rows = connection.execute(
+            """SELECT error.id,error.raw_frame_id,error.error_type,error.created_at,
+                      raw.endpoint_id,raw.station_code
+               FROM ingest_errors error
+               LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+               ORDER BY error.created_at,error.id"""
+        ).fetchall()
+        error_count = 0
+        for row in error_rows:
+            source_key = _source_key(row["endpoint_id"], row["station_code"])
+            occurred_at = str(row["created_at"])
+            parsed = datetime.fromisoformat(occurred_at.replace(" ", "T"))
+            parsed = (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None
+                      else parsed.astimezone(timezone.utc))
+            bucket_hour = parsed.replace(minute=0, second=0, microsecond=0).isoformat()
+            connection.execute(
+                """INSERT INTO station_ingest_error_hourly(
+                       source_key,endpoint_id,station_code,error_type,bucket_hour,occurrence_count,
+                       first_seen_at,last_seen_at,last_raw_frame_id)
+                   VALUES (?,?,?,?,?,1,?,?,?)
+                   ON CONFLICT(source_key,error_type,bucket_hour) DO UPDATE SET
+                       occurrence_count=station_ingest_error_hourly.occurrence_count+1,
+                       first_seen_at=MIN(first_seen_at,excluded.first_seen_at),
+                       last_seen_at=MAX(last_seen_at,excluded.last_seen_at),
+                       last_raw_frame_id=CASE WHEN excluded.last_seen_at>=last_seen_at
+                                              THEN excluded.last_raw_frame_id ELSE last_raw_frame_id END""",
+                (source_key, row["endpoint_id"], row["station_code"], row["error_type"],
+                 bucket_hour, occurred_at, occurred_at, row["raw_frame_id"]),
+            )
+            connection.execute(
+                """INSERT INTO station_ingest_current_state(
+                       source_key,endpoint_id,station_code,latest_error_at,latest_error_type,updated_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(source_key) DO UPDATE SET
+                       latest_error_at=CASE WHEN excluded.latest_error_at>=COALESCE(latest_error_at,'')
+                                            THEN excluded.latest_error_at ELSE latest_error_at END,
+                       latest_error_type=CASE WHEN excluded.latest_error_at>=COALESCE(latest_error_at,'')
+                                              THEN excluded.latest_error_type ELSE latest_error_type END,
+                       updated_at=excluded.updated_at""",
+                (source_key, row["endpoint_id"], row["station_code"], occurred_at,
+                 row["error_type"], _now()),
+            )
+            error_count += 1
+        connection.execute(
+            """WITH grouped AS (
+                   SELECT raw.endpoint_id,raw.logical_key_sha256,MIN(raw.id) AS canonical_raw_frame_id,
+                          MIN(raw.received_at) AS first_received_at,
+                          MAX(raw.received_at) AS last_received_at
+                   FROM ingest_raw_frames raw
+                   WHERE raw.endpoint_id IS NOT NULL AND raw.logical_key_sha256 IS NOT NULL
+                     AND (raw.received_at>=?
+                          OR EXISTS (SELECT 1 FROM observation_batches batch
+                                     JOIN monitoring_business_observations business
+                                       ON business.observation_batch_id=batch.id
+                                     WHERE batch.raw_frame_id=raw.id)
+                          OR EXISTS (SELECT 1 FROM observation_batches batch
+                                     JOIN monitoring_hourly_value_series hourly
+                                       ON hourly.source_last_batch_id=batch.id
+                                     WHERE batch.raw_frame_id=raw.id)
+                          OR EXISTS (SELECT 1 FROM observation_batches batch
+                                     JOIN monitoring_hourly_values hourly
+                                       ON hourly.source_last_batch_id=batch.id
+                                     WHERE batch.raw_frame_id=raw.id)
+                          OR EXISTS (SELECT 1 FROM observation_batches batch
+                                     JOIN observation_batches replacement
+                                       ON replacement.replaces_batch_id=batch.id
+                                     WHERE batch.raw_frame_id=raw.id)
+                          OR EXISTS (SELECT 1 FROM monitoring_quality_issues issue
+                                     WHERE issue.raw_frame_id=raw.id AND issue.status='open')
+                          OR EXISTS (SELECT 1 FROM monitoring_normalization_retries retry
+                                     WHERE retry.raw_frame_id=raw.id
+                                       AND retry.state IN ('pending','retrying','exhausted'))
+                          OR EXISTS (SELECT 1 FROM ingest_errors error
+                                     WHERE error.raw_frame_id=raw.id AND error.status='open'))
+                   GROUP BY raw.endpoint_id,raw.logical_key_sha256
+               )
+               INSERT INTO station_ingest_dedup_keys(
+                   endpoint_id,logical_key_sha256,canonical_raw_frame_id,canonical_evidence_ref_id,
+                   first_received_at,last_received_at,expires_at,protected,updated_at)
+               SELECT grouped.endpoint_id,grouped.logical_key_sha256,grouped.canonical_raw_frame_id,
+                      evidence.id,grouped.first_received_at,grouped.last_received_at,
+                      strftime('%Y-%m-%dT%H:%M:%S+00:00',grouped.last_received_at,'+90 days'),0,?
+               FROM grouped
+               LEFT JOIN monitoring_archive_evidence_refs evidence
+                 ON evidence.source_raw_frame_id=grouped.canonical_raw_frame_id""",
+            (dedup_cutoff, _now()),
+        )
+        connection.execute(
+            """UPDATE station_ingest_dedup_keys SET protected=1,expires_at=NULL
+               WHERE EXISTS (
+                   SELECT 1 FROM observation_batches batch
+                   JOIN monitoring_business_observations business
+                     ON business.observation_batch_id=batch.id
+                   WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+               ) OR EXISTS (
+                   SELECT 1 FROM monitoring_quality_issues issue
+                   WHERE issue.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                     AND issue.status='open'
+                ) OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN monitoring_hourly_value_series hourly
+                      ON hourly.source_last_batch_id=batch.id
+                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                ) OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN monitoring_hourly_values hourly
+                      ON hourly.source_last_batch_id=batch.id
+                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                ) OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
+                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                ) OR EXISTS (
+                    SELECT 1 FROM monitoring_normalization_retries retry
+                    WHERE retry.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                      AND retry.state IN ('pending','retrying','exhausted')
+                ) OR EXISTS (
+                    SELECT 1 FROM ingest_errors error
+                    WHERE error.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
+                      AND error.status='open'
+               )"""
+        )
+        counts = {
+            "current_states": connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_current_state").fetchone()[0],
+            "recent_receipts": connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts").fetchone()[0],
+            "receipt_hour_summaries": connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_receipt_hourly").fetchone()[0],
+            "dedup_keys": connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_dedup_keys").fetchone()[0],
+            "error_details": error_count,
+        }
+        connection.commit()
+        return counts
+
+
+def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) -> tuple[Path, str]:
+    lines = [
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for record in records
+    ]
+    digest = hashlib.sha256(b"".join(lines)).hexdigest()
+    directory = root / "detail-archives"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{kind}-{records[0]['id']}-{records[-1]['id']}-{digest[:16]}.jsonl.gz"
+    if not path.exists():
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with gzip.open(temporary, "wb") as stream:
+                stream.writelines(lines)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    verified = hashlib.sha256()
+    actual = []
+    try:
+        with gzip.open(path, "rb") as stream:
+            for line in stream:
+                verified.update(line)
+                actual.append(json.loads(line.decode("utf-8")))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetentionError("detail archive file cannot be verified") from exc
+    if verified.hexdigest() != digest or actual != records:
+        raise RetentionError("detail archive content verification failed")
+    return path, digest
+
+
+def _archive_detail_batch(
+    database: Path, root: Path, kind: str, cutoff: str, *, batch_limit: int,
+) -> int:
+    table = {
+        "parse_attempt": "ingest_parse_attempts",
+        "ingest_error": "ingest_errors",
+        "error_summary": "station_ingest_error_hourly",
+    }[kind]
+    with closing(sqlite3.connect(str(database))) as connection:
+        connection.row_factory = sqlite3.Row
+        if kind == "parse_attempt":
+            rows = connection.execute(
+                """SELECT attempt.*,evidence.id AS evidence_ref_id
+                   FROM ingest_parse_attempts attempt
+                   JOIN ingest_raw_frames raw ON raw.id=attempt.raw_frame_id
+                   JOIN monitoring_archive_evidence_refs evidence
+                     ON evidence.source_raw_frame_id=attempt.raw_frame_id
+                   WHERE julianday(attempt.created_at)<julianday(?)
+                     AND raw.persistence_state='persisted'
+                   ORDER BY attempt.id LIMIT ?""",
+                (cutoff, batch_limit),
+            ).fetchall()
+        elif kind == "ingest_error":
+            candidates = connection.execute(
+                """SELECT error.*,raw.endpoint_id,raw.station_code,
+                          evidence.id AS evidence_ref_id
+                   FROM ingest_errors error
+                   LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                   LEFT JOIN monitoring_archive_evidence_refs evidence
+                     ON evidence.source_raw_frame_id=error.raw_frame_id
+                   WHERE julianday(error.created_at)<julianday(?)
+                     AND (error.raw_frame_id IS NULL OR evidence.id IS NOT NULL)
+                   ORDER BY error.id LIMIT ?""",
+                (cutoff, batch_limit * 3),
+            ).fetchall()
+            newest_open = {}
+            for row in connection.execute(
+                """SELECT error.id,error.error_type,raw.endpoint_id,raw.station_code
+                   FROM ingest_errors error
+                   LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                   WHERE error.status='open' ORDER BY error.id"""
+            ):
+                newest_open[(_source_key(row["endpoint_id"], row["station_code"]), row["error_type"])] = row["id"]
+            rows = [row for row in candidates if not (
+                row["status"] == "open" and newest_open.get(
+                    (_source_key(row["endpoint_id"], row["station_code"]), row["error_type"])) == row["id"]
+            )][:batch_limit]
+        else:
+            rows = connection.execute(
+                """SELECT rowid AS id,* FROM station_ingest_error_hourly
+                   WHERE julianday(bucket_hour)<julianday(?)
+                   ORDER BY bucket_hour,source_key,error_type LIMIT ?""",
+                (cutoff, batch_limit),
+            ).fetchall()
+    if not rows:
+        return 0
+    records = [dict(row) for row in rows]
+    path, digest = _write_detail_archive(root, kind, records)
+    ids = [int(row["id"]) for row in rows]
+    with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" * len(ids))
+        if kind == "error_summary":
+            current = connection.execute(
+                f"SELECT COUNT(*) FROM station_ingest_error_hourly WHERE rowid IN ({placeholders})", ids
+            ).fetchone()[0]
+        else:
+            current = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE id IN ({placeholders})", ids
+            ).fetchone()[0]
+        if current != len(ids):
+            raise RetentionError("detail rows changed while archive was being written")
+        connection.execute(
+            """INSERT OR IGNORE INTO station_ingest_detail_archive_parts(
+                   detail_kind,archive_path,content_sha256,first_source_id,last_source_id,
+                   record_count,range_start,range_end,verified_at,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (kind, str(path), digest, ids[0], ids[-1], len(ids),
+             min(str(row.get("created_at") or row.get("bucket_hour")) for row in records),
+             max(str(row.get("created_at") or row.get("bucket_hour")) for row in records),
+             _now(), _now()),
+        )
+        if kind == "error_summary":
+            connection.execute(
+                f"DELETE FROM station_ingest_error_hourly WHERE rowid IN ({placeholders})", ids)
+        else:
+            connection.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
+        connection.commit()
+    return len(ids)
+
+
+def _protected_raw_ids(connection: sqlite3.Connection, raw_ids: list[int]) -> set[int]:
+    protected: set[int] = set()
+    queries = (
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_business_observations business ON business.observation_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_hourly_value_series hourly ON hourly.source_last_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_hourly_values hourly ON hourly.source_last_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM monitoring_quality_issues
+           WHERE status='open' AND raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM monitoring_quality_issues issue
+           JOIN observation_batches batch ON batch.id=issue.observation_batch_id
+           WHERE issue.status='open' AND batch.raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM monitoring_normalization_retries
+           WHERE state IN ('pending','retrying','exhausted') AND raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM ingest_errors
+           WHERE status='open' AND raw_frame_id IN ({marks})""",
+    )
+    for batch in _batches(raw_ids):
+        marks = ",".join("?" * len(batch))
+        for query in queries:
+            protected.update(int(row[0]) for row in connection.execute(
+                query.format(marks=marks), batch,
+            ))
+    return protected
+
+
+def _protected_raw_predicate(raw_alias: str = "raw") -> str:
+    return f"""EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN monitoring_business_observations business
+                      ON business.observation_batch_id=batch.id
+                    WHERE batch.raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN monitoring_hourly_value_series hourly
+                      ON hourly.source_last_batch_id=batch.id
+                    WHERE batch.raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN monitoring_hourly_values hourly
+                      ON hourly.source_last_batch_id=batch.id
+                    WHERE batch.raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM observation_batches batch
+                    JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
+                    WHERE batch.raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM monitoring_quality_issues issue
+                    WHERE issue.raw_frame_id={raw_alias}.id AND issue.status='open')
+                OR EXISTS (
+                    SELECT 1 FROM monitoring_quality_issues issue
+                    JOIN observation_batches batch ON batch.id=issue.observation_batch_id
+                    WHERE batch.raw_frame_id={raw_alias}.id AND issue.status='open')
+                OR EXISTS (
+                    SELECT 1 FROM monitoring_normalization_retries retry
+                    WHERE retry.raw_frame_id={raw_alias}.id
+                      AND retry.state IN ('pending','retrying','exhausted'))
+                OR EXISTS (
+                    SELECT 1 FROM ingest_errors error
+                    WHERE error.raw_frame_id={raw_alias}.id AND error.status='open')"""
+
+
+def _protect_active_dedup_keys(
+    connection: sqlite3.Connection, cutoff: str, batch_limit: int,
+) -> int:
+    predicate = _protected_raw_predicate()
+    connection.execute(
+        f"""WITH grouped AS (
+               SELECT raw.endpoint_id,raw.logical_key_sha256,
+                      MIN(raw.id) AS canonical_raw_frame_id,
+                      MIN(raw.received_at) AS first_received_at,
+                      MAX(raw.received_at) AS last_received_at
+               FROM ingest_raw_frames raw
+               WHERE raw.endpoint_id IS NOT NULL AND raw.logical_key_sha256 IS NOT NULL
+                 AND ({predicate})
+               GROUP BY raw.endpoint_id,raw.logical_key_sha256
+           )
+           INSERT INTO station_ingest_dedup_keys(
+               endpoint_id,logical_key_sha256,canonical_raw_frame_id,canonical_evidence_ref_id,
+               first_received_at,last_received_at,expires_at,protected,updated_at)
+           SELECT grouped.endpoint_id,grouped.logical_key_sha256,grouped.canonical_raw_frame_id,
+                  evidence.id,grouped.first_received_at,grouped.last_received_at,NULL,1,?
+           FROM grouped
+           LEFT JOIN monitoring_archive_evidence_refs evidence
+             ON evidence.source_raw_frame_id=grouped.canonical_raw_frame_id
+           WHERE 1
+           ON CONFLICT(endpoint_id,logical_key_sha256) DO UPDATE SET
+               protected=1,expires_at=NULL,
+               canonical_evidence_ref_id=COALESCE(
+                   station_ingest_dedup_keys.canonical_evidence_ref_id,
+                   excluded.canonical_evidence_ref_id),
+               updated_at=excluded.updated_at""",
+        (_now(),),
+    )
+    return int(connection.execute(
+        f"""SELECT COUNT(*) FROM (
+               SELECT raw.id FROM ingest_raw_frames raw
+               WHERE raw.received_at<? AND ({predicate})
+               LIMIT ?)
+           """,
+        (cutoff, batch_limit),
+    ).fetchone()[0])
+
+
+def _delete_unprotected_raw_batch(
+    database: Path, cutoff: str, *, now: str, batch_limit: int,
+) -> tuple[int, int]:
+    deleted = 0
+    retained = 0
+    with closing(sqlite3.connect(str(database), timeout=10, isolation_level=None)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
+        retained = _protect_active_dedup_keys(connection, cutoff, batch_limit)
+        protection_predicate = _protected_raw_predicate()
+        candidates = connection.execute(
+            f"""SELECT raw.id,evidence.id AS evidence_ref_id
+               FROM ingest_raw_frames raw
+               JOIN monitoring_archive_evidence_refs evidence ON evidence.source_raw_frame_id=raw.id
+               WHERE raw.received_at<? AND raw.persistence_state='persisted'
+                 AND NOT EXISTS (SELECT 1 FROM ingest_parse_attempts attempt WHERE attempt.raw_frame_id=raw.id)
+                 AND NOT EXISTS (SELECT 1 FROM ingest_errors error WHERE error.raw_frame_id=raw.id)
+                  AND NOT ({protection_predicate})
+               ORDER BY raw.received_at,raw.id LIMIT ?""",
+            (cutoff, batch_limit),
+        ).fetchall()
+        candidate_ids = [int(row["id"]) for row in candidates]
+        protected_ids = _protected_raw_ids(connection, candidate_ids)
+        protected_rows = [row for row in candidates if int(row["id"]) in protected_ids]
+        for batch in _batches(protected_rows):
+            identifiers = [int(row["id"]) for row in batch]
+            marks = ",".join("?" * len(identifiers))
+            connection.execute(
+                f"""UPDATE station_ingest_dedup_keys
+                   SET protected=1,expires_at=NULL,
+                       canonical_evidence_ref_id=COALESCE(
+                           canonical_evidence_ref_id,
+                           (SELECT evidence.id FROM monitoring_archive_evidence_refs evidence
+                            WHERE evidence.source_raw_frame_id=canonical_raw_frame_id)),
+                       updated_at=?
+                   WHERE canonical_raw_frame_id IN ({marks})""",
+                (_now(), *identifiers),
+            )
+        retained += len(protected_rows)
+        deletable_rows = [row for row in candidates if int(row["id"]) not in protected_ids]
+        for batch in _batches(deletable_rows):
+            identifiers = [int(row["id"]) for row in batch]
+            evidence_refs = {int(row["id"]): int(row["evidence_ref_id"]) for row in batch}
+            marks = ",".join("?" * len(identifiers))
+            batch_ids = [int(item[0]) for item in connection.execute(
+                f"SELECT id FROM observation_batches WHERE raw_frame_id IN ({marks})", identifiers,
+            )]
+            if batch_ids:
+                batch_marks = ",".join("?" * len(batch_ids))
+                connection.execute(
+                    f"""DELETE FROM monitoring_quality_issues
+                        WHERE observation_batch_id IN ({batch_marks}) AND status!='open'""",
+                    batch_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM monitoring_status_events WHERE observation_batch_id IN ({batch_marks})",
+                    batch_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM observation_values WHERE observation_batch_id IN ({batch_marks})",
+                    batch_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM observation_batches WHERE id IN ({batch_marks})", batch_ids,
+                )
+            connection.execute(
+                f"""DELETE FROM monitoring_quality_issues
+                    WHERE raw_frame_id IN ({marks}) AND status!='open'""",
+                identifiers,
+            )
+            duplicate_rows = connection.execute(
+                f"""SELECT id,duplicate_of_raw_frame_id FROM ingest_raw_frames
+                    WHERE duplicate_of_raw_frame_id IN ({marks})""",
+                identifiers,
+            ).fetchall()
+            link_created_at = _now()
+            connection.executemany(
+                """INSERT OR IGNORE INTO station_ingest_duplicate_links(
+                       raw_frame_id,canonical_raw_frame_id,canonical_evidence_ref_id,created_at)
+                   VALUES (?,?,?,?)""",
+                ((duplicate[0], duplicate[1], evidence_refs[int(duplicate[1])], link_created_at)
+                 for duplicate in duplicate_rows),
+            )
+            connection.execute(
+                f"""UPDATE ingest_raw_frames SET duplicate_of_raw_frame_id=NULL
+                    WHERE duplicate_of_raw_frame_id IN ({marks})""",
+                identifiers,
+            )
+            for table, column in (
+                ("station_ingest_duplicate_links", "raw_frame_id"),
+                ("monitoring_raw_archive_part_frames", "raw_frame_id"),
+                ("ingest_frame_protocols", "raw_frame_id"),
+                ("station_ingest_recent_receipts", "raw_frame_id"),
+                ("ingest_raw_frames", "id"),
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {column} IN ({marks})", identifiers,
+                )
+            deleted += len(identifiers)
+        connection.execute(
+            """DELETE FROM station_ingest_dedup_keys
+               WHERE protected=0 AND expires_at IS NOT NULL
+                 AND julianday(expires_at)<julianday(?)""",
+            (now,),
+        )
+        connection.commit()
+    return deleted, retained
+
+
+def _retire_archive_parts_to_mirror(
+    database: Path, local_root: Path, mirror_root: Path, cutoff: str,
+) -> dict[str, Any]:
+    mirror_root = Path(mirror_root)
+    if not mirror_root.exists() or not mirror_root.is_dir():
+        raise RetentionError("mirror storage root must be an existing directory")
+    with closing(sqlite3.connect(str(database))) as connection:
+        connection.row_factory = sqlite3.Row
+        raw_parts = connection.execute(
+            """SELECT 'raw' AS archive_kind,part.id,part.archive_path,part.content_sha256,
+                      part.frame_count AS record_count
+               FROM monitoring_raw_archive_parts part
+               JOIN monitoring_raw_archive_part_metadata metadata
+                 ON metadata.archive_part_id=part.id
+               WHERE metadata.last_received_at<? AND metadata.local_deleted_at IS NULL
+               ORDER BY part.id""",
+            (cutoff,),
+        ).fetchall()
+        detail_parts = connection.execute(
+            """SELECT 'detail' AS archive_kind,id,archive_path,content_sha256,record_count
+               FROM station_ingest_detail_archive_parts
+               WHERE range_end<? AND local_deleted_at IS NULL ORDER BY id""",
+            (cutoff,),
+        ).fetchall()
+    retired = {"raw": 0, "detail": 0}
+    failures = []
+    for part in [*raw_parts, *detail_parts]:
+        kind = str(part["archive_kind"])
+        part_id = int(part["id"])
+        local_path = Path(part["archive_path"])
+        try:
+            mirror_path = _mirror_archive_path(local_path, local_root, mirror_root)
+            if not mirror_path.is_file():
+                raise RetentionError("matching mirror archive is missing")
+            _verify_archive_copy(
+                mirror_path, str(part["content_sha256"]), int(part["record_count"]))
+            if kind == "raw":
+                with closing(sqlite3.connect(str(database))) as connection:
+                    evidence_count = connection.execute(
+                        """SELECT COUNT(*) FROM monitoring_archive_evidence_refs
+                           WHERE archive_part_id=?""",
+                        (part_id,),
+                    ).fetchone()[0]
+                    sample = connection.execute(
+                        """SELECT archive_record_index,record_sha256,frame_sha256
+                           FROM monitoring_archive_evidence_refs
+                           WHERE archive_part_id=? ORDER BY archive_record_index LIMIT 1""",
+                        (part_id,),
+                    ).fetchone()
+                if evidence_count != int(part["record_count"]) or sample is None:
+                    raise RetentionError("raw archive evidence references are incomplete")
+                _read_archived_payload(
+                    mirror_path, int(sample[0]), str(sample[1]), str(sample[2]),
+                    str(part["content_sha256"]), content_verified=True,
+                )
+            verified_at = _now()
+            with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if kind == "raw":
+                    connection.execute(
+                        """UPDATE monitoring_raw_archive_part_metadata
+                           SET mirror_path=?,mirror_verified_at=? WHERE archive_part_id=?""",
+                        (str(mirror_path.resolve()), verified_at, part_id),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE station_ingest_detail_archive_parts
+                           SET mirror_path=?,mirror_verified_at=? WHERE id=?""",
+                        (str(mirror_path.resolve()), verified_at, part_id),
+                    )
+                connection.commit()
+            local_path.unlink(missing_ok=True)
+            with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if kind == "raw":
+                    connection.execute(
+                        """UPDATE monitoring_raw_archive_part_metadata
+                           SET local_deleted_at=? WHERE archive_part_id=?""",
+                        (_now(), part_id),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE station_ingest_detail_archive_parts
+                           SET local_deleted_at=? WHERE id=?""",
+                        (_now(), part_id),
+                    )
+                connection.commit()
+            retired[kind] += 1
+        except (OSError, RetentionError, sqlite3.Error) as exc:
+            failures.append(f"{kind} archive part {part_id}: {exc}")
+    return {
+        "retired_raw_archive_parts": retired["raw"],
+        "retired_detail_archive_parts": retired["detail"],
+        "mirror_failures": len(failures),
+        "mirror_failure_details": failures,
+    }
+
+
+def maintain_retention(
+    database: Path, policy: StoragePolicy, *, now: datetime | None = None, batch_limit: int = 1000,
+    mirror_storage_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Archive first, then prune bounded hot detail and unreferenced process rows."""
+    now = now or datetime.now(timezone.utc)
+    now = (now.replace(tzinfo=timezone.utc) if now.tzinfo is None
+           else now.astimezone(timezone.utc))
+    root = _require_storage(policy, database)
+    backfilled_evidence = backfill_archive_evidence_refs(database)
+    with closing(sqlite3.connect(str(database))) as connection:
+        needs_bootstrap = bool(connection.execute(
+            """SELECT EXISTS(SELECT 1 FROM ingest_raw_frames)
+                      AND NOT EXISTS(SELECT 1 FROM station_ingest_current_state)"""
+        ).fetchone()[0])
+    bootstrap_counts = bootstrap_retention_state(database, now=now) if needs_bootstrap else {}
+    raw_cutoff = _cutoff(now, HOT_RELATION_RETENTION)
+    detail_cutoff = _cutoff(now, DETAIL_RETENTION)
+    with closing(sqlite3.connect(str(database))) as connection:
+        days = [row[0] for row in connection.execute(
+            """SELECT DISTINCT substr(received_at,1,10) FROM ingest_raw_frames
+               WHERE received_at<? AND persistence_state='persisted' AND length(raw_frame)>0
+               ORDER BY 1""", (detail_cutoff,)).fetchall()]
+    archived_raw = sum(archive_raw_day(database, day, policy) for day in days)
+    parse_count = _archive_detail_batch(
+        database, root, "parse_attempt", detail_cutoff, batch_limit=batch_limit)
+    error_count = _archive_detail_batch(
+        database, root, "ingest_error", detail_cutoff, batch_limit=batch_limit)
+    summary_count = _archive_detail_batch(
+        database, root, "error_summary", _cutoff(now, ERROR_SUMMARY_RETENTION),
+        batch_limit=batch_limit)
+    with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        recent_receipts_deleted = connection.execute(
+            "DELETE FROM station_ingest_recent_receipts WHERE received_at<?",
+            (_cutoff(now, RECENT_RECEIPT_RETENTION),),
+        ).rowcount
+        receipt_summaries_deleted = connection.execute(
+            "DELETE FROM station_ingest_receipt_hourly WHERE last_received_at<?",
+            (_cutoff(now, RECEIPT_SUMMARY_RETENTION),),
+        ).rowcount
+        slot_summaries_deleted = connection.execute(
+            "DELETE FROM station_ingest_slot_summaries WHERE last_received_at<?",
+            (_cutoff(now, SLOT_SUMMARY_RETENTION),),
+        ).rowcount
+        connection.commit()
+    deleted_raw, retained_raw = _delete_unprotected_raw_batch(
+        database, raw_cutoff,
+        now=now.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+        batch_limit=batch_limit)
+    archive_cutoff = _cutoff(now, CLOUD_ARCHIVE_RETENTION)
+    mirror_result = {
+        "retired_raw_archive_parts": 0,
+        "retired_detail_archive_parts": 0,
+        "mirror_failures": 0,
+        "mirror_failure_details": [],
+    }
+    if mirror_storage_dir is not None:
+        mirror_result = _retire_archive_parts_to_mirror(
+            database, root, mirror_storage_dir, archive_cutoff)
+    with closing(sqlite3.connect(str(database))) as connection:
+        overdue_raw_parts = connection.execute(
+            """SELECT COUNT(*) FROM monitoring_raw_archive_part_metadata
+               WHERE last_received_at<? AND local_deleted_at IS NULL""", (archive_cutoff,)
+        ).fetchone()[0]
+        unmirrored_raw_parts = connection.execute(
+            """SELECT COUNT(*) FROM monitoring_raw_archive_part_metadata
+               WHERE last_received_at<?
+                 AND (mirror_path IS NULL OR mirror_verified_at IS NULL)""", (archive_cutoff,)
+        ).fetchone()[0]
+        overdue_detail_parts = connection.execute(
+            """SELECT COUNT(*) FROM station_ingest_detail_archive_parts
+               WHERE range_end<? AND local_deleted_at IS NULL""", (archive_cutoff,)
+        ).fetchone()[0]
+        unmirrored_detail_parts = connection.execute(
+            """SELECT COUNT(*) FROM station_ingest_detail_archive_parts
+               WHERE range_end<?
+                 AND (mirror_path IS NULL OR mirror_verified_at IS NULL)""", (archive_cutoff,)
+        ).fetchone()[0]
+    overdue_archive_parts = overdue_raw_parts + overdue_detail_parts
+    unmirrored_archive_parts = unmirrored_raw_parts + unmirrored_detail_parts
+    result = {
+        "backfilled_evidence_refs": backfilled_evidence,
+        "bootstrapped_current_states": bootstrap_counts.get("current_states", 0),
+        "archived_raw_frames": archived_raw,
+        "archived_parse_attempts": parse_count,
+        "archived_errors": error_count,
+        "archived_error_summaries": summary_count,
+        "deleted_recent_receipts": recent_receipts_deleted,
+        "deleted_receipt_summaries": receipt_summaries_deleted,
+        "deleted_slot_summaries": slot_summaries_deleted,
+        "deleted_raw_frames": deleted_raw,
+        "retained_protected_frames": retained_raw,
+        "overdue_archive_parts": overdue_archive_parts,
+        "unmirrored_archive_parts": unmirrored_archive_parts,
+        **mirror_result,
+    }
+    with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """INSERT INTO station_ingest_retention_runs(
+                   cutoff_time,archived_parse_attempts,archived_errors,archived_error_summaries,
+                   deleted_raw_frames,retained_protected_frames,status,detail,created_at)
+               VALUES (?,?,?,?,?,?,'completed',?,?)""",
+            (raw_cutoff, parse_count, error_count, summary_count, deleted_raw, retained_raw,
+             json.dumps(result, sort_keys=True), _now()),
+        )
+        if overdue_archive_parts or mirror_result["mirror_failures"]:
+            failure = mirror_result["mirror_failure_details"][:1]
+            failure_text = f", failure={failure[0]}" if failure else ""
+            _record_health(
+                connection, "degraded",
+                f"archive retention backlog: overdue={overdue_archive_parts}, "
+                f"unmirrored={unmirrored_archive_parts}{failure_text}",
+            )
+        else:
+            _record_health(connection, "healthy", "retention maintenance completed")
+        connection.commit()
+    return result
+
+
+def _record_periodic_failure(database: Path, error: Exception) -> None:
+    try:
+        with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,archived_parse_attempts,archived_errors,archived_error_summaries,
+                       deleted_raw_frames,retained_protected_frames,status,detail,created_at)
+                   VALUES (?,0,0,0,0,0,'failed',?,?)""",
+                (_now(), json.dumps({"error": str(error)}, sort_keys=True), _now()),
+            )
+            connection.commit()
+    except sqlite3.Error:
+        pass
+
+
+def run_periodic_maintenance(
+    database: Path, policy: StoragePolicy, *, lock_file: Path, now: datetime | None = None,
+    batch_limit: int = 1000, mirror_storage_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run one externally scheduled cycle after cutover, with a unique process lease."""
+    with MaintenanceLock(lock_file):
+        try:
+            try:
+                from .station_ingest_cutover import require_cutover_ready
+            except ImportError:  # pragma: no cover - direct script execution
+                from station_ingest_cutover import require_cutover_ready
+            require_cutover_ready(database)
+            return maintain_retention(
+                database, policy, now=now, batch_limit=batch_limit,
+                mirror_storage_dir=mirror_storage_dir,
+            )
+        except Exception as exc:
+            _record_periodic_failure(database, exc)
+            if isinstance(exc, (RetentionError, sqlite3.Error)):
+                raise
+            raise RetentionError(str(exc)) from exc
+
+
+def reduce_legacy_indexes(database: Path, *, now: datetime | None = None) -> list[str]:
+    """Drop superseded large indexes only after replacement directories are complete."""
+    now = now or datetime.now(timezone.utc)
+    recent_cutoff = _cutoff(now, RECENT_RECEIPT_RETENTION)
+    dedup_cutoff = _cutoff(now, DEDUP_DIRECTORY_RETENTION)
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        missing_recent = connection.execute(
+            """SELECT COUNT(*) FROM ingest_raw_frames raw
+               WHERE raw.received_at>=? AND NOT EXISTS (
+                   SELECT 1 FROM station_ingest_recent_receipts recent
+                   WHERE recent.raw_frame_id=raw.id)""", (recent_cutoff,)).fetchone()[0]
+        missing_state = connection.execute(
+            """SELECT COUNT(*) FROM trusted_endpoints endpoint
+               WHERE EXISTS (SELECT 1 FROM ingest_raw_frames raw WHERE raw.endpoint_id=endpoint.id)
+                 AND NOT EXISTS (SELECT 1 FROM station_ingest_current_state state
+                                 WHERE state.endpoint_id=endpoint.id)"""
+        ).fetchone()[0]
+        missing_dedup = connection.execute(
+            """SELECT COUNT(*) FROM ingest_raw_frames raw
+               WHERE raw.received_at>=? AND raw.endpoint_id IS NOT NULL
+                 AND raw.logical_key_sha256 IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM station_ingest_dedup_keys directory
+                                 WHERE directory.endpoint_id=raw.endpoint_id
+                                   AND directory.logical_key_sha256=raw.logical_key_sha256)""",
+            (dedup_cutoff,),
+        ).fetchone()[0]
+        missing_hourly = connection.execute(
+            """SELECT COUNT(*) FROM ingest_raw_frames raw
+               WHERE raw.received_at>=? AND NOT EXISTS (
+                   SELECT 1 FROM station_ingest_receipt_hourly summary
+                   WHERE summary.source_key=CASE
+                           WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                           WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                               THEN 'station:' || raw.station_code
+                           ELSE 'transport:unidentified' END
+                     AND summary.authentication_status=raw.authentication_status
+                     AND summary.bucket_hour=strftime('%Y-%m-%dT%H:00:00+00:00',raw.received_at))""",
+            (_cutoff(now, RECEIPT_SUMMARY_RETENTION),),
+        ).fetchone()[0]
+        if missing_recent or missing_state or missing_dedup or missing_hourly:
+            raise RetentionError(
+                f"replacement directories are incomplete: recent={missing_recent}, state={missing_state}, "
+                f"dedup={missing_dedup}, hourly={missing_hourly}")
+        existing = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        removed = [name for name in LEGACY_RAW_INDEXES if name in existing]
+        connection.execute("BEGIN IMMEDIATE")
+        for name in removed:
+            connection.execute(f'DROP INDEX "{name}"')
+        connection.commit()
+        connection.execute("ANALYZE")
+        return removed
+
+
+def compact_isolated_copy(
+    source: Path, target: Path, policy: StoragePolicy, *, now: datetime | None = None,
+    batch_limit: int = 5000,
+) -> dict[str, Any]:
+    """Create and compact a snapshot copy; live-write catch-up remains a release concern."""
+    source = Path(source)
+    target = Path(target)
+    if target.exists():
+        raise RetentionError("compaction target already exists")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now(timezone.utc)
+    with closing(sqlite3.connect(str(source), timeout=30)) as source_connection:
+        with closing(sqlite3.connect(str(target))) as target_connection:
+            source_connection.backup(target_connection)
+    before_size = target.stat().st_size
+    cycles = []
+    while True:
+        cycle = maintain_retention(target, policy, now=now, batch_limit=batch_limit)
+        cycles.append(cycle)
+        if not any(cycle[key] for key in (
+            "archived_raw_frames", "archived_parse_attempts", "archived_errors",
+            "archived_error_summaries", "deleted_raw_frames",
+        )):
+            break
+    removed_indexes = reduce_legacy_indexes(target, now=now)
+    with closing(sqlite3.connect(str(target), timeout=30, isolation_level=None)) as connection:
+        foreign_violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_violations:
+            raise RetentionError("compacted copy contains foreign-key violations")
+        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RetentionError("compacted copy failed integrity verification")
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RetentionError("compacted copy failed post-vacuum quick verification")
+    return {
+        "source": str(source),
+        "target": str(target),
+        "before_bytes": before_size,
+        "after_bytes": target.stat().st_size,
+        "removed_indexes": removed_indexes,
+        "cycles": cycles,
+        "elapsed_seconds": round((datetime.now(timezone.utc) - started_at).total_seconds(), 3),
+        "consistency_point": "sqlite_backup_snapshot",
+        "live_write_catch_up": "NOT RUN",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline station-ingestion retention maintenance")
-    parser.add_argument("action", choices=("archive", "aggregate"))
+    parser.add_argument(
+        "action",
+        choices=(
+            "archive", "aggregate", "bootstrap", "maintain", "maintain-once",
+            "reduce-indexes", "compact-copy",
+        ),
+    )
     parser.add_argument("--database", required=True, type=Path)
-    parser.add_argument("--day", required=True)
+    parser.add_argument("--day")
+    parser.add_argument("--target", type=Path)
+    parser.add_argument("--batch-limit", type=int, default=1000)
     parser.add_argument("--raw-storage-dir", type=Path)
+    parser.add_argument("--mirror-storage-dir", type=Path)
+    parser.add_argument("--lock-file", type=Path)
     parser.add_argument("--storage-mode", choices=("long_term", "validation"), default="long_term")
     arguments = parser.parse_args(argv)
     try:
         if arguments.action == "aggregate":
+            if not arguments.day:
+                raise RetentionError("aggregate requires --day")
             result = aggregate_hourly(arguments.database, arguments.day)
-        else:
+        elif arguments.action == "archive":
+            if not arguments.day:
+                raise RetentionError("archive requires --day")
             if arguments.raw_storage_dir is None:
                 raise RetentionError("archive requires --raw-storage-dir")
-            result = archive_raw_day(arguments.database, arguments.day, storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode))
-    except (RetentionError, sqlite3.Error):
+            result = archive_raw_day(
+                arguments.database, arguments.day,
+                storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode),
+            )
+        elif arguments.action == "bootstrap":
+            result = bootstrap_retention_state(arguments.database)
+        elif arguments.action == "reduce-indexes":
+            result = reduce_legacy_indexes(arguments.database)
+        else:
+            if arguments.raw_storage_dir is None:
+                raise RetentionError(f"{arguments.action} requires --raw-storage-dir")
+            policy = storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode)
+            if arguments.action == "maintain":
+                result = maintain_retention(
+                    arguments.database, policy, batch_limit=arguments.batch_limit,
+                    mirror_storage_dir=arguments.mirror_storage_dir)
+            elif arguments.action == "maintain-once":
+                lock_file = arguments.lock_file or arguments.database.with_suffix(
+                    arguments.database.suffix + ".station-ingest-retention.lock")
+                result = run_periodic_maintenance(
+                    arguments.database, policy, lock_file=lock_file,
+                    batch_limit=arguments.batch_limit,
+                    mirror_storage_dir=arguments.mirror_storage_dir,
+                )
+            else:
+                if arguments.target is None:
+                    raise RetentionError("compact-copy requires --target")
+                result = compact_isolated_copy(
+                    arguments.database, arguments.target, policy,
+                    batch_limit=arguments.batch_limit,
+                )
+    except (RetentionError, sqlite3.Error) as exc:
+        print(json.dumps({
+            "action": arguments.action, "status": "failed", "error": str(exc),
+        }, sort_keys=True), file=sys.stderr)
         return 2
-    print(json.dumps({"action": arguments.action, "day": arguments.day, "processed": result}, sort_keys=True))
+    print(json.dumps({"action": arguments.action, "result": result}, sort_keys=True))
     return 0
 
 

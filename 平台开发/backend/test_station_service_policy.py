@@ -147,12 +147,19 @@ class StationServicePolicyTest(unittest.TestCase):
                 (self.site_id,)).fetchone()[0], 1)
 
     def test_service_ended_scope_archive_and_new_plan_rejection(self):
+        admin_headers = self.headers('policy-admin')
+        before = self.client.get(
+            '/api/station-monitoring/sites?scope=all&service_scope=current',
+            headers=admin_headers)
+        self.assertEqual(before.status_code, 200, before.get_json())
+        self.assertEqual(before.get_json()['summary']['total'], 2)
+        self.assertEqual(before.get_json()['service_scope'], 'current')
+
         ended = self.save_policy(
             self.other_site_id, version=0, key='service-ended-1',
             service_status='ended', reason='服务合同结束', confirmed=True)
         self.assertEqual(ended.status_code, 200, ended.get_json())
 
-        admin_headers = self.headers('policy-admin')
         current = self.client.get('/api/sites?service_scope=current', headers=admin_headers)
         self.assertEqual(current.status_code, 200, current.get_json())
         self.assertEqual([row['id'] for row in current.get_json()], [self.site_id])
@@ -165,6 +172,41 @@ class StationServicePolicyTest(unittest.TestCase):
         forbidden_all = self.client.get(
             '/api/sites?service_scope=all', headers=self.headers('policy-operator'))
         self.assertEqual(forbidden_all.status_code, 403, forbidden_all.get_json())
+
+        monitoring_current = self.client.get(
+            '/api/station-monitoring/sites?scope=all&service_scope=current',
+            headers=admin_headers)
+        self.assertEqual(
+            [row['site_id'] for row in monitoring_current.get_json()['items']],
+            [self.site_id])
+        self.assertEqual(monitoring_current.get_json()['summary']['total'], 1)
+        self.assertEqual(monitoring_current.get_json()['service_scope'], 'current')
+
+        monitoring_all = self.client.get(
+            '/api/station-monitoring/sites?scope=all&service_scope=all',
+            headers=admin_headers)
+        self.assertEqual(
+            {row['site_id'] for row in monitoring_all.get_json()['items']},
+            {self.site_id, self.other_site_id})
+        self.assertEqual(monitoring_all.get_json()['summary']['total'], 2)
+        self.assertEqual(monitoring_all.get_json()['service_scope'], 'all')
+
+        operator_headers = self.headers('policy-operator')
+        forbidden_monitoring_all = self.client.get(
+            '/api/station-monitoring/sites?scope=mine&service_scope=all',
+            headers=operator_headers)
+        self.assertEqual(forbidden_monitoring_all.status_code, 403)
+        self.assertEqual(
+            forbidden_monitoring_all.get_json()['code'],
+            'FORBIDDEN_MONITORING_SERVICE_SCOPE')
+
+        invalid_service_scope = self.client.get(
+            '/api/station-monitoring/sites?scope=all&service_scope=ended',
+            headers=admin_headers)
+        self.assertEqual(invalid_service_scope.status_code, 400)
+        self.assertEqual(
+            invalid_service_scope.get_json()['code'],
+            'INVALID_MONITORING_SERVICE_SCOPE')
 
         archive = self.client.get(
             f'/api/sites/{self.other_site_id}/archive', headers=admin_headers)
@@ -179,6 +221,152 @@ class StationServicePolicyTest(unittest.TestCase):
                 })
         self.assertEqual(raised.exception.code, 'PLAN_SITE_SERVICE_ENDED')
         self.assertEqual(raised.exception.site_ids, [self.other_site_id])
+
+    def test_site_and_monitoring_scopes_share_the_26_and_36_station_denominators(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.executemany(
+                "INSERT INTO sites(code,name,type) VALUES (?,?, 'water_quality')",
+                ((f'POL-{index}', f'政策站{index}',) for index in range(3, 37)),
+            )
+            site_ids = [row[0] for row in db.execute('SELECT id FROM sites ORDER BY id')]
+            current_ids = set(site_ids[:26])
+            ended_ids = set(site_ids[26:])
+            db.executemany("""INSERT INTO station_service_policy_events(
+                    site_id,version,previous_service_status,service_status,
+                    previous_reporting_condition,reporting_condition,effective_from,reason,
+                    changed_by_user_id,idempotency_key,request_fingerprint,created_at)
+                VALUES (?,1,'active','ended','normal','normal',?,'合同结束',?,?,?,?)""", (
+                (site_id, '2026-10-16T01:05:00+00:00', self.admin_id,
+                 f'end-{site_id}', f'end-{site_id}', '2026-10-16T01:05:00+00:00')
+                for site_id in sorted(ended_ids)
+            ))
+            ended_assigned_id = min(ended_ids)
+            db.execute(
+                'INSERT INTO user_sites(user_id,site_id) VALUES (?,?)',
+                (self.operator_id, ended_assigned_id),
+            )
+            policy_rows = db.execute(
+                'SELECT id,site_id FROM station_service_policy_events ORDER BY id'
+            ).fetchall()
+            self.assertTrue(policy_rows)
+            self.assertTrue(all(event_id != site_id for event_id, site_id in policy_rows))
+            db.commit()
+        current_order = sorted(current_ids)
+        all_order = sorted(current_ids | ended_ids)
+        statuses = {}
+        for site_id in current_order[:2]:
+            statuses[site_id] = 'not_connected'
+        for site_id in current_order[2:19]:
+            statuses[site_id] = 'raw_received_config_pending'
+        for site_id in current_order[19:]:
+            statuses[site_id] = 'waiting_first_valid'
+        statuses[all_order[26]] = 'not_connected'
+        for site_id in all_order[27:]:
+            statuses[site_id] = 'raw_received_config_pending'
+
+        def projections(_db, rows):
+            return [{
+                'site_id': row['id'],
+                'monitoring_status': statuses[row['id']],
+            } for row in rows]
+
+        headers = self.headers('policy-admin')
+        with mock.patch.object(
+                web_app, '_station_monitoring_batch_projections_cached',
+                side_effect=projections):
+            current_sites = self.client.get(
+                '/api/sites?service_scope=current', headers=headers).get_json()
+            current_monitoring = self.client.get(
+                '/api/station-monitoring/sites?scope=all&service_scope=current',
+                headers=headers).get_json()
+            all_sites = self.client.get(
+                '/api/sites?service_scope=all', headers=headers).get_json()
+            all_monitoring = self.client.get(
+                '/api/station-monitoring/sites?scope=all&service_scope=all',
+                headers=headers).get_json()
+
+        self.assertEqual(len(current_sites), 26)
+        self.assertEqual(current_monitoring['summary']['total'], 26)
+        self.assertEqual(current_monitoring['summary']['not_connected'], 2)
+        self.assertEqual(current_monitoring['summary']['raw_received_config_pending'], 17)
+        self.assertEqual(current_monitoring['summary']['waiting_first_valid'], 7)
+        self.assertEqual(len(all_sites), 36)
+        self.assertEqual(all_monitoring['summary']['total'], 36)
+        self.assertEqual(all_monitoring['summary']['not_connected'], 3)
+        self.assertEqual(all_monitoring['summary']['raw_received_config_pending'], 26)
+        self.assertEqual(all_monitoring['summary']['waiting_first_valid'], 7)
+
+        mobile_admin = self.client.get(
+            '/api/mobile/responsible-sites?scope=all', headers=headers)
+        self.assertEqual(mobile_admin.status_code, 200, mobile_admin.get_json())
+        mobile_admin_body = mobile_admin.get_json()
+        self.assertEqual(mobile_admin_body['scope_counts']['all'], 26)
+        self.assertEqual(
+            {item['site_id'] for item in mobile_admin_body['items']}, current_ids)
+        self.assertEqual(
+            [item['name'] for item in mobile_admin_body['items']],
+            sorted(item['name'] for item in mobile_admin_body['items']),
+        )
+        self.assertEqual(
+            {item['site_id'] for item in mobile_admin_body['items']},
+            {item['id'] for item in current_sites},
+        )
+
+        mobile_keyword = self.client.get(
+            '/api/mobile/responsible-sites', headers=headers,
+            query_string={'scope': 'all', 'keyword': '政策站3'},
+        )
+        self.assertEqual(mobile_keyword.status_code, 200, mobile_keyword.get_json())
+        self.assertEqual(
+            [item['site_id'] for item in mobile_keyword.get_json()['items']],
+            [current_order[2]],
+        )
+
+        operator_headers = self.headers('policy-operator')
+        mobile_mine = self.client.get(
+            '/api/mobile/responsible-sites?scope=mine', headers=operator_headers)
+        self.assertEqual(mobile_mine.status_code, 200, mobile_mine.get_json())
+        self.assertEqual(
+            {item['site_id'] for item in mobile_mine.get_json()['items']},
+            {self.site_id, self.other_site_id},
+        )
+        self.assertEqual(mobile_mine.get_json()['scope_counts']['mine'], 2)
+        forbidden_mobile_all = self.client.get(
+            '/api/mobile/responsible-sites?scope=all', headers=operator_headers)
+        self.assertEqual(
+            forbidden_mobile_all.status_code, 403, forbidden_mobile_all.get_json())
+
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("""INSERT INTO station_service_policy_events(
+                    site_id,version,previous_service_status,service_status,
+                    previous_reporting_condition,reporting_condition,effective_from,reason,
+                    changed_by_user_id,idempotency_key,request_fingerprint,created_at)
+                VALUES (?,1,'active','ended','normal','normal',?,'合同结束',?,?,?,?)""", (
+                self.other_site_id, '2026-10-16T01:06:00+00:00', self.admin_id,
+                'end-current-mobile-site', 'end-current-mobile-site',
+                '2026-10-16T01:06:00+00:00',
+            ))
+            db.commit()
+
+        mobile_after_end = self.client.get(
+            '/api/mobile/responsible-sites?scope=all', headers=headers)
+        self.assertEqual(
+            mobile_after_end.status_code, 200, mobile_after_end.get_json())
+        self.assertEqual(mobile_after_end.get_json()['scope_counts']['all'], 25)
+        self.assertNotIn(
+            self.other_site_id,
+            {item['site_id'] for item in mobile_after_end.get_json()['items']},
+        )
+        mobile_mine_after_end = self.client.get(
+            '/api/mobile/responsible-sites?scope=mine', headers=operator_headers)
+        self.assertEqual(
+            mobile_mine_after_end.status_code, 200,
+            mobile_mine_after_end.get_json())
+        self.assertEqual(
+            [item['site_id'] for item in mobile_mine_after_end.get_json()['items']],
+            [self.site_id],
+        )
+        self.assertEqual(mobile_mine_after_end.get_json()['scope_counts']['mine'], 1)
 
     def test_policy_history_controls_arrival_denominator_without_hiding_values(self):
         with closing(sqlite3.connect(self.database)) as db:

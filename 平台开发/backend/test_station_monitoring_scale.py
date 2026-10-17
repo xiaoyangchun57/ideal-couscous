@@ -104,16 +104,10 @@ class StationMonitoringScaleTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             raw_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
-                   SELECT endpoint.id AS endpoint_id,(
-                       SELECT raw.received_at
-                       FROM ingest_raw_frames raw
-                            INDEXED BY idx_ingest_raw_authenticated_endpoint_received
-                       WHERE raw.authentication_status='authenticated'
-                         AND raw.endpoint_id=endpoint.id
-                       ORDER BY raw.received_at DESC LIMIT 1
-                   ) AS received_at
-                   FROM trusted_endpoints endpoint
-                   WHERE endpoint.id IN (?)""",
+                   SELECT endpoint_id,latest_authenticated_at AS received_at
+                   FROM station_ingest_current_state
+                        INDEXED BY idx_station_ingest_current_endpoint
+                   WHERE endpoint_id IN (?) AND latest_authenticated_at IS NOT NULL""",
                 (1,),
             ).fetchall()
             recent_plan = connection.execute(
@@ -126,23 +120,20 @@ class StationMonitoringScaleTest(unittest.TestCase):
             ).fetchall()
             auth_window_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
-                   SELECT authentication_status,COUNT(*),MAX(received_at)
-                   FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
-                   WHERE received_at>=? GROUP BY authentication_status""",
-                ('2026-10-11T00:00:00+00:00',),
+                   SELECT authentication_status,SUM(receipt_count),MAX(last_received_at)
+                   FROM station_ingest_receipt_hourly
+                        INDEXED BY idx_station_ingest_receipt_hour
+                   WHERE bucket_hour>=? AND last_received_at>=?
+                   GROUP BY authentication_status""",
+                ('2026-10-11T00:00:00+00:00', '2026-10-11T00:00:00+00:00'),
             ).fetchall()
             last_authenticated_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
-                   SELECT MAX(received_at) FROM ingest_raw_frames
-                   INDEXED BY idx_ingest_raw_authenticated_received
-                   WHERE authentication_status='authenticated'""",
+                   SELECT MAX(latest_authenticated_at)
+                   FROM station_ingest_current_state""",
             ).fetchall()
         self.assertIn(
-            'idx_ingest_raw_authenticated_endpoint_received',
-            ' '.join(str(row[3]) for row in raw_plan),
-        )
-        self.assertIn(
-            'CORRELATED SCALAR SUBQUERY',
+            'idx_station_ingest_current_endpoint',
             ' '.join(str(row[3]) for row in raw_plan),
         )
         self.assertIn(
@@ -150,13 +141,10 @@ class StationMonitoringScaleTest(unittest.TestCase):
             ' '.join(str(row[3]) for row in recent_plan),
         )
         self.assertIn(
-            'idx_ingest_raw_received',
+            'idx_station_ingest_receipt_hour',
             ' '.join(str(row[3]) for row in auth_window_plan),
         )
-        self.assertIn(
-            'idx_ingest_raw_authenticated_received',
-            ' '.join(str(row[3]) for row in last_authenticated_plan),
-        )
+        self.assertNotIn('ingest_raw_frames', ' '.join(str(row[3]) for row in last_authenticated_plan))
         print('STATION_MONITORING_SCALE_PLANS=' + json.dumps({
             'last_authenticated': [row[3] for row in last_authenticated_plan],
             'last_by_endpoint': [row[3] for row in raw_plan],

@@ -65,20 +65,21 @@
         </view>
       </view>
 
-      <!-- 最近检测周期 -->
+      <!-- 最近一期结果 -->
       <view class="mon-section">
         <view class="mon-section-head">
-          <text class="mon-section-title">最近检测周期</text>
-          <text class="mon-section-count">{{site.monitoring.latest_cycle.formed_count || 0}}/{{site.monitoring.latest_cycle.expected_count || 0}}</text>
+          <text class="mon-section-title">最近一期结果</text>
+          <text class="mon-section-count" wx:if="{{site.monitoring.latest_cycle.scheduled_at}}">已到 {{site.monitoring.latest_cycle.arrived_count_display}} / 应到 {{site.monitoring.latest_cycle.expected_count_display}}</text>
         </view>
-        <view class="card mon-values-card" wx:if="{{site.monitoring.latest_cycle && site.monitoring.latest_cycle.scheduled_at}}">
+        <view class="card mon-values-card" wx:if="{{site.monitoring.latest_cycle}}">
+          <block wx:if="{{site.monitoring.latest_cycle.scheduled_at}}">
           <view class="mon-value-row">
             <text class="mon-value-name">检测时点</text>
             <text class="mon-value-unit">{{site.monitoring.latest_cycle.scheduled_at}}</text>
           </view>
           <view class="mon-value-row">
-            <text class="mon-value-name">周期状态</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_cycle.status === 'complete' ? '结果完整' : site.monitoring.latest_cycle.status === 'incomplete' ? '结果不完整' : site.monitoring.latest_cycle.status === 'review_required' ? '结果待核对' : site.monitoring.latest_cycle.status === 'pending' ? '结果形成中' : '周期未配置'}}</text>
+            <text class="mon-value-name">结果状态</text>
+            <text class="mon-value-unit">{{site.monitoring.latest_cycle.status_label}}</text>
           </view>
           <view class="mon-value-row">
             <text class="mon-value-name">最近完整时点（辅助）</text>
@@ -87,6 +88,11 @@
           <view class="mon-value-row" wx:for="{{site.monitoring.latest_cycle.factors}}" wx:key="business_metric">
             <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}} · {{item.status === 'value' ? '已形成' : item.status === 'pending' ? '形成中' : item.status === 'missing' ? '缺测' : '待核对'}}</text>
             <view class="mon-value-right"><text class="mon-value-num">{{item.status === 'value' ? (item.value_display !== undefined && item.value_display !== null ? item.value_display : item.value) : '—'}}</text><text class="mon-value-unit">{{item.standard_unit}}</text></view>
+          </view>
+          </block>
+          <view class="mon-value-row" wx:else>
+            <text class="mon-value-name">结果状态</text>
+            <text class="mon-value-unit">{{site.monitoring.latest_cycle.status_label}}</text>
           </view>
         </view>
       </view>

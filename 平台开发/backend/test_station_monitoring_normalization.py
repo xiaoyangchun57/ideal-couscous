@@ -19,6 +19,7 @@ from sl651_parser import (FrameError, UP_FLOW_CONTROL, crc16_modbus, encode_bcd_
                           encode_bcd_time, encode_station_code, parse_frame, parse_water_quality_payload,
                           parse_water_quality_report)
 from sl651_server import IngestionStorage, credential_hmac
+from station_ingest_retention import archive_raw_day, bootstrap_retention_state, storage_policy_for_mode
 from station_monitoring import (_project_business_observation, _scheduled_at,
                                 business_slot_deadline, expected_business_slots,
                                 format_business_value, latest_cycle, normalize_raw_frame)
@@ -332,6 +333,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             values = {row['business_metric']: row['standard_value'] for row in connection.execute(
                 """SELECT business_metric,standard_value FROM observation_values WHERE is_current=1 AND is_published=1"""
             )}
+
             self.assertEqual(values, {'water_temp': 12.3, 'ammonia': 0.0, 'codmn': 5.4})
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM monitoring_status_events WHERE event_axis='rtu'").fetchone()[0], 2)
             self.assertEqual(connection.execute(
@@ -353,6 +355,24 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             0.0,
         )
         self.assertEqual(trend.get_json()['standard_unit'], 'mg/L')
+
+    def test_historical_reparse_reads_verified_archived_raw_evidence(self):
+        payload = bytes.fromhex('0311') + bcd_number(12.3, 3, 1)
+        raw_id = self._persist(
+            payload, sent_at=datetime(2020, 6, 12, 4, 0),
+            observed_at=datetime(2020, 6, 12, 4, 0),
+            received_at='2026-09-09T00:00:00+00:00')
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+        self.assertEqual(archive_raw_day(
+            self.database, '2026-09-09',
+            storage_policy_for_mode(Path(self.temp_dir.name), 'validation')), 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                'SELECT length(raw_frame) FROM ingest_raw_frames WHERE id=?', (raw_id,)
+            ).fetchone()[0], 0)
+
+        self.assertEqual(normalize_raw_frame(
+            self.database, raw_id, normalization_version='archived-reparse-v2'), 'accepted')
 
     def test_unconfigured_expected_factors_keep_formal_values_readable_without_completeness(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -381,7 +401,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         body = overview.get_json()
         self.assertEqual(body['site']['reason_code'], 'expected_factors_unconfigured')
         self.assertEqual(body['site']['latest_cycle']['status'], 'not_configured')
+        self.assertEqual(
+            body['site']['latest_cycle']['reason_code'], 'expected_factors_unconfigured')
         self.assertEqual(body['site']['latest_cycle']['expected_count'], 0)
+        self.assertEqual(body['site']['latest_cycle']['arrived_count'], 0)
         self.assertEqual(
             [(item['business_metric'], item['standard_value'])
              for item in body['monitoring']['latest_values']],
@@ -394,6 +417,36 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(item['reason_code'], 'expected_factors_unconfigured')
         self.assertEqual(item['last_valid_observation_at'], '2020-06-11T20:00:00+00:00')
         self.assertEqual(item['latest_cycle']['status'], 'not_configured')
+
+    def test_latest_cycle_explains_missing_time_configuration(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute('DELETE FROM monitoring_business_schedules')
+            connection.commit()
+            cycle = latest_cycle(
+                connection, self.site_id, at_time='2020-06-11T21:00:00+00:00')
+        self.assertEqual(cycle['status'], 'not_configured')
+        self.assertEqual(cycle['reason_code'], 'time_configuration_missing')
+        self.assertEqual(cycle['arrived_count'], 0)
+
+    def test_latest_cycle_explains_when_no_period_is_yet_evaluable(self):
+        effective_from = '2020-06-11T20:30:00+00:00'
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                'UPDATE station_expected_factor_configs SET effective_from=?',
+                (effective_from,),
+            )
+            connection.execute(
+                'UPDATE station_expected_factors SET effective_from=?',
+                (effective_from,),
+            )
+            connection.commit()
+            cycle = latest_cycle(
+                connection, self.site_id, at_time='2020-06-11T21:00:00+00:00')
+        self.assertEqual(cycle['status'], 'not_configured')
+        self.assertEqual(cycle['reason_code'], 'no_evaluable_period')
+        self.assertEqual(cycle['arrived_count'], 0)
 
     def test_partial_unmapped_evidence_and_read_permission_boundaries(self):
         raw_id = self._persist(bytes.fromhex('0311') + bcd_number(10.0, 3, 1) + bytes.fromhex('FEED'), serial=8)
@@ -1079,7 +1132,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
 
             with web_app._station_monitoring_list_cache_lock:
                 admin_key = [key for key in web_app._station_monitoring_list_cache
-                             if key[-2:] == ('all', '')][0]
+                             if key[-3:] == ('all', 'current', '')][0]
                 web_app._station_monitoring_list_cache[admin_key]['refresh_after'] = 0
             refreshed = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
             self.assertEqual(refreshed.status_code, 200, refreshed.get_json())
@@ -1175,7 +1228,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
 
         def blocked_body(*args, **kwargs):
             with entered_lock:
-                entered.append(args[3]['id'])
+                entered.append(args[4]['id'])
                 if len(entered) == 2:
                     both_entered.set()
             self.assertTrue(release.wait(3), 'parallel list projections were not released')
@@ -1561,6 +1614,43 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         item = next(item for item in response.get_json()['items'] if item['site_id'] == self.site_id)
         self.assertEqual(item['monitoring_status'], 'awaiting_first_frame')
+        self.assertEqual(item['latest_cycle']['reason_code'], 'time_configuration_missing')
+
+    def test_unbound_station_cycle_reason_follows_expected_factor_configuration(self):
+        client = web_app.app.test_client()
+        headers = self._headers('monitor-admin')
+        before = client.get(
+            f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=headers)
+        self.assertEqual(before.status_code, 200, before.get_json())
+        self.assertEqual(
+            before.get_json()['site']['latest_cycle']['reason_code'],
+            'expected_factors_unconfigured',
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            config_id = connection.execute(
+                """INSERT INTO station_expected_factor_configs(
+                       site_id,version,effective_from,previous_metrics_json,
+                       selected_metrics_json,changed_by_user_id,idempotency_key,created_at)
+                   VALUES (?,1,?,'[]','[\"ph\"]',?,?,?)""",
+                (self.other_site_id, '2020-01-01T00:00:00+00:00', self.admin_id,
+                 'unbound-configured-v1', '2020-01-01T00:00:00+00:00'),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO station_expected_factors(
+                       config_id,site_id,business_metric,display_order,effective_from)
+                   VALUES (?,?,'ph',0,'2020-01-01T00:00:00+00:00')""",
+                (config_id, self.other_site_id),
+            )
+            connection.commit()
+        web_app._invalidate_station_monitoring_projection_caches()
+
+        after = client.get(
+            f'/api/station-monitoring/sites/{self.other_site_id}/overview', headers=headers)
+        self.assertEqual(after.status_code, 200, after.get_json())
+        cycle = after.get_json()['site']['latest_cycle']
+        self.assertEqual(cycle['reason_code'], 'time_configuration_missing')
+        self.assertEqual(cycle['expected_count'], 1)
 
     def test_recent_credential_failure_is_visible_without_becoming_authenticated_data(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -1852,7 +1942,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             self.assertEqual(ph['status'], 'review_required')
             self.assertIsNone(ph['value'])
 
-    def test_batch_last_receipt_query_uses_authenticated_endpoint_received_index(self):
+    def test_batch_last_receipt_query_uses_current_state_index(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
             connection.executemany(
@@ -1869,6 +1959,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                      'last-receipt-rejected', b'rejected', 'credential_failed', 'quarantined'),
                 ),
             )
+            connection.commit()
+            bootstrap_retention_state(
+                self.database, now=datetime(2026, 10, 13, 3, tzinfo=timezone.utc))
             latest = web_app._station_monitoring_latest_authenticated_receipts(
                 connection, [self.endpoint_id])
             self.assertEqual(
@@ -1876,21 +1969,14 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             marks = '?'
             plan = connection.execute(
                 f"""EXPLAIN QUERY PLAN
-                    SELECT endpoint.id AS endpoint_id,(
-                        SELECT raw.received_at
-                        FROM ingest_raw_frames raw
-                             INDEXED BY idx_ingest_raw_authenticated_endpoint_received
-                        WHERE raw.authentication_status='authenticated'
-                          AND raw.endpoint_id=endpoint.id
-                        ORDER BY raw.received_at DESC LIMIT 1
-                    ) AS received_at
-                    FROM trusted_endpoints endpoint
-                    WHERE endpoint.id IN ({marks})""",
+                    SELECT endpoint_id,latest_authenticated_at AS received_at
+                    FROM station_ingest_current_state
+                    WHERE endpoint_id IN ({marks}) AND latest_authenticated_at IS NOT NULL""",
                 (self.endpoint_id,),
             ).fetchall()
         detail = ' '.join(str(row[3]) for row in plan)
-        self.assertIn('idx_ingest_raw_authenticated_endpoint_received', detail)
-        self.assertIn('CORRELATED SCALAR SUBQUERY', detail)
+        self.assertIn('idx_station_ingest_current_endpoint', detail)
+        self.assertNotIn('ingest_raw_frames', detail)
 
     def test_batch_projection_query_count_is_constant_for_one_ten_and_fifty_sites(self):
         def ensure_sites(connection, target):
@@ -2056,8 +2142,11 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                 project_cycle(definition, index, '2020-06-11T20:00:00+00:00', 'cycle-latest')
             cycle = latest_cycle(connection, self.site_id, at_time='2020-06-11T23:00:00+00:00')
         self.assertEqual(cycle['status'], 'incomplete')
-        self.assertEqual((cycle['formed_count'], cycle['expected_count'], cycle['missing_count']),
-                         (6, 9, 3))
+        self.assertIsNone(cycle['reason_code'])
+        self.assertEqual(
+            (cycle['arrived_count'], cycle['formed_count'], cycle['expected_count'],
+             cycle['missing_count']),
+            (6, 6, 9, 3))
         self.assertEqual(len([item for item in cycle['factors'] if item['status'] == 'missing']), 3)
         self.assertEqual({item['business_metric'] for item in cycle['factors']},
                          set(expected_metrics))

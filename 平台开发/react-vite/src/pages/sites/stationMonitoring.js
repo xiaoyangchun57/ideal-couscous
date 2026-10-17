@@ -48,6 +48,7 @@ function copySiteDirectorySnapshot(snapshot) {
     scopeFacts: snapshot.scopeFacts ? {
       ...snapshot.scopeFacts,
       availableScopes: [...(snapshot.scopeFacts.availableScopes || [])],
+      availableServiceScopes: [...(snapshot.scopeFacts.availableServiceScopes || [])],
     } : null,
   };
 }
@@ -98,9 +99,15 @@ const MONITORING_FIELDS = [
 export const CYCLE_STATUS_META = {
   pending: { label: '结果形成中', color: 'blue' },
   complete: { label: '结果完整', color: 'green' },
-  incomplete: { label: '结果不完整', color: 'orange' },
+  incomplete: { label: '结果缺项', color: 'orange' },
   review_required: { label: '结果待核对', color: 'red' },
-  not_configured: { label: '周期未配置', color: 'default' },
+  not_configured: { label: '结果条件未配置', color: 'default' },
+};
+
+const CYCLE_UNAVAILABLE_META = {
+  expected_factors_unconfigured: { label: '应监测因子未设置', color: 'gold' },
+  time_configuration_missing: { label: '时间配置缺失', color: 'default' },
+  no_evaluable_period: { label: '暂无可评价时段', color: 'default' },
 };
 
 export const COMMUNICATION_STATUS_META = {
@@ -111,6 +118,9 @@ export const COMMUNICATION_STATUS_META = {
 };
 
 export function cycleStatusView(cycle = {}) {
+  if (cycle.status === 'not_configured' && CYCLE_UNAVAILABLE_META[cycle.reason_code]) {
+    return CYCLE_UNAVAILABLE_META[cycle.reason_code];
+  }
   return CYCLE_STATUS_META[cycle.status] || { label: '周期状态待确认', color: 'default' };
 }
 
@@ -167,6 +177,37 @@ export function mergeMonitoringSites(siteRows, monitoringPayload, previousRows =
     const previous = monitoringPayload == null ? previousById.get(key) : null;
     return previous ? mergeMonitoringSite(site, previous) : mergeMonitoringSite(site);
   });
+}
+
+export function validateMonitoringDirectoryPayload(
+  siteRows, payload, { scope, serviceScope } = {},
+) {
+  const items = Array.isArray(payload?.items) ? payload.items : null;
+  const availableScopes = Array.isArray(payload?.available_scopes)
+    ? payload.available_scopes : [];
+  const availableServiceScopes = Array.isArray(payload?.available_service_scopes)
+    ? payload.available_service_scopes : [];
+  if (!items || payload?.scope !== scope || payload?.service_scope !== serviceScope
+      || !availableScopes.includes(scope)
+      || !availableServiceScopes.includes(serviceScope)) {
+    return { ok: false, error: '监测范围与当前站点列表不一致，请重新加载' };
+  }
+  const siteIds = (Array.isArray(siteRows) ? siteRows : []).map((item) => String(item.id));
+  const monitoringIds = items.map((item) => String(item.id ?? item.site_id));
+  const uniqueSiteIds = new Set(siteIds);
+  const uniqueMonitoringIds = new Set(monitoringIds);
+  const summaryTotal = Number(payload?.summary?.total);
+  const sameIds = uniqueSiteIds.size === uniqueMonitoringIds.size
+    && [...uniqueSiteIds].every((id) => uniqueMonitoringIds.has(id));
+  if (uniqueSiteIds.size !== siteIds.length
+      || uniqueMonitoringIds.size !== monitoringIds.length
+      || !Number.isInteger(summaryTotal)
+      || summaryTotal !== siteIds.length
+      || items.length !== siteIds.length
+      || !sameIds) {
+    return { ok: false, error: '监测汇总与当前站点列表数量不一致，请重新加载' };
+  }
+  return { ok: true };
 }
 
 export function monitoringSummaryItems(summary = {}) {

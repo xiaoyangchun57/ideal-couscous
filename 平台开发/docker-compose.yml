@@ -7,7 +7,7 @@ services:
     container_name: water-monitor
     restart: unless-stopped
     depends_on:
-      station-ingest-permissions:
+      station-ingest-cutover:
         condition: service_completed_successfully
     command:
       - /bin/sh
@@ -70,6 +70,26 @@ services:
       - ./backend/data:/app/backend/data
       - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
 
+  station-ingest-cutover:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    restart: "no"
+    depends_on:
+      station-ingest-permissions:
+        condition: service_completed_successfully
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python station_ingest_cutover.py prepare --database /app/backend/data/water.db --backup-dir /app/backend/data/migration-backups"
+    environment:
+      TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+    volumes:
+      - ./backend/data:/app/backend/data
+
   station-ingest:
     build:
       context: .
@@ -79,7 +99,7 @@ services:
     profiles: ["station-ingest"]
     restart: unless-stopped
     depends_on:
-      station-ingest-permissions:
+      station-ingest-cutover:
         condition: service_completed_successfully
     user: "10001:10001"
     read_only: true
@@ -110,6 +130,33 @@ services:
       timeout: 8s
       retries: 3
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  station-ingest-retention:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    profiles: ["station-ingest-maintenance"]
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python station_ingest_retention.py maintain-once --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --mirror-storage-dir /var/lib/station-ingest/mirror --lock-file /app/backend/data/.station-ingest-retention.lock --storage-mode ${SL651_STORAGE_MODE:-long_term} --batch-limit 500"
+    environment:
+      TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
     logging:
       driver: json-file
       options:

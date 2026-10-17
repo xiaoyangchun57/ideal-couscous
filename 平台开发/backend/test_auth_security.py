@@ -2,6 +2,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -164,6 +165,34 @@ class AuthSecurityTest(unittest.TestCase):
         ])
         self.assertEqual(response.json['user']['roles'], ['operator'])
         self.assertIn('station_monitoring_public', response.json['user']['capabilities'])
+
+    def test_me_skips_last_seen_touch_when_another_writer_holds_sqlite(self):
+        token = self.login('operator', 'OperatorPass123')
+        old_seen_at = (datetime.now() - timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+        with self.temporary_db() as db:
+            db.execute(
+                'UPDATE auth_sessions SET last_seen_at=? WHERE token_hash=?',
+                (old_seen_at, app_module._hash_token(token)),
+            )
+
+        writer = sqlite3.connect(self.db_path, timeout=0.1)
+        writer.execute('BEGIN IMMEDIATE')
+        try:
+            started = time.monotonic()
+            response = self.client.get('/api/auth/me', headers=self.headers(token))
+            elapsed = time.monotonic() - started
+        finally:
+            writer.rollback()
+            writer.close()
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertLess(elapsed, 1.0)
+        with self.temporary_db() as db:
+            last_seen_at = db.execute(
+                'SELECT last_seen_at FROM auth_sessions WHERE token_hash=?',
+                (app_module._hash_token(token),),
+            ).fetchone()['last_seen_at']
+        self.assertEqual(last_seen_at, old_seen_at)
 
     def test_global_search_and_workorder_list_follow_page_roles(self):
         admin = self.login('admin', 'AdminPass123')

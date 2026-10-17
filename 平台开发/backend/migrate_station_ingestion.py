@@ -29,6 +29,7 @@ MIGRATIONS = (
     ("20261013_011_station_expected_factors", Path(__file__).with_name("migrations") / "20261013_011_station_expected_factors.sql"),
     ("20261013_012_hj212_numeric_factor_definitions", Path(__file__).with_name("migrations") / "20261013_012_hj212_numeric_factor_definitions.sql"),
     ("20261013_013_station_service_policy", Path(__file__).with_name("migrations") / "20261013_013_station_service_policy.sql"),
+    ("20261016_014_station_ingest_retention_windows", Path(__file__).with_name("migrations") / "20261016_014_station_ingest_retention_windows.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -42,6 +43,7 @@ PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION = "20261012_010_pending_normalizat
 STATION_EXPECTED_FACTORS_MIGRATION_VERSION = "20261013_011_station_expected_factors"
 HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION = "20261013_012_hj212_numeric_factor_definitions"
 STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
+STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION = "20261016_014_station_ingest_retention_windows"
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -84,6 +86,17 @@ STATION_INGESTION_TABLES = frozenset({
     "station_expected_factor_configs",
     "station_expected_factors",
     "station_service_policy_events",
+    "station_ingest_current_state",
+    "station_ingest_recent_receipts",
+    "station_ingest_receipt_hourly",
+    "station_ingest_slot_summaries",
+    "monitoring_raw_archive_part_metadata",
+    "monitoring_archive_evidence_refs",
+    "station_ingest_dedup_keys",
+    "station_ingest_duplicate_links",
+    "station_ingest_error_hourly",
+    "station_ingest_detail_archive_parts",
+    "station_ingest_retention_runs",
 })
 
 
@@ -229,13 +242,20 @@ def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
         raise MigrationError(f"missing required tables: {', '.join(sorted(missing))}")
     required_indexes = {
         "idx_ingest_raw_received",
-        "idx_ingest_raw_endpoint_received",
-        "idx_ingest_raw_frame_hash",
-        "idx_ingest_raw_disposition_received",
-        "idx_ingest_raw_logical_key",
-        "idx_ingest_parse_pending",
         "idx_ingest_errors_open",
         "idx_ingest_protocol_family_raw",
+        "idx_station_ingest_current_endpoint",
+        "idx_station_ingest_current_station",
+        "idx_station_ingest_recent_received",
+        "idx_station_ingest_recent_endpoint_auth",
+        "idx_station_ingest_recent_station_auth",
+        "idx_station_ingest_receipt_hour",
+        "idx_station_ingest_slot_summary_retention",
+        "idx_monitoring_evidence_archive_record",
+        "idx_monitoring_evidence_received",
+        "idx_station_ingest_dedup_expiry",
+        "idx_station_ingest_error_hour",
+        "idx_station_ingest_detail_range",
     }
     indexes = {
         row[0]
@@ -347,10 +367,23 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     if not service_policy_migration or service_policy_migration[0] != migration_checksum(
             STATION_SERVICE_POLICY_MIGRATION_VERSION):
         raise MigrationError("station service-policy migration is missing or incompatible")
+    retention_windows_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,),
+    ).fetchone()
+    if (not retention_windows_migration
+            or retention_windows_migration[0] != migration_checksum(
+                STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)):
+        raise MigrationError("station ingest retention-window migration is missing or incompatible")
     required_read_indexes = {
+        "idx_ingest_raw_logical_key",
         "idx_ingest_raw_authenticated_endpoint_received",
-        "idx_ingest_raw_authenticated_received",
-        "idx_ingest_raw_station_auth_received",
+        "idx_station_ingest_current_endpoint",
+        "idx_station_ingest_recent_received",
+        "idx_station_ingest_recent_endpoint_auth",
+        "idx_station_ingest_recent_station_auth",
+        "idx_station_ingest_receipt_hour",
+        "idx_station_ingest_slot_summary_retention",
         "idx_monitoring_business_current_site_scheduled",
         "idx_monitoring_business_valid_endpoint_factor",
     }

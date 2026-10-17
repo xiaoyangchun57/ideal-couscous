@@ -1,6 +1,7 @@
 const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
+const { presentLatestCycle } = require('../../utils/stationMonitoringPresentation.js');
 const {
   normalizeStationHubTarget,
   localBusinessDate,
@@ -92,7 +93,10 @@ Page({
       const resolvedKeyword = requestedKeyword;
       this._loadedScope.stations = resolvedScope;
       this.setData({
-        sites: (res.items || []).map(site => Object.assign({}, site, { type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点') })),
+        sites: (res.items || []).map(site => Object.assign({}, site, {
+          type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点'),
+          latest_cycle: presentLatestCycle(site.latest_cycle),
+        })),
         loading: false, scope: resolvedScope, pendingScope: null, keyword: resolvedKeyword,
         keywordInput: resolvedKeyword, availableScopes,
         canViewAll: availableScopes.includes('all'), scopeCounts: res.scope_counts || { mine: 0, all: null },

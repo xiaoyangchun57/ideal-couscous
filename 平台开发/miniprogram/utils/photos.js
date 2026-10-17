@@ -32,9 +32,9 @@ function chooseReportAlbumPhotos(maxCount) {
   });
 }
 
-// 巡检证据必须先保留原图，后端才能读取 EXIF 并在校验后生成压缩存储图。
+// 巡检相册上传保留原图，由后端生成展示副本并记录真实来源。
 function chooseInspectionPhotos(maxCount, captureSource) {
-  if (captureSource !== 'supplement') {
+  if (captureSource !== 'album') {
     return Promise.reject({
       error: '正式现场拍照必须使用小程序内可信相机页',
       code: 'TRUSTED_CAMERA_PAGE_REQUIRED',
@@ -99,7 +99,7 @@ function captureSourceNeedsLocationSession(captureSource) {
 
 function photoActionOpeningTitle(captureSource) {
   if (captureSource === 'camera') return '正在打开相机';
-  if (captureSource === 'supplement') return '正在打开补充材料';
+  if (captureSource === 'album') return '正在打开相册';
   return '正在打开相机/相册';
 }
 

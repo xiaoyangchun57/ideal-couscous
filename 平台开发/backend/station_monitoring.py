@@ -11,9 +11,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 try:
     from .sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
+    from .station_ingest_retention import RetentionError, read_raw_evidence
 except ImportError:  # pragma: no cover
     from sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
+    from station_ingest_retention import RetentionError, read_raw_evidence
 
 NORMALIZATION_VERSION = "station-monitoring-normalizer-v4"
 BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v3"
@@ -353,6 +355,27 @@ def normalize_raw_frame(
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
+        raw = connection.execute("SELECT * FROM ingest_raw_frames WHERE id=?", (raw_id,)).fetchone()
+        if not raw:
+            return "missing"
+        existing = connection.execute(
+            "SELECT projection_state FROM observation_batches WHERE raw_frame_id=? AND normalization_version=?",
+            (raw_id, normalization_version),
+        ).fetchone()
+        if existing:
+            if existing["projection_state"] == "failed_retryable":
+                connection.execute("BEGIN IMMEDIATE")
+                return _mark_waiting(connection, raw_id, None, "normalization_reparse_required", "existing retryable result needs a new parser version")
+            return "already_normalized"
+        replayable_unbound = allow_unbound_replay and raw["authentication_status"] == "unbound_authenticated"
+        if (raw["authentication_status"] != "authenticated" and not replayable_unbound) or raw["disposition"] == "duplicate":
+            return "not_projectable"
+        try:
+            raw_payload = read_raw_evidence(connection, raw_id)
+        except RetentionError as exc:
+            connection.execute("BEGIN IMMEDIATE")
+            return _mark_waiting(
+                connection, raw_id, None, "raw_evidence_unavailable", str(exc))
         connection.execute("BEGIN IMMEDIATE")
         raw = connection.execute("SELECT * FROM ingest_raw_frames WHERE id=?", (raw_id,)).fetchone()
         if not raw:
@@ -367,10 +390,6 @@ def normalize_raw_frame(
                 return _mark_waiting(connection, raw_id, None, "normalization_reparse_required", "existing retryable result needs a new parser version")
             connection.rollback()
             return "already_normalized"
-        replayable_unbound = allow_unbound_replay and raw["authentication_status"] == "unbound_authenticated"
-        if (raw["authentication_status"] != "authenticated" and not replayable_unbound) or raw["disposition"] == "duplicate":
-            connection.rollback()
-            return "not_projectable"
         try:
             protocol = connection.execute(
                 "SELECT protocol_family FROM ingest_frame_protocols WHERE raw_frame_id=?", (raw_id,)
@@ -378,7 +397,7 @@ def normalize_raw_frame(
             family = protocol[0] if protocol else "sl651"
             endpoint_timezone = _endpoint_timezone(connection, raw["endpoint_id"])
             if family == "hj212":
-                frame = parse_hj212_frame(raw["raw_frame"])
+                frame = parse_hj212_frame(raw_payload)
                 if frame.command not in {"2011", "2061"} or frame.data_time is None:
                     return _mark_waiting(connection, raw_id, None, "hj212_not_projectable", "HJ212 command has no projectable observation")
                 report_factors = frame.factors
@@ -388,7 +407,7 @@ def normalize_raw_frame(
                 serial_number = 0
                 parser_version = HJ212_PARSER_VERSION
             elif family == "sl651":
-                frame = parse_frame(raw["raw_frame"])
+                frame = parse_frame(raw_payload)
                 report = parse_water_quality_report(frame.payload)
                 if report.station_code != frame.station_code:
                     return _mark_waiting(connection, raw_id, None, "payload_station_mismatch", "32H body station does not match frame header")
@@ -771,10 +790,24 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
                 factor_selection = expected_by_metric[item["business_metric"]]
                 item["mapping_effective_from"] = max(
                     item["mapping_effective_from"], factor_selection["effective_from"])
+                item["protocol_configurations"] = [
+                    dict(protocol_configuration)
+                    for protocol_configuration in item.get("protocol_configurations") or []
+                ]
+                for protocol_configuration in item["protocol_configurations"]:
+                    protocol_configuration["mapping_effective_from"] = max(
+                        protocol_configuration["mapping_effective_from"],
+                        factor_selection["effective_from"],
+                    )
                 if selection["effective_to"]:
                     current_to = item.get("mapping_effective_to")
                     item["mapping_effective_to"] = min(
                         value for value in (current_to, selection["effective_to"]) if value)
+                    for protocol_configuration in item["protocol_configurations"]:
+                        current_to = protocol_configuration.get("mapping_effective_to")
+                        protocol_configuration["mapping_effective_to"] = min(
+                            value for value in (current_to, selection["effective_to"])
+                            if value)
                 item["expected_factor_config_id"] = selection["config_id"]
                 item["expected_factor_version"] = selection["version"]
             for expected in expected_items:
@@ -1063,7 +1096,8 @@ def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
             item.get("expected_factor_config_id") for item in configurations):
         return {
             "scheduled_at": None, "available_at": None, "deadline_at": None,
-            "status": "not_configured", "expected_count": 0,
+            "status": "not_configured", "reason_code": "expected_factors_unconfigured",
+            "expected_count": 0, "arrived_count": 0,
             "formed_count": 0, "missing_count": 0, "pending_count": 0,
             "review_required_count": 0, "sufficient_for_business": False,
             "latest_complete_cycle_at": None, "factors": [],
@@ -1072,7 +1106,8 @@ def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
     if not configurations or len(configured) != len(configurations):
         return {
             "scheduled_at": None, "available_at": None, "deadline_at": None,
-            "status": "not_configured", "expected_count": len(configurations),
+            "status": "not_configured", "reason_code": "time_configuration_missing",
+            "expected_count": len(configurations), "arrived_count": 0,
             "formed_count": 0, "missing_count": 0, "pending_count": 0,
             "review_required_count": 0, "sufficient_for_business": False,
             "latest_complete_cycle_at": None, "factors": [],
@@ -1093,7 +1128,8 @@ def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
     if scheduled_at is None:
         return {
             "scheduled_at": None, "available_at": None, "deadline_at": None,
-            "status": "not_configured", "expected_count": len(configured),
+            "status": "not_configured", "reason_code": "no_evaluable_period",
+            "expected_count": len(configured), "arrived_count": 0,
             "formed_count": 0, "missing_count": 0, "pending_count": 0,
             "review_required_count": 0, "sufficient_for_business": False,
             "latest_complete_cycle_at": None, "factors": [],
@@ -1114,7 +1150,8 @@ def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
     deadline_at = max(item["deadline_at"] for item in factors)
     return {
         "scheduled_at": scheduled_at, "available_at": available_at, "deadline_at": deadline_at,
-        "status": status, "expected_count": len(factors), "formed_count": formed_count,
+        "status": status, "reason_code": None, "expected_count": len(factors),
+        "arrived_count": formed_count + review_count, "formed_count": formed_count,
         "missing_count": missing_count, "pending_count": pending_count,
         "review_required_count": review_count, "sufficient_for_business": status == "complete",
         "latest_complete_cycle_at": (_latest_complete_cycle_at(

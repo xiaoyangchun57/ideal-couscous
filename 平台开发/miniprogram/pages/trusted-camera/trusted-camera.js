@@ -16,6 +16,11 @@ function decodeOption(value) {
   try { return decodeURIComponent(text); } catch (error) { return text; }
 }
 
+function inspectionWatermarkDefault(category) {
+  const value = String(category || '').trim();
+  return value !== 'log_books' && value !== '台账登记';
+}
+
 function trustedCameraFrameLayout(size) {
   const width = positiveNumber(size && (size.windowWidth || size.width), 375);
   const height = positiveNumber(size && (size.windowHeight || size.height), 667);
@@ -67,17 +72,18 @@ Page({
     const planId = Number(options && options.plan_id);
     const itemId = Number(options && options.item_id);
     const captureContext = String(options && options.capture_context || '').trim();
+    const itemCategory = decodeOption(options && options.item_category);
     const inspectionMode = siteId > 0 && planId > 0 && itemId > 0 && !orderNo;
     const workorderMode = siteId > 0 && !!orderNo && !(planId > 0) && !(itemId > 0);
     const manualReportMode = siteId > 0 && captureContext === 'manual_report'
       && !orderNo && !(planId > 0) && !(itemId > 0);
-    this._context = { siteId, planId, itemId, orderNo, captureContext };
+    this._context = { siteId, planId, itemId, orderNo, captureContext, itemCategory };
     this._contextValid = inspectionMode || workorderMode || manualReportMode;
     this._eventChannel = this.getOpenerEventChannel ? this.getOpenerEventChannel() : null;
     this.setData({
       siteName: decodeOption(options && options.site_name),
       itemName: decodeOption(options && options.item_name),
-      displayWatermark: true,
+      displayWatermark: inspectionMode ? inspectionWatermarkDefault(itemCategory) : true,
     });
     this._applyFrameLayout();
     if (this._contextValid) {
@@ -290,4 +296,4 @@ Page({
   },
 });
 
-module.exports = { trustedCameraFrameLayout, preparationErrorMessage };
+module.exports = { trustedCameraFrameLayout, preparationErrorMessage, inspectionWatermarkDefault };

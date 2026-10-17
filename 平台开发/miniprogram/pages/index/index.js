@@ -14,6 +14,7 @@ const { currentUnreadRevision } = require('../../utils/notificationCount.js');
 const {
   buildPackageOption,
   normalizeExecutionTarget,
+  uniqueActiveFieldTarget,
   uniqueExecutableTarget,
 } = require('../../utils/executionTarget.js');
 
@@ -260,7 +261,8 @@ Page({
     return api.todayExecution().then(res => {
       const packages = (res && Array.isArray(res.packages) ? res.packages : [])
         .map(buildPackageOption);
-      return navigate(uniqueExecutableTarget(packages, 'home'));
+      return navigate(uniqueActiveFieldTarget(packages, 'home')
+        || uniqueExecutableTarget(packages, 'home'));
     }).catch(() => navigate(null));
   },
 

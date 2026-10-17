@@ -1,0 +1,6 @@
+[Unit]
+Description=Record failed station-ingestion retention run
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p daemon.alert -t water-monitor-station-ingest-retention Unit %i failed after configured retries; inspect journalctl -u water-monitor-station-ingest-retention.service

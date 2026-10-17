@@ -620,6 +620,25 @@ test('home inspection navigation carries a unique executable package and station
       'ambiguous packages enter the existing selection page without inventing a target');
     navigationCalls.at(-1).options.complete();
 
+    api.todayExecution = () => Promise.resolve({ packages: [
+      {
+        plan_id: 71, schedule_id: 7, work_date: '2026-08-28', site_order: [8],
+        sites: [{ site_id: 8, checked_in: true, checked_out: false,
+          total: 1, completed: 1, abnormal: 0 }],
+      },
+      {
+        plan_id: 72, schedule_id: 8, work_date: '2026-08-28', site_order: [9],
+        sites: [{ site_id: 9, checked_in: false, checked_out: false,
+          total: 1, completed: 0, abnormal: 0 }],
+      },
+    ] });
+    await page.goInspection();
+    assert.deepEqual(app.globalData.executionTarget, {
+      executionPlanId: 71, scheduleId: 7, workDate: '2026-08-28',
+      siteId: 8, itemId: null, source: 'home',
+    }, 'one checked-in, not-checked-out site takes priority across multiple packages');
+    navigationCalls.at(-1).options.complete();
+
     api.todayExecution = () => Promise.resolve({ packages: [{
       plan_id: 73, schedule_id: 9, work_date: '2026-08-28', site_order: [10],
       sites: [{ site_id: 10, total: 1, completed: 0, abnormal: 0 }],

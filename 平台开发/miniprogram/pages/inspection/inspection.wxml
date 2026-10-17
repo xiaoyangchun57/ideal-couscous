@@ -619,7 +619,7 @@
 
     <!-- ===== 全高单项操作面板 ===== -->
     <view class="ip-fullpanel-mask" wx:if="{{sheet.open}}" bindtap="onCloseSheet"></view>
-    <view class="ip-fullpanel" wx:if="{{sheet.open && viewMode === 'execute'}}">
+    <view class="ip-fullpanel" wx:if="{{sheet.open && viewMode === 'execute' && !sheet.readOnly}}">
       <!-- 面板头部（固定） -->
       <view class="ip-fullpanel-header">
         <view class="ip-fp-close" bindtap="onCloseSheet">
@@ -650,27 +650,36 @@
         <!-- 判定结果 -->
         <view class="ip-fp-section">
           <text class="ip-fp-field-label">判定结果</text>
-          <view class="ip-segmented">
+          <view class="ip-segmented" wx:if="{{!sheet.photoCorrection}}">
             <view class="ip-seg-item {{sheet.result === 'normal' ? 'active' : ''}}"
                   bindtap="onSetResult" data-r="normal">正常</view>
             <view class="ip-seg-item ip-seg-danger {{sheet.result === 'abnormal' ? 'active' : ''}}"
                   bindtap="onSetResult" data-r="abnormal">异常</view>
           </view>
+          <text class="ip-fp-standard-text" wx:else>{{sheet.result === 'abnormal' ? '异常' : '正常'}}</text>
         </view>
 
         <!-- 现场说明 -->
         <view class="ip-fp-section">
           <text class="ip-fp-field-label">现场说明</text>
           <textarea class="ip-textarea"
+                    wx:if="{{!sheet.photoCorrection}}"
                     placeholder="{{sheet.result === 'abnormal' ? '请说明异常原因（必填）' : '补充说明（选填）'}}"
                     value="{{sheet.remark}}" bindinput="onRemark" maxlength="200" />
+          <text class="ip-fp-standard-text" wx:else>{{sheet.remark || '无'}}</text>
         </view>
 
         <!-- 校准信息 -->
         <view class="ip-fp-section" wx:if="{{sheet.requiresCalibration}}">
           <text class="ip-fp-field-label">校准信息</text>
-          <input class="ip-input" placeholder="校准人" value="{{sheet.calibrator}}" bindinput="onCalibrator" />
-          <input class="ip-input ip-input-gap" placeholder="校准值" value="{{sheet.calValues}}" bindinput="onCalValues" />
+          <block wx:if="{{!sheet.photoCorrection}}">
+            <input class="ip-input" placeholder="校准人" value="{{sheet.calibrator}}" bindinput="onCalibrator" />
+            <input class="ip-input ip-input-gap" placeholder="校准值" value="{{sheet.calValues}}" bindinput="onCalValues" />
+          </block>
+          <block wx:else>
+            <text class="ip-fp-standard-text">校准人：{{sheet.calibrator || '未记录'}}</text>
+            <text class="ip-fp-standard-text">校准值：{{sheet.calValues || '未记录'}}</text>
+          </block>
         </view>
 
         <!-- 现场照片 -->
@@ -740,15 +749,14 @@
               <image class="ip-photo-img" src="{{p}}" mode="aspectFit" bindtap="onPreview" data-src="{{p}}" />
               <text class="ip-photo-upload-status {{sheet.localPhotoMeta[index].uploadStatus === 'failed' ? 'ip-photo-upload-status-failed' : ''}}">{{sheet.localPhotoMeta[index].uploadStatusLabel || '上传失败，可重试/删除'}}</text>
               <text class="ip-photo-del" wx:if="{{sheet.localPhotoMeta[index].uploadStatus === 'failed'}}" catchtap="onDelLocalPhoto" data-idx="{{index}}">×</text>
-              <view class="ip-photo-local-actions" wx:if="{{sheet.localPhotoMeta[index].uploadStatus === 'failed'}}">
+              <view class="ip-photo-local-actions ip-photo-local-actions-single" wx:if="{{sheet.localPhotoMeta[index].uploadStatus === 'failed'}}">
                 <text catchtap="onRetryLocalPhoto" data-kind="required" data-idx="{{index}}">重试上传</text>
-                <text catchtap="onSaveLocalPhotoAsSupplement" data-kind="required" data-idx="{{index}}">转补充</text>
               </view>
             </view>
           </view>
 
           <block wx:if="{{sheet.supplementPhotos.length || sheet.supplementLocalPhotos.length}}">
-            <text class="ip-fp-photo-section-title">补充材料（不计入必需照片）</text>
+            <text class="ip-fp-photo-section-title">历史补充材料（不计入当前必需照片）</text>
             <view class="ip-photo-grid">
               <view class="ip-photo-item" wx:for="{{sheet.supplementMedia}}" wx:key="key" wx:for-item="p">
                 <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="supplementMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
@@ -772,9 +780,9 @@
           </block>
 
           <!-- 拍照来源按钮 -->
-          <view class="ip-photo-source-row" wx:if="{{sheet.photos.length + sheet.localPhotos.length + sheet.supplementPhotos.length + sheet.supplementLocalPhotos.length < 6}}">
+          <view class="ip-photo-source-row" wx:if="{{sheet.photos.length + sheet.localPhotos.length < 6}}">
             <button class="ip-photo-btn ip-photo-btn-primary" bindtap="onAddPhoto" data-source="camera">现场拍照</button>
-            <button class="ip-photo-btn" bindtap="onAddPhoto" data-source="supplement">补充材料</button>
+            <button class="ip-photo-btn" bindtap="onAddPhoto" data-source="album">相册上传</button>
           </view>
 
           <!-- 照片结果反馈 -->
@@ -783,7 +791,7 @@
             <text class="ip-photo-result-message">{{sheet.photoResultMessage}}</text>
           </view>
 
-          <text class="ip-fp-photo-hint ip-fp-photo-bottom-hint">必需照片只能使用现场拍照；补充材料可选历史照片或说明图片，但不能替代现场拍照，也不计入必需数量</text>
+          <text class="ip-fp-photo-hint ip-fp-photo-bottom-hint">现场拍照和相册上传都会计入当前检查项的必需照片数量</text>
         </view>
 
         <view class="ip-fp-bottom-spacer"></view>
@@ -791,12 +799,13 @@
 
       <!-- 底部固定提交按钮 -->
       <view class="ip-fullpanel-footer">
-        <button class="ip-btn ip-btn-primary ip-btn-lg" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSubmitItem">提交本项</button>
+        <button wx:if="{{sheet.photoCorrection}}" class="ip-btn ip-btn-primary ip-btn-lg" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSavePhotoCorrection">保存照片修改</button>
+        <button wx:else class="ip-btn ip-btn-primary ip-btn-lg" loading="{{submitting}}" disabled="{{submitting}}" bindtap="onSubmitItem">提交本项</button>
       </view>
     </view>
 
     <!-- 审核/执行人结果回看：单项记录只读面板 -->
-    <view class="ip-fullpanel" wx:if="{{sheet.open && (viewMode === 'review' || viewMode === 'readonly')}}">
+    <view class="ip-fullpanel" wx:if="{{sheet.open && (viewMode === 'review' || viewMode === 'readonly' || sheet.readOnly)}}">
       <view class="ip-fullpanel-header">
         <view class="ip-fp-close" bindtap="onCloseSheet"><text>关闭</text></view>
         <text class="ip-fp-title">{{sheet.item.item_name}}</text>
@@ -882,6 +891,9 @@
         </view>
         <view class="ip-fp-bottom-spacer"></view>
       </scroll-view>
+      <view class="ip-fullpanel-footer" wx:if="{{viewMode === 'execute' && sheet.item.photo_correction_allowed}}">
+        <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onStartPhotoCorrection">修改照片</button>
+      </view>
     </view>
 
     <!-- ===== 次级 Sheet ===== -->

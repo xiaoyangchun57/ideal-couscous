@@ -39,7 +39,9 @@ function createPage() {
     assert.match(wxml, /wx:if="\{\{monitoringIntent\}\}"/);
     assert.match(wxml, /wx:elif="\{\{monitoringUnavailable\}\}"/);
     assert.match(wxml, /wx:elif="\{\{monitoringPublic && monitoringSource\}\}"/);
-    assert.match(wxml, /最近检测周期/);
+    assert.match(wxml, /最近一期结果/);
+    assert.match(wxml, /已到 .*应到/);
+    assert.doesNotMatch(wxml, /最近检测周期|周期未配置/);
     assert.match(wxml, /各因子最近可用值/);
     assert.match(wxml, /各项可能来自不同检测周期，不代表同一次完整检测/);
     assert.match(wxml, /item\.value_display[^<]+item\.value/);
@@ -72,7 +74,13 @@ function createPage() {
       profileCalls += 1;
       return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', can_calibrate: true } });
     };
-    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true }, monitoring: { latest_values: [], axes: {} } }); };
+    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({
+      site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true },
+      monitoring: {
+        latest_cycle: { status: 'review_required', arrived_count: 3, formed_count: 2, expected_count: 4 },
+        latest_values: [], axes: {},
+      },
+    }); };
     api.partsInventory = () => {
       inventoryCalls += 1;
       return Promise.resolve([]);
@@ -114,6 +122,8 @@ function createPage() {
     assert.equal(monitoringPage.data.monitoringSource, true);
     assert.equal(monitoringPage.data.site.can_calibrate, true);
     assert.equal(monitoringPage.data.monitoringIntent, true);
+    assert.equal(monitoringPage.data.site.monitoring.latest_cycle.arrived_count_display, 3);
+    assert.equal(monitoringPage.data.site.monitoring.latest_cycle.status_label, '结果待核对');
 
     api.stationMonitoringOverview = () => Promise.reject({ status: 403, error: 'forbidden' });
     const gatedPage = createPage();

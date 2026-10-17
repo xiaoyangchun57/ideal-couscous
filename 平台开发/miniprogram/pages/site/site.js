@@ -1,5 +1,6 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
+const { presentMonitoring } = require('../../utils/stationMonitoringPresentation.js');
 const { nowStr } = require('../../utils/util.js');
 const { queueCount, flushQueue } = require('../../utils/request.js');
 const { requestLocation, locationErrorMessage, shouldOpenLocationSettings } = require('../../utils/location.js');
@@ -107,7 +108,9 @@ Page({
             checked_in: checkedIn,
             can_check_in: !this.data.readOnlySource && !!(source.can_check_in && !checkedIn),
             checkin_sync_pending: false,
-            monitoring: this.data.monitoringSource ? (res.monitoring || { latest_cycle: {}, latest_values: [] }) : { latest_cycle: {}, latest_values: [] },
+            monitoring: this.data.monitoringSource
+              ? presentMonitoring(res.monitoring)
+              : { latest_cycle: {}, latest_values: [] },
           }),
           monitoringLoading: false,
           monitoringError: '',

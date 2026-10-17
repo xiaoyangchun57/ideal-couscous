@@ -175,9 +175,12 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, item_name TEXT,
                     category TEXT, result TEXT, check_in_time TEXT, check_out_time TEXT,
                     completed_at TEXT, check_time TEXT, review_status INTEGER DEFAULT 0,
+                    review_comment TEXT DEFAULT '', reviewer_id INTEGER, review_time TEXT DEFAULT '',
                     evidence_status TEXT DEFAULT '', rework_required_at TEXT DEFAULT '',
                     execution_status TEXT DEFAULT 'active', required_photos INTEGER DEFAULT 0,
-                    actual_photos INTEGER DEFAULT 0, photo_urls TEXT DEFAULT '[]'
+                    actual_photos INTEGER DEFAULT 0, photo_urls TEXT DEFAULT '[]',
+                    remark TEXT DEFAULT '', calibrator TEXT DEFAULT '',
+                    calibration_values TEXT DEFAULT ''
                 );
                 INSERT INTO insp_plan_items
                     (id,plan_id,site_id,item_name,category,result,check_in_time,check_out_time,
@@ -209,7 +212,9 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     watermark_text TEXT DEFAULT '', recognized_category TEXT DEFAULT '',
                     match_status TEXT DEFAULT 'manual', match_confidence REAL,
                     review_required INTEGER DEFAULT 0, requirement_id INTEGER,
-                    review_status TEXT DEFAULT 'pending', extra_json TEXT DEFAULT '{}',
+                    review_status TEXT DEFAULT 'pending', reviewer_id INTEGER, reviewed_at TEXT,
+                    voided_at TEXT, voided_by INTEGER, void_reason TEXT DEFAULT '',
+                    archive_name TEXT DEFAULT '', extra_json TEXT DEFAULT '{}',
                     is_deleted INTEGER DEFAULT 0, is_flagged INTEGER DEFAULT 0,
                     flag_reason TEXT DEFAULT '', flag_rule TEXT DEFAULT '',
                     evidence_qualification TEXT DEFAULT 'review', evidence_basis TEXT DEFAULT 'unknown',
@@ -221,6 +226,22 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     qualification TEXT, basis TEXT, verified_taken_at TEXT, reason TEXT,
                     next_action TEXT, facts_json TEXT, evaluation_type TEXT, rule_version TEXT,
                     actor_id INTEGER, actor_name TEXT, replaces_evaluation_id INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE attachment_void_audits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attachment_id INTEGER NOT NULL UNIQUE,
+                    original_source_type TEXT DEFAULT '', original_source_id INTEGER,
+                    original_site_id INTEGER, original_plan_id INTEGER,
+                    original_item_id INTEGER, original_item_name TEXT DEFAULT '',
+                    original_site_name TEXT DEFAULT '', original_uploader_id INTEGER,
+                    original_uploader_name TEXT DEFAULT '', original_archive_name TEXT DEFAULT '',
+                    original_review_status TEXT DEFAULT '', original_reviewer_id INTEGER,
+                    original_reviewed_at TEXT, original_risk_snapshot TEXT DEFAULT '{}',
+                    original_state TEXT NOT NULL DEFAULT '{}', replacement_item_id INTEGER,
+                    replacement_plan_id INTEGER, replacement_required INTEGER NOT NULL DEFAULT 1,
+                    operator_id INTEGER NOT NULL, operator_name TEXT DEFAULT '',
+                    reason TEXT NOT NULL, voided_at TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE photo_capture_sessions (
@@ -295,6 +316,39 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     rework_required_at=?, check_out_time=? WHERE id=?""",
                 (required_at, checkout_at, item_id))
         return required_at, checkout_at
+
+    def submit_initial_album_photos(self, *, colors, suffix='base'):
+        uploads = []
+        for index, color in enumerate(colors):
+            upload = self.upload(
+                jpeg_bytes(color), capture_source='album',
+                _idempotency_key=f'inspection-correction-upload-{suffix}-{index}')
+            self.assertEqual(upload.status_code, 200, upload.json)
+            uploads.append(upload)
+        with app_module.get_db() as db:
+            plan_columns = {
+                row['name'] for row in db.execute('PRAGMA table_info(insp_plans)').fetchall()
+            }
+            if 'plan_name' not in plan_columns:
+                db.execute("ALTER TABLE insp_plans ADD COLUMN plan_name TEXT DEFAULT '测试计划'")
+            if 'generate_date' not in plan_columns:
+                db.execute(
+                    "ALTER TABLE insp_plans ADD COLUMN generate_date TEXT DEFAULT '2026-10-16'")
+            db.execute("""UPDATE insp_plan_items
+                SET required_photos=?,remark='原现场说明',calibrator='原校准人',
+                    calibration_values='原校准值' WHERE id=100""", (len(uploads),))
+        submitted = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal',
+            'remark': '原现场说明', 'calibrator': '原校准人',
+            'calibration_values': '原校准值',
+            'photo_urls': json.dumps([upload.json['display_url'] for upload in uploads]),
+            '_idempotency_key': f'inspection-correction-submit-{suffix}',
+        })
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        return uploads
+
+    def submit_initial_album_photo(self, *, color='silver', suffix='base'):
+        return self.submit_initial_album_photos(colors=[color], suffix=suffix)[0]
 
     def create_capture_session(self, *, item_id=100, capture_source='camera',
                                gps_lat=28.071303, gps_lng=115.539684):
@@ -1051,6 +1105,382 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertNotEqual(reused.json['id'], response.json['id'])
         self.assertFalse(reused.json['recovered_pending_attachment'])
 
+    def test_inspection_album_without_provenance_is_formal_and_submittable(self):
+        image = jpeg_bytes('silver')
+        metadata = {
+            'capture_source': 'album',
+            '_idempotency_key': 'inspection-album-formal',
+        }
+        with mock.patch.object(app_module, '_recognize_watermark',
+                               side_effect=AssertionError('album upload must not run OCR')):
+            upload = self.upload(image, **metadata)
+            replay = self.upload(image, **metadata)
+        self.assertEqual(upload.status_code, 200, upload.json)
+        self.assertEqual(replay.json, upload.json)
+        self.assertTrue(upload.json['accepted_for_review'])
+        self.assertFalse(upload.json['supplemental'])
+        self.assertEqual(upload.json['capture_source'], 'album')
+        self.assertEqual(upload.json['evidence_qualification'], 'qualified')
+        self.assertEqual(upload.json['evidence_basis'], 'inspection_album')
+        self.assertEqual(upload.json['watermark_status'], 'not_requested')
+        self.assertIsNone(upload.json['taken_at'])
+        self.assertIsNone(upload.json['gps_lat'])
+        self.assertIsNone(upload.json['gps_lng'])
+        self.assertNotIn('缺少现场拍摄GPS或时间信息', upload.json['risk_reasons'])
+
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT capture_source,evidence_qualification,evidence_basis,
+                review_required,is_flagged,extra_json FROM operation_attachments""").fetchone()
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 1)
+            self.assertEqual(tuple(row)[:5], ('album', 'qualified', 'inspection_album', 0, 0))
+            self.assertEqual(json.loads(row['extra_json'])['material_role'], 'pending_inspection')
+            db.execute("ALTER TABLE insp_plans ADD COLUMN plan_name TEXT DEFAULT '测试计划'")
+            db.execute("ALTER TABLE insp_plans ADD COLUMN generate_date TEXT DEFAULT '2026-10-10'")
+            db.execute('UPDATE insp_plan_items SET required_photos=1 WHERE id=100')
+
+        submitted = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal',
+            'photo_urls': json.dumps([upload.json['display_url']]),
+            '_idempotency_key': 'inspection-album-submit',
+        })
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        with app_module.get_db() as db:
+            item = db.execute(
+                'SELECT actual_photos,photo_urls FROM insp_plan_items WHERE id=100').fetchone()
+            attachment = db.execute("""SELECT source_type,source_id,capture_source,
+                evidence_basis,extra_json FROM operation_attachments WHERE id=?""",
+                (upload.json['id'],)).fetchone()
+        self.assertEqual((item['actual_photos'], json.loads(item['photo_urls'])),
+                         (1, [upload.json['url']]))
+        self.assertEqual(tuple(attachment)[:4],
+                         ('inspection', 100, 'album', 'inspection_album'))
+        self.assertEqual(json.loads(attachment['extra_json'])['material_role'], 'formal')
+
+    def test_submitted_photo_correction_replaces_only_photos_with_audit_and_idempotency(self):
+        original = self.submit_initial_album_photo(suffix='success')
+        historical = self.upload(
+            jpeg_bytes('gray'), capture_source='album',
+            _idempotency_key='inspection-correction-historical-rejected')
+        self.assertEqual(historical.status_code, 200, historical.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET review_status=2 WHERE id=100")
+            db.execute("INSERT INTO work_orders VALUES (1,'IX-EXISTING',1)")
+            db.execute("""UPDATE operation_attachments
+                SET source_type='inspection',source_id=100,review_status='rejected',
+                    reviewer_id=3,reviewed_at='2026-10-15 09:00:00',
+                    extra_json=json_set(extra_json,'$.material_role','formal')
+                WHERE id=?""", (historical.json['id'],))
+        replacement = self.upload(
+            jpeg_bytes('navy'), capture_source='album',
+            _idempotency_key='inspection-correction-replacement')
+        self.assertEqual(replacement.status_code, 200, replacement.json)
+
+        payload = {
+            'photo_urls': [replacement.json['display_url']],
+            '_idempotency_key': 'inspection-photo-correction-success',
+        }
+        corrected = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct',
+            headers=self.headers(), json=payload)
+        replay = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct',
+            headers=self.headers(), json=payload)
+        self.assertEqual(corrected.status_code, 200, corrected.json)
+        self.assertEqual(replay.json, corrected.json)
+        self.assertEqual(corrected.json['voided_attachment_ids'], [original.json['id']])
+
+        with app_module.get_db() as db:
+            item = db.execute("""SELECT result,remark,calibrator,calibration_values,
+                    actual_photos,photo_urls,review_status FROM insp_plan_items WHERE id=100""").fetchone()
+            old_attachment = db.execute("""SELECT review_status,void_reason,is_deleted
+                FROM operation_attachments WHERE id=?""", (original.json['id'],)).fetchone()
+            new_attachment = db.execute("""SELECT source_type,source_id,review_status,extra_json
+                FROM operation_attachments WHERE id=?""", (replacement.json['id'],)).fetchone()
+            audit = db.execute("""SELECT attachment_id,replacement_required,operator_id,reason
+                FROM attachment_void_audits WHERE attachment_id=?""",
+                (original.json['id'],)).fetchone()
+            workorder_count = db.execute('SELECT COUNT(*) FROM work_orders').fetchone()[0]
+        self.assertEqual(tuple(item)[:4], ('normal', '原现场说明', '原校准人', '原校准值'))
+        self.assertEqual((item['actual_photos'], json.loads(item['photo_urls'])),
+                         (1, [replacement.json['url']]))
+        self.assertEqual(item['review_status'], 1,
+                         'a completed site returns to one consistent review batch')
+        self.assertEqual(tuple(old_attachment), ('voided', '执行人提交后照片更正', 0))
+        self.assertEqual(tuple(audit),
+                         (original.json['id'], 0, 2, '执行人提交后照片更正'))
+        self.assertEqual((new_attachment['source_type'], new_attachment['source_id'],
+                          new_attachment['review_status']), ('inspection', 100, 'pending'))
+        self.assertEqual(json.loads(new_attachment['extra_json'])['material_role'], 'formal')
+        self.assertEqual(workorder_count, 1, 'photo correction never recreates downstream workorders')
+
+    def test_submitted_photo_correction_keeps_one_formal_album_photo(self):
+        originals = self.submit_initial_album_photos(
+            colors=['silver', 'gray'], suffix='partial-keep')
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET review_status=2 WHERE id=100')
+        replacement = self.upload(
+            jpeg_bytes('navy'), capture_source='album',
+            _idempotency_key='inspection-correction-partial-replacement')
+        self.assertEqual(replacement.status_code, 200, replacement.json)
+
+        corrected = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                'photo_urls': [
+                    originals[0].json['display_url'], replacement.json['display_url'],
+                ],
+                '_idempotency_key': 'inspection-photo-correction-partial-keep',
+            })
+        self.assertEqual(corrected.status_code, 200, corrected.json)
+        self.assertEqual(corrected.json['voided_attachment_ids'], [originals[1].json['id']])
+
+        with app_module.get_db() as db:
+            item = db.execute("""SELECT result,remark,calibrator,calibration_values,
+                actual_photos,photo_urls FROM insp_plan_items WHERE id=100""").fetchone()
+            statuses = {
+                row['id']: row['review_status'] for row in db.execute(
+                    'SELECT id,review_status FROM operation_attachments WHERE id IN (?,?,?)',
+                    (originals[0].json['id'], originals[1].json['id'],
+                     replacement.json['id'])).fetchall()
+            }
+            audited_ids = [row['attachment_id'] for row in db.execute(
+                'SELECT attachment_id FROM attachment_void_audits ORDER BY attachment_id').fetchall()]
+        self.assertEqual(tuple(item)[:4], ('normal', '原现场说明', '原校准人', '原校准值'))
+        self.assertEqual((item['actual_photos'], json.loads(item['photo_urls'])), (
+            2, [originals[0].json['url'], replacement.json['url']]))
+        self.assertEqual(statuses[originals[0].json['id']], 'pending')
+        self.assertEqual(statuses[originals[1].json['id']], 'voided')
+        self.assertEqual(statuses[replacement.json['id']], 'pending')
+        self.assertEqual(audited_ids, [originals[1].json['id']])
+
+    def test_same_album_content_in_two_pending_items_keeps_distinct_attachments(self):
+        with app_module.get_db() as db:
+            db.execute("ALTER TABLE insp_plans ADD COLUMN plan_name TEXT DEFAULT '测试计划'")
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,item_name,category,result,execution_status,required_photos)
+                VALUES (101,10,1,'余氯检查','水质检查',NULL,'active',1)""")
+            db.execute('UPDATE insp_plan_items SET required_photos=1 WHERE id=100')
+        image = jpeg_bytes('purple')
+        first = self.upload(
+            image, capture_source='album', item_id=100,
+            _idempotency_key='inspection-cross-item-first')
+        second = self.upload(
+            image, capture_source='album', item_id=101,
+            _idempotency_key='inspection-cross-item-second')
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(second.status_code, 200, second.json)
+        self.assertNotEqual(first.json['id'], second.json['id'])
+
+        for item_id, upload, key in (
+                (100, first, 'inspection-cross-item-submit-first'),
+                (101, second, 'inspection-cross-item-submit-second')):
+            submitted = self.client.post(
+                '/api/mobile/submit-item', headers=self.headers(), json={
+                    'item_id': item_id, 'plan_id': 10, 'result': 'normal',
+                    'photo_urls': json.dumps([upload.json['display_url']]),
+                    '_idempotency_key': key,
+                })
+            self.assertEqual(submitted.status_code, 200, submitted.json)
+
+        with app_module.get_db() as db:
+            rows = db.execute("""SELECT id,source_type,source_id,extra_json
+                FROM operation_attachments WHERE id IN (?,?) ORDER BY id""",
+                (first.json['id'], second.json['id'])).fetchall()
+        self.assertEqual(len(rows), 2)
+        contexts = {
+            row['id']: (row['source_type'], row['source_id'],
+                        json.loads(row['extra_json'])['item_id'])
+            for row in rows
+        }
+        self.assertEqual(contexts[first.json['id']], ('inspection', 100, 100))
+        self.assertEqual(contexts[second.json['id']], ('inspection', 101, 101))
+
+    def test_concurrent_photo_correction_replays_after_write_lock(self):
+        original = self.submit_initial_album_photo(suffix='concurrent')
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET review_status=2 WHERE id=100')
+        replacement = self.upload(
+            jpeg_bytes('teal'), capture_source='album',
+            _idempotency_key='inspection-correction-concurrent-replacement')
+        self.assertEqual(replacement.status_code, 200, replacement.json)
+        payload = {
+            'photo_urls': [replacement.json['display_url']],
+            '_idempotency_key': 'inspection-photo-correction-concurrent',
+        }
+        barrier = threading.Barrier(2)
+        strict_get = app_module._mobile_idempotency_strict_get
+
+        def synchronized_get(db, *args, **kwargs):
+            if not db.in_transaction:
+                barrier.wait(timeout=5)
+            return strict_get(db, *args, **kwargs)
+
+        def correct(_):
+            with app_module.app.test_client() as client:
+                response = client.post(
+                    '/api/mobile/inspection-items/100/photos/correct',
+                    headers=self.headers(), json=payload)
+                return response.status_code, response.get_json()
+
+        with mock.patch.object(
+                app_module, '_mobile_idempotency_strict_get', side_effect=synchronized_get):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = list(executor.map(correct, range(2)))
+
+        self.assertEqual([status for status, _ in responses], [200, 200])
+        self.assertEqual(responses[0][1], responses[1][1])
+        self.assertEqual(responses[0][1]['voided_attachment_ids'], [original.json['id']])
+        with app_module.get_db() as db:
+            audit_count = db.execute(
+                'SELECT COUNT(*) FROM attachment_void_audits WHERE attachment_id=?',
+                (original.json['id'],)).fetchone()[0]
+            idempotency_count = db.execute("""SELECT COUNT(*) FROM mobile_idempotency
+                WHERE idempotency_key=?""", (
+                    '2:inspection-photo-correction:100:' + payload['_idempotency_key'],
+                )).fetchone()[0]
+        self.assertEqual(audit_count, 1)
+        self.assertEqual(idempotency_count, 1)
+
+    def test_submitted_photo_correction_blocks_invalid_state_and_rolls_back(self):
+        original = self.submit_initial_album_photo(suffix='blocked')
+        original_url = original.json['url']
+        insufficient = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                'photo_urls': [], '_idempotency_key': 'inspection-photo-correction-empty',
+            })
+        self.assertEqual(insufficient.status_code, 400, insufficient.json)
+
+        replacement = self.upload(
+            jpeg_bytes('teal'), capture_source='album',
+            _idempotency_key='inspection-correction-rollback-photo')
+        self.assertEqual(replacement.status_code, 200, replacement.json)
+        with mock.patch.object(app_module, '_bind_inspection_attachments', return_value=False):
+            failed = self.client.post(
+                '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                    'photo_urls': [replacement.json['display_url']],
+                    '_idempotency_key': 'inspection-photo-correction-bind-fail',
+                })
+        self.assertEqual(failed.status_code, 409, failed.json)
+        with app_module.get_db() as db:
+            item = db.execute('SELECT photo_urls,actual_photos FROM insp_plan_items WHERE id=100').fetchone()
+            old_attachment = db.execute(
+                'SELECT review_status FROM operation_attachments WHERE id=?',
+                (original.json['id'],)).fetchone()
+            audit_count = db.execute('SELECT COUNT(*) FROM attachment_void_audits').fetchone()[0]
+        self.assertEqual((json.loads(item['photo_urls']), item['actual_photos']), ([original_url], 1))
+        self.assertEqual(old_attachment['review_status'], 'pending')
+        self.assertEqual(audit_count, 0)
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET reviewer_id=3,review_time='2026-10-16 10:00:00' WHERE id=100")
+        reviewed = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                'photo_urls': [original.json['display_url']],
+                '_idempotency_key': 'inspection-photo-correction-reviewed',
+            })
+        self.assertEqual(reviewed.status_code, 409, reviewed.json)
+        self.assertEqual(reviewed.json['code'], 'INSPECTION_PHOTO_CORRECTION_BLOCKED')
+
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items SET reviewer_id=NULL,review_time='',
+                check_out_time='2026-10-16 10:30:00' WHERE id=100""")
+        checked_out = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                'photo_urls': [original.json['display_url']],
+                '_idempotency_key': 'inspection-photo-correction-checked-out',
+            })
+        self.assertEqual(checked_out.status_code, 409, checked_out.json)
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE insp_plan_items SET check_out_time=NULL WHERE id=100")
+            db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=1')
+        no_permission = self.client.post(
+            '/api/mobile/inspection-items/100/photos/correct', headers=self.headers(), json={
+                'photo_urls': [original.json['display_url']],
+                '_idempotency_key': 'inspection-photo-correction-no-permission',
+            })
+        self.assertEqual(no_permission.status_code, 409, no_permission.json)
+
+    def test_inspection_album_duplicate_is_risk_only_and_missing_context_has_no_side_effects(self):
+        image = jpeg_bytes('purple')
+        missing = self.upload(
+            image, capture_source='album', plan_id=None,
+            _idempotency_key='inspection-album-missing-context')
+        self.assertEqual(missing.status_code, 400, missing.json)
+        self.assertEqual(missing.json['code'], 'INSPECTION_ALBUM_CONTEXT_REQUIRED')
+        self.assert_no_upload_artifacts()
+
+        first = self.upload(
+            image, capture_source='album',
+            _idempotency_key='inspection-album-duplicate-source')
+        self.assertEqual(first.status_code, 200, first.json)
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET source_type='inspection',source_id=100,
+                    extra_json=json_set(extra_json,'$.material_role','formal')
+                WHERE id=?""", (first.json['id'],))
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,item_name,category,result,execution_status)
+                VALUES (101,10,1,'余氯检查','水质检查',NULL,'active')""")
+
+        duplicate = self.upload(
+            image, capture_source='album', item_id=101,
+            _idempotency_key='inspection-album-duplicate-target')
+        self.assertEqual(duplicate.status_code, 200, duplicate.json)
+        self.assertTrue(duplicate.json['accepted_for_review'])
+        self.assertTrue(duplicate.json['duplicate'])
+        self.assertEqual(duplicate.json['duplicate_of_id'], first.json['id'])
+        self.assertIn(f'与历史影像#{first.json["id"]}完全相同', duplicate.json['risk_reasons'])
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT capture_source,evidence_qualification,evidence_basis,
+                duplicate_of_id,is_flagged,flag_rule,extra_json
+                FROM operation_attachments WHERE id=?""", (duplicate.json['id'],)).fetchone()
+        self.assertEqual((row['capture_source'], row['evidence_qualification'], row['evidence_basis']),
+                         ('album', 'qualified', 'inspection_album'))
+        self.assertEqual((row['duplicate_of_id'], row['is_flagged'], row['flag_rule']),
+                         (first.json['id'], 1, 'duplicate'))
+        self.assertEqual(json.loads(row['extra_json'])['material_role'], 'pending_inspection')
+
+    def test_inspection_album_retake_requires_current_rework_cycle(self):
+        old_album = self.upload(
+            jpeg_bytes('orange'), capture_source='album',
+            _idempotency_key='inspection-album-before-rework')
+        self.assertEqual(old_album.status_code, 200, old_album.json)
+        required_at, _ = self.set_retake_required()
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET required_photos=1 WHERE id=100')
+
+        stale_submit = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps([old_album.json['url']]),
+            '_idempotency_key': 'inspection-album-stale-rework-submit',
+        })
+        self.assertEqual(stale_submit.status_code, 409, stale_submit.json)
+        self.assertEqual(stale_submit.json['code'], 'RETAKE_EVIDENCE_CYCLE_MISMATCH')
+
+        current_album = self.upload(
+            jpeg_bytes('yellow'), capture_source='album',
+            _idempotency_key='inspection-album-current-rework')
+        self.assertEqual(current_album.status_code, 200, current_album.json)
+        with app_module.get_db() as db:
+            attachment = db.execute(
+                'SELECT extra_json FROM operation_attachments WHERE id=?',
+                (current_album.json['id'],)).fetchone()
+        self.assertEqual(json.loads(attachment['extra_json'])['rework_required_at'], required_at)
+
+        submitted = self.client.post('/api/mobile/submit-item', headers=self.headers(), json={
+            'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
+            'photo_urls': json.dumps([current_album.json['url']]),
+            '_idempotency_key': 'inspection-album-current-rework-submit',
+        })
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['evidence_status'], 'replacement_submitted')
+        with app_module.get_db() as db:
+            item = db.execute(
+                'SELECT actual_photos,photo_urls FROM insp_plan_items WHERE id=100').fetchone()
+        self.assertEqual((item['actual_photos'], json.loads(item['photo_urls'])),
+                         (1, [current_album.json['url']]))
+
 
 
 
@@ -1275,7 +1705,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertIsNone(sessions[1]['used_at'])
         self.assertIsNone(sessions[2]['used_at'])
 
-    def test_wrong_item_camera_photo_is_reissued_with_new_watermark_and_old_row_preserved(self):
+    def test_wrong_item_camera_photo_gets_independent_new_watermark_attachment(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO insp_plan_items
                 (id,plan_id,site_id,item_name,category,result,check_in_time,execution_status)
@@ -1296,7 +1726,9 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             _idempotency_key='correct-item-camera')
         self.assertTrue(wrong.json['accepted_for_review'], wrong.json)
         self.assertTrue(corrected.json['accepted_for_review'], corrected.json)
-        self.assertTrue(corrected.json['recovered_pending_attachment'])
+        self.assertFalse(corrected.json['recovered_pending_attachment'])
+        self.assertTrue(corrected.json['duplicate'])
+        self.assertEqual(corrected.json['duplicate_of_id'], wrong.json['id'])
         self.assertNotEqual((wrong.json['id'], wrong.json['url'], wrong.json['watermark_code']),
                             (corrected.json['id'], corrected.json['url'],
                              corrected.json['watermark_code']))
@@ -1305,7 +1737,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 FROM operation_attachments ORDER BY id""").fetchall()
         self.assertEqual(
             [(row['item_id'], row['review_status'], row['evidence_qualification']) for row in rows],
-            [(100, 'superseded', 'ineligible'), (101, 'pending', 'qualified')])
+            [(100, 'pending', 'qualified'), (101, 'pending', 'qualified')])
         corrected_extra = json.loads(rows[1]['extra_json'])
         self.assertEqual(
             corrected_extra['display_copy']['server_watermark']['anti_counterfeit_code'],
@@ -1787,7 +2219,9 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
     def test_already_approved_item_rejects_session_and_upload_without_side_effects(self):
         with app_module.get_db() as db:
             db.execute("""UPDATE insp_plan_items
-                SET result='normal',review_status=2,evidence_status='effective' WHERE id=100""")
+                SET result='normal',review_status=2,evidence_status='effective',
+                    reviewer_id=3,review_time='2026-10-16 10:00:00'
+                WHERE id=100""")
         session = self.create_capture_session()
         self.assertEqual(session.status_code, 409, session.json)
         self.assertEqual(session.json['code'], 'INSPECTION_ITEM_APPROVED')

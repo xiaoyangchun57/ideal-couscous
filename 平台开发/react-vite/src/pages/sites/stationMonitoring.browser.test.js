@@ -102,10 +102,21 @@ test('station monitoring real Web behavior with isolated API fixtures', {
         site_ids: [7, 8],
       };
       else if (url.pathname === '/api/sites') body = roles.includes('admin') ? [row, { ...row, id: 8, name: '隔离测试站乙', code: 'WEB-TEST-8' }] : [row];
-      else if (url.pathname === '/api/station-monitoring/sites') body = {
-        scope: roles.includes('admin') ? 'all' : 'mine', available_scopes: roles.includes('admin') ? ['all', 'mine'] : ['mine'],
-        items: roles.includes('admin') ? [overview().site, overview('normal', 8).site] : [overview().site], summary: { interval_unconfigured: 1, normal: roles.includes('admin') ? 1 : 0 },
-      };
+      else if (url.pathname === '/api/station-monitoring/sites') {
+        const items = roles.includes('admin')
+          ? [overview().site, overview('normal', 8).site] : [overview().site];
+        body = {
+          scope: roles.includes('admin') ? 'all' : 'mine',
+          available_scopes: roles.includes('admin') ? ['all', 'mine'] : ['mine'],
+          service_scope: url.searchParams.get('service_scope') || 'current',
+          available_service_scopes: roles.includes('admin') ? ['current', 'all'] : ['current'],
+          items,
+          summary: {
+            total: items.length, interval_unconfigured: 1,
+            normal: roles.includes('admin') ? 1 : 0,
+          },
+        };
+      }
       else if (/\/station-monitoring\/sites\/\d+\/overview$/.test(url.pathname)) body = overview('interval_unconfigured', Number(url.pathname.split('/').at(-2)));
       else if (/\/station-monitoring\/sites\/\d+\/trend$/.test(url.pathname)) body = {
         ...trend(url.searchParams.get('metric')), site_id: Number(url.pathname.split('/').at(-2)),
@@ -294,6 +305,14 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       return policyDialog;
     };
     try {
+      await page.goto(`${baseURL}/sites`);
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await tableRow.getByRole('button', { name: /服务状态/ }).click();
+      const directPolicyDialog = page.getByRole('dialog', { name: /维护服务政策/ });
+      await visible(directPolicyDialog);
+      await directPolicyDialog.getByRole('button', { name: /取\s*消/ }).click();
+      await directPolicyDialog.waitFor({ state: 'hidden' });
+
       await page.goto(`${baseURL}/sites?archive=7`);
       const archive = page.getByRole('dialog', { name: /站点档案/ });
       await visible(archive);
@@ -305,7 +324,6 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await policyDialog.waitFor({ state: 'hidden' });
       await archive.locator('button.ant-modal-close').click();
       await archive.waitFor({ state: 'hidden' });
-      const tableRow = page.getByRole('row').filter({ hasText: row.name });
       await tableRow.getByRole('button', { name: `查看 ${row.name} 的站点档案` }).click();
       await visible(archive);
       await archive.getByRole('button', { name: '维护服务政策', exact: true }).click();
@@ -322,8 +340,10 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     const { page, close } = await session(['admin'], undefined, async (route, url) => {
       if (url.pathname !== '/api/station-monitoring/sites') return false;
       await route.fulfill({ json: {
-        scope: 'all', available_scopes: ['all', 'mine'], items: [item],
-        summary: { raw_received_config_pending: 1 },
+        scope: 'all', available_scopes: ['all', 'mine'],
+        service_scope: 'current', available_service_scopes: ['current', 'all'],
+        items: [item, overview('normal', 8).site],
+        summary: { total: 2, raw_received_config_pending: 1, normal: 1 },
       } });
       return true;
     });
@@ -461,7 +481,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       firstRefresh.release();
       pendingRelease = null;
       await visible(page.getByText('0/2', { exact: true }));
-      await visible(page.getByText('应监测因子已保存，列表与详情已按新分母更新。', { exact: true }));
+      await visible(page.getByText('应监测因子已保存；最近一期结果将按新范围继续形成。', { exact: true }));
       assert.equal(await page.getByText('应监测因子未设置', { exact: true }).count(), 0);
 
       await page.getByRole('checkbox', { name: /溶解氧/ }).uncheck();
@@ -474,9 +494,82 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       secondRefresh.release();
       pendingRelease = null;
       await visible(page.getByText('0/1', { exact: true }));
-      await visible(page.getByText('应监测因子已保存，列表与详情已按新分母更新。', { exact: true }));
+      await visible(page.getByText('应监测因子已保存；最近一期结果将按新范围继续形成。', { exact: true }));
     } finally {
       pendingRelease?.();
+      await close();
+    }
+  });
+
+  await t.test('uncertain expected-factor save retries with the same idempotency key', async () => {
+    const candidates = [{ business_metric: 'ph', label: '酸碱度', mapping_available: true }];
+    const putBodies = [];
+    let version = 0;
+    const expectedPayload = (replayed = false) => ({
+      site_id: 7,
+      configured: version > 0,
+      selected_metrics: version > 0 ? ['ph'] : [],
+      version,
+      effective_from: version > 0 ? '2026-10-16T04:00:00+00:00' : null,
+      can_edit: true,
+      candidates,
+      replayed,
+    });
+    const overviewPayload = () => {
+      const payload = overview(version ? 'awaiting_first_frame' : 'raw_received_config_pending');
+      const cycle = {
+        status: 'not_configured',
+        reason_code: version ? 'no_evaluable_period' : 'expected_factors_unconfigured',
+        scheduled_at: null,
+        deadline_at: null,
+        arrived_count: 0,
+        formed_count: 0,
+        expected_count: version ? 1 : 0,
+        factors: [],
+      };
+      payload.site.expected_factors_configured = version > 0;
+      payload.site.expected_factor_version = version;
+      payload.site.latest_cycle = cycle;
+      payload.monitoring.latest_cycle = cycle;
+      return payload;
+    };
+    const { page, close } = await session(['operator'], undefined, async (route, url, request) => {
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: overviewPayload() });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/expected-factors')) {
+        if (request.method() === 'PUT') {
+          putBodies.push(request.postDataJSON());
+          version = 1;
+          if (putBodies.length === 1) {
+            await route.abort('timedout');
+            return true;
+          }
+          await route.fulfill({ json: expectedPayload(true) });
+          return true;
+        }
+        await route.fulfill({ json: expectedPayload() });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/trend')) {
+        await route.fulfill({ json: trend(url.searchParams.get('metric')) });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      await page.getByRole('checkbox', { name: /酸碱度/ }).check();
+      await page.getByRole('button', { name: '保存设置', exact: true }).click();
+      await visible(page.getByText('保存结果待确认', { exact: true }));
+      await page.getByRole('button', { name: '再次提交确认', exact: true }).click();
+      await visible(page.getByText('已确认此前保存结果，无需重复写入。', { exact: true }));
+      assert.equal(putBodies.length, 2);
+      assert.equal(putBodies[0].idempotency_key, putBodies[1].idempotency_key);
+      assert.equal(putBodies[0].version, 0);
+      assert.equal(putBodies[1].version, 0);
+    } finally {
       await close();
     }
   });
@@ -592,12 +685,17 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     } finally { await close(); }
   });
 
-  await t.test('directory distinguishes first monitoring failure, refresh retention and missing projection', async () => {
+  await t.test('directory distinguishes first failure and retains last success on range mismatch', async () => {
     let mode = 'failure';
     const { page, close } = await session(['admin'], undefined, async (route, url) => {
       if (url.pathname !== '/api/station-monitoring/sites') return false;
       await route.fulfill(mode === 'failure' ? { status: 503, json: { error: '监测投影暂不可用' } }
-        : { json: { scope: 'all', available_scopes: ['all', 'mine'], items: mode === 'missing' ? [] : [overview().site], summary: { interval_unconfigured: 1 } } });
+        : { json: {
+          scope: 'all', available_scopes: ['all', 'mine'],
+          service_scope: 'current', available_service_scopes: ['current', 'all'],
+          items: mode === 'mismatch' ? [] : [overview().site, overview('normal', 8).site],
+          summary: { total: 2, interval_unconfigured: 1, normal: 1 },
+        } });
       return true;
     });
     try {
@@ -611,10 +709,10 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await page.getByRole('button', { name: /刷新/ }).click();
       await visible(page.getByText('监测状态刷新失败，当前保留上次成功结果', { exact: true }));
       await visible(tableRow.getByText('数据周期未配置', { exact: true }));
-      mode = 'missing';
+      mode = 'mismatch';
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
-      await visible(tableRow.getByText('监测状态待确认', { exact: true }));
-      assert.equal(await tableRow.getByText('数据周期未配置', { exact: true }).count(), 0);
+      await visible(page.getByText('监测汇总与当前站点列表数量不一致，请重新加载', { exact: true }));
+      await visible(tableRow.getByText('数据周期未配置', { exact: true }));
       await snapshot(page, 'directory-desktop');
     } finally { await close(); }
   });
@@ -632,7 +730,9 @@ test('station monitoring real Web behavior with isolated API fixtures', {
         await route.fulfill({
           json: {
             scope: 'all', available_scopes: ['all', 'mine'],
-            items: [overview().site], summary: { interval_unconfigured: 1 },
+            service_scope: 'current', available_service_scopes: ['current', 'all'],
+            items: [overview().site, overview('normal', 8).site],
+            summary: { total: 2, interval_unconfigured: 1, normal: 1 },
           },
         });
       } catch { /* A superseding request may abort the pending response. */ }
@@ -701,12 +801,12 @@ test('station monitoring real Web behavior with isolated API fixtures', {
           const other = page.getByRole('row').filter({ hasText: '隔离测试站乙' });
           await visible(other.getByText('数据正常', { exact: true }));
         }
-        await visible(page.getByText(`监测范围：${expected === 'all' ? '全部有权站点' : '本人负责站点'}`, { exact: true }));
+        await visible(page.getByText(`监测范围：${expected === 'all' ? '全部有权站点' : '本人负责站点'}；服务范围：当前服务站点`, { exact: true }));
       } finally { await close(); }
     }
   });
 
-  await t.test('server scope facts stay authoritative and a superseded refresh cannot overwrite the latest result', async () => {
+  await t.test('matching scope facts survive refresh and a superseded response cannot overwrite the latest result', async () => {
     let calls = 0;
     let release;
     let started;
@@ -721,8 +821,14 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       const current = calls;
       if (current === 2) { started(); await pending; }
       const result = {
-        scope: current === 1 ? 'mine' : 'all', available_scopes: current === 1 ? ['mine'] : ['mine', 'all'],
-        items: [{ ...overview(current === 3 ? 'attention' : 'normal').site, monitoring_reason: current === 3 ? '最新刷新事实' : '较早刷新事实' }], summary: {},
+        scope: 'all', available_scopes: ['mine', 'all'],
+        service_scope: 'current', available_service_scopes: ['current', 'all'],
+        items: [
+          { ...overview(current === 3 ? 'attention' : 'normal').site, monitoring_reason: current === 3 ? '最新刷新事实' : '较早刷新事实' },
+          overview('normal', 8).site,
+        ],
+        summary: { total: 2, normal: 1, attention: current === 3 ? 1 : 0 },
+        updated_at: '2026-10-16T16:00:00+08:00',
       };
       try { await route.fulfill({ json: result }); } catch { /* A newer refresh may have cancelled the held request. */ }
       if (current === 2) finished();
@@ -730,7 +836,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     });
     try {
       await page.goto(`${baseURL}/sites`);
-      await visible(page.getByText('监测范围：本人负责站点', { exact: true }));
+      await visible(page.getByText('监测范围：全部有权站点；服务范围：当前服务站点', { exact: true }));
       await page.getByRole('button', { name: /刷新/ }).click();
       await requested;
       await page.getByRole('button', { name: '重新加载', exact: true }).click();
@@ -738,7 +844,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       release();
       await settled;
       await absent(page, '较早刷新事实');
-      await visible(page.getByText('监测范围：全部有权站点', { exact: true }));
+      await visible(page.getByText('监测范围：全部有权站点；服务范围：当前服务站点', { exact: true }));
     } finally { release(); await close(); }
   });
 
@@ -815,7 +921,11 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     const { page, close } = await session(['admin'], { width: 1280, height: 720 }, async (route, url) => {
       if (url.pathname === '/api/sites') { await route.fulfill({ json: rows }); return true; }
       if (url.pathname === '/api/station-monitoring/sites') {
-        await route.fulfill({ json: { scope: 'all', available_scopes: ['all', 'mine'], items: monitoringItems, summary: { normal: 19, attention: 18 } } });
+        await route.fulfill({ json: {
+          scope: 'all', available_scopes: ['all', 'mine'],
+          service_scope: 'current', available_service_scopes: ['current', 'all'],
+          items: monitoringItems, summary: { total: 37, normal: 19, attention: 18 },
+        } });
         return true;
       }
       return false;

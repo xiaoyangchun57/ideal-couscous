@@ -81,6 +81,36 @@ class IngestionStorageTest(unittest.TestCase):
         self.assertEqual(rows[0][10], "pending_parse")
         self.assertEqual(rows[1][10], "duplicate")
         self.assertEqual(rows[1][11], rows[0][0])
+        with closing(sqlite3.connect(self.database)) as connection:
+            directory = connection.execute(
+                """SELECT canonical_raw_frame_id,last_received_at,expires_at
+                   FROM station_ingest_dedup_keys"""
+            ).fetchone()
+            self.assertEqual(directory[0], rows[0][0])
+            self.assertEqual(directory[1], "2026-09-08T00:00:01+00:00")
+            self.assertEqual(directory[2], "2026-12-07T00:00:01+00:00")
+            self.assertEqual(connection.execute(
+                """SELECT raw_frame_id,canonical_raw_frame_id
+                   FROM station_ingest_duplicate_links"""
+            ).fetchone(), (rows[1][0], rows[0][0]))
+
+    def test_late_receipt_does_not_move_current_communication_backwards(self):
+        self.add_endpoint()
+        server = StationIngestServer(self.storage)
+        server._process_raw(make_uplink(serial=10), "2026-09-08T10:00:00+00:00")
+        server._process_raw(make_uplink(serial=11), "2026-09-08T09:00:00+00:00")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            state = connection.execute(
+                """SELECT latest_received_at,latest_authenticated_at,latest_raw_frame_id
+                   FROM station_ingest_current_state"""
+            ).fetchone()
+            self.assertEqual(state[0], "2026-09-08T10:00:00+00:00")
+            self.assertEqual(state[1], "2026-09-08T10:00:00+00:00")
+            self.assertEqual(state[2], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts"
+            ).fetchone()[0], 2)
 
     def test_raw_persistence_failure_never_acknowledges(self):
         self.add_endpoint()

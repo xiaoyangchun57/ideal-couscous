@@ -355,3 +355,72 @@ test('late retry success clears item A draft and remains visible after returning
     api.uploadSitePhoto = originalUpload;
   }
 });
+
+test('same uploaded file with refreshed tickets stays one card and submits one storage path', async () => {
+  const originalUpload = api.uploadSitePhoto;
+  const originalTrack = api.trackEvent;
+  const originalSubmit = api.submitItem;
+  try {
+    Object.keys(storage).filter(key => key !== 'user' && key !== 'sites')
+      .forEach(key => delete storage[key]);
+    const page = createPhotoPage();
+    let captureIndex = 0;
+    const uploadKeys = [];
+    page._openTrustedCamera = () => {
+      captureIndex += 1;
+      return Promise.resolve({
+        path: `/tmp/same-${captureIndex}.jpg`,
+        captureSession: `same-session-${captureIndex}`,
+        gpsLat: 28.6,
+        gpsLng: 115.7,
+        frameOrientation: 'portrait',
+        frameRatio: '3:4',
+        frameMode: 'photo',
+      });
+    };
+    api.trackEvent = () => {};
+    api.uploadSitePhoto = (siteId, image, key) => {
+      uploadKeys.push(key);
+      const ticket = uploadKeys.length === 1 ? 'first' : 'second';
+      return Promise.resolve({
+        id: uploadKeys.length,
+        url: '/uploads/site_photos/same.jpg',
+        display_url: `/uploads/site_photos/same.jpg?ticket=${ticket}`,
+        accepted_for_review: true,
+      });
+    };
+
+    await page.onAddPhoto({ currentTarget: { dataset: { source: 'camera' } } });
+    await page.onAddPhoto({ currentTarget: { dataset: { source: 'camera' } } });
+
+    assert.equal(uploadKeys.length, 2);
+    assert.notEqual(uploadKeys[0], uploadKeys[1]);
+    assert.equal(page.data.sheet.photos.length, 1);
+    assert.equal(page.data.sheet.pendingPhotos.length, 1);
+    assert.match(page.data.sheet.photos[0], /same\.jpg\?ticket=second$/);
+    assert.deepEqual(
+      page.data.categories[0].items[0].pending_photo_urls,
+      ['/uploads/site_photos/same.jpg'],
+    );
+
+    let submittedPayload = null;
+    api.submitItem = payload => {
+      submittedPayload = payload;
+      return Promise.resolve({
+        photo_urls: JSON.parse(payload.photo_urls),
+        review_status: 1,
+        evidence_status: 'pending',
+      });
+    };
+    page.onSubmitItem();
+    await waitFor(() => submittedPayload, 'deduplicated inspection item was not submitted');
+    assert.deepEqual(
+      JSON.parse(submittedPayload.photo_urls),
+      ['/uploads/site_photos/same.jpg'],
+    );
+  } finally {
+    api.uploadSitePhoto = originalUpload;
+    api.trackEvent = originalTrack;
+    api.submitItem = originalSubmit;
+  }
+});

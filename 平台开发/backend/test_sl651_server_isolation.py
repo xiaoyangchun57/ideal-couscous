@@ -767,7 +767,14 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("umask 0007", web["command"][2])
         self.assertEqual(web["environment"]["LD_PRELOAD"], "/opt/libsqlite-group-mode.so")
         self.assertEqual(
-            web["depends_on"]["station-ingest-permissions"]["condition"],
+            web["depends_on"]["station-ingest-cutover"]["condition"],
+            "service_completed_successfully",
+        )
+
+        cutover = compose["station-ingest-cutover"]
+        self.assertIn("station_ingest_cutover.py prepare", cutover["command"][2])
+        self.assertEqual(
+            cutover["depends_on"]["station-ingest-permissions"]["condition"],
             "service_completed_successfully",
         )
 
@@ -782,10 +789,17 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw", receiver["volumes"])
         self.assertIn("umask 0007", receiver["healthcheck"]["test"][1])
         self.assertEqual(
-            receiver["depends_on"]["station-ingest-permissions"]["condition"],
+            receiver["depends_on"]["station-ingest-cutover"]["condition"],
             "service_completed_successfully",
         )
         self.assertEqual(receiver["ports"], ["127.0.0.1:${SL651_BIND_PORT:-5505}:5005"])
+
+        maintenance = compose["station-ingest-retention"]
+        self.assertEqual(maintenance["user"], "10001:10001")
+        self.assertTrue(maintenance["read_only"])
+        self.assertIn("maintain-once", maintenance["command"][2])
+        self.assertIn("--lock-file", maintenance["command"][2])
+        self.assertNotIn("compact-copy", maintenance["command"][2])
 
         probe = compose["station-ingest-permission-check"]
         self.assertEqual(probe["user"], "0:0")

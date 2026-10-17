@@ -121,6 +121,8 @@ const originals = {
   uploadSitePhoto: api.uploadSitePhoto,
   attachmentDetail: api.attachmentDetail,
   deletePendingSitePhoto: api.deletePendingSitePhoto,
+  deletePhoto: api.deletePhoto,
+  correctInspectionItemPhotos: api.correctInspectionItemPhotos,
 };
 
 (async () => {
@@ -474,10 +476,37 @@ const originals = {
     assert.deepEqual(scrollCalls.at(-1), { scrollTop: 187, duration: 0 });
 
     resetStorage();
+    const submittedAwayPage = createPage();
+    seedStation(submittedAwayPage, { checked_in: false, checked_out: true });
+    submittedAwayPage.data.categories = [{ items: [{
+      item_id: 311, plan_id: 10, item_name: '离站后已提交项', result: 'normal',
+      review_status: 2, evidence_status: 'effective', required_photos: 0,
+      photo_urls: '[]', evidence_attachments: [], requiresCalibration: false,
+    }, {
+      item_id: 312, plan_id: 10, item_name: '未重新签到的整改项', result: 'abnormal',
+      review_status: 3, evidence_status: 'supplement_required', required_photos: 1,
+      current_photo_urls: ['/uploads/original.jpg'], evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    submittedAwayPage.onOpenItem({ currentTarget: { dataset: { id: 311 } } });
+    assert.equal(submittedAwayPage.data.sheet.open, true,
+      'submitted items remain available after checkout');
+    assert.equal(submittedAwayPage.data.sheet.readOnly, true);
+    submittedAwayPage.onCloseSheet();
+    submittedAwayPage.onOpenItem({ currentTarget: { dataset: { id: 312 } } });
+    assert.equal(submittedAwayPage.data.sheet.open, true,
+      'a submitted rework item remains available before the next check-in');
+    assert.equal(submittedAwayPage.data.sheet.readOnly, true,
+      'rework editing still requires an active site check-in');
+    assert.equal(modals.some(item => item.title === '请先到站打卡'), false,
+      'read-only submitted-item review never opens the check-in action modal');
+
+    resetStorage();
     const cameraItemPage = createPage();
     seedStation(cameraItemPage);
     cameraItemPage.data.categories = [{ items: [{
       item_id: 308, plan_id: 10, item_name: '相机水印契约', result: null,
+      category: 'log_books',
       required_photos: 1, evidence_attachments: [], requiresCalibration: false,
     }] }];
     cameraItemPage.onOpenItem({ currentTarget: { dataset: { id: 308 } } });
@@ -495,6 +524,8 @@ const originals = {
     });
     await flush();
     const inspectionNavigation = navigationCalls.at(-1);
+    assert.equal(new URLSearchParams(inspectionNavigation.url.split('?')[1]).get('item_category'),
+      'log_books', 'inspection category reaches the trusted camera entry');
     inspectionNavigation.events.trustedCameraCaptured({
       requestId: new URLSearchParams(inspectionNavigation.url.split('?')[1]).get('request_id'),
       path: '/tmp/inspection-hidden-watermark.jpg',
@@ -584,6 +615,100 @@ const originals = {
     api.submitItem = () => { replacementSubmitWrites += 1; return Promise.resolve({}); };
     replacementSubmittedPage.onSubmitItem();
     assert.equal(replacementSubmitWrites, 0, 'submitted replacement cannot be submitted twice');
+
+    resetStorage();
+    const correctionPage = createPage();
+    seedStation(correctionPage);
+    correctionPage.data.categories = [{ items: [{
+      item_id: 309, plan_id: 10, item_name: '已提交检查项', result: 'abnormal',
+      remark: '原说明', requiresCalibration: true, calibrator: '原校准人',
+      calibration_values: '7.00', review_status: 1, evidence_status: 'accepted',
+      photo_correction_allowed: true, photo_correction_block_reason: '', required_photos: 1,
+      photo_urls: JSON.stringify(['/uploads/formal-a.jpg', '/uploads/formal-b.jpg']),
+      pending_photo_urls: [], evidence_attachments: [],
+    }] }];
+    correctionPage.onOpenItem({ currentTarget: { dataset: { id: 309 } } });
+    assert.equal(correctionPage.data.sheet.open, true);
+    assert.equal(correctionPage.data.sheet.readOnly, true,
+      'a submitted item always opens in read-only mode');
+    assert.equal(correctionPage.data.sheet.photoCorrection, false);
+    correctionPage.onStartPhotoCorrection();
+    assert.equal(correctionPage.data.sheet.readOnly, false);
+    assert.equal(correctionPage.data.sheet.photoCorrection, true,
+      'the explicit action enters photo-only correction mode');
+    correctionPage.onSetResult({ currentTarget: { dataset: { r: 'normal' } } });
+    correctionPage.onRemark({ detail: { value: '被篡改说明' } });
+    correctionPage.onCalibrator({ detail: { value: '被篡改校准人' } });
+    correctionPage.onCalValues({ detail: { value: '9.99' } });
+    assert.equal(correctionPage.data.sheet.result, 'abnormal');
+    assert.equal(correctionPage.data.sheet.remark, '原说明');
+    assert.equal(correctionPage.data.sheet.calibrator, '原校准人');
+    assert.equal(correctionPage.data.sheet.calValues, '7.00');
+
+    let legacyFormalDeletes = 0;
+    api.deletePhoto = () => { legacyFormalDeletes += 1; return Promise.resolve({}); };
+    const formalDisplayUrl = correctionPage.data.sheet.photos[0];
+    correctionPage.data.sheet.correctionIdempotencyKey = 'stale-formal-key';
+    correctionPage.onDelPhoto({ currentTarget: { dataset: { idx: 1 } } });
+    assert.equal(legacyFormalDeletes, 0,
+      'formal photo correction never calls the legacy immediate-delete endpoint');
+    assert.deepEqual(correctionPage.data.sheet.photos, [formalDisplayUrl]);
+    assert.equal(correctionPage.data.sheet.correctionIdempotencyKey, '',
+      'changing the formal photo selection rotates the correction idempotency key');
+
+    correctionPage.setData({
+      'sheet.photos': [formalDisplayUrl, '/uploads/pending-new.jpg'],
+      'sheet.pendingPhotos': ['/uploads/pending-new.jpg'],
+      'sheet.correctionIdempotencyKey': 'stale-pending-key',
+    });
+    let pendingDeletes = 0;
+    api.deletePendingSitePhoto = path => {
+      pendingDeletes += 1;
+      return Promise.resolve({ success: true, deleted: true, path });
+    };
+    await correctionPage.onDelPhoto({ currentTarget: { dataset: { idx: 1 } } });
+    assert.equal(pendingDeletes, 1);
+    assert.deepEqual(correctionPage.data.sheet.photos, [formalDisplayUrl]);
+    assert.deepEqual(correctionPage.data.sheet.pendingPhotos, []);
+    assert.equal(correctionPage.data.sheet.correctionIdempotencyKey, '',
+      'removing a pending upload also rotates the correction idempotency key');
+
+    let correctionPayload = null;
+    let correctionCalls = 0;
+    api.correctInspectionItemPhotos = (itemId, payload) => {
+      correctionCalls += 1;
+      correctionPayload = { itemId, payload };
+      return Promise.resolve({ photo_urls: ['/uploads/formal-a.jpg'] });
+    };
+    correctionPage.loadTasks = () => {};
+    await correctionPage.onSavePhotoCorrection();
+    assert.equal(correctionCalls, 1);
+    assert.equal(correctionPayload.itemId, 309);
+    assert.deepEqual(correctionPayload.payload.photo_urls, ['/uploads/formal-a.jpg']);
+    assert.match(correctionPayload.payload._idempotency_key,
+      /^inspection-photo-correction-309-/);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'result'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'remark'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'calibrator'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'calibration_values'), false);
+    assert.equal(correctionPage.data.sheet.open, false);
+
+    resetStorage();
+    const blockedCorrectionPage = createPage();
+    seedStation(blockedCorrectionPage);
+    blockedCorrectionPage.data.categories = [{ items: [{
+      item_id: 310, plan_id: 10, item_name: '人工审核后检查项', result: 'normal',
+      review_status: 2, evidence_status: 'accepted', photo_correction_allowed: false,
+      photo_correction_block_reason: '审核人已形成结论，不能再修改照片',
+      required_photos: 0, photo_urls: '[]', evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    blockedCorrectionPage.onOpenItem({ currentTarget: { dataset: { id: 310 } } });
+    assert.equal(blockedCorrectionPage.data.sheet.readOnly, true);
+    blockedCorrectionPage.onStartPhotoCorrection();
+    assert.equal(blockedCorrectionPage.data.sheet.photoCorrection, false,
+      'the client cannot enter correction mode without server capability');
+    assert.equal(toasts.at(-1).title, '审核人已形成结论，不能再修改照片');
 
     resetStorage();
     const normalWithRemark = createPage();

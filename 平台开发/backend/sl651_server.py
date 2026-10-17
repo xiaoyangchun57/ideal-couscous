@@ -15,10 +15,12 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sqlite3
 from typing import Literal, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # Support both package tests and direct container execution.
     from .sl651_parser import (
@@ -120,6 +122,19 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _source_key(endpoint_id: int | None, station_code: str | None) -> str:
+    if endpoint_id is not None:
+        return f"endpoint:{endpoint_id}"
+    if station_code:
+        return f"station:{station_code}"
+    return "transport:unidentified"
+
+
+def _dedup_expires_at(received_at: str) -> str:
+    return (datetime.fromisoformat(received_at).astimezone(timezone.utc) + timedelta(days=90)).replace(
+        microsecond=0).isoformat()
+
+
 def credential_hmac(password: bytes, pepper: str) -> str:
     if not pepper:
         raise StorageError("credential pepper is not configured")
@@ -214,10 +229,235 @@ class IngestionStorage:
         )
 
     def _write_error(self, connection: sqlite3.Connection, raw_id: int | None, error_type: str) -> None:
+        if raw_id is None:
+            endpoint_id = None
+            station_code = None
+            occurred_at = _utc_now()
+        else:
+            raw = connection.execute(
+                "SELECT endpoint_id,station_code,received_at FROM ingest_raw_frames WHERE id=?", (raw_id,)
+            ).fetchone()
+            endpoint_id = raw["endpoint_id"] if raw else None
+            station_code = raw["station_code"] if raw else None
+            occurred_at = str(raw["received_at"]) if raw else _utc_now()
         connection.execute(
             "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
             (raw_id, error_type),
         )
+        source_key = _source_key(endpoint_id, station_code)
+        bucket_hour = datetime.fromisoformat(occurred_at).astimezone(timezone.utc).replace(
+            minute=0, second=0, microsecond=0).isoformat()
+        connection.execute(
+            """INSERT INTO station_ingest_error_hourly(
+                   source_key,endpoint_id,station_code,error_type,bucket_hour,occurrence_count,
+                   first_seen_at,last_seen_at,last_raw_frame_id)
+               VALUES (?,?,?,?,?,1,?,?,?)
+               ON CONFLICT(source_key,error_type,bucket_hour) DO UPDATE SET
+                   occurrence_count=station_ingest_error_hourly.occurrence_count+1,
+                   first_seen_at=MIN(station_ingest_error_hourly.first_seen_at,excluded.first_seen_at),
+                   last_seen_at=MAX(station_ingest_error_hourly.last_seen_at,excluded.last_seen_at),
+                   last_raw_frame_id=CASE WHEN excluded.last_seen_at>=station_ingest_error_hourly.last_seen_at
+                                          THEN excluded.last_raw_frame_id
+                                          ELSE station_ingest_error_hourly.last_raw_frame_id END""",
+            (source_key, endpoint_id, station_code, error_type, bucket_hour,
+             occurred_at, occurred_at, raw_id),
+        )
+        self._update_current_state(
+            connection, raw_id, endpoint_id, station_code, occurred_at, None,
+            error_type=error_type, record_received=raw_id is not None,
+        )
+
+    def _update_current_state(
+        self, connection: sqlite3.Connection, raw_id: int | None, endpoint_id: int | None,
+        station_code: str | None, received_at: str, authentication_status: str | None,
+        *, error_type: str | None = None, record_received: bool = True,
+    ) -> None:
+        source_key = _source_key(endpoint_id, station_code)
+        latest_received_at = received_at if record_received else None
+        latest_raw_frame_id = raw_id if record_received else None
+        authenticated_at = received_at if authentication_status == "authenticated" else None
+        authenticated_raw_id = raw_id if authenticated_at else None
+        credential_failed_at = received_at if authentication_status == "credential_failed" else None
+        credential_failed_raw_id = raw_id if credential_failed_at else None
+        error_at = received_at if error_type else None
+        connection.execute(
+            """INSERT INTO station_ingest_current_state(
+                   source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
+                   latest_authenticated_at,latest_authenticated_raw_frame_id,
+                   latest_credential_failed_at,latest_credential_failed_raw_frame_id,
+                   latest_error_at,latest_error_type,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_key) DO UPDATE SET
+                   endpoint_id=COALESCE(excluded.endpoint_id,station_ingest_current_state.endpoint_id),
+                   station_code=COALESCE(excluded.station_code,station_ingest_current_state.station_code),
+                   latest_raw_frame_id=CASE
+                       WHEN excluded.latest_received_at IS NOT NULL
+                        AND excluded.latest_received_at>=COALESCE(station_ingest_current_state.latest_received_at,'')
+                       THEN excluded.latest_raw_frame_id ELSE station_ingest_current_state.latest_raw_frame_id END,
+                   latest_received_at=CASE
+                       WHEN excluded.latest_received_at IS NULL THEN station_ingest_current_state.latest_received_at
+                       ELSE MAX(COALESCE(station_ingest_current_state.latest_received_at,''),excluded.latest_received_at) END,
+                   latest_authenticated_raw_frame_id=CASE
+                       WHEN excluded.latest_authenticated_at IS NOT NULL
+                        AND excluded.latest_authenticated_at>=COALESCE(station_ingest_current_state.latest_authenticated_at,'')
+                       THEN excluded.latest_authenticated_raw_frame_id
+                       ELSE station_ingest_current_state.latest_authenticated_raw_frame_id END,
+                   latest_authenticated_at=CASE
+                       WHEN excluded.latest_authenticated_at IS NULL THEN station_ingest_current_state.latest_authenticated_at
+                       ELSE MAX(COALESCE(station_ingest_current_state.latest_authenticated_at,''),excluded.latest_authenticated_at) END,
+                   latest_credential_failed_raw_frame_id=CASE
+                       WHEN excluded.latest_credential_failed_at IS NOT NULL
+                        AND excluded.latest_credential_failed_at>=COALESCE(station_ingest_current_state.latest_credential_failed_at,'')
+                       THEN excluded.latest_credential_failed_raw_frame_id
+                       ELSE station_ingest_current_state.latest_credential_failed_raw_frame_id END,
+                   latest_credential_failed_at=CASE
+                       WHEN excluded.latest_credential_failed_at IS NULL THEN station_ingest_current_state.latest_credential_failed_at
+                       ELSE MAX(COALESCE(station_ingest_current_state.latest_credential_failed_at,''),excluded.latest_credential_failed_at) END,
+                   latest_error_at=CASE
+                       WHEN excluded.latest_error_at IS NULL THEN station_ingest_current_state.latest_error_at
+                       ELSE MAX(COALESCE(station_ingest_current_state.latest_error_at,''),excluded.latest_error_at) END,
+                   latest_error_type=CASE
+                       WHEN excluded.latest_error_at IS NOT NULL
+                        AND excluded.latest_error_at>=COALESCE(station_ingest_current_state.latest_error_at,'')
+                       THEN excluded.latest_error_type ELSE station_ingest_current_state.latest_error_type END,
+                   updated_at=excluded.updated_at""",
+            (source_key, endpoint_id, station_code, latest_received_at, latest_raw_frame_id,
+             authenticated_at, authenticated_raw_id, credential_failed_at,
+             credential_failed_raw_id, error_at, error_type, _utc_now()),
+        )
+
+    def _record_receipt(
+        self, connection: sqlite3.Connection, raw_id: int, endpoint_id: int | None,
+        station_code: str | None, received_at: str, authentication_status: str,
+    ) -> None:
+        source_key = _source_key(endpoint_id, station_code)
+        connection.execute(
+            """INSERT INTO station_ingest_recent_receipts(
+                   raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
+               VALUES (?,?,?,?,?,?)""",
+            (raw_id, source_key, endpoint_id, station_code, received_at, authentication_status),
+        )
+        self._record_hourly_receipt(
+            connection, raw_id, endpoint_id, station_code, received_at, authentication_status,
+        )
+        self._update_current_state(
+            connection, raw_id, endpoint_id, station_code, received_at, authentication_status,
+        )
+
+    def _record_hourly_receipt(
+        self, connection: sqlite3.Connection, raw_id: int | None, endpoint_id: int | None,
+        station_code: str | None, received_at: str, authentication_status: str,
+    ) -> None:
+        source_key = _source_key(endpoint_id, station_code)
+        bucket_hour = datetime.fromisoformat(received_at).astimezone(timezone.utc).replace(
+            minute=0, second=0, microsecond=0).isoformat()
+        connection.execute(
+            """INSERT INTO station_ingest_receipt_hourly(
+                   source_key,endpoint_id,station_code,authentication_status,bucket_hour,
+                   receipt_count,first_received_at,last_received_at,last_complete_raw_frame_id,updated_at)
+               VALUES (?,?,?,?,?,1,?,?,?,?)
+               ON CONFLICT(source_key,authentication_status,bucket_hour) DO UPDATE SET
+                   endpoint_id=COALESCE(excluded.endpoint_id,station_ingest_receipt_hourly.endpoint_id),
+                   station_code=COALESCE(excluded.station_code,station_ingest_receipt_hourly.station_code),
+                   receipt_count=station_ingest_receipt_hourly.receipt_count+1,
+                   first_received_at=MIN(station_ingest_receipt_hourly.first_received_at,excluded.first_received_at),
+                   last_complete_raw_frame_id=CASE
+                       WHEN excluded.last_received_at>=station_ingest_receipt_hourly.last_received_at
+                        AND excluded.last_complete_raw_frame_id IS NOT NULL
+                       THEN excluded.last_complete_raw_frame_id
+                       ELSE station_ingest_receipt_hourly.last_complete_raw_frame_id END,
+                   last_received_at=MAX(station_ingest_receipt_hourly.last_received_at,excluded.last_received_at),
+                   updated_at=excluded.updated_at""",
+            (source_key, endpoint_id, station_code, authentication_status, bucket_hour,
+             received_at, received_at, raw_id, _utc_now()),
+        )
+
+    def _hj212_realtime_summary_identity(
+        self, connection: sqlite3.Connection, frame: ParsedHJ212Frame, endpoint_id: int,
+    ) -> tuple[str, str] | None:
+        if frame.command != "2011" or frame.data_time is None or not frame.factors:
+            return None
+        if any(
+            factor.quality != "valid" or factor.issue_code is not None
+            or factor.raw_value is None or not math.isfinite(factor.raw_value)
+            for factor in frame.factors
+        ):
+            return None
+        profile = None
+        observed_at = None
+        for candidate in connection.execute(
+            """SELECT timezone,instrument_asset_code,effective_from,effective_to
+               FROM monitoring_endpoint_profiles
+               WHERE endpoint_id=? AND enabled=1 ORDER BY effective_from DESC""",
+            (endpoint_id,),
+        ).fetchall():
+            try:
+                candidate_observed = frame.data_time.replace(
+                    tzinfo=ZoneInfo(candidate["timezone"]),
+                ).astimezone(timezone.utc).replace(microsecond=0)
+            except ZoneInfoNotFoundError:
+                return None
+            candidate_text = candidate_observed.isoformat()
+            if (candidate["effective_from"] <= candidate_text
+                    and (candidate["effective_to"] is None
+                         or candidate["effective_to"] > candidate_text)):
+                profile = candidate
+                observed_at = candidate_observed
+                break
+        if profile is None or observed_at is None:
+            return None
+        protocol_codes = sorted({factor.protocol_code for factor in frame.factors})
+        marks = ",".join("?" for _ in protocol_codes)
+        mapped_rows = connection.execute(
+            f"""SELECT mapping.protocol_code,
+                       COALESCE(mapping.business_metric,definition.business_metric) AS business_metric,
+                       COALESCE(mapping.instrument_asset_code,?) AS instrument_asset_code,
+                       definition.standard_unit
+                FROM monitoring_factor_mappings mapping
+                JOIN monitoring_factor_definitions definition
+                  ON definition.protocol_code=mapping.protocol_code
+                WHERE mapping.endpoint_id=? AND mapping.protocol_code IN ({marks})
+                  AND mapping.enabled=1 AND mapping.effective_from<=?
+                  AND (mapping.effective_to IS NULL OR mapping.effective_to>?)""",
+            (profile["instrument_asset_code"], endpoint_id, *protocol_codes,
+             observed_at.isoformat(), observed_at.isoformat()),
+        ).fetchall()
+        mapped_by_code = {row["protocol_code"]: row for row in mapped_rows}
+        if set(mapped_by_code) != set(protocol_codes):
+            return None
+        slot_local = frame.data_time.replace(
+            hour=(frame.data_time.hour // 4) * 4, minute=0, second=0, microsecond=0,
+            tzinfo=ZoneInfo(profile["timezone"]),
+        )
+        slot_started_at = slot_local.astimezone(timezone.utc).isoformat()
+        normalized_factors: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        for factor in frame.factors:
+            mapping = mapped_by_code[factor.protocol_code]
+            identity = (
+                mapping["business_metric"] or factor.protocol_code,
+                mapping["instrument_asset_code"] or "",
+                mapping["standard_unit"] or "",
+                factor.value_kind or "",
+            )
+            normalized = {
+                "factor": identity[0],
+                "instrument_asset_code": identity[1],
+                "standard_unit": identity[2],
+                "value_kind": identity[3],
+                "value": 0.0 if factor.raw_value == 0 else factor.raw_value,
+                "quality": factor.quality,
+                "issue_code": factor.issue_code,
+            }
+            previous = normalized_factors.get(identity)
+            if previous is not None and previous != normalized:
+                return None
+            normalized_factors[identity] = normalized
+        factors = [normalized_factors[key] for key in sorted(normalized_factors)]
+        content = json.dumps(
+            {"factors": factors},
+            ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+        )
+        return slot_started_at, hashlib.sha256(content.encode("ascii")).hexdigest()
 
     def persist_unparseable(
         self, raw: bytes, error_code: str, received_at: str, *, protocol_family: str = "unknown",
@@ -240,6 +480,7 @@ class IngestionStorage:
                 "INSERT INTO ingest_frame_protocols(raw_frame_id, protocol_family, parser_version) VALUES (?, ?, ?)",
                 (raw_id, protocol_family, parser_version),
             )
+            self._record_receipt(connection, raw_id, None, None, received_at, "not_checked")
             self._write_attempt(connection, raw_id, "failed_header", error_code, parser_version=parser_version)
             self._write_error(connection, raw_id, error_code)
             connection.commit()
@@ -263,23 +504,138 @@ class IngestionStorage:
         quarantine_error: str | None = None,
         configuration_pending: bool = False,
     ) -> tuple[int, bool]:
-        """Persist one parsed frame and its attempt. Returns raw id and duplicate status."""
+        """Persist evidence or fold a normal repeated HJ212 receipt into its slot summary."""
         self._require_raw_storage_capacity()
         frame_hash = hashlib.sha256(frame.raw).hexdigest()
         logical_hash = hashlib.sha256(frame.logical_key.encode("ascii")).hexdigest()
         disposition = "pending_parse" if auth.status == "authenticated" and not quarantine_error and not configuration_pending else "quarantined"
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            slot_identity = None
+            if (isinstance(frame, ParsedHJ212Frame) and auth.status == "authenticated"
+                    and not quarantine_error and not configuration_pending
+                    and auth.endpoint_id is not None):
+                slot_identity = self._hj212_realtime_summary_identity(
+                    connection, frame, int(auth.endpoint_id))
+            if slot_identity is not None:
+                slot_started_at, content_hash = slot_identity
+                summary = connection.execute(
+                    """SELECT canonical_raw_frame_id,last_received_at
+                       FROM station_ingest_slot_summaries
+                       WHERE endpoint_id=? AND command=? AND slot_started_at=? AND content_sha256=?""",
+                    (auth.endpoint_id, frame.command, slot_started_at, content_hash),
+                ).fetchone()
+                if summary is not None:
+                    connection.execute(
+                        """UPDATE station_ingest_slot_summaries
+                           SET receipt_count=receipt_count+1,
+                               first_received_at=MIN(first_received_at,?),
+                               last_received_at=MAX(last_received_at,?),
+                               last_authentication_status=CASE WHEN ?>=last_received_at THEN ?
+                                                               ELSE last_authentication_status END,
+                               updated_at=?
+                           WHERE endpoint_id=? AND command=? AND slot_started_at=? AND content_sha256=?""",
+                        (received_at, received_at, received_at, auth.status, _utc_now(),
+                         auth.endpoint_id, frame.command, slot_started_at, content_hash),
+                    )
+                    canonical_raw_id = int(summary["canonical_raw_frame_id"])
+                    self._record_hourly_receipt(
+                        connection, canonical_raw_id, auth.endpoint_id, frame.station_code,
+                        received_at, auth.status,
+                    )
+                    self._update_current_state(
+                        connection, canonical_raw_id, auth.endpoint_id, frame.station_code,
+                        received_at, auth.status,
+                    )
+                    connection.commit()
+                    return canonical_raw_id, True
             duplicate_of = None
+            canonical_evidence_ref_id = None
             if auth.endpoint_id is not None:
                 existing = connection.execute(
-                    """SELECT id FROM ingest_raw_frames
-                       WHERE endpoint_id=? AND logical_key_sha256=? AND duplicate_of_raw_frame_id IS NULL
-                       ORDER BY id ASC LIMIT 1""",
-                    (auth.endpoint_id, logical_hash),
+                    """SELECT canonical_raw_frame_id,canonical_evidence_ref_id
+                       FROM station_ingest_dedup_keys
+                       WHERE endpoint_id=? AND logical_key_sha256=?
+                         AND (protected=1 OR expires_at>?)""",
+                    (auth.endpoint_id, logical_hash, received_at),
                 ).fetchone()
-                duplicate_of = int(existing["id"]) if existing else None
-            if duplicate_of is not None:
+                if existing is None:
+                    existing_raw = connection.execute(
+                        """SELECT id,received_at FROM ingest_raw_frames
+                           WHERE endpoint_id=? AND logical_key_sha256=? AND duplicate_of_raw_frame_id IS NULL
+                           ORDER BY id ASC LIMIT 1""",
+                        (auth.endpoint_id, logical_hash),
+                    ).fetchone()
+                    if existing_raw is not None:
+                        connection.execute(
+                            """INSERT INTO station_ingest_dedup_keys(
+                                   endpoint_id,logical_key_sha256,canonical_raw_frame_id,
+                                   first_received_at,last_received_at,expires_at,protected,updated_at)
+                               VALUES (?,?,?,?,?,?,0,?)
+                               ON CONFLICT(endpoint_id,logical_key_sha256) DO NOTHING""",
+                            (auth.endpoint_id, logical_hash, existing_raw["id"],
+                             existing_raw["received_at"], existing_raw["received_at"],
+                             _dedup_expires_at(existing_raw["received_at"]), _utc_now()),
+                        )
+                        existing = connection.execute(
+                            """SELECT canonical_raw_frame_id,canonical_evidence_ref_id
+                               FROM station_ingest_dedup_keys
+                               WHERE endpoint_id=? AND logical_key_sha256=?""",
+                            (auth.endpoint_id, logical_hash),
+                        ).fetchone()
+                canonical_raw_id = int(existing["canonical_raw_frame_id"]) if existing else None
+                canonical_evidence_ref_id = (
+                    int(existing["canonical_evidence_ref_id"])
+                    if existing and existing["canonical_evidence_ref_id"] is not None else None)
+                canonical_exists = (connection.execute(
+                    "SELECT 1 FROM ingest_raw_frames WHERE id=?", (canonical_raw_id,)
+                ).fetchone() is not None) if canonical_raw_id is not None else False
+                duplicate_of = canonical_raw_id if canonical_exists else None
+            is_duplicate = existing is not None if auth.endpoint_id is not None else False
+            if slot_identity is not None and existing is not None:
+                canonical = connection.execute(
+                    "SELECT received_at,frame_sha256 FROM ingest_raw_frames WHERE id=?",
+                    (canonical_raw_id,),
+                ).fetchone()
+                if canonical is None and canonical_evidence_ref_id is not None:
+                    canonical = connection.execute(
+                        """SELECT received_at,frame_sha256 FROM monitoring_archive_evidence_refs
+                           WHERE id=?""",
+                        (canonical_evidence_ref_id,),
+                    ).fetchone()
+                if canonical is not None:
+                    slot_started_at, content_hash = slot_identity
+                    connection.execute(
+                        """INSERT INTO station_ingest_slot_summaries(
+                               endpoint_id,station_code,command,slot_started_at,content_sha256,
+                               canonical_raw_frame_id,canonical_frame_sha256,receipt_count,
+                               first_received_at,last_received_at,last_authentication_status,created_at,updated_at)
+                           VALUES (?,?,?,?,?,?,?,2,?,?,?,?,?)""",
+                        (auth.endpoint_id, frame.station_code, frame.command, slot_started_at,
+                         content_hash, canonical_raw_id, canonical["frame_sha256"],
+                         min(canonical["received_at"], received_at),
+                         max(canonical["received_at"], received_at), auth.status,
+                         _utc_now(), _utc_now()),
+                    )
+                    connection.execute(
+                        """UPDATE station_ingest_dedup_keys
+                           SET last_received_at=MAX(last_received_at,?),
+                               expires_at=MAX(COALESCE(expires_at,''),?),updated_at=?
+                           WHERE endpoint_id=? AND logical_key_sha256=?""",
+                        (received_at, _dedup_expires_at(received_at), _utc_now(),
+                         auth.endpoint_id, logical_hash),
+                    )
+                    self._record_hourly_receipt(
+                        connection, canonical_raw_id, auth.endpoint_id, frame.station_code,
+                        received_at, auth.status,
+                    )
+                    self._update_current_state(
+                        connection, canonical_raw_id, auth.endpoint_id, frame.station_code,
+                        received_at, auth.status,
+                    )
+                    connection.commit()
+                    return canonical_raw_id, True
+            if is_duplicate:
                 disposition = "duplicate"
             cursor = connection.execute(
                 """INSERT INTO ingest_raw_frames(
@@ -305,6 +661,47 @@ class IngestionStorage:
                 "INSERT INTO ingest_frame_protocols(raw_frame_id, protocol_family, parser_version) VALUES (?, ?, ?)",
                 (raw_id, frame.protocol_family, frame.parser_version),
             )
+            self._record_receipt(
+                connection, raw_id, auth.endpoint_id, frame.station_code, received_at, auth.status,
+            )
+            if auth.endpoint_id is not None:
+                if is_duplicate:
+                    connection.execute(
+                        """INSERT INTO station_ingest_duplicate_links(
+                               raw_frame_id,canonical_raw_frame_id,canonical_evidence_ref_id,created_at)
+                           VALUES (?,?,?,?)""",
+                        (raw_id, int(existing["canonical_raw_frame_id"]),
+                         canonical_evidence_ref_id, _utc_now()),
+                    )
+                    connection.execute(
+                        """UPDATE station_ingest_dedup_keys
+                           SET last_received_at=MAX(last_received_at,?),expires_at=MAX(COALESCE(expires_at,''),?),
+                               updated_at=?
+                           WHERE endpoint_id=? AND logical_key_sha256=?""",
+                        (received_at, _dedup_expires_at(received_at), _utc_now(),
+                         auth.endpoint_id, logical_hash),
+                    )
+                else:
+                    connection.execute(
+                        """INSERT INTO station_ingest_dedup_keys(
+                               endpoint_id,logical_key_sha256,canonical_raw_frame_id,
+                               first_received_at,last_received_at,expires_at,protected,updated_at)
+                           VALUES (?,?,?,?,?,?,0,?)""",
+                        (auth.endpoint_id, logical_hash, raw_id, received_at, received_at,
+                         _dedup_expires_at(received_at), _utc_now()),
+                    )
+            if slot_identity is not None:
+                slot_started_at, content_hash = slot_identity
+                connection.execute(
+                    """INSERT INTO station_ingest_slot_summaries(
+                           endpoint_id,station_code,command,slot_started_at,content_sha256,
+                           canonical_raw_frame_id,canonical_frame_sha256,receipt_count,
+                           first_received_at,last_received_at,last_authentication_status,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)""",
+                    (auth.endpoint_id, frame.station_code, frame.command, slot_started_at,
+                     content_hash, raw_id, frame_hash, received_at, received_at, auth.status,
+                     _utc_now(), _utc_now()),
+                )
             self._write_attempt(connection, raw_id, "parsed_header", quarantine_error, parser_version=frame.parser_version)
             if quarantine_error:
                 self._write_error(connection, raw_id, quarantine_error)
@@ -315,7 +712,7 @@ class IngestionStorage:
             elif auth.status == "unbound_authenticated":
                 self._write_error(connection, raw_id, "unbound_authenticated_endpoint")
             connection.commit()
-            return raw_id, duplicate_of is not None
+            return raw_id, is_duplicate
 
     def endpoint_has_monitoring_profile(self, endpoint_id: int) -> bool:
         with closing(self._connect()) as connection:
@@ -827,6 +1224,11 @@ def main() -> int:
         raise SystemExit("SL651_CREDENTIAL_PEPPER must be injected through private runtime configuration")
     if storage_policy is None:
         raise SystemExit("SL651_RAW_STORAGE_DIR must name the independent raw archive storage")
+    try:
+        from .station_ingest_cutover import require_cutover_ready
+    except ImportError:  # pragma: no cover - direct script execution
+        from station_ingest_cutover import require_cutover_ready
+    require_cutover_ready(arguments.database)
 
     async def serve() -> None:
         server = await run_server(

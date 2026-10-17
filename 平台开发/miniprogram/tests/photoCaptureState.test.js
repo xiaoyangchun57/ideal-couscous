@@ -63,9 +63,9 @@ test('only location lookup failures are classified as location failures', async 
   );
 });
 
-test('supplement material bypasses current location and capture-session preflight', () => {
+test('inspection album upload bypasses current location and capture-session preflight', () => {
   assert.equal(captureSourceNeedsLocationSession('camera'), true);
-  assert.equal(captureSourceNeedsLocationSession('supplement'), false);
+  assert.equal(captureSourceNeedsLocationSession('album'), false);
 });
 
 test('photo upload results classify every selected photo without silent gaps', () => {
@@ -395,20 +395,20 @@ test('empty successful selection is actionable while user cancellation stays sil
     },
   };
   await assert.rejects(
-    chooseInspectionPhotos(6, 'supplement'),
+    chooseInspectionPhotos(6, 'album'),
     error => photoCaptureErrorMessage(error) === '未获取到有效照片，请重新选择'
       && !isPhotoSelectionCancelled(error),
   );
 
   global.wx.chooseMedia = options => options.fail({ errMsg: 'chooseMedia:fail cancel' });
   await assert.rejects(
-    chooseInspectionPhotos(6, 'supplement'),
+    chooseInspectionPhotos(6, 'album'),
     error => isPhotoSelectionCancelled(error),
   );
   delete global.wx;
 });
 
-test('formal capture cannot fall back to chooseMedia while supplement stays album-only', async () => {
+test('formal camera cannot fall back to chooseMedia while formal album upload stays album-only', async () => {
   const sourceTypes = [];
   global.wx = {
     chooseMedia(options) {
@@ -418,14 +418,14 @@ test('formal capture cannot fall back to chooseMedia while supplement stays albu
   };
   await assert.rejects(chooseInspectionPhotos(1, 'camera'),
     error => error.code === 'TRUSTED_CAMERA_PAGE_REQUIRED');
-  await chooseInspectionPhotos(1, 'supplement');
+  await chooseInspectionPhotos(1, 'album');
   assert.deepEqual(sourceTypes, [['album']]);
   delete global.wx;
 });
 
-test('camera, supplement and report actions expose clear opening feedback', () => {
+test('camera, album and report actions expose clear opening feedback', () => {
   assert.equal(photoActionOpeningTitle('camera'), '正在打开相机');
-  assert.equal(photoActionOpeningTitle('supplement'), '正在打开补充材料');
+  assert.equal(photoActionOpeningTitle('album'), '正在打开相册');
   assert.equal(photoActionOpeningTitle('report_camera'), '正在打开相机/相册');
   assert.equal(photoActionOpeningTitle('report_album'), '正在打开相机/相册');
 });
@@ -440,7 +440,7 @@ test('one page allows only one photo action and permits the next after success',
     actionCalls += 1;
     return new Promise(resolve => { releaseFirst = resolve; });
   }, title => starts.push(title), () => { finishes += 1; });
-  const duplicate = runPhotoActionOnce(owner, 'supplement', () => {
+  const duplicate = runPhotoActionOnce(owner, 'album', () => {
     actionCalls += 1;
   }, title => starts.push(title), () => { finishes += 1; });
 
@@ -453,22 +453,22 @@ test('one page allows only one photo action and permits the next after success',
   await first;
   assert.equal(finishes, 1);
 
-  await runPhotoActionOnce(owner, 'supplement', () => {
+  await runPhotoActionOnce(owner, 'album', () => {
     actionCalls += 1;
   }, title => starts.push(title), () => { finishes += 1; });
   assert.equal(actionCalls, 2);
-  assert.deepEqual(starts, ['正在打开相机', '正在打开补充材料']);
+  assert.deepEqual(starts, ['正在打开相机', '正在打开相册']);
   assert.equal(finishes, 2);
 });
 
 test('cancel and every startup or upload failure release the shared photo action', async () => {
   const failures = [
     { phase: 'camera-cancel', source: 'camera', error: { errMsg: 'chooseMedia:fail cancel' } },
-    { phase: 'album-cancel', source: 'supplement', error: { errMsg: 'chooseMedia:fail cancel' } },
+    { phase: 'album-cancel', source: 'album', error: { errMsg: 'chooseMedia:fail cancel' } },
     { phase: 'location', source: 'camera', error: { error: '定位失败' } },
     { phase: 'session', source: 'camera', error: { error: '会话创建失败' } },
-    { phase: 'chooseMedia', source: 'supplement', error: { error: '选图失败' } },
-    { phase: 'upload', source: 'supplement', error: { error: '上传失败' } },
+    { phase: 'chooseMedia', source: 'album', error: { error: '选图失败' } },
+    { phase: 'upload', source: 'album', error: { error: '上传失败' } },
   ];
   for (const item of failures) {
     const owner = { sheet: { photos: ['/uploads/existing.jpg'], remark: '已填写说明' } };
@@ -490,15 +490,16 @@ test('cancel and every startup or upload failure release the shared photo action
   }
 });
 
-test('inspection photo card separates camera evidence and supplement materials', () => {
+test('inspection photo card sends camera and album photos into the formal collection', () => {
   const wxml = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.wxml'), 'utf8');
   assert.match(wxml, /class="ip-photo-source-row"[\s\S]{0,300}?bindtap="onAddPhoto"[\s\S]{0,100}?data-source="camera">现场拍照<\/button>/);
-  assert.match(wxml, /data-source="supplement">补充材料<\/button>/);
-  assert.match(wxml, /补充材料（不计入必需照片）/);
-  assert.match(wxml, /补充材料[^<]*不能替代现场拍照/);
+  assert.match(wxml, /data-source="album">相册上传<\/button>/);
+  assert.match(wxml, /现场拍照和相册上传都会计入当前检查项的必需照片数量/);
+  assert.match(wxml, /历史补充材料（不计入当前必需照片）/);
+  assert.doesNotMatch(wxml, /必需照片只能使用现场拍照/);
   assert.match(wxml, /catchtap="onDelSupplementPhoto"[^>]*data-id="\{\{p\.businessId\}\}"/);
   assert.match(wxml, /catchtap="onRetryLocalPhoto"[^>]*data-kind="required"/);
-  assert.match(wxml, /catchtap="onSaveLocalPhotoAsSupplement"/);
+  assert.doesNotMatch(wxml, /catchtap="onSaveLocalPhotoAsSupplement"/);
   assert.doesNotMatch(wxml, /data-source="watermark_album"/);
   assert.match(wxml, /disabled="\{\{reportSheet\.uploading \|\| reportSheet\.submitting\}\}"[^>]*bindtap="onTakeReportPhoto">现场拍照<\/button>/);
   assert.match(wxml, /disabled="\{\{reportSheet\.uploading \|\| reportSheet\.submitting\}\}"[^>]*bindtap="onAddReportPhoto">从相册选择<\/button>/);
@@ -510,6 +511,10 @@ test('inspection photo card separates camera evidence and supplement materials',
     /onAddReportPhoto\(\)[\s\S]*?uploadReportPhotoPaths\(paths, context, \{ capture_source: 'unknown' \}\)/);
   assert.match(pageSource, /handlePhotoActionFailure\(error, message => new Promise/);
   assert.match(pageSource, /onAddPhoto\(e\)[\s\S]*?runPhotoActionOnce\(this, captureSource/);
+  assert.match(pageSource, /const formalPhotoCount = sheet\.photos\.length \+ sheet\.localPhotos\.length/);
+  assert.match(pageSource, /chooseInspectionPhotos\(6 - formalPhotoCount, 'album'\)/);
+  assert.match(wxml, /sheet\.photos\.length \+ sheet\.localPhotos\.length < 6/);
+  assert.match(pageSource, /capture_source: captureSource/);
   assert.match(pageSource, /_openTrustedCamera\(sheet\)[\s\S]{0,1600}wx\.navigateTo\(/);
   assert.match(pageSource, /capture_client = 'trusted_camera_v1'/);
   assert.match(pageSource, /capture_frame_mode = capture\.frameMode/);
@@ -520,12 +525,9 @@ test('inspection photo card separates camera evidence and supplement materials',
   assert.match(pageSource, /addPendingInspectionPhotos\(/);
   assert.match(pageSource, /let idempotencyKey = metadata\._idempotency_key/);
   assert.match(pageSource, /api\.uploadSitePhoto\([\s\S]{0,100}idempotencyKey, metadata/);
-  assert.match(pageSource, /delete metadata\.capture_session/);
   assert.match(pageSource, /businessResponse: result/);
-  assert.match(pageSource, /retainRejectedPhotoAsSupplement\(failedPhoto/,
-    'the rejected-photo retention choice must use the tested durable workflow');
-  assert.match(pageSource,
-    /onPersisted: draft => \{[\s\S]{0,260}appendInspectionPhotoRetryDraft\([\s\S]{0,260}supplementLocalPhotos/);
+  assert.doesNotMatch(pageSource, /retainRejectedPhotoAsSupplement\(failedPhoto/);
+  assert.doesNotMatch(pageSource, /onSaveLocalPhotoAsSupplement\(e\)/);
   assert.match(pageSource, /setInspectionPhotoIssueMessage\(this, issue\)[\s\S]{0,160}wx\.showModal/);
   assert.match(pageSource, /if \(!uploadResult\.issues\.length\)[\s\S]{0,140}photoResultTitle': ''[\s\S]{0,80}photoResultMessage': ''/);
   assert.match(wxml, /class="ip-photo-result"[\s\S]{0,180}class="ip-photo-result-title"[\s\S]{0,120}class="ip-photo-result-message"/);
@@ -548,7 +550,7 @@ test('inspection photo retry draft is isolated, durable and cleared only after o
     'the persisted retry metadata must retain the original capture session and idempotency key');
 
   const retryBlock = pageSource.slice(
-    pageSource.indexOf('_retryInspectionLocalPhoto(kind, index, forceSupplement)'),
+    pageSource.indexOf('_retryInspectionLocalPhoto(kind, index)'),
     pageSource.indexOf('onRetryLocalPhoto(e)'));
   assert.match(retryBlock,
     /saveInspectionSheetPhotoRetryDraft\([\s\S]*?isCurrentInspectionPhotoContext/,

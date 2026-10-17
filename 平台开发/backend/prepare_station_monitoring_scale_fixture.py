@@ -1,9 +1,10 @@
 """Build the isolated production-shape fixture used by station monitoring scale tests.
 
-The default fixture contains 36 sites, 2,160,000 authenticated raw frames, and
-468,000 projected business observations (1,000 slots for each of 13 factors at
-each site). The output is always a new, explicitly named SQLite file and is
-never allowed to reuse the application's configured database.
+The default fixture contains 36 sites, 2,160,000 legacy historical raw frames,
+and 468,000 projected business observations (1,000 slots for each of 13 factors
+at each site). It validates bounded reads over retained history; it is not the
+capacity model for new four-hour slot-summarized writes. The output is always a
+new, explicitly named SQLite file and never reuses the configured database.
 """
 
 import argparse
@@ -200,6 +201,36 @@ def build_fixture(output: Path, force: bool = False) -> None:
                 rows,
             )
             connection.commit()
+        recent_cutoff = (now - timedelta(hours=72)).isoformat()
+        connection.execute(
+            """INSERT INTO station_ingest_recent_receipts(
+                   raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
+               SELECT id,'endpoint:' || endpoint_id,endpoint_id,station_code,received_at,
+                      authentication_status
+               FROM ingest_raw_frames WHERE received_at>=?""",
+            (recent_cutoff,),
+        )
+        connection.execute(
+            """INSERT INTO station_ingest_current_state(
+                   source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
+                   latest_authenticated_at,latest_authenticated_raw_frame_id,updated_at)
+               SELECT 'endpoint:' || endpoint_id,endpoint_id,MAX(station_code),MAX(received_at),MAX(id),
+                      MAX(received_at),MAX(id),?
+               FROM ingest_raw_frames GROUP BY endpoint_id""",
+            (now.isoformat(),),
+        )
+        connection.execute(
+            """INSERT INTO station_ingest_receipt_hourly(
+                   source_key,endpoint_id,station_code,authentication_status,bucket_hour,
+                   receipt_count,first_received_at,last_received_at,last_complete_raw_frame_id,updated_at)
+               SELECT 'endpoint:' || endpoint_id,endpoint_id,MAX(station_code),authentication_status,
+                      strftime('%Y-%m-%dT%H:00:00+00:00',received_at),COUNT(*),MIN(received_at),
+                      MAX(received_at),MAX(id),?
+               FROM ingest_raw_frames WHERE received_at>=?
+               GROUP BY endpoint_id,authentication_status,5""",
+            (now.isoformat(), (now - timedelta(days=30)).isoformat()),
+        )
+        connection.commit()
 
         factor_units = dict(connection.execute(
             """SELECT protocol_code,standard_unit FROM monitoring_factor_definitions
