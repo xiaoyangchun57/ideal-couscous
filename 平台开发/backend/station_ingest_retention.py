@@ -716,23 +716,29 @@ def _prepare_current_state(database: Path, *, recent_cutoff: str) -> int:
         connection.execute("BEGIN IMMEDIATE")
         endpoint_rows = connection.execute(
             """SELECT endpoint.id,endpoint.station_code FROM trusted_endpoints endpoint
-               WHERE EXISTS (SELECT 1 FROM ingest_raw_frames raw WHERE raw.endpoint_id=endpoint.id)"""
+               WHERE EXISTS (
+                   SELECT 1 FROM ingest_raw_frames raw
+                        INDEXED BY idx_ingest_raw_endpoint_received
+                   WHERE raw.endpoint_id=endpoint.id)"""
         ).fetchall()
         for endpoint in endpoint_rows:
             endpoint_id = int(endpoint["id"])
             latest = connection.execute(
                 """SELECT id,received_at FROM ingest_raw_frames
+                        INDEXED BY idx_ingest_raw_endpoint_received
                    WHERE endpoint_id=? ORDER BY received_at DESC,id DESC LIMIT 1""",
                 (endpoint_id,),
             ).fetchone()
             authenticated = connection.execute(
                 """SELECT id,received_at FROM ingest_raw_frames
+                        INDEXED BY idx_ingest_raw_authenticated_endpoint_received
                    WHERE endpoint_id=? AND authentication_status='authenticated'
                    ORDER BY received_at DESC,id DESC LIMIT 1""",
                 (endpoint_id,),
             ).fetchone()
             credential_failed = connection.execute(
                 """SELECT id,received_at FROM ingest_raw_frames
+                        INDEXED BY idx_ingest_raw_station_auth_received
                    WHERE station_code=? AND authentication_status='credential_failed'
                    ORDER BY received_at DESC,id DESC LIMIT 1""",
                 (endpoint["station_code"],),
@@ -755,7 +761,8 @@ def _prepare_current_state(database: Path, *, recent_cutoff: str) -> int:
                                                 THEN 'station:' || station_code ELSE 'transport:unidentified' END,
                                            authentication_status
                               ORDER BY received_at DESC,id DESC) AS status_rank
-                   FROM ingest_raw_frames WHERE endpoint_id IS NULL AND received_at>=?)
+                   FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
+                   WHERE endpoint_id IS NULL AND received_at>=?)
                SELECT * FROM ranked WHERE latest_rank=1 OR status_rank=1""",
             (recent_cutoff,),
         ).fetchall()
@@ -809,20 +816,8 @@ def _prepare_consumer_windows(database: Path, *, cutoff: str) -> tuple[int, int]
     with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM station_ingest_recent_receipts WHERE received_at>=?", (cutoff,))
-        connection.execute(
-            """INSERT INTO station_ingest_recent_receipts(
-                   raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
-               SELECT id,CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                              WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                              ELSE 'transport:unidentified' END,
-                      endpoint_id,station_code,received_at,authentication_status
-               FROM ingest_raw_frames WHERE received_at>=?""",
-            (cutoff,),
-        )
         cutoff_hour = datetime.fromisoformat(cutoff).replace(
             minute=0, second=0, microsecond=0).isoformat()
-        connection.execute("DELETE FROM station_ingest_receipt_hourly WHERE bucket_hour>=?", (cutoff_hour,))
         connection.execute(
             """INSERT INTO station_ingest_receipt_hourly(
                    source_key,endpoint_id,station_code,authentication_status,bucket_hour,
@@ -833,9 +828,37 @@ def _prepare_consumer_windows(database: Path, *, cutoff: str) -> tuple[int, int]
                       endpoint_id,station_code,authentication_status,
                       strftime('%Y-%m-%dT%H:00:00+00:00',received_at),
                       COUNT(*),MIN(received_at),MAX(received_at),MAX(id),?
-               FROM ingest_raw_frames WHERE received_at>=?
-               GROUP BY 1,endpoint_id,station_code,authentication_status,5""",
+               FROM ingest_raw_frames raw INDEXED BY idx_ingest_raw_received
+               WHERE received_at>=?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM station_ingest_recent_receipts recent
+                     WHERE recent.raw_frame_id=raw.id)
+               GROUP BY 1,endpoint_id,station_code,authentication_status,5
+               ON CONFLICT(source_key,authentication_status,bucket_hour) DO UPDATE SET
+                   endpoint_id=COALESCE(excluded.endpoint_id,station_ingest_receipt_hourly.endpoint_id),
+                   station_code=COALESCE(excluded.station_code,station_ingest_receipt_hourly.station_code),
+                   receipt_count=station_ingest_receipt_hourly.receipt_count+excluded.receipt_count,
+                   first_received_at=MIN(station_ingest_receipt_hourly.first_received_at,
+                                         excluded.first_received_at),
+                   last_complete_raw_frame_id=CASE
+                       WHEN excluded.last_received_at>=station_ingest_receipt_hourly.last_received_at
+                       THEN excluded.last_complete_raw_frame_id
+                       ELSE station_ingest_receipt_hourly.last_complete_raw_frame_id END,
+                   last_received_at=MAX(station_ingest_receipt_hourly.last_received_at,
+                                        excluded.last_received_at),
+                   updated_at=excluded.updated_at""",
             (_now(), cutoff),
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO station_ingest_recent_receipts(
+                   raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
+                SELECT id,CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                               WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                               ELSE 'transport:unidentified' END,
+                       endpoint_id,station_code,received_at,authentication_status
+                FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
+                WHERE received_at>=?""",
+            (cutoff,),
         )
         counts = (
             connection.execute(
@@ -847,6 +870,94 @@ def _prepare_consumer_windows(database: Path, *, cutoff: str) -> tuple[int, int]
         )
         connection.commit()
         return int(counts[0]), int(counts[1])
+
+
+def prepare_recent_slot_summaries(
+    database: Path, *, now: datetime | None = None,
+) -> dict[str, int]:
+    """Prepare only recent HJ212 2011 slot identities needed across a restart."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = _cutoff(now, BOOTSTRAP_CONSUMER_WINDOW)
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        rows = connection.execute(
+            """SELECT raw.id,raw.endpoint_id,raw.station_code,raw.received_at,
+                      raw.frame_sha256,raw.raw_frame,raw.duplicate_of_raw_frame_id
+               FROM ingest_raw_frames raw
+                    INDEXED BY idx_ingest_raw_authenticated_received
+               JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+               WHERE raw.received_at>=? AND raw.endpoint_id IS NOT NULL
+                 AND raw.authentication_status='authenticated'
+                 AND raw.disposition IN ('accepted','duplicate','pending_parse','pending_reparse')
+                 AND protocol.protocol_family='hj212'
+               ORDER BY raw.received_at,raw.id""",
+            (cutoff,),
+        ).fetchall()
+        resolver = HJ212SlotIdentityResolver(connection)
+        grouped: dict[tuple[int, str, str], list[sqlite3.Row]] = {}
+        eligible = 0
+        unclassified = 0
+        for row in rows:
+            try:
+                frame = parse_hj212_frame(bytes(row["raw_frame"]))
+            except HJ212FrameError:
+                unclassified += 1
+                continue
+            identity = resolver.resolve(frame, int(row["endpoint_id"]))
+            if frame.command != "2011" or identity is None:
+                unclassified += 1
+                continue
+            eligible += 1
+            slot_started_at, content_sha256 = identity
+            grouped.setdefault(
+                (int(row["endpoint_id"]), slot_started_at, content_sha256), []
+            ).append(row)
+
+        connection.execute("BEGIN IMMEDIATE")
+        for (endpoint_id, slot_started_at, content_sha256), group in grouped.items():
+            canonical = min(
+                group,
+                key=lambda item: (
+                    item["duplicate_of_raw_frame_id"] is not None, int(item["id"])),
+            )
+            first_received_at = min(str(item["received_at"]) for item in group)
+            last_received_at = max(str(item["received_at"]) for item in group)
+            connection.execute(
+                """INSERT INTO station_ingest_slot_summaries(
+                       endpoint_id,station_code,command,slot_started_at,content_sha256,
+                       canonical_raw_frame_id,canonical_frame_sha256,receipt_count,
+                       first_received_at,last_received_at,last_authentication_status,
+                       created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?, ?,?,?, 'authenticated',?,?)
+                   ON CONFLICT(endpoint_id,command,slot_started_at,content_sha256) DO UPDATE SET
+                       receipt_count=MAX(station_ingest_slot_summaries.receipt_count,
+                                         excluded.receipt_count),
+                       first_received_at=MIN(station_ingest_slot_summaries.first_received_at,
+                                             excluded.first_received_at),
+                       last_received_at=MAX(station_ingest_slot_summaries.last_received_at,
+                                            excluded.last_received_at),
+                       last_authentication_status=CASE
+                           WHEN excluded.last_received_at>=station_ingest_slot_summaries.last_received_at
+                           THEN excluded.last_authentication_status
+                           ELSE station_ingest_slot_summaries.last_authentication_status END,
+                       updated_at=excluded.updated_at""",
+                (
+                    endpoint_id, canonical["station_code"], "2011", slot_started_at,
+                    content_sha256, canonical["id"], canonical["frame_sha256"], len(group),
+                    first_received_at, last_received_at, _now(), _now(),
+                ),
+            )
+        connection.commit()
+    return {
+        "scanned_frames": len(rows),
+        "eligible_frames": eligible,
+        "slot_identities": len(grouped),
+        "unclassified_frames": unclassified,
+        "consumer_window_hours": int(
+            BOOTSTRAP_CONSUMER_WINDOW.total_seconds() // 3600),
+    }
 
 
 def _prepare_protected_dedup_keys(database: Path) -> int:
@@ -906,22 +1017,27 @@ def _prepare_protected_dedup_keys(database: Path) -> int:
         return int(count)
 
 
-def bootstrap_retention_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
-    """Prepare only state required by current consumers and protected evidence."""
+def prepare_startup_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
+    """Prepare the bounded state required before Web and receiver startup."""
     now = now or datetime.now(timezone.utc)
     consumer_cutoff = _cutoff(now, BOOTSTRAP_CONSUMER_WINDOW)
     current_states = _prepare_current_state(database, recent_cutoff=consumer_cutoff)
     recent_receipts, receipt_hours = _prepare_consumer_windows(
         database, cutoff=consumer_cutoff)
-    protected_dedup = _prepare_protected_dedup_keys(database)
     return {
         "current_states": current_states,
         "recent_receipts": recent_receipts,
         "receipt_hour_summaries": receipt_hours,
-        "protected_dedup_keys": protected_dedup,
         "consumer_window_hours": int(BOOTSTRAP_CONSUMER_WINDOW.total_seconds() // 3600),
         "historical_error_summaries": 0,
     }
+
+
+def bootstrap_retention_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
+    """Prepare current consumers plus protected evidence for explicit governance."""
+    result = prepare_startup_state(database, now=now)
+    result["protected_dedup_keys"] = _prepare_protected_dedup_keys(database)
+    return result
 
 
 def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) -> tuple[Path, str]:
@@ -1763,44 +1879,24 @@ def run_periodic_maintenance(
     database: Path, policy: StoragePolicy, *, lock_file: Path, now: datetime | None = None,
     batch_limit: int = 1000, mirror_storage_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Run one externally scheduled cycle after cutover, with a unique process lease."""
-    with MaintenanceLock(lock_file):
-        try:
-            try:
-                from .station_ingest_cutover import require_cutover_ready
-            except ImportError:  # pragma: no cover - direct script execution
-                from station_ingest_cutover import require_cutover_ready
-            require_cutover_ready(database)
-            return maintain_retention(
-                database, policy, now=now, batch_limit=batch_limit,
-                mirror_storage_dir=mirror_storage_dir,
-            )
-        except Exception as exc:
-            _record_periodic_failure(database, exc)
-            if isinstance(exc, (RetentionError, sqlite3.Error)):
-                raise
-            raise RetentionError(str(exc)) from exc
+    """Keep the installed timer harmless while historical governance is deferred."""
+    del database, policy, lock_file, now, batch_limit, mirror_storage_dir
+    return {
+        "status": "skipped",
+        "reason": (
+            "historical station-ingestion maintenance is disabled for this release; "
+            "run it only after separate approval"
+        ),
+        "historical_maintenance_called": 0,
+        "retry_required": False,
+    }
 
 
 def reduce_legacy_indexes(database: Path, *, now: datetime | None = None) -> list[str]:
-    """Drop superseded indexes only after the necessary-state cutover is ready."""
-    del now
-    try:
-        from .station_ingest_cutover import require_cutover_ready
-    except ImportError:  # pragma: no cover - direct script execution
-        from station_ingest_cutover import require_cutover_ready
-    require_cutover_ready(database)
-    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
-        connection.execute("PRAGMA foreign_keys=ON")
-        existing = {row[0] for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'")}
-        removed = [name for name in LEGACY_RAW_INDEXES if name in existing]
-        connection.execute("BEGIN IMMEDIATE")
-        for name in removed:
-            connection.execute(f'DROP INDEX "{name}"')
-        connection.commit()
-        connection.execute("ANALYZE")
-        return removed
+    """Keep the r25 rollback contract intact until a later release retires it."""
+    del database, now
+    raise RetentionError(
+        "legacy index reduction is disabled while r25 remains the rollback version")
 
 
 def compact_isolated_copy(

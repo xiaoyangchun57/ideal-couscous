@@ -65,6 +65,20 @@ class StationIngestionMigrationTest(unittest.TestCase):
             return migration.main()
 
     @staticmethod
+    def _apply_until(database: Path, stop_before: str) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == stop_before:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version),
+                     "2026-10-16T00:00:00+00:00", "isolated-prior"),
+                )
+            connection.commit()
+
+    @staticmethod
     def _apply_through_006(database: Path) -> None:
         with closing(sqlite3.connect(database)) as connection:
             for version, path in migration.MIGRATIONS:
@@ -456,6 +470,44 @@ class StationIngestionMigrationTest(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM legacy_children").fetchone()[0], 0)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertFalse(migration._table_exists(connection, "ingest_raw_frames"))
+
+    def test_strict_014_only_path_uses_affected_table_foreign_key_checks(self):
+        self._apply_until(
+            self.database, migration.STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            applied, backup = migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True,
+                require_014_only=True)
+
+        self.assertTrue(applied)
+        self.assertIsNone(backup)
+        self.assertEqual(sum(
+            statement.strip().upper() == "PRAGMA FOREIGN_KEY_CHECK"
+            for statement in statements
+        ), 0)
+        affected_checks = [
+            statement for statement in statements
+            if statement.strip().upper().startswith("PRAGMA FOREIGN_KEY_CHECK(")
+        ]
+        self.assertGreater(len(affected_checks), 0)
+
+    def test_strict_014_only_path_rejects_missing_earlier_migration(self):
+        self._apply_until(self.database, migration.STATION_SERVICE_POLICY_MIGRATION_VERSION)
+
+        with self.assertRaisesRegex(
+            migration.MigrationError, "requires complete migrations 001 through 013"
+        ):
+            migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True,
+                require_014_only=True)
 
     def test_checksum_conflict_is_rejected(self):
         migration.apply_migration(self.database, self.backups)

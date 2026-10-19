@@ -18,7 +18,6 @@ from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
 from sl651_server import IngestionStorage, StationIngestServer, credential_hmac
 from station_ingest_cutover import prepare_cutover
-from station_ingest_retention import reduce_legacy_indexes
 from station_monitoring import latest_cycle, latest_values, normalize_raw_frame
 
 
@@ -1000,8 +999,6 @@ class StationExpectedFactorsTest(unittest.TestCase):
             now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
             recovery_reference="isolated-expected-factor-test",
         )
-        reduce_legacy_indexes(
-            self.database, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
         with sqlite3.connect(self.database) as db:
             plan = db.execute("""EXPLAIN QUERY PLAN SELECT raw.id
                 FROM ingest_raw_frames raw

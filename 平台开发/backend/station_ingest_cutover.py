@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import time
 from typing import Any
 
 try:
@@ -15,36 +16,30 @@ try:
         MigrationError,
         STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,
         apply_migration,
-        backup_database,
         verify_station_monitoring_contract,
     )
     from .station_ingest_retention import (
         BOOTSTRAP_CONSUMER_WINDOW,
         RetentionError,
-        bootstrap_retention_state,
-        drop_duplicate_cleanup_indexes,
-        ensure_duplicate_cleanup_indexes,
-        reduce_confirmed_minute_duplicates,
+        prepare_recent_slot_summaries,
+        prepare_startup_state,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from migrate_station_ingestion import (
         MigrationError,
         STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,
         apply_migration,
-        backup_database,
         verify_station_monitoring_contract,
     )
     from station_ingest_retention import (
         BOOTSTRAP_CONSUMER_WINDOW,
         RetentionError,
-        bootstrap_retention_state,
-        drop_duplicate_cleanup_indexes,
-        ensure_duplicate_cleanup_indexes,
-        reduce_confirmed_minute_duplicates,
+        prepare_recent_slot_summaries,
+        prepare_startup_state,
     )
 
 
-CUTOVER_NAME = "station-ingest-necessary-state-v2"
+CUTOVER_NAME = "station-ingest-startup-ready-v1"
 
 
 class CutoverError(RuntimeError):
@@ -90,7 +85,9 @@ def _record_state(database: Path, status: str, detail: dict[str, Any], counts=No
         connection.commit()
 
 
-def _verify_backfill(database: Path, *, now: datetime) -> dict[str, int]:
+def _verify_startup(
+    database: Path, *, now: datetime, recent_summary: dict[str, int],
+) -> dict[str, int]:
     consumer_cutoff = _cutoff(now, BOOTSTRAP_CONSUMER_WINDOW)
     cutoff_hour = datetime.fromisoformat(consumer_cutoff).replace(
         minute=0, second=0, microsecond=0).isoformat()
@@ -99,16 +96,22 @@ def _verify_backfill(database: Path, *, now: datetime) -> dict[str, int]:
         verify_station_monitoring_contract(connection)
         counts = dict(connection.execute(
             """SELECT
-                   (SELECT COUNT(*) FROM ingest_raw_frames) AS raw_frame_count,
                    (SELECT COALESCE(MAX(id),0) FROM ingest_raw_frames) AS raw_max_id,
                    (SELECT COUNT(*) FROM station_ingest_current_state) AS current_state_count,
                    (SELECT COUNT(*) FROM station_ingest_current_state
                       WHERE latest_authenticated_at IS NOT NULL) AS authenticated_source_count,
-                   (SELECT COUNT(*) FROM station_ingest_recent_receipts) AS recent_receipt_count,
-                   (SELECT COUNT(*) FROM station_ingest_receipt_hourly) AS receipt_hour_count"""
+                   (SELECT COUNT(*) FROM station_ingest_recent_receipts
+                      WHERE received_at>=?) AS recent_receipt_count,
+                   (SELECT COUNT(*) FROM station_ingest_receipt_hourly
+                      WHERE bucket_hour>=?) AS receipt_hour_count,
+                   (SELECT COUNT(*) FROM station_ingest_slot_summaries
+                      WHERE last_received_at>=?) AS recent_slot_summary_count""",
+            (consumer_cutoff, cutoff_hour, consumer_cutoff),
         ).fetchone())
         expected_recent = connection.execute(
-            "SELECT COUNT(*) FROM ingest_raw_frames WHERE received_at>=?", (consumer_cutoff,)
+            """SELECT COUNT(*) FROM ingest_raw_frames
+                    INDEXED BY idx_ingest_raw_received WHERE received_at>=?""",
+            (consumer_cutoff,),
         ).fetchone()[0]
         actual_recent = connection.execute(
             "SELECT COUNT(*) FROM station_ingest_recent_receipts WHERE received_at>=?",
@@ -118,27 +121,34 @@ def _verify_backfill(database: Path, *, now: datetime) -> dict[str, int]:
             raise CutoverError(
                 f"consumer receipt preparation mismatch: raw={expected_recent}, prepared={actual_recent}")
         expected_hourly_receipts = connection.execute(
-            "SELECT COUNT(*) FROM ingest_raw_frames WHERE received_at>=?", (consumer_cutoff,)
+            """SELECT COUNT(*) FROM ingest_raw_frames
+                    INDEXED BY idx_ingest_raw_received WHERE received_at>=?""",
+            (consumer_cutoff,),
         ).fetchone()[0]
         actual_hourly_receipts = connection.execute(
             """SELECT COALESCE(SUM(receipt_count),0) FROM station_ingest_receipt_hourly
                WHERE bucket_hour>=?""", (cutoff_hour,),
         ).fetchone()[0]
-        if actual_hourly_receipts != expected_hourly_receipts:
+        if actual_hourly_receipts < expected_hourly_receipts:
             raise CutoverError(
                 "consumer hourly preparation mismatch: "
-                f"raw={expected_hourly_receipts}, prepared={actual_hourly_receipts}")
+                f"minimum_raw={expected_hourly_receipts}, prepared={actual_hourly_receipts}")
         latest_mismatches = connection.execute(
             """SELECT COUNT(*) FROM trusted_endpoints endpoint
                LEFT JOIN station_ingest_current_state state ON state.endpoint_id=endpoint.id
-               WHERE EXISTS (SELECT 1 FROM ingest_raw_frames raw WHERE raw.endpoint_id=endpoint.id)
+               WHERE EXISTS (
+                         SELECT 1 FROM ingest_raw_frames raw
+                              INDEXED BY idx_ingest_raw_endpoint_received
+                         WHERE raw.endpoint_id=endpoint.id)
                  AND (state.source_key IS NULL
                       OR state.latest_raw_frame_id<>(
-                          SELECT raw.id FROM ingest_raw_frames raw
+                           SELECT raw.id FROM ingest_raw_frames raw
+                                INDEXED BY idx_ingest_raw_endpoint_received
                           WHERE raw.endpoint_id=endpoint.id
                           ORDER BY raw.received_at DESC,raw.id DESC LIMIT 1)
                       OR COALESCE(state.latest_authenticated_raw_frame_id,0)<>COALESCE((
-                          SELECT raw.id FROM ingest_raw_frames raw
+                           SELECT raw.id FROM ingest_raw_frames raw
+                                INDEXED BY idx_ingest_raw_authenticated_endpoint_received
                           WHERE raw.endpoint_id=endpoint.id
                             AND raw.authentication_status='authenticated'
                           ORDER BY raw.received_at DESC,raw.id DESC LIMIT 1),0))"""
@@ -146,8 +156,11 @@ def _verify_backfill(database: Path, *, now: datetime) -> dict[str, int]:
         if latest_mismatches:
             raise CutoverError(
                 f"necessary current-state preparation mismatch: endpoints={latest_mismatches}")
-        if counts["raw_frame_count"] and not counts["current_state_count"]:
-            raise CutoverError("raw history exists but necessary current state is empty")
+        expected_slot_identities = int(recent_summary.get("slot_identities", 0))
+        if counts["recent_slot_summary_count"] < expected_slot_identities:
+            raise CutoverError(
+                "recent slot summary preparation mismatch: "
+                f"expected={expected_slot_identities}, prepared={counts['recent_slot_summary_count']}")
         counts["expected_recent_receipt_count"] = expected_recent
         counts["expected_hourly_receipt_count"] = expected_hourly_receipts
         counts["latest_authenticated_mismatches"] = latest_mismatches
@@ -176,10 +189,10 @@ def _read_cutover_state(database: Path):
 def require_cutover_ready(database: Path) -> dict[str, Any]:
     row = _read_cutover_state(database)
     if row is None or row["migration_version"] != STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION:
-        raise CutoverError("station-ingestion cutover has not completed for migration 014")
+        raise CutoverError("station-ingestion startup has not completed for migration 014")
     if row["status"] != "completed":
         raise CutoverError(
-            f"station-ingestion cutover is {row['status']}: {row['detail']}")
+            f"station-ingestion startup is {row['status']}: {row['detail']}")
     return {
         "cutover_name": row["cutover_name"],
         "migration_version": row["migration_version"],
@@ -188,50 +201,15 @@ def require_cutover_ready(database: Path) -> dict[str, Any]:
     }
 
 
-def _state_detail(row) -> dict[str, Any]:
-    if row is None:
-        return {}
-    try:
-        detail = json.loads(row["detail"])
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return detail if isinstance(detail, dict) else {}
-
-
-def _cutover_recovery(
-    database: Path, backup_dir: Path | None, migration_backup: Path | None,
-    recovery_reference: str | None, state, previous_detail: dict[str, Any],
-) -> tuple[Path | None, str | None, dict[str, str]]:
-    recorded = previous_detail.get("recovery")
-    if state is not None:
-        if not isinstance(recorded, dict):
-            raise CutoverError("incomplete cutover has no recorded pre-cleanup recovery source")
-        kind = recorded.get("kind")
-        reference = recorded.get("reference")
-        if not isinstance(reference, str) or not reference:
-            raise CutoverError("recorded pre-cleanup recovery source is invalid")
-        if kind == "local_backup":
-            path = Path(reference)
-            if not path.is_file():
-                raise CutoverError("recorded pre-cleanup backup is missing")
-            return path, None, {"kind": kind, "reference": str(path)}
-        if kind == "verified_external":
-            if recovery_reference and recovery_reference != reference:
-                raise CutoverError("verified recovery reference changed during cutover resume")
-            return None, reference, {"kind": kind, "reference": reference}
-        raise CutoverError("recorded pre-cleanup recovery source type is invalid")
-
-    if migration_backup is not None:
-        path = Path(migration_backup)
-        return path, None, {"kind": "local_backup", "reference": str(path)}
-    if backup_dir is not None:
-        path = backup_database(database, backup_dir)
-        return path, None, {"kind": "local_backup", "reference": str(path)}
-    if recovery_reference:
-        return None, recovery_reference, {
-            "kind": "verified_external", "reference": recovery_reference,
-        }
-    raise CutoverError("cutover requires a pre-cleanup backup or verified recovery set")
+def _phase_result(
+    started_at: str, started_clock: float, counts: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "started_at": started_at,
+        "completed_at": _utc_now(),
+        "elapsed_seconds": round(time.perf_counter() - started_clock, 3),
+        "counts": counts,
+    }
 
 
 def prepare_cutover(
@@ -242,97 +220,101 @@ def prepare_cutover(
     now = now or datetime.now(timezone.utc)
     backup_dir = Path(backup_dir) if backup_dir is not None else None
     recovery_reference = recovery_reference.strip() if recovery_reference else None
-    applied, migration_backup = apply_migration(
-        database, backup_dir,
-        external_recovery_confirmed=bool(recovery_reference),
-    )
-    state = _read_cutover_state(database)
-    previous_detail = _state_detail(state)
-    if (state is not None
-            and state["migration_version"] == STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION
-            and state["status"] == "completed"):
-        recorded = previous_detail.get("recovery")
-        completed_backup = None
-        completed_reference = recovery_reference
-        if isinstance(recorded, dict) and recorded.get("kind") == "local_backup":
-            completed_backup = recorded.get("reference")
-            completed_reference = None
-        elif isinstance(recorded, dict) and recorded.get("kind") == "verified_external":
-            completed_reference = recorded.get("reference")
-        return {
-            "migration": "applied" if applied else "already-applied",
-            "backup": completed_backup,
-            "recovery_reference": completed_reference,
-            "backfill": "already-completed",
-            "verification": require_cutover_ready(database),
-        }
-    backup, recovery_reference, recovery = _cutover_recovery(
-        database, backup_dir, migration_backup, recovery_reference, state, previous_detail)
-    cursor = int(previous_detail.get("cursor_raw_id") or 0)
-    totals = previous_detail.get("duplicate_reduction_totals")
-    if not isinstance(totals, dict):
-        totals = {"scanned": 0, "eligible": 0, "deleted": 0,
-                  "retained_protected": 0, "retained_unclassified": 0}
-    phase = "necessary-state"
-    _record_state(database, "running", {
-        "phase": phase, "cursor_raw_id": cursor,
-        "duplicate_reduction_totals": totals,
-        "recovery": recovery,
-    })
+    del batch_limit  # Retained only for command compatibility with the previous cutover.
+    phases: dict[str, dict[str, Any]] = {}
+    phase = "structure"
+    phase_started_at = _utc_now()
+    phase_started_clock = time.perf_counter()
+    recovery: dict[str, str] = {"kind": "not-required", "reference": "migration-already-applied"}
     try:
-        bootstrap_counts = bootstrap_retention_state(database, now=now)
-        phase = "confirmed-duplicate-reduction"
-        cleanup_index_prep = ensure_duplicate_cleanup_indexes(database)
-        while True:
-            batch = reduce_confirmed_minute_duplicates(
-                database, after_id=cursor, batch_limit=batch_limit, now=now)
-            cursor = int(batch["cursor_raw_id"])
-            for key in totals:
-                totals[key] = int(totals[key]) + int(batch.get(key, 0))
-            progress = {
-                "phase": phase, "cursor_raw_id": cursor,
-                "duplicate_reduction_totals": totals, "last_batch": batch,
-                "bootstrap": bootstrap_counts, "recovery": recovery,
-            }
-            _record_state(database, "running", progress)
-            if batch["complete"]:
-                break
-        removed_cleanup_indexes = drop_duplicate_cleanup_indexes(database)
-        phase = "necessary-consumer-verification"
-        verification = _verify_backfill(database, now=now)
+        applied, migration_backup = apply_migration(
+            database, backup_dir,
+            external_recovery_confirmed=bool(recovery_reference),
+            require_014_only=True,
+        )
+        if migration_backup is not None:
+            recovery = {"kind": "local_backup", "reference": str(migration_backup)}
+        elif applied and recovery_reference:
+            recovery = {"kind": "verified_external", "reference": recovery_reference}
+        phases[phase] = _phase_result(
+            phase_started_at, phase_started_clock,
+            {"migration": "applied" if applied else "already-applied"},
+        )
+
+        phase = "necessary-state"
+        phase_started_at = _utc_now()
+        phase_started_clock = time.perf_counter()
+        _record_state(database, "running", {
+            "phase": phase, "phases": phases, "recovery": recovery,
+        })
+        startup_counts = prepare_startup_state(database, now=now)
+        phases[phase] = _phase_result(
+            phase_started_at, phase_started_clock, startup_counts)
+
+        phase = "recent-summary"
+        phase_started_at = _utc_now()
+        phase_started_clock = time.perf_counter()
+        _record_state(database, "running", {
+            "phase": phase, "phases": phases, "recovery": recovery,
+        }, {
+            "current_state_count": startup_counts["current_states"],
+            "recent_receipt_count": startup_counts["recent_receipts"],
+            "receipt_hour_count": startup_counts["receipt_hour_summaries"],
+        })
+        recent_summary = prepare_recent_slot_summaries(database, now=now)
+        phases[phase] = _phase_result(
+            phase_started_at, phase_started_clock, recent_summary)
+
+        phase = "startup-verification"
+        phase_started_at = _utc_now()
+        phase_started_clock = time.perf_counter()
+        _record_state(database, "running", {
+            "phase": phase, "phases": phases, "recovery": recovery,
+        }, {
+            "current_state_count": startup_counts["current_states"],
+            "recent_receipt_count": startup_counts["recent_receipts"],
+            "receipt_hour_count": startup_counts["receipt_hour_summaries"],
+        })
+        verification = _verify_startup(
+            database, now=now, recent_summary=recent_summary)
+        phases[phase] = _phase_result(
+            phase_started_at, phase_started_clock, verification)
         _record_state(
             database, "completed",
             {
-                "phase": "ready", "bootstrap": bootstrap_counts,
-                "duplicate_reduction_totals": totals, "cursor_raw_id": cursor,
-                "cleanup_index_prep": cleanup_index_prep,
-                "removed_cleanup_indexes": removed_cleanup_indexes,
+                "phase": "ready", "phases": phases,
+                "startup": startup_counts, "recent_summary": recent_summary,
                 "verification": verification, "recovery": recovery,
             },
             verification,
         )
         return {
             "migration": "applied" if applied else "already-applied",
-            "backup": str(backup) if backup else None,
-            "recovery_reference": recovery_reference,
-            "backfill": bootstrap_counts,
-            "duplicate_reduction": totals,
-            "cleanup_index_prep": cleanup_index_prep,
-            "removed_cleanup_indexes": removed_cleanup_indexes,
+            "backup": str(migration_backup) if migration_backup else None,
+            "recovery_reference": recovery_reference if applied and not migration_backup else None,
+            "startup": startup_counts,
+            "recent_summary": recent_summary,
             "verification": verification,
+            "phases": phases,
         }
     except Exception as exc:
+        setattr(exc, "startup_phase", phase)
+        failed_phase = {
+            "started_at": phase_started_at,
+            "failed_at": _utc_now(),
+            "elapsed_seconds": round(time.perf_counter() - phase_started_clock, 3),
+            "error": str(exc),
+        }
         try:
             _record_state(database, "failed", {
-                "phase": phase, "cursor_raw_id": cursor,
-                "duplicate_reduction_totals": totals, "error": str(exc),
+                "phase": phase, "phases": phases, "failed_phase": failed_phase,
                 "recovery": recovery,
             })
-        except sqlite3.Error:
+        except (MigrationError, sqlite3.Error):
             pass
         if isinstance(exc, (CutoverError, MigrationError, RetentionError, sqlite3.Error)):
             raise
-        raise CutoverError("station-ingestion cutover failed") from exc
+        raise CutoverError(f"station-ingestion startup failed during {phase}") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -345,16 +327,17 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         if arguments.action == "prepare":
-            if arguments.backup_dir is None and not arguments.verified_recovery_reference:
-                raise CutoverError(
-                    "prepare requires --backup-dir or --verified-recovery-reference")
             result = prepare_cutover(
                 arguments.database, arguments.backup_dir, batch_limit=arguments.batch_limit,
                 recovery_reference=arguments.verified_recovery_reference)
         else:
             result = require_cutover_ready(arguments.database)
     except (CutoverError, MigrationError, RetentionError, sqlite3.Error) as exc:
-        print(json.dumps({"action": arguments.action, "status": "failed", "error": str(exc)}), file=sys.stderr)
+        payload = {"action": arguments.action, "status": "failed", "error": str(exc)}
+        phase = getattr(exc, "startup_phase", None)
+        if phase:
+            payload["phase"] = phase
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps({"action": arguments.action, "status": "completed", "result": result}, sort_keys=True))
     return 0

@@ -1,6 +1,6 @@
 import base64
 from contextlib import closing
-from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import gzip
 import hashlib
@@ -20,7 +20,6 @@ from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
 import station_ingest_retention as retention
 from station_ingest_retention import (
-    MaintenanceLock,
     RetentionError,
     StoragePolicy,
     archive_raw_day,
@@ -29,12 +28,14 @@ from station_ingest_retention import (
     compact_isolated_copy,
     compact_prepared_database,
     maintain_retention,
+    prepare_recent_slot_summaries,
+    prepare_startup_state,
     read_raw_evidence,
     reduce_confirmed_minute_duplicates,
     reduce_legacy_indexes,
     run_periodic_maintenance,
 )
-from station_ingest_cutover import CutoverError, prepare_cutover
+from station_ingest_cutover import prepare_cutover
 
 
 class StationIngestRetentionWindowsTest(unittest.TestCase):
@@ -163,6 +164,61 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT SUM(receipt_count) FROM station_ingest_receipt_hourly"
             ).fetchone()[0], 1)
+
+    def test_startup_prepares_recent_slot_summaries_idempotently(self):
+        self._configure_hj212_ph()
+        outside = self._insert_raw(
+            "2026-10-16T03:59:59+00:00",
+            self._hj212(qn="outside", data_time="20261016120000"),
+            logical_key="outside-slot")
+        first = self._insert_raw(
+            "2026-10-16T10:00:00+00:00",
+            self._hj212(qn="recent-1", data_time="20261016160000"),
+            logical_key="recent-slot-1", disposition="pending_parse", persistence="pending_parse")
+        second = self._insert_raw(
+            "2026-10-16T10:01:00+00:00",
+            self._hj212(qn="recent-2", data_time="20261016160100"),
+            logical_key="recent-slot-2", disposition="pending_parse", persistence="pending_parse")
+
+        startup = prepare_startup_state(self.database, now=self.now)
+        prepared = prepare_recent_slot_summaries(self.database, now=self.now)
+        repeated = prepare_recent_slot_summaries(self.database, now=self.now)
+
+        self.assertEqual(startup["recent_receipts"], 2)
+        self.assertEqual(prepared["scanned_frames"], 2)
+        self.assertEqual(prepared["eligible_frames"], 2)
+        self.assertEqual(prepared["slot_identities"], 1)
+        self.assertEqual(repeated, prepared)
+        with closing(sqlite3.connect(self.database)) as connection:
+            summary = connection.execute(
+                """SELECT canonical_raw_frame_id,receipt_count,first_received_at,last_received_at
+                   FROM station_ingest_slot_summaries""").fetchone()
+            self.assertEqual(summary, (
+                first, 2, "2026-10-16T10:00:00+00:00", "2026-10-16T10:01:00+00:00"))
+            self.assertNotEqual(summary[0], outside)
+
+    def test_startup_refresh_preserves_folded_receipts_and_adds_r25_rows_once(self):
+        self._insert_raw(
+            "2026-10-16T11:00:00+00:00", b"r26-canonical", logical_key="r26-canonical")
+        prepare_startup_state(self.database, now=self.now)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE station_ingest_receipt_hourly SET receipt_count=5")
+            connection.commit()
+
+        prepare_startup_state(self.database, now=self.now)
+        self._insert_raw(
+            "2026-10-16T11:30:00+00:00", b"r25-new-row", logical_key="r25-new-row")
+        prepare_startup_state(self.database, now=self.now)
+        prepare_startup_state(self.database, now=self.now)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT SUM(receipt_count) FROM station_ingest_receipt_hourly"
+            ).fetchone()[0], 6)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts"
+            ).fetchone()[0], 2)
 
     def test_current_state_selects_one_latest_open_error_per_source(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -668,20 +724,17 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
             ).fetchone()[0], 0)
 
-    def test_index_reduction_requires_the_necessary_state_cutover(self):
+    def test_r25_indexes_remain_after_startup_and_reduction_is_disabled(self):
         self._insert_raw(
             "2026-10-16T11:00:00+00:00", b"recent", logical_key="recent-key")
-        with self.assertRaisesRegex(CutoverError, "cutover has not completed"):
+        prepare_cutover(self.database, self.root / "backups", now=self.now)
+        with self.assertRaisesRegex(RetentionError, "r25 remains the rollback version"):
             reduce_legacy_indexes(self.database, now=self.now)
 
-        prepare_cutover(self.database, self.root / "backups", now=self.now)
-        removed = reduce_legacy_indexes(self.database, now=self.now)
-
-        self.assertNotIn("idx_ingest_raw_authenticated_endpoint_received", removed)
-        self.assertNotIn("idx_ingest_raw_logical_key", removed)
         with closing(sqlite3.connect(self.database)) as connection:
             indexes = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='index'")}
+            self.assertTrue(set(retention.LEGACY_RAW_INDEXES) <= indexes)
             self.assertIn("idx_ingest_raw_logical_key", indexes)
             self.assertIn("idx_ingest_raw_authenticated_endpoint_received", indexes)
             self.assertIn("idx_ingest_raw_received", indexes)
@@ -771,49 +824,52 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 self.database, self.root / "legacy.db", self.policy,
                 now=self.now, batch_limit=100)
 
-    def test_periodic_runner_is_mutually_exclusive_repeatable_and_failure_visible(self):
+    def test_periodic_runner_skips_historical_governance_without_retry(self):
         prepare_cutover(self.database, self.root / "backups", now=self.now)
         lock_file = self.root / "maintenance.lock"
-        with MaintenanceLock(lock_file), self.assertRaisesRegex(
-            RetentionError, "already running"
-        ):
-            run_periodic_maintenance(
-                self.database, self.policy, lock_file=lock_file, now=self.now)
-
+        expected = {
+            "status": "skipped",
+            "reason": (
+                "historical station-ingestion maintenance is disabled for this release; "
+                "run it only after separate approval"
+            ),
+            "historical_maintenance_called": 0,
+            "retry_required": False,
+        }
         with mock.patch.object(
-            retention, "maintain_retention", side_effect=[{"cycle": 1}, {"cycle": 2}]
-        ) as maintained:
+            retention, "maintain_retention",
+            side_effect=AssertionError("scheduled entry must not run governance"),
+        ) as maintained, mock.patch.object(
+            retention, "MaintenanceLock",
+            side_effect=AssertionError("disabled entry must not acquire the governance lock"),
+        ) as locked, mock.patch.object(
+            retention, "_record_periodic_failure",
+            side_effect=AssertionError("a normal skip must not be recorded as a failure"),
+        ) as failed:
             self.assertEqual(run_periodic_maintenance(
-                self.database, self.policy, lock_file=lock_file, now=self.now), {"cycle": 1})
-            self.assertEqual(run_periodic_maintenance(
-                self.database, self.policy, lock_file=lock_file, now=self.now), {"cycle": 2})
-        self.assertEqual(maintained.call_count, 2)
-
-        with mock.patch.object(
-            retention, "maintain_retention", side_effect=RetentionError("visible periodic failure")
-        ), self.assertRaisesRegex(RetentionError, "visible periodic failure"):
-            run_periodic_maintenance(
-                self.database, self.policy, lock_file=lock_file, now=self.now)
+                self.database, self.policy, lock_file=lock_file, now=self.now), expected)
+        maintained.assert_not_called()
+        locked.assert_not_called()
+        failed.assert_not_called()
+        self.assertFalse(lock_file.exists())
         with closing(sqlite3.connect(self.database)) as connection:
-            status, detail = connection.execute(
-                """SELECT status,detail FROM station_ingest_retention_runs
-                   ORDER BY id DESC LIMIT 1"""
-            ).fetchone()
-        self.assertEqual(status, "failed")
-        self.assertIn("visible periodic failure", detail)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
 
-        stderr = io.StringIO()
+        stdout = io.StringIO()
         with mock.patch.object(
-            retention, "run_periodic_maintenance",
-            side_effect=RetentionError("visible cli failure"),
-        ), redirect_stderr(stderr):
+            retention, "maintain_retention",
+            side_effect=AssertionError("CLI must not run governance"),
+        ), redirect_stdout(stdout):
             exit_code = retention.main([
                 "maintain-once", "--database", str(self.database),
                 "--raw-storage-dir", str(self.root), "--storage-mode", "validation",
             ])
-        self.assertEqual(exit_code, 2)
-        self.assertIn('"status": "failed"', stderr.getvalue())
-        self.assertIn("visible cli failure", stderr.getvalue())
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["action"], "maintain-once")
+        self.assertEqual(payload["result"], expected)
 
 
 if __name__ == "__main__":

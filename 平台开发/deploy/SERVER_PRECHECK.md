@@ -38,9 +38,10 @@ Before deployment:
    and checksum manifest as one timestamped recovery set.
 10. Keep Web and the station receiver stopped while the one-shot
     `station-ingest-cutover` Compose dependency runs. It applies migration 014,
-    backfills historical bounded summaries, verifies endpoint/latest-authenticated
-    and receipt-window counts, and writes the durable cutover marker. A non-zero
-    exit blocks both services; do not bypass it or run the backfill from Web startup.
+    refreshes the bounded startup state and recent slot summaries, verifies
+    endpoint/latest-authenticated and receipt-window counts, and writes the durable
+    startup marker. A non-zero
+    exit blocks both services; do not bypass it or run startup preparation from Web startup.
     The successful JSON output must contain `status=completed`, zero
     `latest_authenticated_mismatches`, and matching expected/actual receipt counts.
     From the immutable release directory, the independent release task runs:
@@ -52,16 +53,18 @@ Before deployment:
     docker compose --profile station-ingest up -d water-monitor station-ingest
     ```
     Do not run the final `up` command after either one-shot command returns non-zero.
-    Re-running `station-ingest-cutover` after a completed marker must report
-    `backfill=already-completed` rather than scan historical raw frames again.
-11. After the cutover succeeds, install the unique six-hour maintenance runner with
-    `sudo bash deploy/install-station-ingest-retention-timer.sh <verified-FN-mirror-path>`.
-    The timer retries failures up to three times at ten-minute intervals. The Python
-    runner holds a cross-process lease for the whole cycle, writes failed runs to
-    `station_ingest_retention_runs` when SQLite is available, and emits daemon alert
-    messages plus a failed systemd unit otherwise. Confirm the host monitor alerts on
-    that unit before release. The scheduled command runs only `maintain-once`; it never
-    runs `compact-copy` or the first historical compaction automatically.
+    Re-running `station-ingest-cutover` after a completed marker must refresh the
+    bounded startup state again and report `migration=already-applied`; it must not
+    reuse an old ready marker without incorporating receipts written during an R25
+    rollback interval.
+11. Do not install or enable the six-hour station-ingestion maintenance timer for this
+    release. Historical scanning, archive creation, expiry deletion, index reduction,
+    and compaction remain deferred pending separate approval. The `maintain-once`
+    entry returns a successful `status=skipped` result with a reason and
+    `retry_required=false`, so an already-installed timer does not enter governance or
+    retry a normal deferral. Do not change any existing online timer during development;
+    the release operator must inspect and handle host timer state under a later release
+    contract.
 
 ## Consistent restore
 

@@ -83,7 +83,7 @@ services:
     command:
       - /bin/sh
       - -ec
-      - "umask 0007; exec python station_ingest_cutover.py prepare --database /app/backend/data/water.db --batch-limit ${STATION_CUTOVER_BATCH_LIMIT:-500} ${STATION_CUTOVER_RECOVERY_ARGS:---backup-dir /app/backend/data/migration-backups}"
+      - "umask 0007; exec python station_ingest_cutover.py prepare --database /app/backend/data/water.db ${STATION_CUTOVER_RECOVERY_ARGS:-}"
     environment:
       TZ: Asia/Shanghai
       LD_PRELOAD: /opt/libsqlite-group-mode.so

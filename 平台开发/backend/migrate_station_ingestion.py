@@ -44,6 +44,20 @@ STATION_EXPECTED_FACTORS_MIGRATION_VERSION = "20261013_011_station_expected_fact
 HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION = "20261013_012_hj212_numeric_factor_definitions"
 STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
 STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION = "20261016_014_station_ingest_retention_windows"
+STATION_INGEST_RETENTION_WINDOW_TABLES = frozenset({
+    "station_ingest_current_state",
+    "station_ingest_recent_receipts",
+    "station_ingest_receipt_hourly",
+    "station_ingest_slot_summaries",
+    "monitoring_raw_archive_part_metadata",
+    "monitoring_archive_evidence_refs",
+    "station_ingest_dedup_keys",
+    "station_ingest_duplicate_links",
+    "station_ingest_error_hourly",
+    "station_ingest_detail_archive_parts",
+    "station_ingest_retention_runs",
+    "station_ingest_cutover_state",
+})
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -539,6 +553,7 @@ def apply_migration(
     app_version: str = "station-ingestion-v1",
     isolated_test: bool = False,
     external_recovery_confirmed: bool = False,
+    require_014_only: bool = False,
 ) -> tuple[bool, Path | None]:
     database = Path(database)
     backup_dir = Path(backup_dir) if backup_dir is not None else None
@@ -551,7 +566,24 @@ def apply_migration(
             existing = existing_versions.get(version)
             if existing is not None and existing != migration_checksum(version):
                 raise MigrationError("migration checksum conflict")
+        known_versions = tuple(version for version, _ in MIGRATIONS)
         pending = [(version, path) for version, path in MIGRATIONS if version not in existing_versions]
+        pending_versions = tuple(version for version, _ in pending)
+        fast_014_only = False
+        if require_014_only:
+            unknown_versions = set(existing_versions) - set(known_versions)
+            if unknown_versions:
+                raise MigrationError(
+                    "startup migration found unknown schema migration versions: "
+                    + ", ".join(sorted(unknown_versions)))
+            missing_prior = [version for version in known_versions[:-1] if version not in existing_versions]
+            if missing_prior:
+                raise MigrationError(
+                    "startup migration requires complete migrations 001 through 013; missing: "
+                    + ", ".join(missing_prior))
+            if pending_versions not in ((), (STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,)):
+                raise MigrationError("startup migration permits only migration 014")
+            fast_014_only = bool(pending_versions)
         if not pending:
             verify_station_monitoring_contract(connection)
             return False, None
@@ -563,12 +595,14 @@ def apply_migration(
     backup_path = backup_database(database, backup_dir) if backup_dir is not None else None
     connection: sqlite3.Connection | None = None
     before_foreign_rows: frozenset[tuple[object, ...]] | None = None
+    foreign_key_tables = (
+        STATION_INGEST_RETENTION_WINDOW_TABLES if fast_014_only else None)
     try:
         connection = sqlite3.connect(str(database), isolation_level=None)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
-        before_foreign_rows = _foreign_key_violations(connection)
+        before_foreign_rows = _foreign_key_violations(connection, foreign_key_tables)
         for version, path in pending:
             _execute_migration_sql(connection, path.read_text(encoding="utf-8"))
             connection.execute(
@@ -580,7 +614,7 @@ def apply_migration(
         _verify_existing_schema_changes(
             before_schema, after_schema, tuple(version for version, _ in pending),
         )
-        after_foreign_rows = _foreign_key_violations(connection)
+        after_foreign_rows = _foreign_key_violations(connection, foreign_key_tables)
         if after_foreign_rows != before_foreign_rows:
             raise MigrationError("migration changed foreign key violations")
         connection.commit()
@@ -599,13 +633,15 @@ def apply_migration(
             with closing(sqlite3.connect(str(database))) as restored:
                 if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise MigrationError("migration failed and automatic restore verification failed")
-                if before_foreign_rows is not None and _foreign_key_violations(restored) != before_foreign_rows:
+                if (before_foreign_rows is not None
+                        and _foreign_key_violations(restored, foreign_key_tables) != before_foreign_rows):
                     raise MigrationError("migration failed and automatic restore verification failed")
         else:
             with closing(sqlite3.connect(str(database))) as rolled_back:
                 unchanged = _schema_snapshot(rolled_back) == before_schema
                 foreign_unchanged = (before_foreign_rows is None
-                                     or _foreign_key_violations(rolled_back) == before_foreign_rows)
+                                     or _foreign_key_violations(
+                                         rolled_back, foreign_key_tables) == before_foreign_rows)
             if not unchanged or not foreign_unchanged:
                 raise MigrationError(
                     "migration failed after external recovery was selected; restore the verified recovery set")
