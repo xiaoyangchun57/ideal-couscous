@@ -1,6 +1,7 @@
 import hashlib
 from contextlib import closing
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -68,10 +69,30 @@ class StationIngestCutoverTest(unittest.TestCase):
                 )
             connection.commit()
 
+    def _trace_sql(self, action):
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            result = action()
+        return result, statements
+
+    @staticmethod
+    def _pragma_count(statements, name):
+        prefix = f"PRAGMA {name}".upper()
+        return sum(statement.strip().upper().startswith(prefix) for statement in statements)
+
     def test_prepare_migrates_backfills_verifies_and_is_idempotent(self):
-        result = cutover.prepare_cutover(
-            self.database, self.root / "backups",
-            now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+        result, first_statements = self._trace_sql(
+            lambda: cutover.prepare_cutover(
+                self.database, self.root / "backups",
+                now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+            )
         )
 
         self.assertEqual(result["migration"], "applied")
@@ -81,12 +102,84 @@ class StationIngestCutoverTest(unittest.TestCase):
         self.assertEqual(result["verification"]["recent_receipt_count"], 1)
         self.assertEqual(result["verification"]["receipt_hour_count"], 1)
         self.assertEqual(result["verification"]["latest_authenticated_mismatches"], 0)
+        self.assertEqual(result["verification"]["consumer_window_hours"], 8)
+        self.assertEqual(self._pragma_count(first_statements, "integrity_check"), 1)
+        self.assertEqual(self._pragma_count(first_statements, "quick_check"), 0)
         self.assertEqual(cutover.require_cutover_ready(self.database)["status"], "completed")
         with mock.patch.object(
             cutover, "bootstrap_retention_state", side_effect=AssertionError("must not rescan")
         ):
-            repeated = cutover.prepare_cutover(self.database, self.root / "backups")
+            repeated, repeated_statements = self._trace_sql(
+                lambda: cutover.prepare_cutover(self.database, self.root / "backups"))
         self.assertEqual(repeated["backfill"], "already-completed")
+        self.assertEqual(repeated["backup"], result["backup"])
+        self.assertEqual(self._pragma_count(repeated_statements, "integrity_check"), 0)
+        self.assertEqual(self._pragma_count(repeated_statements, "quick_check"), 0)
+
+    def test_prepare_accepts_explicit_verified_recovery_reference_without_local_backup(self):
+        result, first_statements = self._trace_sql(
+            lambda: cutover.prepare_cutover(
+                self.database, None,
+                now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+                recovery_reference="isolated-release-recovery-set",
+            )
+        )
+
+        self.assertEqual(result["migration"], "applied")
+        self.assertIsNone(result["backup"])
+        self.assertEqual(
+            result["recovery_reference"], "isolated-release-recovery-set")
+        self.assertEqual(self._pragma_count(first_statements, "integrity_check"), 0)
+        self.assertEqual(self._pragma_count(first_statements, "quick_check"), 0)
+        self.assertEqual(cutover.require_cutover_ready(self.database)["status"], "completed")
+        repeated, repeated_statements = self._trace_sql(
+            lambda: cutover.prepare_cutover(
+                self.database, None,
+                recovery_reference="isolated-release-recovery-set",
+            ))
+        self.assertEqual(repeated["backfill"], "already-completed")
+        self.assertEqual(self._pragma_count(repeated_statements, "integrity_check"), 0)
+        self.assertEqual(self._pragma_count(repeated_statements, "quick_check"), 0)
+
+    def test_prepare_creates_pre_cleanup_backup_when_migration_is_already_applied(self):
+        migration.apply_migration(
+            self.database, None, external_recovery_confirmed=True)
+        backup_dir = self.root / "cutover-backups"
+
+        result, statements = self._trace_sql(
+            lambda: cutover.prepare_cutover(
+                self.database, backup_dir,
+                now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+            )
+        )
+
+        backup = Path(result["backup"])
+        self.assertEqual(result["migration"], "already-applied")
+        self.assertTrue(backup.is_file())
+        self.assertEqual(backup.parent, backup_dir)
+        with closing(sqlite3.connect(self.database)) as connection:
+            detail = json.loads(connection.execute(
+                "SELECT detail FROM station_ingest_cutover_state WHERE cutover_name=?",
+                (cutover.CUTOVER_NAME,),
+            ).fetchone()[0])
+        self.assertEqual(detail["recovery"], {
+            "kind": "local_backup", "reference": str(backup),
+        })
+        self.assertEqual(self._pragma_count(statements, "integrity_check"), 1)
+        self.assertEqual(self._pragma_count(statements, "quick_check"), 0)
+
+    def test_prepare_still_rejects_missing_required_structure_without_deep_check(self):
+        migration.apply_migration(
+            self.database, None, external_recovery_confirmed=True)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP INDEX idx_station_ingest_current_endpoint")
+            connection.commit()
+
+        with self.assertRaisesRegex(migration.MigrationError, "missing required indexes"):
+            cutover.prepare_cutover(
+                self.database, None,
+                recovery_reference="isolated-release-recovery-set",
+            )
 
     def test_backfill_failure_leaves_startup_gate_closed_with_visible_reason(self):
         with mock.patch.object(
@@ -103,6 +196,46 @@ class StationIngestCutoverTest(unittest.TestCase):
         self.assertIn("injected backfill failure", detail)
         with self.assertRaisesRegex(cutover.CutoverError, "cutover is failed"):
             cutover.require_cutover_ready(self.database)
+
+    def test_duplicate_reduction_resumes_from_the_last_committed_cursor(self):
+        first_batch = {
+            "cursor_raw_id": 10, "scanned": 10, "eligible": 8,
+            "duplicate_candidates": 6, "deleted": 5, "retained_protected": 1,
+            "retained_unclassified": 2, "canonical_kept": 2, "complete": False,
+            "cutoff": "2026-10-09T12:00:00+00:00",
+        }
+        with mock.patch.object(
+            cutover, "reduce_confirmed_minute_duplicates",
+            side_effect=[first_batch, RetentionError("injected batch failure")],
+        ), self.assertRaisesRegex(RetentionError, "injected batch failure"):
+            cutover.prepare_cutover(
+                self.database, self.root / "backups",
+                now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+            )
+        original_backups = list((self.root / "backups").glob("*.db"))
+        self.assertEqual(len(original_backups), 1)
+
+        def finish(_database, *, after_id, batch_limit, now):
+            self.assertEqual(after_id, 10)
+            return {
+                "cursor_raw_id": 12, "scanned": 2, "eligible": 2,
+                "duplicate_candidates": 1, "deleted": 1, "retained_protected": 0,
+                "retained_unclassified": 0, "canonical_kept": 1, "complete": True,
+                "cutoff": "2026-10-09T12:00:00+00:00",
+            }
+
+        with mock.patch.object(
+            cutover, "reduce_confirmed_minute_duplicates", side_effect=finish,
+        ):
+            result = cutover.prepare_cutover(
+                self.database, self.root / "backups",
+                now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+            )
+        self.assertEqual(result["duplicate_reduction"]["scanned"], 12)
+        self.assertEqual(result["duplicate_reduction"]["deleted"], 6)
+        self.assertEqual(list((self.root / "backups").glob("*.db")), original_backups)
+        self.assertEqual(Path(result["backup"]), original_backups[0])
+        self.assertEqual(cutover.require_cutover_ready(self.database)["status"], "completed")
 
 
 if __name__ == "__main__":

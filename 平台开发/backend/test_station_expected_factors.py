@@ -17,7 +17,8 @@ import station_monitoring as monitoring_module
 from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
 from sl651_server import IngestionStorage, StationIngestServer, credential_hmac
-from station_ingest_retention import bootstrap_retention_state, reduce_legacy_indexes
+from station_ingest_cutover import prepare_cutover
+from station_ingest_retention import reduce_legacy_indexes
 from station_monitoring import latest_cycle, latest_values, normalize_raw_frame
 
 
@@ -994,8 +995,11 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 SELECT id,'hj212','large-history-test' FROM ingest_raw_frames
                 WHERE endpoint_id=?""", (unrelated_endpoint,))
             db.commit()
-        bootstrap_retention_state(
-            self.database, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
+        prepare_cutover(
+            self.database, None,
+            now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc),
+            recovery_reference="isolated-expected-factor-test",
+        )
         reduce_legacy_indexes(
             self.database, now=datetime(2026, 10, 16, 12, tzinfo=timezone.utc))
         with sqlite3.connect(self.database) as db:

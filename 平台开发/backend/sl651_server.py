@@ -15,12 +15,10 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import sqlite3
 from typing import Literal, Protocol
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # Support both package tests and direct container execution.
     from .sl651_parser import (
@@ -29,6 +27,7 @@ try:  # Support both package tests and direct container execution.
     from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from .ingestion_framing import extract_ingestion_frames
     from .station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
+    from .station_ingest_slots import hj212_realtime_summary_identity
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
     from sl651_parser import (
         MAX_FRAME_BYTES, PARSER_VERSION, FrameError, ParsedFrame, build_ack, parse_frame,
@@ -36,6 +35,7 @@ except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry 
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from ingestion_framing import extract_ingestion_frames
     from station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
+    from station_ingest_slots import hj212_realtime_summary_identity
 try:
     from .station_monitoring import normalize_raw_frame
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
@@ -375,89 +375,7 @@ class IngestionStorage:
     def _hj212_realtime_summary_identity(
         self, connection: sqlite3.Connection, frame: ParsedHJ212Frame, endpoint_id: int,
     ) -> tuple[str, str] | None:
-        if frame.command != "2011" or frame.data_time is None or not frame.factors:
-            return None
-        if any(
-            factor.quality != "valid" or factor.issue_code is not None
-            or factor.raw_value is None or not math.isfinite(factor.raw_value)
-            for factor in frame.factors
-        ):
-            return None
-        profile = None
-        observed_at = None
-        for candidate in connection.execute(
-            """SELECT timezone,instrument_asset_code,effective_from,effective_to
-               FROM monitoring_endpoint_profiles
-               WHERE endpoint_id=? AND enabled=1 ORDER BY effective_from DESC""",
-            (endpoint_id,),
-        ).fetchall():
-            try:
-                candidate_observed = frame.data_time.replace(
-                    tzinfo=ZoneInfo(candidate["timezone"]),
-                ).astimezone(timezone.utc).replace(microsecond=0)
-            except ZoneInfoNotFoundError:
-                return None
-            candidate_text = candidate_observed.isoformat()
-            if (candidate["effective_from"] <= candidate_text
-                    and (candidate["effective_to"] is None
-                         or candidate["effective_to"] > candidate_text)):
-                profile = candidate
-                observed_at = candidate_observed
-                break
-        if profile is None or observed_at is None:
-            return None
-        protocol_codes = sorted({factor.protocol_code for factor in frame.factors})
-        marks = ",".join("?" for _ in protocol_codes)
-        mapped_rows = connection.execute(
-            f"""SELECT mapping.protocol_code,
-                       COALESCE(mapping.business_metric,definition.business_metric) AS business_metric,
-                       COALESCE(mapping.instrument_asset_code,?) AS instrument_asset_code,
-                       definition.standard_unit
-                FROM monitoring_factor_mappings mapping
-                JOIN monitoring_factor_definitions definition
-                  ON definition.protocol_code=mapping.protocol_code
-                WHERE mapping.endpoint_id=? AND mapping.protocol_code IN ({marks})
-                  AND mapping.enabled=1 AND mapping.effective_from<=?
-                  AND (mapping.effective_to IS NULL OR mapping.effective_to>?)""",
-            (profile["instrument_asset_code"], endpoint_id, *protocol_codes,
-             observed_at.isoformat(), observed_at.isoformat()),
-        ).fetchall()
-        mapped_by_code = {row["protocol_code"]: row for row in mapped_rows}
-        if set(mapped_by_code) != set(protocol_codes):
-            return None
-        slot_local = frame.data_time.replace(
-            hour=(frame.data_time.hour // 4) * 4, minute=0, second=0, microsecond=0,
-            tzinfo=ZoneInfo(profile["timezone"]),
-        )
-        slot_started_at = slot_local.astimezone(timezone.utc).isoformat()
-        normalized_factors: dict[tuple[str, str, str, str], dict[str, object]] = {}
-        for factor in frame.factors:
-            mapping = mapped_by_code[factor.protocol_code]
-            identity = (
-                mapping["business_metric"] or factor.protocol_code,
-                mapping["instrument_asset_code"] or "",
-                mapping["standard_unit"] or "",
-                factor.value_kind or "",
-            )
-            normalized = {
-                "factor": identity[0],
-                "instrument_asset_code": identity[1],
-                "standard_unit": identity[2],
-                "value_kind": identity[3],
-                "value": 0.0 if factor.raw_value == 0 else factor.raw_value,
-                "quality": factor.quality,
-                "issue_code": factor.issue_code,
-            }
-            previous = normalized_factors.get(identity)
-            if previous is not None and previous != normalized:
-                return None
-            normalized_factors[identity] = normalized
-        factors = [normalized_factors[key] for key in sorted(normalized_factors)]
-        content = json.dumps(
-            {"factors": factors},
-            ensure_ascii=True, separators=(",", ":"), sort_keys=True,
-        )
-        return slot_started_at, hashlib.sha256(content.encode("ascii")).hexdigest()
+        return hj212_realtime_summary_identity(connection, frame, endpoint_id)
 
     def persist_unparseable(
         self, raw: bytes, error_code: str, received_at: str, *, protocol_family: str = "unknown",

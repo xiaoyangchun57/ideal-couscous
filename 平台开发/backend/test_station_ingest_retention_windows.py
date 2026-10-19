@@ -16,6 +16,7 @@ from unittest import mock
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
 import station_ingest_retention as retention
 from station_ingest_retention import (
@@ -26,12 +27,14 @@ from station_ingest_retention import (
     backfill_archive_evidence_refs,
     bootstrap_retention_state,
     compact_isolated_copy,
+    compact_prepared_database,
     maintain_retention,
     read_raw_evidence,
+    reduce_confirmed_minute_duplicates,
     reduce_legacy_indexes,
     run_periodic_maintenance,
 )
-from station_ingest_cutover import prepare_cutover
+from station_ingest_cutover import CutoverError, prepare_cutover
 
 
 class StationIngestRetentionWindowsTest(unittest.TestCase):
@@ -64,9 +67,11 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
 
     def _insert_raw(
         self, received_at, payload, *, logical_key=None, authentication="authenticated",
-        disposition="accepted", persistence="persisted",
+        disposition="accepted", persistence="persisted", endpoint_id=None, station_code=None,
     ):
         digest = hashlib.sha256(payload).hexdigest()
+        endpoint_id = self.endpoint_id if endpoint_id is None else endpoint_id
+        station_code = station_code or "RETENTION-MN"
         with closing(sqlite3.connect(self.database)) as connection:
             raw_id = connection.execute(
                 """INSERT INTO ingest_raw_frames(
@@ -74,7 +79,7 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                        raw_frame,body_length,crc_status,authentication_status,disposition,
                        persistence_state)
                    VALUES (?,?,?,?,?,?,?,'valid',?,?,?)""",
-                (self.endpoint_id, "RETENTION-MN", received_at, digest, logical_key,
+                (endpoint_id, station_code, received_at, digest, logical_key,
                  payload, len(payload), authentication, disposition, persistence),
             ).lastrowid
             connection.execute(
@@ -92,7 +97,34 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
         shutil.copy2(archive_path, mirror_path)
         return mirror_path
 
-    def test_bootstrap_uses_strict_windows_and_canonical_dedup_identity(self):
+    def _configure_hj212_ph(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,1,'Asia/Shanghai',1,'realtime',60,'2020-01-01T00:00:00+00:00')""",
+                (self.endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01001',60,0,'2020-01-01T00:00:00+00:00',1)""",
+                (self.endpoint_id,),
+            )
+            connection.commit()
+
+    def _hj212(self, *, qn, data_time, value="7.1", command="2011"):
+        kind = "Avg" if command == "2061" else "Rtd"
+        body = (
+            f"QN={qn};ST=91;CN={command};PW=testpw;MN=RETENTION-MN;Flag=5;"
+            f"DataTime={data_time};CP=&&w01001-{kind}={value},Flag=N&&"
+        ).encode("ascii")
+        return (b"##" + f"{len(body):04d}".encode("ascii") + body
+                + hj212_crc(body).encode("ascii") + b"\r\n")
+
+    def test_bootstrap_prepares_only_the_real_consumer_window(self):
         self._insert_raw(
             "2026-07-18T11:59:59+00:00", b"outside-dedup", logical_key="outside-dedup")
         dedup_boundary_id = self._insert_raw(
@@ -106,13 +138,15 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
 
         counts = bootstrap_retention_state(self.database, now=self.now)
 
-        self.assertEqual(counts["recent_receipts"], 2)
-        self.assertEqual(counts["receipt_hour_summaries"], 3)
+        self.assertEqual(counts["recent_receipts"], 1)
+        self.assertEqual(counts["receipt_hour_summaries"], 1)
+        self.assertEqual(counts["consumer_window_hours"], 8)
+        self.assertEqual(counts["historical_error_summaries"], 0)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 [row[0] for row in connection.execute(
                     "SELECT raw_frame_id FROM station_ingest_recent_receipts ORDER BY raw_frame_id")],
-                [boundary_id, latest_id],
+                [latest_id],
             )
             state = connection.execute(
                 """SELECT latest_received_at,latest_raw_frame_id,latest_authenticated_at
@@ -123,23 +157,179 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 state,
                 ("2026-10-16T11:00:00+00:00", latest_id, "2026-10-16T11:00:00+00:00"),
             )
-            dedup = connection.execute(
-                """SELECT canonical_raw_frame_id,expires_at
-                   FROM station_ingest_dedup_keys WHERE logical_key_sha256='same-key'"""
-            ).fetchone()
-            self.assertEqual(dedup[0], old_id)
-            self.assertEqual(dedup[1], "2027-01-11T12:00:00+00:00")
             self.assertEqual(connection.execute(
-                """SELECT canonical_raw_frame_id FROM station_ingest_dedup_keys
-                   WHERE logical_key_sha256='dedup-boundary'"""
-            ).fetchone()[0], dedup_boundary_id)
-            self.assertIsNone(connection.execute(
-                """SELECT 1 FROM station_ingest_dedup_keys
-                   WHERE logical_key_sha256='outside-dedup'"""
-            ).fetchone())
+                "SELECT COUNT(*) FROM station_ingest_dedup_keys"
+            ).fetchone()[0], 0)
             self.assertEqual(connection.execute(
                 "SELECT SUM(receipt_count) FROM station_ingest_receipt_hourly"
-            ).fetchone()[0], 3)
+            ).fetchone()[0], 1)
+
+    def test_current_state_selects_one_latest_open_error_per_source(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            second_endpoint = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('RETENTION-SECOND','credential-2',1,'bound')"""
+            ).lastrowid
+            connection.commit()
+
+        source_rows = ((self.endpoint_id, "RETENTION-MN", 20),
+                       (second_endpoint, "RETENTION-SECOND", 5))
+        expected = {}
+        errors = []
+        for source_index, (endpoint_id, station_code, count) in enumerate(source_rows):
+            for error_index in range(count):
+                received_at = (
+                    f"2026-10-0{source_index + 1}T00:{error_index:02d}:00+00:00")
+                raw_id = self._insert_raw(
+                    received_at, f"open-{source_index}-{error_index}".encode("ascii"),
+                    logical_key=f"open-{source_index}-{error_index}",
+                    endpoint_id=endpoint_id, station_code=station_code,
+                )
+                error_type = f"source-{source_index}-error-{error_index}"
+                errors.append((raw_id, error_type, received_at))
+                expected[endpoint_id] = (received_at, error_type)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,?,'open',?)""",
+                errors,
+            )
+            connection.commit()
+
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            bootstrap_retention_state(self.database, now=self.now)
+
+        error_state_writes = [
+            statement for statement in statements
+            if "RANKED_OPEN_ERRORS" in statement.upper()
+            and "INSERT INTO STATION_INGEST_CURRENT_STATE" in statement.upper()
+        ]
+        self.assertEqual(len(error_state_writes), 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE status='open'"
+            ).fetchone()[0], 25)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_dedup_keys WHERE protected=1"
+            ).fetchone()[0], 25)
+            for endpoint_id, latest in expected.items():
+                self.assertEqual(connection.execute(
+                    """SELECT latest_error_at,latest_error_type
+                       FROM station_ingest_current_state WHERE source_key=?""",
+                    (f"endpoint:{endpoint_id}",),
+                ).fetchone(), latest)
+
+    def test_confirmed_minute_duplicates_are_resumable_and_preserve_exceptions(self):
+        self._configure_hj212_ph()
+        raws = [
+            self._hj212(qn="20260911120000001", data_time="20260911120000"),
+            self._hj212(qn="20260911120100001", data_time="20260911120100"),
+            self._hj212(qn="20260911120200001", data_time="20260911120200"),
+            self._hj212(qn="20260911120400001", data_time="20260911120400"),
+            self._hj212(qn="20260911120300001", data_time="20260911120300", value="7.2"),
+            self._hj212(qn="20260911160000001", data_time="20260911160000"),
+            self._hj212(qn="20260911120500001", data_time="20260911120000", command="2061"),
+        ]
+        raw_ids = [
+            self._insert_raw(
+                f"2026-09-11T04:0{index}:05+00:00", raw,
+                logical_key=f"historical-{index}",
+            )
+            for index, raw in enumerate(raws)
+        ]
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'manual_review','open','2026-09-11T04:01:06+00:00')""",
+                (raw_ids[1],),
+            )
+            connection.execute(
+                """INSERT INTO ingest_parse_attempts(
+                       raw_frame_id,parser_version,parse_status,created_at)
+                   VALUES (?,'historical','parsed_header','2026-09-11T04:02:06+00:00')""",
+                (raw_ids[2],),
+            )
+            schedule_id = connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       effective_from)
+                   VALUES (?,'HJ212:w01001','Asia/Shanghai',14400,'00:00:00',
+                           '2020-01-01T00:00:00+00:00')""",
+                (self.endpoint_id,),
+            ).lastrowid
+            batch_id = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,1,2011,0,'2026-09-11T04:04:00+00:00',
+                           '2026-09-11T04:04:00+00:00','2026-09-11T04:03:05+00:00',
+                           'realtime','device_reported','formal-duplicate','test','accepted',
+                           'completed','2026-09-11T04:04:06+00:00')""",
+                (raw_ids[3], self.endpoint_id),
+            ).lastrowid
+            value_id = connection.execute(
+                """INSERT INTO observation_values(
+                       observation_batch_id,protocol_code,business_metric,standard_value,
+                       standard_unit,quality,parser_version,is_published)
+                   VALUES (?,'HJ212:w01001','ph',7.1,'pH','valid','test',1)""",
+                (batch_id,),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_business_observations(
+                       source_observation_value_id,observation_batch_id,schedule_id,endpoint_id,
+                       business_site_id,protocol_code,business_metric,scheduled_at,observed_at,
+                       received_at,standard_value,standard_unit,quality,timeliness,slot_state,
+                       projection_version)
+                   VALUES (?,?,?,?,1,'HJ212:w01001','ph','2026-09-11T04:00:00+00:00',
+                           '2026-09-11T04:04:00+00:00','2026-09-11T04:03:05+00:00',7.1,
+                           'pH','valid','on_time','selected','test')""",
+                (value_id, batch_id, schedule_id, self.endpoint_id),
+            )
+            connection.commit()
+
+        first = reduce_confirmed_minute_duplicates(
+            self.database, batch_limit=2, now=self.now)
+        second = reduce_confirmed_minute_duplicates(
+            self.database, after_id=first["cursor_raw_id"], batch_limit=10, now=self.now)
+
+        self.assertFalse(first["complete"])
+        self.assertTrue(second["complete"])
+        self.assertEqual(second["deleted"], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            remaining = {row[0] for row in connection.execute(
+                "SELECT id FROM ingest_raw_frames ORDER BY id")}
+            self.assertIn(raw_ids[0], remaining)
+            self.assertIn(raw_ids[1], remaining)
+            self.assertNotIn(raw_ids[2], remaining)
+            self.assertIn(raw_ids[3], remaining)
+            self.assertIn(raw_ids[4], remaining)
+            self.assertIn(raw_ids[5], remaining)
+            self.assertIn(raw_ids[6], remaining)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_parse_attempts WHERE raw_frame_id=?", (raw_ids[2],)
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM monitoring_business_observations WHERE observation_batch_id=?",
+                (batch_id,),
+            ).fetchone()[0], 1)
+            summaries = connection.execute(
+                """SELECT slot_started_at,content_sha256,canonical_raw_frame_id
+                   FROM station_ingest_slot_summaries ORDER BY slot_started_at,content_sha256"""
+            ).fetchall()
+            self.assertEqual(len(summaries), 3)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 2)
 
     def test_maintenance_keeps_summary_boundary_and_prunes_strictly_older_rows(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -478,13 +668,13 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
             ).fetchone()[0], 0)
 
-    def test_index_reduction_requires_complete_directories(self):
+    def test_index_reduction_requires_the_necessary_state_cutover(self):
         self._insert_raw(
             "2026-10-16T11:00:00+00:00", b"recent", logical_key="recent-key")
-        with self.assertRaisesRegex(RetentionError, "replacement directories are incomplete"):
+        with self.assertRaisesRegex(CutoverError, "cutover has not completed"):
             reduce_legacy_indexes(self.database, now=self.now)
 
-        bootstrap_retention_state(self.database, now=self.now)
+        prepare_cutover(self.database, self.root / "backups", now=self.now)
         removed = reduce_legacy_indexes(self.database, now=self.now)
 
         self.assertNotIn("idx_ingest_raw_authenticated_endpoint_received", removed)
@@ -532,7 +722,7 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 " ".join(str(row[3]) for row in plan),
             )
 
-    def test_compact_copy_does_not_modify_source_database(self):
+    def test_compact_prepared_writes_one_final_copy_without_modifying_source(self):
         payload = b"source-must-remain"
         raw_id = self._insert_raw(
             "2026-10-01T08:00:00+00:00", payload, logical_key="compact-key")
@@ -546,20 +736,40 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
             connection.commit()
         target = self.root / "compacted.db"
 
-        result = compact_isolated_copy(
-            self.database, target, self.policy, now=self.now, batch_limit=100)
+        prepare_cutover(self.database, self.root / "backups", now=self.now)
+        original_connect = sqlite3.connect
+        statements = []
 
-        self.assertEqual(result["live_write_catch_up"], "NOT RUN")
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            result = compact_prepared_database(self.database, target)
+
+        self.assertFalse(result["source_modified"])
+        self.assertEqual(sum(
+            statement.strip().upper().startswith("PRAGMA QUICK_CHECK")
+            for statement in statements
+        ), 1)
+        self.assertEqual(sum(
+            statement.strip().upper().startswith("PRAGMA INTEGRITY_CHECK")
+            for statement in statements
+        ), 0)
         with closing(sqlite3.connect(self.database)) as source:
             self.assertEqual(source.execute(
                 "SELECT raw_frame FROM ingest_raw_frames WHERE id=?", (raw_id,)
             ).fetchone()[0], payload)
         with closing(sqlite3.connect(target)) as compacted:
-            self.assertIsNone(compacted.execute(
+            self.assertIsNotNone(compacted.execute(
                 "SELECT 1 FROM ingest_raw_frames WHERE id=?", (raw_id,)
             ).fetchone())
-            self.assertEqual(read_raw_evidence(compacted, raw_id), payload)
             self.assertEqual(compacted.execute("PRAGMA quick_check").fetchone()[0], "ok")
+        with self.assertRaisesRegex(RetentionError, "compact-copy is retired"):
+            compact_isolated_copy(
+                self.database, self.root / "legacy.db", self.policy,
+                now=self.now, batch_limit=100)
 
     def test_periodic_runner_is_mutually_exclusive_repeatable_and_failure_visible(self):
         prepare_cutover(self.database, self.root / "backups", now=self.now)

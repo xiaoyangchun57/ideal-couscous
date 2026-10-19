@@ -148,7 +148,7 @@ class StationIngestionMigrationTest(unittest.TestCase):
     def test_failed_010_upgrade_restores_the_009_database(self):
         self._apply_through_009(self.database)
         with mock.patch.object(
-                migration, "verify_station_monitoring_schema",
+                migration, "verify_station_monitoring_contract",
                 side_effect=migration.MigrationError("forced-010")):
             with self.assertRaisesRegex(migration.MigrationError, "forced-010"):
                 migration.apply_migration(self.database, self.backups)
@@ -240,7 +240,7 @@ class StationIngestionMigrationTest(unittest.TestCase):
             ).fetchall()
 
         with mock.patch.object(
-            migration, "verify_station_monitoring_schema",
+            migration, "verify_station_monitoring_contract",
             side_effect=migration.MigrationError("forced 007 verification failure"),
         ):
             with self.assertRaisesRegex(migration.MigrationError, "forced 007 verification failure"):
@@ -484,7 +484,9 @@ class StationIngestionMigrationTest(unittest.TestCase):
             connection.execute("INSERT INTO legacy(note) VALUES ('before')")
             before_schema = migration._schema_snapshot(connection)
             connection.commit()
-        with mock.patch.object(migration, "verify_station_ingestion_schema", side_effect=migration.MigrationError("forced")):
+        with mock.patch.object(
+                migration, "verify_station_monitoring_contract",
+                side_effect=migration.MigrationError("forced")):
             with self.assertRaisesRegex(migration.MigrationError, "forced"):
                 migration.apply_migration(self.database, self.backups)
         with closing(sqlite3.connect(self.database)) as connection:

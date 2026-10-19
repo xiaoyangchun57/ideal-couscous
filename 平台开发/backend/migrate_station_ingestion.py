@@ -117,7 +117,7 @@ def _utc_now() -> str:
 
 def backup_database(database: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = backup_dir / f"{database.stem}-{MIGRATION_VERSION}-{stamp}.db"
     source = sqlite3.connect(str(database))
     destination = sqlite3.connect(str(target))
@@ -534,13 +534,14 @@ def _execute_migration_sql(connection: sqlite3.Connection, script: str) -> None:
 
 def apply_migration(
     database: Path,
-    backup_dir: Path,
+    backup_dir: Path | None,
     *,
     app_version: str = "station-ingestion-v1",
     isolated_test: bool = False,
+    external_recovery_confirmed: bool = False,
 ) -> tuple[bool, Path | None]:
     database = Path(database)
-    backup_dir = Path(backup_dir)
+    backup_dir = Path(backup_dir) if backup_dir is not None else None
     _require_existing_business_database(database, isolated_test=isolated_test)
     with closing(sqlite3.connect(str(database))) as connection:
         existing_versions = {}
@@ -552,11 +553,14 @@ def apply_migration(
                 raise MigrationError("migration checksum conflict")
         pending = [(version, path) for version, path in MIGRATIONS if version not in existing_versions]
         if not pending:
-            verify_station_monitoring_schema(connection)
+            verify_station_monitoring_contract(connection)
             return False, None
         before_schema = _schema_snapshot(connection)
 
-    backup_path = backup_database(database, backup_dir)
+    if backup_dir is None and not external_recovery_confirmed:
+        raise MigrationError(
+            "migration requires either a local backup directory or a verified external recovery set")
+    backup_path = backup_database(database, backup_dir) if backup_dir is not None else None
     connection: sqlite3.Connection | None = None
     before_foreign_rows: frozenset[tuple[object, ...]] | None = None
     try:
@@ -571,7 +575,7 @@ def apply_migration(
                 "INSERT INTO schema_migrations(version, checksum, applied_at, app_version) VALUES (?, ?, ?, ?)",
                 (version, migration_checksum(version), _utc_now(), app_version),
             )
-        verify_station_monitoring_schema(connection)
+        verify_station_monitoring_contract(connection)
         after_schema = _schema_snapshot(connection)
         _verify_existing_schema_changes(
             before_schema, after_schema, tuple(version for version, _ in pending),
@@ -590,12 +594,21 @@ def apply_migration(
             connection = None
         # SQLite PRAGMA changes and DDL can survive a failed run on some versions. Restore
         # the verified pre-migration backup so a failed migration has zero target side effect.
-        restore_backup(database, backup_path)
-        with closing(sqlite3.connect(str(database))) as restored:
-            if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise MigrationError("migration failed and automatic restore verification failed")
-            if before_foreign_rows is not None and _foreign_key_violations(restored) != before_foreign_rows:
-                raise MigrationError("migration failed and automatic restore verification failed")
+        if backup_path is not None:
+            restore_backup(database, backup_path)
+            with closing(sqlite3.connect(str(database))) as restored:
+                if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise MigrationError("migration failed and automatic restore verification failed")
+                if before_foreign_rows is not None and _foreign_key_violations(restored) != before_foreign_rows:
+                    raise MigrationError("migration failed and automatic restore verification failed")
+        else:
+            with closing(sqlite3.connect(str(database))) as rolled_back:
+                unchanged = _schema_snapshot(rolled_back) == before_schema
+                foreign_unchanged = (before_foreign_rows is None
+                                     or _foreign_key_violations(rolled_back) == before_foreign_rows)
+            if not unchanged or not foreign_unchanged:
+                raise MigrationError(
+                    "migration failed after external recovery was selected; restore the verified recovery set")
         raise
     finally:
         if connection is not None:

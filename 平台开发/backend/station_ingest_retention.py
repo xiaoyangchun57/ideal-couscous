@@ -17,6 +17,13 @@ import sys
 import tempfile
 from typing import Any
 
+try:
+    from .hj212_parser import FrameError as HJ212FrameError, parse_hj212_frame
+    from .station_ingest_slots import HJ212SlotIdentityResolver
+except ImportError:  # pragma: no cover - direct script execution
+    from hj212_parser import FrameError as HJ212FrameError, parse_hj212_frame
+    from station_ingest_slots import HJ212SlotIdentityResolver
+
 
 class RetentionError(RuntimeError):
     pass
@@ -34,15 +41,27 @@ CLOUD_ARCHIVE_RETENTION = timedelta(days=90)
 ERROR_SUMMARY_RETENTION = timedelta(days=30)
 RECEIPT_SUMMARY_RETENTION = timedelta(days=30)
 SLOT_SUMMARY_RETENTION = timedelta(days=90)
+BOOTSTRAP_CONSUMER_WINDOW = timedelta(hours=8)
 RAW_ARCHIVE_FORMAT_VERSION = 2
 LEGACY_RAW_INDEXES = (
-    "idx_ingest_raw_endpoint_received",
     "idx_ingest_raw_frame_hash",
     "idx_ingest_raw_disposition_received",
     "idx_ingest_parse_pending",
     "idx_ingest_raw_authenticated_received",
     "idx_ingest_raw_station_auth_received",
 )
+CLEANUP_INDEXES = {
+    "idx_ingest_parse_raw_cleanup":
+        "CREATE INDEX IF NOT EXISTS idx_ingest_parse_raw_cleanup ON ingest_parse_attempts(raw_frame_id)",
+    "idx_ingest_errors_raw_cleanup":
+        "CREATE INDEX IF NOT EXISTS idx_ingest_errors_raw_cleanup ON ingest_errors(raw_frame_id)",
+    "idx_observation_batches_raw_cleanup":
+        "CREATE INDEX IF NOT EXISTS idx_observation_batches_raw_cleanup ON observation_batches(raw_frame_id)",
+    "idx_monitoring_quality_raw_cleanup":
+        "CREATE INDEX IF NOT EXISTS idx_monitoring_quality_raw_cleanup ON monitoring_quality_issues(raw_frame_id)",
+    "idx_ingest_raw_duplicate_cleanup":
+        "CREATE INDEX IF NOT EXISTS idx_ingest_raw_duplicate_cleanup ON ingest_raw_frames(duplicate_of_raw_frame_id)",
+}
 
 
 class MaintenanceLock:
@@ -644,32 +663,166 @@ def _cutoff(now: datetime, delta: timedelta) -> str:
     return (now.astimezone(timezone.utc) - delta).replace(microsecond=0).isoformat()
 
 
-def bootstrap_retention_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
-    """Build bounded state/directories from the existing hot history in one explicit transaction."""
-    now = now or datetime.now(timezone.utc)
-    recent_cutoff = _cutoff(now, RECENT_RECEIPT_RETENTION)
-    dedup_cutoff = _cutoff(now, DEDUP_DIRECTORY_RETENTION)
+def _upsert_current_state(
+    connection: sqlite3.Connection, source_key: str, endpoint_id: int | None,
+    station_code: str | None, latest, authenticated, credential_failed,
+) -> None:
+    connection.execute(
+        """INSERT INTO station_ingest_current_state(
+               source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
+               latest_authenticated_at,latest_authenticated_raw_frame_id,
+               latest_credential_failed_at,latest_credential_failed_raw_frame_id,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(source_key) DO UPDATE SET
+               endpoint_id=COALESCE(excluded.endpoint_id,station_ingest_current_state.endpoint_id),
+               station_code=COALESCE(excluded.station_code,station_ingest_current_state.station_code),
+               latest_raw_frame_id=CASE
+                   WHEN excluded.latest_received_at>=COALESCE(station_ingest_current_state.latest_received_at,'')
+                   THEN excluded.latest_raw_frame_id ELSE station_ingest_current_state.latest_raw_frame_id END,
+               latest_received_at=NULLIF(MAX(
+                   COALESCE(station_ingest_current_state.latest_received_at,''),
+                   COALESCE(excluded.latest_received_at,'')),''),
+               latest_authenticated_raw_frame_id=CASE
+                   WHEN excluded.latest_authenticated_at>=COALESCE(station_ingest_current_state.latest_authenticated_at,'')
+                   THEN excluded.latest_authenticated_raw_frame_id
+                   ELSE station_ingest_current_state.latest_authenticated_raw_frame_id END,
+               latest_authenticated_at=NULLIF(MAX(
+                   COALESCE(station_ingest_current_state.latest_authenticated_at,''),
+                   COALESCE(excluded.latest_authenticated_at,'')),''),
+               latest_credential_failed_raw_frame_id=CASE
+                   WHEN excluded.latest_credential_failed_at>=COALESCE(station_ingest_current_state.latest_credential_failed_at,'')
+                   THEN excluded.latest_credential_failed_raw_frame_id
+                   ELSE station_ingest_current_state.latest_credential_failed_raw_frame_id END,
+               latest_credential_failed_at=NULLIF(MAX(
+                   COALESCE(station_ingest_current_state.latest_credential_failed_at,''),
+                   COALESCE(excluded.latest_credential_failed_at,'')),''),
+               updated_at=excluded.updated_at""",
+        (
+            source_key, endpoint_id, station_code,
+            latest["received_at"] if latest else None, latest["id"] if latest else None,
+            authenticated["received_at"] if authenticated else None,
+            authenticated["id"] if authenticated else None,
+            credential_failed["received_at"] if credential_failed else None,
+            credential_failed["id"] if credential_failed else None, _now(),
+        ),
+    )
+
+
+def _prepare_current_state(database: Path, *, recent_cutoff: str) -> int:
     with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM station_ingest_recent_receipts")
-        connection.execute("DELETE FROM station_ingest_current_state")
-        connection.execute("DELETE FROM station_ingest_receipt_hourly")
-        connection.execute("DELETE FROM station_ingest_error_hourly")
-        connection.execute("DELETE FROM station_ingest_dedup_keys")
+        endpoint_rows = connection.execute(
+            """SELECT endpoint.id,endpoint.station_code FROM trusted_endpoints endpoint
+               WHERE EXISTS (SELECT 1 FROM ingest_raw_frames raw WHERE raw.endpoint_id=endpoint.id)"""
+        ).fetchall()
+        for endpoint in endpoint_rows:
+            endpoint_id = int(endpoint["id"])
+            latest = connection.execute(
+                """SELECT id,received_at FROM ingest_raw_frames
+                   WHERE endpoint_id=? ORDER BY received_at DESC,id DESC LIMIT 1""",
+                (endpoint_id,),
+            ).fetchone()
+            authenticated = connection.execute(
+                """SELECT id,received_at FROM ingest_raw_frames
+                   WHERE endpoint_id=? AND authentication_status='authenticated'
+                   ORDER BY received_at DESC,id DESC LIMIT 1""",
+                (endpoint_id,),
+            ).fetchone()
+            credential_failed = connection.execute(
+                """SELECT id,received_at FROM ingest_raw_frames
+                   WHERE station_code=? AND authentication_status='credential_failed'
+                   ORDER BY received_at DESC,id DESC LIMIT 1""",
+                (endpoint["station_code"],),
+            ).fetchone()
+            _upsert_current_state(
+                connection, f"endpoint:{endpoint_id}", endpoint_id,
+                endpoint["station_code"], latest, authenticated, credential_failed,
+            )
+        recent_unknown = connection.execute(
+            """WITH ranked AS (
+                   SELECT id,station_code,received_at,authentication_status,
+                          CASE WHEN station_code IS NOT NULL AND station_code<>''
+                               THEN 'station:' || station_code ELSE 'transport:unidentified' END AS source_key,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE WHEN station_code IS NOT NULL AND station_code<>''
+                                                THEN 'station:' || station_code ELSE 'transport:unidentified' END
+                              ORDER BY received_at DESC,id DESC) AS latest_rank,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE WHEN station_code IS NOT NULL AND station_code<>''
+                                                THEN 'station:' || station_code ELSE 'transport:unidentified' END,
+                                           authentication_status
+                              ORDER BY received_at DESC,id DESC) AS status_rank
+                   FROM ingest_raw_frames WHERE endpoint_id IS NULL AND received_at>=?)
+               SELECT * FROM ranked WHERE latest_rank=1 OR status_rank=1""",
+            (recent_cutoff,),
+        ).fetchall()
+        unknown_by_source: dict[str, dict[str, sqlite3.Row]] = {}
+        for row in recent_unknown:
+            facts = unknown_by_source.setdefault(row["source_key"], {})
+            if row["latest_rank"] == 1:
+                facts["latest"] = row
+            facts[str(row["authentication_status"])] = row
+        for source_key, facts in unknown_by_source.items():
+            _upsert_current_state(
+                connection, source_key, None, facts["latest"]["station_code"],
+                facts.get("latest"), facts.get("authenticated"), facts.get("credential_failed"),
+            )
+        connection.execute(
+            """WITH ranked_open_errors AS (
+                   SELECT error.error_type,error.created_at,raw.endpoint_id,raw.station_code,
+                          CASE WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                               WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                                   THEN 'station:' || raw.station_code
+                               ELSE 'transport:unidentified' END AS source_key,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY CASE
+                                  WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                                  WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                                      THEN 'station:' || raw.station_code
+                                  ELSE 'transport:unidentified' END
+                              ORDER BY error.created_at DESC,error.id DESC) AS source_rank
+                   FROM ingest_errors error
+                   LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                   WHERE error.status='open')
+               INSERT INTO station_ingest_current_state(
+                   source_key,endpoint_id,station_code,latest_error_at,latest_error_type,updated_at)
+               SELECT source_key,endpoint_id,station_code,created_at,error_type,?
+               FROM ranked_open_errors WHERE source_rank=1
+               ON CONFLICT(source_key) DO UPDATE SET
+                   latest_error_at=CASE
+                       WHEN excluded.latest_error_at>=COALESCE(station_ingest_current_state.latest_error_at,'')
+                       THEN excluded.latest_error_at ELSE station_ingest_current_state.latest_error_at END,
+                   latest_error_type=CASE
+                       WHEN excluded.latest_error_at>=COALESCE(station_ingest_current_state.latest_error_at,'')
+                       THEN excluded.latest_error_type ELSE station_ingest_current_state.latest_error_type END,
+                   updated_at=excluded.updated_at""",
+            (_now(),),
+        )
+        connection.commit()
+        return len(endpoint_rows) + len(unknown_by_source)
+
+
+def _prepare_consumer_windows(database: Path, *, cutoff: str) -> tuple[int, int]:
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM station_ingest_recent_receipts WHERE received_at>=?", (cutoff,))
         connection.execute(
             """INSERT INTO station_ingest_recent_receipts(
                    raw_frame_id,source_key,endpoint_id,station_code,received_at,authentication_status)
-               SELECT id,
-                      CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                           WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                           ELSE 'transport:unidentified' END,
+               SELECT id,CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
+                              WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
+                              ELSE 'transport:unidentified' END,
                       endpoint_id,station_code,received_at,authentication_status
                FROM ingest_raw_frames WHERE received_at>=?""",
-            (recent_cutoff,),
+            (cutoff,),
         )
+        cutoff_hour = datetime.fromisoformat(cutoff).replace(
+            minute=0, second=0, microsecond=0).isoformat()
+        connection.execute("DELETE FROM station_ingest_receipt_hourly WHERE bucket_hour>=?", (cutoff_hour,))
         connection.execute(
             """INSERT INTO station_ingest_receipt_hourly(
                    source_key,endpoint_id,station_code,authentication_status,bucket_hour,
@@ -682,192 +835,93 @@ def bootstrap_retention_state(database: Path, *, now: datetime | None = None) ->
                       COUNT(*),MIN(received_at),MAX(received_at),MAX(id),?
                FROM ingest_raw_frames WHERE received_at>=?
                GROUP BY 1,endpoint_id,station_code,authentication_status,5""",
-            (_now(), _cutoff(now, RECEIPT_SUMMARY_RETENTION)),
+            (_now(), cutoff),
         )
-        connection.execute(
-            """WITH ranked AS (
-                   SELECT id,endpoint_id,station_code,received_at,authentication_status,
-                          CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                               WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                               ELSE 'transport:unidentified' END AS source_key,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                                                ELSE 'transport:unidentified' END
-                              ORDER BY received_at DESC,id DESC) AS latest_rank,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                                                ELSE 'transport:unidentified' END,
-                                           CASE WHEN authentication_status='authenticated' THEN 1 ELSE 0 END
-                              ORDER BY received_at DESC,id DESC) AS auth_rank,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY CASE WHEN endpoint_id IS NOT NULL THEN 'endpoint:' || endpoint_id
-                                                WHEN station_code IS NOT NULL AND station_code<>'' THEN 'station:' || station_code
-                                                ELSE 'transport:unidentified' END,
-                                           CASE WHEN authentication_status='credential_failed' THEN 1 ELSE 0 END
-                              ORDER BY received_at DESC,id DESC) AS credential_rank
-                   FROM ingest_raw_frames
-               ), sources AS (
-                   SELECT source_key,
-                          MAX(endpoint_id) AS endpoint_id,MAX(station_code) AS station_code,
-                          MAX(CASE WHEN latest_rank=1 THEN received_at END) AS latest_received_at,
-                          MAX(CASE WHEN latest_rank=1 THEN id END) AS latest_raw_frame_id,
-                          MAX(CASE WHEN authentication_status='authenticated' AND auth_rank=1 THEN received_at END)
-                              AS latest_authenticated_at,
-                          MAX(CASE WHEN authentication_status='authenticated' AND auth_rank=1 THEN id END)
-                              AS latest_authenticated_raw_frame_id,
-                          MAX(CASE WHEN authentication_status='credential_failed' AND credential_rank=1 THEN received_at END)
-                              AS latest_credential_failed_at,
-                          MAX(CASE WHEN authentication_status='credential_failed' AND credential_rank=1 THEN id END)
-                              AS latest_credential_failed_raw_frame_id
-                   FROM ranked GROUP BY source_key
-               )
-               INSERT INTO station_ingest_current_state(
-                   source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
-                   latest_authenticated_at,latest_authenticated_raw_frame_id,
-                   latest_credential_failed_at,latest_credential_failed_raw_frame_id,updated_at)
-               SELECT source_key,endpoint_id,station_code,latest_received_at,latest_raw_frame_id,
-                      latest_authenticated_at,latest_authenticated_raw_frame_id,
-                      latest_credential_failed_at,latest_credential_failed_raw_frame_id,?
-               FROM sources""",
-            (_now(),),
+        counts = (
+            connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts WHERE received_at>=?", (cutoff,)
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_receipt_hourly WHERE bucket_hour>=?", (cutoff_hour,)
+            ).fetchone()[0],
         )
-        error_rows = connection.execute(
-            """SELECT error.id,error.raw_frame_id,error.error_type,error.created_at,
-                      raw.endpoint_id,raw.station_code
-               FROM ingest_errors error
-               LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
-               ORDER BY error.created_at,error.id"""
-        ).fetchall()
-        error_count = 0
-        for row in error_rows:
-            source_key = _source_key(row["endpoint_id"], row["station_code"])
-            occurred_at = str(row["created_at"])
-            parsed = datetime.fromisoformat(occurred_at.replace(" ", "T"))
-            parsed = (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None
-                      else parsed.astimezone(timezone.utc))
-            bucket_hour = parsed.replace(minute=0, second=0, microsecond=0).isoformat()
-            connection.execute(
-                """INSERT INTO station_ingest_error_hourly(
-                       source_key,endpoint_id,station_code,error_type,bucket_hour,occurrence_count,
-                       first_seen_at,last_seen_at,last_raw_frame_id)
-                   VALUES (?,?,?,?,?,1,?,?,?)
-                   ON CONFLICT(source_key,error_type,bucket_hour) DO UPDATE SET
-                       occurrence_count=station_ingest_error_hourly.occurrence_count+1,
-                       first_seen_at=MIN(first_seen_at,excluded.first_seen_at),
-                       last_seen_at=MAX(last_seen_at,excluded.last_seen_at),
-                       last_raw_frame_id=CASE WHEN excluded.last_seen_at>=last_seen_at
-                                              THEN excluded.last_raw_frame_id ELSE last_raw_frame_id END""",
-                (source_key, row["endpoint_id"], row["station_code"], row["error_type"],
-                 bucket_hour, occurred_at, occurred_at, row["raw_frame_id"]),
-            )
-            connection.execute(
-                """INSERT INTO station_ingest_current_state(
-                       source_key,endpoint_id,station_code,latest_error_at,latest_error_type,updated_at)
-                   VALUES (?,?,?,?,?,?)
-                   ON CONFLICT(source_key) DO UPDATE SET
-                       latest_error_at=CASE WHEN excluded.latest_error_at>=COALESCE(latest_error_at,'')
-                                            THEN excluded.latest_error_at ELSE latest_error_at END,
-                       latest_error_type=CASE WHEN excluded.latest_error_at>=COALESCE(latest_error_at,'')
-                                              THEN excluded.latest_error_type ELSE latest_error_type END,
-                       updated_at=excluded.updated_at""",
-                (source_key, row["endpoint_id"], row["station_code"], occurred_at,
-                 row["error_type"], _now()),
-            )
-            error_count += 1
+        connection.commit()
+        return int(counts[0]), int(counts[1])
+
+
+def _prepare_protected_dedup_keys(database: Path) -> int:
+    protected_ids = """SELECT batch.raw_frame_id FROM observation_batches batch
+                       JOIN monitoring_business_observations business
+                         ON business.observation_batch_id=batch.id
+                       UNION SELECT batch.raw_frame_id FROM observation_batches batch
+                       JOIN monitoring_hourly_value_series hourly
+                         ON hourly.source_last_batch_id=batch.id
+                       UNION SELECT batch.raw_frame_id FROM observation_batches batch
+                       JOIN monitoring_hourly_values hourly
+                         ON hourly.source_last_batch_id=batch.id
+                       UNION SELECT batch.raw_frame_id FROM observation_batches batch
+                       JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
+                       UNION SELECT raw_frame_id FROM monitoring_quality_issues WHERE status='open'
+                       UNION SELECT batch.raw_frame_id FROM monitoring_quality_issues issue
+                       JOIN observation_batches batch ON batch.id=issue.observation_batch_id
+                       WHERE issue.status='open'
+                       UNION SELECT raw_frame_id FROM monitoring_normalization_retries
+                       WHERE state IN ('pending','retrying','exhausted')
+                       UNION SELECT raw_frame_id FROM ingest_errors WHERE status='open'"""
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            """WITH grouped AS (
-                   SELECT raw.endpoint_id,raw.logical_key_sha256,MIN(raw.id) AS canonical_raw_frame_id,
+            f"""WITH protected_ids(raw_id) AS ({protected_ids}), grouped AS (
+                   SELECT raw.endpoint_id,raw.logical_key_sha256,
+                          MIN(raw.id) AS canonical_raw_frame_id,
                           MIN(raw.received_at) AS first_received_at,
                           MAX(raw.received_at) AS last_received_at
-                   FROM ingest_raw_frames raw
+                   FROM protected_ids protected JOIN ingest_raw_frames raw ON raw.id=protected.raw_id
                    WHERE raw.endpoint_id IS NOT NULL AND raw.logical_key_sha256 IS NOT NULL
-                     AND (raw.received_at>=?
-                          OR EXISTS (SELECT 1 FROM observation_batches batch
-                                     JOIN monitoring_business_observations business
-                                       ON business.observation_batch_id=batch.id
-                                     WHERE batch.raw_frame_id=raw.id)
-                          OR EXISTS (SELECT 1 FROM observation_batches batch
-                                     JOIN monitoring_hourly_value_series hourly
-                                       ON hourly.source_last_batch_id=batch.id
-                                     WHERE batch.raw_frame_id=raw.id)
-                          OR EXISTS (SELECT 1 FROM observation_batches batch
-                                     JOIN monitoring_hourly_values hourly
-                                       ON hourly.source_last_batch_id=batch.id
-                                     WHERE batch.raw_frame_id=raw.id)
-                          OR EXISTS (SELECT 1 FROM observation_batches batch
-                                     JOIN observation_batches replacement
-                                       ON replacement.replaces_batch_id=batch.id
-                                     WHERE batch.raw_frame_id=raw.id)
-                          OR EXISTS (SELECT 1 FROM monitoring_quality_issues issue
-                                     WHERE issue.raw_frame_id=raw.id AND issue.status='open')
-                          OR EXISTS (SELECT 1 FROM monitoring_normalization_retries retry
-                                     WHERE retry.raw_frame_id=raw.id
-                                       AND retry.state IN ('pending','retrying','exhausted'))
-                          OR EXISTS (SELECT 1 FROM ingest_errors error
-                                     WHERE error.raw_frame_id=raw.id AND error.status='open'))
-                   GROUP BY raw.endpoint_id,raw.logical_key_sha256
-               )
+                   GROUP BY raw.endpoint_id,raw.logical_key_sha256)
                INSERT INTO station_ingest_dedup_keys(
                    endpoint_id,logical_key_sha256,canonical_raw_frame_id,canonical_evidence_ref_id,
                    first_received_at,last_received_at,expires_at,protected,updated_at)
                SELECT grouped.endpoint_id,grouped.logical_key_sha256,grouped.canonical_raw_frame_id,
-                      evidence.id,grouped.first_received_at,grouped.last_received_at,
-                      strftime('%Y-%m-%dT%H:%M:%S+00:00',grouped.last_received_at,'+90 days'),0,?
-               FROM grouped
-               LEFT JOIN monitoring_archive_evidence_refs evidence
-                 ON evidence.source_raw_frame_id=grouped.canonical_raw_frame_id""",
-            (dedup_cutoff, _now()),
+                      evidence.id,grouped.first_received_at,grouped.last_received_at,NULL,1,?
+               FROM grouped LEFT JOIN monitoring_archive_evidence_refs evidence
+                 ON evidence.source_raw_frame_id=grouped.canonical_raw_frame_id
+               ON CONFLICT(endpoint_id,logical_key_sha256) DO UPDATE SET
+                   protected=1,expires_at=NULL,
+                   canonical_evidence_ref_id=COALESCE(
+                       station_ingest_dedup_keys.canonical_evidence_ref_id,
+                       excluded.canonical_evidence_ref_id),
+                   first_received_at=MIN(station_ingest_dedup_keys.first_received_at,
+                                         excluded.first_received_at),
+                   last_received_at=MAX(station_ingest_dedup_keys.last_received_at,
+                                        excluded.last_received_at),
+                   updated_at=excluded.updated_at""",
+            (_now(),),
         )
-        connection.execute(
-            """UPDATE station_ingest_dedup_keys SET protected=1,expires_at=NULL
-               WHERE EXISTS (
-                   SELECT 1 FROM observation_batches batch
-                   JOIN monitoring_business_observations business
-                     ON business.observation_batch_id=batch.id
-                   WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-               ) OR EXISTS (
-                   SELECT 1 FROM monitoring_quality_issues issue
-                   WHERE issue.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                     AND issue.status='open'
-                ) OR EXISTS (
-                    SELECT 1 FROM observation_batches batch
-                    JOIN monitoring_hourly_value_series hourly
-                      ON hourly.source_last_batch_id=batch.id
-                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                ) OR EXISTS (
-                    SELECT 1 FROM observation_batches batch
-                    JOIN monitoring_hourly_values hourly
-                      ON hourly.source_last_batch_id=batch.id
-                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                ) OR EXISTS (
-                    SELECT 1 FROM observation_batches batch
-                    JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
-                    WHERE batch.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                ) OR EXISTS (
-                    SELECT 1 FROM monitoring_normalization_retries retry
-                    WHERE retry.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                      AND retry.state IN ('pending','retrying','exhausted')
-                ) OR EXISTS (
-                    SELECT 1 FROM ingest_errors error
-                    WHERE error.raw_frame_id=station_ingest_dedup_keys.canonical_raw_frame_id
-                      AND error.status='open'
-               )"""
-        )
-        counts = {
-            "current_states": connection.execute(
-                "SELECT COUNT(*) FROM station_ingest_current_state").fetchone()[0],
-            "recent_receipts": connection.execute(
-                "SELECT COUNT(*) FROM station_ingest_recent_receipts").fetchone()[0],
-            "receipt_hour_summaries": connection.execute(
-                "SELECT COUNT(*) FROM station_ingest_receipt_hourly").fetchone()[0],
-            "dedup_keys": connection.execute(
-                "SELECT COUNT(*) FROM station_ingest_dedup_keys").fetchone()[0],
-            "error_details": error_count,
-        }
+        count = connection.execute(
+            "SELECT COUNT(*) FROM station_ingest_dedup_keys WHERE protected=1"
+        ).fetchone()[0]
         connection.commit()
-        return counts
+        return int(count)
+
+
+def bootstrap_retention_state(database: Path, *, now: datetime | None = None) -> dict[str, int]:
+    """Prepare only state required by current consumers and protected evidence."""
+    now = now or datetime.now(timezone.utc)
+    consumer_cutoff = _cutoff(now, BOOTSTRAP_CONSUMER_WINDOW)
+    current_states = _prepare_current_state(database, recent_cutoff=consumer_cutoff)
+    recent_receipts, receipt_hours = _prepare_consumer_windows(
+        database, cutoff=consumer_cutoff)
+    protected_dedup = _prepare_protected_dedup_keys(database)
+    return {
+        "current_states": current_states,
+        "recent_receipts": recent_receipts,
+        "receipt_hour_summaries": receipt_hours,
+        "protected_dedup_keys": protected_dedup,
+        "consumer_window_hours": int(BOOTSTRAP_CONSUMER_WINDOW.total_seconds() // 3600),
+        "historical_error_summaries": 0,
+    }
 
 
 def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) -> tuple[Path, str]:
@@ -1017,6 +1071,22 @@ def _protected_raw_ids(connection: sqlite3.Connection, raw_ids: list[int]) -> se
            WHERE state IN ('pending','retrying','exhausted') AND raw_frame_id IN ({marks})""",
         """SELECT raw_frame_id FROM ingest_errors
            WHERE status='open' AND raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_slot_summaries
+           WHERE canonical_raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_dedup_keys
+           WHERE protected=1 AND canonical_raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_duplicate_links
+           WHERE canonical_raw_frame_id IN ({marks})""",
+        """SELECT duplicate_of_raw_frame_id FROM ingest_raw_frames
+           WHERE duplicate_of_raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM station_ingest_recent_receipts
+           WHERE raw_frame_id IN ({marks})""",
+        """SELECT latest_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_raw_frame_id IN ({marks})""",
+        """SELECT latest_authenticated_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_authenticated_raw_frame_id IN ({marks})""",
+        """SELECT latest_credential_failed_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_credential_failed_raw_frame_id IN ({marks})""",
     )
     for batch in _batches(raw_ids):
         marks = ",".join("?" * len(batch))
@@ -1060,7 +1130,250 @@ def _protected_raw_predicate(raw_alias: str = "raw") -> str:
                       AND retry.state IN ('pending','retrying','exhausted'))
                 OR EXISTS (
                     SELECT 1 FROM ingest_errors error
-                    WHERE error.raw_frame_id={raw_alias}.id AND error.status='open')"""
+                    WHERE error.raw_frame_id={raw_alias}.id AND error.status='open')
+                OR EXISTS (
+                    SELECT 1 FROM station_ingest_slot_summaries summary
+                    WHERE summary.canonical_raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM station_ingest_dedup_keys directory
+                    WHERE directory.canonical_raw_frame_id={raw_alias}.id AND directory.protected=1)
+                OR EXISTS (
+                    SELECT 1 FROM station_ingest_duplicate_links link
+                    WHERE link.canonical_raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM ingest_raw_frames duplicate
+                    WHERE duplicate.duplicate_of_raw_frame_id={raw_alias}.id)
+                OR EXISTS (
+                    SELECT 1 FROM station_ingest_current_state state
+                    WHERE state.latest_raw_frame_id={raw_alias}.id
+                       OR state.latest_authenticated_raw_frame_id={raw_alias}.id
+                       OR state.latest_credential_failed_raw_frame_id={raw_alias}.id)"""
+
+
+def _delete_confirmed_duplicate_rows(
+    connection: sqlite3.Connection, raw_ids: list[int],
+) -> int:
+    deleted = 0
+    for identifiers in _batches(raw_ids):
+        marks = ",".join("?" * len(identifiers))
+        batch_ids = [int(row[0]) for row in connection.execute(
+            f"SELECT id FROM observation_batches WHERE raw_frame_id IN ({marks})", identifiers,
+        )]
+        if batch_ids:
+            batch_marks = ",".join("?" * len(batch_ids))
+            connection.execute(
+                f"""DELETE FROM monitoring_quality_issues
+                    WHERE observation_batch_id IN ({batch_marks}) AND status!='open'""",
+                batch_ids,
+            )
+            connection.execute(
+                f"DELETE FROM monitoring_status_events WHERE observation_batch_id IN ({batch_marks})",
+                batch_ids,
+            )
+            connection.execute(
+                f"DELETE FROM observation_values WHERE observation_batch_id IN ({batch_marks})",
+                batch_ids,
+            )
+            connection.execute(
+                f"DELETE FROM observation_batches WHERE id IN ({batch_marks})", batch_ids,
+            )
+        connection.execute(
+            f"DELETE FROM monitoring_quality_issues WHERE raw_frame_id IN ({marks}) AND status!='open'",
+            identifiers,
+        )
+        connection.execute(
+            f"DELETE FROM ingest_parse_attempts WHERE raw_frame_id IN ({marks})", identifiers,
+        )
+        connection.execute(
+            f"DELETE FROM ingest_errors WHERE raw_frame_id IN ({marks}) AND status!='open'", identifiers,
+        )
+        connection.execute(
+            f"""DELETE FROM station_ingest_dedup_keys
+                WHERE protected=0 AND canonical_raw_frame_id IN ({marks})""", identifiers,
+        )
+        connection.execute(
+            f"""UPDATE station_ingest_receipt_hourly SET last_complete_raw_frame_id=NULL
+                WHERE last_complete_raw_frame_id IN ({marks})""", identifiers,
+        )
+        connection.execute(
+            f"""UPDATE station_ingest_error_hourly SET last_raw_frame_id=NULL
+                WHERE last_raw_frame_id IN ({marks})""", identifiers,
+        )
+        for table, column in (
+            ("station_ingest_duplicate_links", "raw_frame_id"),
+            ("monitoring_raw_archive_part_frames", "raw_frame_id"),
+            ("ingest_frame_protocols", "raw_frame_id"),
+            ("station_ingest_recent_receipts", "raw_frame_id"),
+            ("ingest_raw_frames", "id"),
+        ):
+            connection.execute(
+                f"DELETE FROM {table} WHERE {column} IN ({marks})", identifiers,
+            )
+        deleted += len(identifiers)
+    return deleted
+
+
+def ensure_duplicate_cleanup_indexes(database: Path) -> dict[str, Any]:
+    """Create resumable cleanup-only indexes and report their file-space impact."""
+    started_at = datetime.now(timezone.utc)
+    before_bytes = Path(database).stat().st_size
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        existing = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        created = []
+        for name, statement in CLEANUP_INDEXES.items():
+            if name not in existing:
+                connection.execute(statement)
+                created.append(name)
+    return {
+        "created": created,
+        "database_growth_bytes": max(0, Path(database).stat().st_size - before_bytes),
+        "elapsed_seconds": round(
+            (datetime.now(timezone.utc) - started_at).total_seconds(), 3),
+    }
+
+
+def drop_duplicate_cleanup_indexes(database: Path) -> list[str]:
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        existing = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        removed = [name for name in CLEANUP_INDEXES if name in existing]
+        connection.execute("BEGIN IMMEDIATE")
+        for name in removed:
+            connection.execute(f'DROP INDEX "{name}"')
+        connection.commit()
+    return removed
+
+
+def reduce_confirmed_minute_duplicates(
+    database: Path, *, after_id: int = 0, batch_limit: int = 500,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Remove one resumable batch of confirmed old 2011 repeats without archiving them."""
+    if batch_limit <= 0:
+        raise RetentionError("duplicate reduction batch limit must be positive")
+    now = now or datetime.now(timezone.utc)
+    cutoff = _cutoff(now, HOT_RELATION_RETENTION)
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        rows = connection.execute(
+            """SELECT raw.id,raw.endpoint_id,raw.station_code,raw.received_at,
+                      raw.frame_sha256,raw.raw_frame
+               FROM ingest_raw_frames raw
+               JOIN ingest_frame_protocols protocol ON protocol.raw_frame_id=raw.id
+               WHERE raw.id>? AND raw.received_at<? AND raw.endpoint_id IS NOT NULL
+                 AND raw.authentication_status='authenticated'
+                 AND raw.persistence_state='persisted'
+                 AND protocol.protocol_family='hj212'
+               ORDER BY raw.id LIMIT ?""",
+            (after_id, cutoff, batch_limit),
+        ).fetchall()
+        if not rows:
+            return {
+                "cursor_raw_id": after_id, "scanned": 0, "eligible": 0,
+                "duplicate_candidates": 0, "deleted": 0, "retained_protected": 0,
+                "retained_unclassified": 0, "canonical_kept": 0, "complete": True,
+                "cutoff": cutoff,
+            }
+
+        connection.execute("BEGIN IMMEDIATE")
+        resolver = HJ212SlotIdentityResolver(connection)
+        grouped_rows: dict[tuple[int, str, str], list[sqlite3.Row]] = {}
+        eligible = 0
+        canonical_kept = 0
+        retained_unclassified = 0
+        for row in rows:
+            try:
+                frame = parse_hj212_frame(bytes(row["raw_frame"]))
+            except HJ212FrameError:
+                retained_unclassified += 1
+                continue
+            identity = resolver.resolve(frame, int(row["endpoint_id"]))
+            if identity is None:
+                retained_unclassified += 1
+                continue
+            eligible += 1
+            slot_started_at, content_sha256 = identity
+            grouped_rows.setdefault(
+                (int(row["endpoint_id"]), slot_started_at, content_sha256), []
+            ).append(row)
+
+        candidates: list[int] = []
+        for (endpoint_id, slot_started_at, content_sha256), group in grouped_rows.items():
+            summary = connection.execute(
+                """SELECT canonical_raw_frame_id FROM station_ingest_slot_summaries
+                   WHERE endpoint_id=? AND command='2011'
+                     AND slot_started_at=? AND content_sha256=?""",
+                (endpoint_id, slot_started_at, content_sha256),
+            ).fetchone()
+            if summary is None:
+                canonical = min(group, key=lambda item: int(item["id"]))
+                connection.execute(
+                    """INSERT INTO station_ingest_slot_summaries(
+                           endpoint_id,station_code,command,slot_started_at,content_sha256,
+                           canonical_raw_frame_id,canonical_frame_sha256,receipt_count,
+                           first_received_at,last_received_at,last_authentication_status,
+                           created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)""",
+                    (
+                        endpoint_id, canonical["station_code"], "2011", slot_started_at,
+                        content_sha256, canonical["id"], canonical["frame_sha256"],
+                        min(str(item["received_at"]) for item in group),
+                        max(str(item["received_at"]) for item in group),
+                        "authenticated", _now(), _now(),
+                    ),
+                )
+                canonical_raw_id = int(canonical["id"])
+            else:
+                canonical_raw_id = int(summary["canonical_raw_frame_id"])
+                connection.execute(
+                    """UPDATE station_ingest_slot_summaries
+                       SET first_received_at=MIN(first_received_at,?),
+                           last_received_at=MAX(last_received_at,?),updated_at=?
+                       WHERE endpoint_id=? AND command='2011'
+                         AND slot_started_at=? AND content_sha256=?""",
+                    (
+                        min(str(item["received_at"]) for item in group),
+                        max(str(item["received_at"]) for item in group), _now(),
+                        endpoint_id, slot_started_at, content_sha256,
+                    ),
+                )
+            canonical_kept += sum(
+                1 for item in group if int(item["id"]) == canonical_raw_id)
+            candidates.extend(
+                int(item["id"]) for item in group if int(item["id"]) != canonical_raw_id)
+
+        protected = _protected_raw_ids(connection, candidates)
+        deletable = [raw_id for raw_id in candidates if raw_id not in protected]
+        deleted = _delete_confirmed_duplicate_rows(connection, deletable)
+        cursor = int(rows[-1]["id"])
+        detail = {
+            "rule": "authenticated-hj212-2011-same-endpoint-slot-normalized-content",
+            "range": [int(rows[0]["id"]), cursor],
+            "scanned": len(rows), "eligible": eligible,
+            "duplicate_candidates": len(candidates), "deleted": deleted,
+            "retained_protected": len(protected),
+            "retained_unclassified": retained_unclassified,
+            "historical_summary_count_semantics": "canonical-only; live receipts increment after cutover",
+        }
+        connection.execute(
+            """INSERT INTO station_ingest_retention_runs(
+                   cutoff_time,archived_parse_attempts,archived_errors,archived_error_summaries,
+                   deleted_raw_frames,retained_protected_frames,status,detail,created_at)
+               VALUES (?,0,0,0,?,?, 'completed',?,?)""",
+            (cutoff, deleted, len(protected), json.dumps(detail, sort_keys=True), _now()),
+        )
+        connection.commit()
+        return {
+            "cursor_raw_id": cursor, "scanned": len(rows), "eligible": eligible,
+            "duplicate_candidates": len(candidates), "deleted": deleted,
+            "retained_protected": len(protected),
+            "retained_unclassified": retained_unclassified,
+            "canonical_kept": canonical_kept,
+            "complete": len(rows) < batch_limit, "cutoff": cutoff,
+        }
 
 
 def _protect_active_dedup_keys(
@@ -1323,12 +1636,7 @@ def maintain_retention(
            else now.astimezone(timezone.utc))
     root = _require_storage(policy, database)
     backfilled_evidence = backfill_archive_evidence_refs(database)
-    with closing(sqlite3.connect(str(database))) as connection:
-        needs_bootstrap = bool(connection.execute(
-            """SELECT EXISTS(SELECT 1 FROM ingest_raw_frames)
-                      AND NOT EXISTS(SELECT 1 FROM station_ingest_current_state)"""
-        ).fetchone()[0])
-    bootstrap_counts = bootstrap_retention_state(database, now=now) if needs_bootstrap else {}
+    bootstrap_counts: dict[str, int] = {}
     raw_cutoff = _cutoff(now, HOT_RELATION_RETENTION)
     detail_cutoff = _cutoff(now, DETAIL_RETENTION)
     with closing(sqlite3.connect(str(database))) as connection:
@@ -1475,49 +1783,15 @@ def run_periodic_maintenance(
 
 
 def reduce_legacy_indexes(database: Path, *, now: datetime | None = None) -> list[str]:
-    """Drop superseded large indexes only after replacement directories are complete."""
-    now = now or datetime.now(timezone.utc)
-    recent_cutoff = _cutoff(now, RECENT_RECEIPT_RETENTION)
-    dedup_cutoff = _cutoff(now, DEDUP_DIRECTORY_RETENTION)
+    """Drop superseded indexes only after the necessary-state cutover is ready."""
+    del now
+    try:
+        from .station_ingest_cutover import require_cutover_ready
+    except ImportError:  # pragma: no cover - direct script execution
+        from station_ingest_cutover import require_cutover_ready
+    require_cutover_ready(database)
     with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        missing_recent = connection.execute(
-            """SELECT COUNT(*) FROM ingest_raw_frames raw
-               WHERE raw.received_at>=? AND NOT EXISTS (
-                   SELECT 1 FROM station_ingest_recent_receipts recent
-                   WHERE recent.raw_frame_id=raw.id)""", (recent_cutoff,)).fetchone()[0]
-        missing_state = connection.execute(
-            """SELECT COUNT(*) FROM trusted_endpoints endpoint
-               WHERE EXISTS (SELECT 1 FROM ingest_raw_frames raw WHERE raw.endpoint_id=endpoint.id)
-                 AND NOT EXISTS (SELECT 1 FROM station_ingest_current_state state
-                                 WHERE state.endpoint_id=endpoint.id)"""
-        ).fetchone()[0]
-        missing_dedup = connection.execute(
-            """SELECT COUNT(*) FROM ingest_raw_frames raw
-               WHERE raw.received_at>=? AND raw.endpoint_id IS NOT NULL
-                 AND raw.logical_key_sha256 IS NOT NULL
-                 AND NOT EXISTS (SELECT 1 FROM station_ingest_dedup_keys directory
-                                 WHERE directory.endpoint_id=raw.endpoint_id
-                                   AND directory.logical_key_sha256=raw.logical_key_sha256)""",
-            (dedup_cutoff,),
-        ).fetchone()[0]
-        missing_hourly = connection.execute(
-            """SELECT COUNT(*) FROM ingest_raw_frames raw
-               WHERE raw.received_at>=? AND NOT EXISTS (
-                   SELECT 1 FROM station_ingest_receipt_hourly summary
-                   WHERE summary.source_key=CASE
-                           WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
-                           WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
-                               THEN 'station:' || raw.station_code
-                           ELSE 'transport:unidentified' END
-                     AND summary.authentication_status=raw.authentication_status
-                     AND summary.bucket_hour=strftime('%Y-%m-%dT%H:00:00+00:00',raw.received_at))""",
-            (_cutoff(now, RECEIPT_SUMMARY_RETENTION),),
-        ).fetchone()[0]
-        if missing_recent or missing_state or missing_dedup or missing_hourly:
-            raise RetentionError(
-                f"replacement directories are incomplete: recent={missing_recent}, state={missing_state}, "
-                f"dedup={missing_dedup}, hourly={missing_hourly}")
         existing = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='index'")}
         removed = [name for name in LEGACY_RAW_INDEXES if name in existing]
@@ -1533,47 +1807,47 @@ def compact_isolated_copy(
     source: Path, target: Path, policy: StoragePolicy, *, now: datetime | None = None,
     batch_limit: int = 5000,
 ) -> dict[str, Any]:
-    """Create and compact a snapshot copy; live-write catch-up remains a release concern."""
+    """Retired: copying the large source before reduction repeats the failed R26 path."""
+    del source, target, policy, now, batch_limit
+    raise RetentionError(
+        "compact-copy is retired; prepare the protected source first, then use compact-prepared")
+
+
+def compact_prepared_database(source: Path, target: Path) -> dict[str, Any]:
+    """Write one final compact database from a prepared source without another work copy."""
     source = Path(source)
     target = Path(target)
+    if not source.is_file():
+        raise RetentionError("prepared source database does not exist")
     if target.exists():
         raise RetentionError("compaction target already exists")
     target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from .station_ingest_cutover import require_cutover_ready
+    except ImportError:  # pragma: no cover - direct script execution
+        from station_ingest_cutover import require_cutover_ready
+    require_cutover_ready(source)
     started_at = datetime.now(timezone.utc)
-    with closing(sqlite3.connect(str(source), timeout=30)) as source_connection:
-        with closing(sqlite3.connect(str(target))) as target_connection:
-            source_connection.backup(target_connection)
-    before_size = target.stat().st_size
-    cycles = []
-    while True:
-        cycle = maintain_retention(target, policy, now=now, batch_limit=batch_limit)
-        cycles.append(cycle)
-        if not any(cycle[key] for key in (
-            "archived_raw_frames", "archived_parse_attempts", "archived_errors",
-            "archived_error_summaries", "deleted_raw_frames",
-        )):
-            break
-    removed_indexes = reduce_legacy_indexes(target, now=now)
-    with closing(sqlite3.connect(str(target), timeout=30, isolation_level=None)) as connection:
-        foreign_violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-        if foreign_violations:
-            raise RetentionError("compacted copy contains foreign-key violations")
-        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise RetentionError("compacted copy failed integrity verification")
-        connection.execute("VACUUM")
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-            raise RetentionError("compacted copy failed post-vacuum quick verification")
+    free_before = shutil.disk_usage(target.parent).free
+    try:
+        with closing(sqlite3.connect(str(source), timeout=30, isolation_level=None)) as connection:
+            connection.execute("VACUUM INTO ?", (str(target),))
+        with closing(sqlite3.connect(str(target), timeout=30)) as compacted:
+            if compacted.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RetentionError("compacted database failed quick verification")
+            if compacted.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RetentionError("compacted database contains foreign-key violations")
+        require_cutover_ready(target)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
     return {
-        "source": str(source),
-        "target": str(target),
-        "before_bytes": before_size,
-        "after_bytes": target.stat().st_size,
-        "removed_indexes": removed_indexes,
-        "cycles": cycles,
+        "source": str(source), "target": str(target),
+        "source_bytes": source.stat().st_size, "target_bytes": target.stat().st_size,
+        "target_filesystem_free_bytes_before": free_before,
         "elapsed_seconds": round((datetime.now(timezone.utc) - started_at).total_seconds(), 3),
-        "consistency_point": "sqlite_backup_snapshot",
-        "live_write_catch_up": "NOT RUN",
+        "consistency_point": "prepared-source-vacuum-into",
+        "source_modified": False,
     }
 
 
@@ -1583,7 +1857,7 @@ def main(argv: list[str] | None = None) -> int:
         "action",
         choices=(
             "archive", "aggregate", "bootstrap", "maintain", "maintain-once",
-            "reduce-indexes", "compact-copy",
+            "reduce-indexes", "compact-copy", "compact-prepared",
         ),
     )
     parser.add_argument("--database", required=True, type=Path)
@@ -1613,6 +1887,10 @@ def main(argv: list[str] | None = None) -> int:
             result = bootstrap_retention_state(arguments.database)
         elif arguments.action == "reduce-indexes":
             result = reduce_legacy_indexes(arguments.database)
+        elif arguments.action == "compact-prepared":
+            if arguments.target is None:
+                raise RetentionError("compact-prepared requires --target")
+            result = compact_prepared_database(arguments.database, arguments.target)
         else:
             if arguments.raw_storage_dir is None:
                 raise RetentionError(f"{arguments.action} requires --raw-storage-dir")
