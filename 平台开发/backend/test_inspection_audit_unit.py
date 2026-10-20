@@ -141,9 +141,15 @@ class InspectionAuditUnitTest(unittest.TestCase):
                 ALTER TABLE operation_attachments ADD COLUMN evidence_next_action TEXT DEFAULT '';
                 ALTER TABLE operation_attachments ADD COLUMN evidence_basis TEXT DEFAULT 'unknown';
                 ALTER TABLE operation_attachments ADD COLUMN watermark_code TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN sha256_hash TEXT DEFAULT '';
                 ALTER TABLE operation_attachments ADD COLUMN plan_id INTEGER;
                 ALTER TABLE operation_attachments ADD COLUMN item_id INTEGER;
                 ALTER TABLE operation_attachments ADD COLUMN item_name TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN category TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN frequency TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN calibrator TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN calibration_values TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN inspection_standard TEXT DEFAULT '';
                 ALTER TABLE insp_plan_items ADD COLUMN need_review INTEGER DEFAULT 0;
                 CREATE TABLE photo_capture_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE,
@@ -350,8 +356,9 @@ class InspectionAuditUnitTest(unittest.TestCase):
         self.assertIn(202, batch['attachment_ids'])
         self.assertNotIn(208, batch['attachment_ids'])
 
-    def test_three_submitted_photos_bind_to_one_item_and_enter_review_without_site_photo_zero(self):
+    def test_eight_submitted_photos_persist_reenter_and_reach_audit_without_site_photo_zero(self):
         self.prepare_last_item_submission()
+        extra_specs = [(208 + index, chr(ord('d') + index)) for index in range(7)]
         with app_module.get_db() as db:
             db.executemany("""INSERT INTO operation_attachments
                 (id,stored_path,site_id,uploader_id,filename,review_status,source_type,source_id,
@@ -359,42 +366,52 @@ class InspectionAuditUnitTest(unittest.TestCase):
                  capture_source,evidence_basis,watermark_code,plan_id,item_id,item_name)
                 VALUES (?,?,?,?,?,'pending','site_photo',0,0,0,datetime('now'),?,'image','qualified',
                         'camera','server_capture_session',?,?,?,?)""", [
-                (208, '/uploads/d.jpg', 1, 2, 'd.jpg',
+                (photo_id, f'/uploads/{suffix}.jpg', 1, 2, f'{suffix}.jpg',
                  '{"material_role":"pending_inspection","plan_id":10,"item_id":101}',
-                 'AUDIT-208', 10, 101, 'Pump'),
-                (209, '/uploads/e.jpg', 1, 2, 'e.jpg',
-                 '{"material_role":"pending_inspection","plan_id":10,"item_id":101}',
-                 'AUDIT-209', 10, 101, 'Pump'),
+                 f'AUDIT-{photo_id}', 10, 101, 'Pump')
+                for photo_id, suffix in extra_specs
             ])
             db.executemany("""INSERT INTO photo_capture_sessions
                 (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
                  attachment_id,capture_source,nonce,anti_counterfeit_code)
                 VALUES (?,2,1,10,101,datetime('now'),datetime('now','+15 minute'),datetime('now'),
                         ?,'camera',?,?)""", [
-                ('audit-token-208', 208, 'audit-nonce-208', 'AUDIT-208'),
-                ('audit-token-209', 209, 'audit-nonce-209', 'AUDIT-209'),
+                (f'audit-token-{photo_id}', photo_id, f'audit-nonce-{photo_id}',
+                 f'AUDIT-{photo_id}')
+                for photo_id, _ in extra_specs
             ])
+
+        selected_ids = [202] + [photo_id for photo_id, _ in extra_specs]
+        selected_urls = ['/uploads/c.jpg'] + [
+            f'/uploads/{suffix}.jpg' for _, suffix in extra_specs]
 
         submitted = self.client.post(
             '/api/mobile/submit-item',
             headers={'Authorization': 'Bearer operator-token'},
             json={
                 'item_id': 101, 'plan_id': 10, 'result': 'normal',
-                'remark': 'three-photo item',
-                'photo_urls': json.dumps(['/uploads/c.jpg', '/uploads/d.jpg', '/uploads/e.jpg']),
-                '_idempotency_key': 'three-photo-final-item',
+                'remark': 'eight-photo item',
+                'photo_urls': json.dumps(selected_urls),
+                '_idempotency_key': 'eight-photo-final-item',
             },
         )
         self.assertEqual(submitted.status_code, 200, submitted.json)
 
         with app_module.get_db() as db:
+            placeholders = ','.join('?' for _ in selected_ids)
             rows = db.execute("""SELECT id,source_type,source_id,plan_id,item_id,item_name,
                     site_id,uploader_id,review_required,review_status,extra_json
-                FROM operation_attachments WHERE id IN (202,208,209) ORDER BY id""").fetchall()
+                FROM operation_attachments WHERE id IN (""" + placeholders + ") ORDER BY id",
+                selected_ids).fetchall()
             leaked = db.execute("""SELECT COUNT(*) FROM operation_attachments
-                WHERE id IN (202,208,209) AND source_type='site_photo' AND COALESCE(source_id,0)=0""").fetchone()[0]
-        self.assertEqual(len(rows), 3)
+                WHERE id IN (""" + placeholders + ") AND source_type='site_photo' "
+                "AND COALESCE(source_id,0)=0", selected_ids).fetchone()[0]
+            item = db.execute("""SELECT photo_urls,actual_photos,review_status
+                                  FROM insp_plan_items WHERE id=101""").fetchone()
+        self.assertEqual(len(rows), 8)
         self.assertEqual(leaked, 0)
+        self.assertEqual(json.loads(item['photo_urls']), selected_urls)
+        self.assertEqual((item['actual_photos'], item['review_status']), (8, 1))
         for row in rows:
             self.assertEqual(
                 (row['source_type'], row['source_id'], row['plan_id'], row['item_id'],
@@ -404,10 +421,23 @@ class InspectionAuditUnitTest(unittest.TestCase):
             )
             self.assertEqual(json.loads(row['extra_json'])['material_role'], 'formal')
 
+        reentered = self.client.get(
+            '/api/mobile/execution-plans/10/sites/1?scope=result',
+            headers={'Authorization': 'Bearer operator-token'},
+        )
+        self.assertEqual(reentered.status_code, 200, reentered.json)
+        reentered_items = [item for category in reentered.json['categories']
+                           for item in category['items']]
+        reentered_item = next(item for item in reentered_items if item['item_id'] == 101)
+        self.assertEqual(json.loads(reentered_item['photo_urls']), selected_urls)
+        self.assertEqual(reentered_item['actual_photos'], 8)
+
         pending = self.client.get('/api/audit/pending', headers=self.headers())
         self.assertEqual(pending.status_code, 200, pending.json)
         batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
-        self.assertTrue({202, 208, 209}.issubset(set(batch['attachment_ids'])))
+        self.assertTrue(set(selected_ids).issubset(set(batch['attachment_ids'])))
+        details = [row for row in batch['attachment_details'] if row['id'] in selected_ids]
+        self.assertEqual(len(details), 8)
 
     def test_checkout_after_approval_does_not_reopen_review(self):
         self.prepare_last_item_submission()

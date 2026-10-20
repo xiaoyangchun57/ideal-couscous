@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from unittest import mock
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import app as app_module
@@ -30,6 +30,12 @@ def jpeg_bytes(color='white'):
 def portrait_jpeg_bytes(color='white'):
     buffer = io.BytesIO()
     Image.new('RGB', (720, 960), color).save(buffer, format='JPEG')
+    return buffer.getvalue()
+
+
+def landscape_jpeg_bytes(color='white'):
+    buffer = io.BytesIO()
+    Image.new('RGB', (1600, 1200), color).save(buffer, format='JPEG', quality=92)
     return buffer.getvalue()
 
 
@@ -987,10 +993,52 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(hidden_meta['server_watermark']['anti_counterfeit_code'],
                          facts['anti_counterfeit_code'])
 
-    def test_trusted_camera_frame_uses_center_cover_without_black_padding(self):
+    def test_server_watermark_uses_text_stroke_without_background_plate(self):
+        facts = {
+            'site_name': '测试站',
+            'item_name': '浊度仪表读数',
+            'capture_time': '2026-10-20 10:20:30',
+            'gps_lat': 28.071303,
+            'gps_lng': 115.539684,
+            'anti_counterfeit_code': 'WQ-20261020-TEXT',
+        }
+        source_color = (52, 88, 123)
+        source = Image.new('RGB', (720, 960), source_color)
+        buffer = io.BytesIO()
+        source.save(buffer, format='PNG')
+        source_bytes = buffer.getvalue()
+
+        visible_bytes, visible_meta = app_module._create_site_photo_display_copy(
+            source_bytes, {'format': 'PNG'}, facts, render_watermark=True)
+        hidden_bytes, hidden_meta = app_module._create_site_photo_display_copy(
+            source_bytes, {'format': 'PNG'}, facts, render_watermark=False)
+
+        with Image.open(io.BytesIO(visible_bytes)).convert('RGB') as visible, \
+                Image.open(io.BytesIO(hidden_bytes)).convert('RGB') as hidden:
+            self.assertIsNone(ImageChops.difference(hidden, source).getbbox())
+            left, top, right, bottom = visible_meta['server_watermark']['layout_box']
+            plate_probe = ((left + right) // 2, min(bottom - 1, top + 2))
+            self.assertEqual(visible.getpixel(plate_probe), source_color)
+            crop = visible.crop((left, top, right, bottom))
+            pixels = list(getattr(crop, 'get_flattened_data', crop.getdata)())
+            self.assertTrue(any(min(pixel) < 30 for pixel in pixels))
+            self.assertTrue(any(max(pixel) > 220 for pixel in pixels))
+            self.assertIsNotNone(ImageChops.difference(visible, hidden).getbbox())
+
+        self.assertTrue(visible_meta['server_watermark']['rendered'])
+        self.assertFalse(hidden_meta['server_watermark']['rendered'])
+        self.assertEqual(hidden_meta['server_watermark']['rendered_lines'], [])
+
+    def test_trusted_camera_frame_keeps_legacy_cover_and_accepts_full_frame(self):
         self.assertEqual(app_module._trusted_camera_frame_contract({
             'orientation': 'portrait', 'ratio': '3:4', 'mode': 'center_cover',
         }), {'orientation': 'portrait', 'ratio': '3:4', 'mode': 'center_cover'})
+        self.assertEqual(app_module._trusted_camera_frame_contract({
+            'orientation': 'portrait', 'ratio': '3:4', 'mode': 'full_frame',
+        }), {'orientation': 'portrait', 'ratio': '3:4', 'mode': 'full_frame'})
+        self.assertEqual(app_module._trusted_camera_frame_contract({
+            'orientation': 'landscape', 'ratio': '4:3', 'mode': 'full_frame',
+        }), {'orientation': 'landscape', 'ratio': '4:3', 'mode': 'full_frame'})
         self.assertIsNone(app_module._trusted_camera_frame_contract({
             'orientation': 'landscape', 'ratio': '4:3', 'mode': 'center_cover',
         }))
@@ -1014,6 +1062,25 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 self.assertIsNone(metadata['neutral_background'])
                 self.assertEqual(metadata['capture_frame']['source_crop_box'], expected_crop)
                 self.assertEqual(metadata['capture_frame']['output_size'], list(expected_size))
+
+        full_frame_cases = (
+            ((720, 960), {'orientation': 'portrait', 'ratio': '3:4',
+                          'mode': 'full_frame'}),
+            ((1600, 1200), {'orientation': 'landscape', 'ratio': '4:3',
+                            'mode': 'full_frame'}),
+        )
+        for size, frame in full_frame_cases:
+            with self.subTest(full_frame=size):
+                buffer = io.BytesIO()
+                Image.new('RGB', size, (70, 90, 180)).save(buffer, format='JPEG', quality=95)
+                display_bytes, metadata = app_module._create_site_photo_display_copy(
+                    buffer.getvalue(), {'format': 'JPEG'}, capture_frame=frame)
+                with Image.open(io.BytesIO(display_bytes)) as display:
+                    self.assertEqual(display.size, size)
+                self.assertEqual(metadata['content_box'], [0, 0, *size])
+                self.assertIsNone(metadata['neutral_background'])
+                self.assertEqual(metadata['capture_frame']['source_crop_box'], [0, 0, *size])
+                self.assertEqual(metadata['capture_frame']['output_size'], list(size))
 
     def test_original_and_display_extensions_match_jpeg_png_and_webp_mime(self):
         app_module._recognize_watermark = lambda _: {
@@ -1519,6 +1586,12 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 'capture_frame_ratio': '9:16',
                 'capture_frame_mode': 'center_cover',
             },
+            {
+                'capture_client': 'trusted_camera_v1',
+                'capture_frame_orientation': 'landscape',
+                'capture_frame_ratio': '3:4',
+                'capture_frame_mode': 'full_frame',
+            },
         )
         for index, metadata in enumerate(invalid_frames):
             with self.subTest(index=index, metadata=metadata):
@@ -1551,6 +1624,91 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(capture_frame['mode'], 'center_cover')
         self.assertIsNotNone(capture['used_at'])
         self.assertEqual(capture['attachment_id'], response.json['id'])
+
+    def assert_trusted_full_frame_upload(self, *, orientation, ratio, image,
+                                         expected_size, display_watermark):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        response = self.upload(
+            image,
+            _trusted_camera_defaults=False,
+            capture_source='camera',
+            capture_session=session.json['capture_session'],
+            gps_lat=28.071303,
+            gps_lng=115.539684,
+            capture_client='trusted_camera_v1',
+            capture_frame_orientation=orientation,
+            capture_frame_ratio=ratio,
+            capture_frame_mode='full_frame',
+            capture_image_width=expected_size[0],
+            capture_image_height=expected_size[1],
+            capture_image_orientation='up',
+            display_watermark=display_watermark,
+            _idempotency_key=f'trusted-{orientation}-full-frame',
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['accepted_for_review'], response.json)
+        with app_module.get_db() as db:
+            attachment = db.execute(
+                'SELECT stored_path,extra_json FROM operation_attachments WHERE id=?',
+                (response.json['id'],)).fetchone()
+        extra = json.loads(attachment['extra_json'])
+        capture_frame = extra['capture_frame']
+        self.assertEqual((capture_frame['orientation'], capture_frame['ratio'],
+                          capture_frame['mode']), (orientation, ratio, 'full_frame'))
+        self.assertEqual(capture_frame['source_crop_box'], [0, 0, *expected_size])
+        self.assertEqual(capture_frame['output_size'], list(expected_size))
+        self.assertEqual(extra['client_image_facts'], {
+            'width': expected_size[0], 'height': expected_size[1],
+            'orientation': 'up'})
+        self.assertEqual(
+            extra['display_copy']['server_watermark']['image_orientation'], orientation)
+        self.assertEqual(
+            extra['display_copy']['server_watermark']['rendered'], display_watermark)
+        with Image.open(os.path.join(
+                app_module.UPLOAD_DIR,
+                attachment['stored_path'][len('/uploads/'):].replace('/', os.sep))) as display:
+            self.assertEqual(display.size, expected_size)
+
+    def test_camera_upload_trusted_portrait_full_frame_preserves_entire_image(self):
+        self.assert_trusted_full_frame_upload(
+            orientation='portrait', ratio='3:4', image=portrait_jpeg_bytes('blue'),
+            expected_size=(720, 960), display_watermark=False)
+
+    def test_camera_upload_trusted_landscape_full_frame_preserves_entire_image(self):
+        self.assert_trusted_full_frame_upload(
+            orientation='landscape', ratio='4:3', image=landscape_jpeg_bytes('green'),
+            expected_size=(1600, 1200), display_watermark=True)
+
+    def test_full_frame_direction_follows_decoded_pixels_not_stale_client_frame(self):
+        session = self.create_capture_session()
+        response = self.upload(
+            landscape_jpeg_bytes('orange'),
+            _trusted_camera_defaults=False,
+            capture_source='camera',
+            capture_session=session.json['capture_session'],
+            gps_lat=28.071303,
+            gps_lng=115.539684,
+            capture_client='trusted_camera_v1',
+            capture_frame_orientation='portrait',
+            capture_frame_ratio='3:4',
+            capture_frame_mode='full_frame',
+            capture_image_width=1200,
+            capture_image_height=1600,
+            capture_image_orientation='up',
+            _idempotency_key='trusted-full-frame-direction-normalized',
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            attachment = db.execute(
+                'SELECT extra_json FROM operation_attachments WHERE id=?',
+                (response.json['id'],)).fetchone()
+        extra = json.loads(attachment['extra_json'])
+        self.assertEqual(
+            (extra['capture_frame']['orientation'], extra['capture_frame']['ratio']),
+            ('landscape', '4:3'))
+        self.assertEqual(
+            extra['display_copy']['server_watermark']['image_orientation'], 'landscape')
 
     def test_location_verified_one_time_camera_session(self):
         session = self.client.post('/api/mobile/photo-capture-session', headers=self.headers(), json={
@@ -1872,33 +2030,46 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     related_order_no TEXT, flow_type TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
             ''')
-        session = self.create_manual_report_capture_session()
-        self.assertEqual(session.status_code, 200, session.json)
-        uploaded = self.upload(
-            portrait_jpeg_bytes('green'), plan_id=None, item_id=None,
-            capture_context='manual_report', capture_source='camera',
-            capture_session=session.json['capture_session'],
-            gps_lat=28.071303, gps_lng=115.539684,
-            _idempotency_key='manual-report-media-read',
-        )
-        self.assertEqual(uploaded.status_code, 200, uploaded.json)
-        stored_path = uploaded.json['url']
+        stored_paths = []
+        for index, color in enumerate(
+                ('green', 'blue', 'red', 'yellow', 'purple', 'orange', 'white', 'gray')):
+            session = self.create_manual_report_capture_session()
+            self.assertEqual(session.status_code, 200, session.json)
+            uploaded = self.upload(
+                portrait_jpeg_bytes(color), plan_id=None, item_id=None,
+                capture_context='manual_report', capture_source='camera',
+                capture_session=session.json['capture_session'],
+                gps_lat=28.071303, gps_lng=115.539684,
+                _idempotency_key=f'manual-report-media-read-{index}',
+            )
+            self.assertEqual(uploaded.status_code, 200, uploaded.json)
+            stored_paths.append(uploaded.json['url'])
         created = self.client.post('/api/manual-reports', headers=self.headers(), json={
             'site_id': 1, 'report_type': 'equipment', 'description': '泵房异响',
-            'photo_urls': [stored_path], 'gps_lat': 28.071303, 'gps_lng': 115.539684,
+            'photo_urls': stored_paths, 'gps_lat': 28.071303, 'gps_lng': 115.539684,
         })
         self.assertEqual(created.status_code, 201, created.json)
-        self.assertEqual(json.loads(created.json['photo_urls']), [stored_path])
-        self.assertEqual(created.json['photo_media'][0]['stored_path'], stored_path)
+        self.assertEqual(json.loads(created.json['photo_urls']), stored_paths)
+        self.assertEqual(len(created.json['photo_media']), 8)
+        self.assertEqual(created.json['photo_media'][0]['stored_path'], stored_paths[0])
         self.assertIn('?ticket=', created.json['photo_media'][0]['display_url'])
+        with app_module.get_db() as db:
+            self.assertTrue(db.execute(
+                'SELECT 1 FROM work_orders WHERE order_no=?',
+                (created.json['order_no'],)).fetchone())
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments "
+                "WHERE source_type='manual_report' AND source_id=?",
+                (created.json['id'],)).fetchone()[0], 8)
 
         ticket_clock = int(app_module.time.time())
         with mock.patch.object(app_module.time, 'time', return_value=ticket_clock):
             first = self.client.get('/api/manual-reports', headers=self.headers())
             self.assertEqual(first.status_code, 200, first.json)
-            self.assertEqual(json.loads(first.json[0]['photo_urls']), [stored_path])
+            self.assertEqual(json.loads(first.json[0]['photo_urls']), stored_paths)
+            self.assertEqual(len(first.json[0]['photo_media']), 8)
             first_display = first.json[0]['photo_media'][0]['display_url']
-            self.assertEqual(self.client.get(stored_path).status_code, 403)
+            self.assertEqual(self.client.get(stored_paths[0]).status_code, 403)
             first_media = self.client.get(first_display)
             self.assertEqual(first_media.status_code, 200)
             first_media.close()
@@ -1911,6 +2082,14 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             refreshed_media = self.client.get(refreshed_display)
             self.assertEqual(refreshed_media.status_code, 200)
             refreshed_media.close()
+
+        rejected = self.client.post('/api/manual-reports', headers=self.headers(), json={
+            'site_id': 1, 'report_type': 'equipment', 'description': '无照片不应创建',
+            'photo_urls': [], 'gps_lat': 28.071303, 'gps_lng': 115.539684,
+        })
+        self.assertEqual(rejected.status_code, 400, rejected.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM manual_reports').fetchone()[0], 1)
 
     def test_manual_report_upload_cannot_reuse_inspection_capture_session(self):
         session = self.create_capture_session()

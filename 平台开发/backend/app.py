@@ -129,12 +129,6 @@ from station_ingest_retention import RetentionError, read_raw_evidence
 
 
 def validate_submission_photos(result, required_photos, photo_urls):
-    try:
-        photos = json.loads(photo_urls or '[]') if isinstance(photo_urls, str) else (photo_urls or [])
-    except (TypeError, ValueError):
-        photos = []
-    if isinstance(photos, list) and len([photo for photo in photos if photo]) > 6:
-        return '单项最多上传 6 张现场照片'
     return _validate_submission_photos(result, required_photos, photo_urls)
 from station_monitoring import (business_slot_diagnostics as monitoring_business_slot_diagnostics,
                                 BUSINESS_PROJECTION_VERSION as MONITORING_BUSINESS_PROJECTION_VERSION,
@@ -373,21 +367,27 @@ def _project_workorder_display(workorder):
     return value
 
 
+def _workorder_service_mode(workorder):
+    value = dict(workorder or {})
+    return 'remote' if str(value.get('service_mode') or '').strip().lower() == 'remote' else 'onsite'
+
+
 def _project_workorder_detail(db, workorder, user):
     """Return the mobile detail contract from the current server facts only."""
     row = _project_workorder_display(workorder)
     can_operate = _workorder_user_can_operate(row, user, db)
     effective_checkin = _workorder_effective_checkin_time(db, row, user)
     status = str(row.get('status') or '').strip().lower()
+    service_mode = _workorder_service_mode(row)
     primary_action = None
     block_reason = ''
     if can_operate:
         if status == 'pending':
             primary_action = 'accept'
         elif status in ('accepted', 'dispatched'):
-            primary_action = 'start' if effective_checkin else 'check_in'
+            primary_action = 'start' if service_mode == 'remote' or effective_checkin else 'check_in'
         elif status == 'in_progress':
-            primary_action = 'submit_review' if effective_checkin else 'check_in'
+            primary_action = 'submit_review' if service_mode == 'remote' or effective_checkin else 'check_in'
         elif status == 'reviewing':
             block_reason = '工单已提交核验，等待审核结果'
         elif status in ('resolved', 'closed'):
@@ -398,6 +398,8 @@ def _project_workorder_detail(db, workorder, user):
         block_reason = '当前账号无权操作该工单'
 
     row.update({
+        'service_mode': service_mode,
+        'service_mode_label': '远程协助' if service_mode == 'remote' else '现场处置',
         'can_operate': can_operate,
         'effective_check_in_time': effective_checkin or '',
         'checked_in': bool(effective_checkin),
@@ -405,21 +407,23 @@ def _project_workorder_detail(db, workorder, user):
         'actions': {
             'primary': primary_action,
             'can_apply_resources': bool(can_operate and status in ('accepted', 'dispatched', 'in_progress')),
+            'can_switch_service_mode': bool(can_operate and status in ('accepted', 'dispatched', 'in_progress')),
             'can_dismiss_auto_alert': _workorder_can_dismiss_auto_alert(row, user, db),
         },
         'block_reason': block_reason,
         'action_summary': {
             'accept': '待受理，等待你接单执行',
             'check_in': '已受理，请到场签到后开始处置',
-            'start': '已签到，可开始现场处置',
-            'submit_review': '处置中，完成后提交核验',
+            'start': '可开始远程协助' if service_mode == 'remote' else '已签到，可开始现场处置',
+            'submit_review': '远程协助中，完成后提交核验' if service_mode == 'remote' else '处置中，完成后提交核验',
         }.get(primary_action, block_reason or ('等待审核人员处理' if status == 'reviewing'
                                                  else '工单已完成' if status in ('resolved', 'closed')
                                                  else '当前账号仅可查看')),
         # The current schema has no universal row version. This fact changes with
         # every state or evidence update and prevents the client inventing one.
         'version': '|'.join(str(row.get(key) or '') for key in (
-            'id', 'status', 'check_in_time', 'resolved_at', 'updated_at', 'images')),
+            'id', 'status', 'service_mode', 'check_in_time', 'remote_started_at',
+            'remote_submitted_at', 'resolved_at', 'updated_at', 'images')),
     })
     return row
 
@@ -707,7 +711,13 @@ def migrate_workorder_flow_columns():
                                    ('check_in_time', 'TEXT'), ('check_in_user', 'TEXT'),
                                    ('review_submitted_at', 'TEXT'),
                                    ('review_submitter_id', 'INTEGER'),
-                                   ('review_cycle', 'INTEGER DEFAULT 0')):
+                                   ('review_cycle', 'INTEGER DEFAULT 0'),
+                                   ('service_mode', "TEXT DEFAULT 'onsite'"),
+                                   ('remote_contact', "TEXT DEFAULT ''"),
+                                   ('remote_process', "TEXT DEFAULT ''"),
+                                   ('remote_result', "TEXT DEFAULT ''"),
+                                   ('remote_started_at', 'TEXT'),
+                                   ('remote_submitted_at', 'TEXT')):
                     if col not in wo_cols:
                         db.execute(f"ALTER TABLE work_orders ADD COLUMN {col} {ctype}")
             va_cols = [r['name'] for r in db.execute("PRAGMA table_info(vehicle_applications)").fetchall()]
@@ -732,9 +742,10 @@ def migrate_workorder_flow_columns():
                 if 'operator_id' not in recycle_cols:
                     db.execute("ALTER TABLE device_recycle ADD COLUMN operator_id INTEGER")
             db.commit()
-            print('[Migrate] 工单流程卡控字段已确保（签到/用车关联/备件关联）')
+            print('[Migrate] 工单流程卡控字段已确保（签到/远程协助/用车关联/备件关联）')
         except Exception as e:
-            print(f'[Migrate] 工单流程字段迁移跳过: {e}')
+            db.rollback()
+            raise RuntimeError(f'工单流程字段迁移失败: {e}') from e
 
 
 def migrate_actor_identity_columns():
@@ -1547,6 +1558,12 @@ def init_db():
                 remark TEXT,
                 satisfaction INTEGER,
                 review_submitted_at TEXT,
+                service_mode TEXT DEFAULT 'onsite',
+                remote_contact TEXT DEFAULT '',
+                remote_process TEXT DEFAULT '',
+                remote_result TEXT DEFAULT '',
+                remote_started_at TEXT,
+                remote_submitted_at TEXT,
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 FOREIGN KEY (site_id) REFERENCES sites(id)
             );
@@ -7464,6 +7481,7 @@ def _workorder_flow_events(db, order):
         return []
     labels = {
         'created': '创建工单', 'accepted': '接单', 'dispatched': '派发',
+        'service_mode_changed': '切换处置方式',
         'in_progress': '开始处置', 'submit_review': '提交核验',
         'approved': '审核通过', 'rejected': '审核退回', 'closed': '完成工单',
     }
@@ -7510,7 +7528,8 @@ def _workorder_flow_events(db, order):
             'time': order.get('resolved_at') or '', 'remark': '工单已完成', '_event_id': 0,
         })
     business_order = {
-        'created': 0, 'accepted': 10, 'dispatched': 20, 'check_in': 30,
+        'created': 0, 'accepted': 10, 'dispatched': 20, 'service_mode_changed': 25,
+        'check_in': 30,
         'in_progress': 40, 'submit_review': 50, 'rejected': 60,
         'approved': 70, 'closed': 80,
     }
@@ -8110,6 +8129,92 @@ def _inspection_arrival_gate(db, plan_id, user_id):
     return {'allowed': bool(allowed), 'code': code, 'message': message}
 
 
+@app.route('/api/workorders/<order_no>/service-mode', methods=['PUT'])
+@login_required
+def update_workorder_service_mode(order_no):
+    data = request.get_json(silent=True) or {}
+    service_mode = str(data.get('service_mode') or '').strip().lower()
+    if service_mode not in ('onsite', 'remote'):
+        return jsonify({
+            'error': '处置方式无效，请选择现场处置或远程协助',
+            'code': 'WORKORDER_SERVICE_MODE_INVALID',
+        }), 400
+    with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = db.execute('SELECT * FROM work_orders WHERE order_no=?', (order_no,)).fetchone()
+        if not current:
+            return jsonify({'error': '工单不存在', 'code': 'WORKORDER_NOT_FOUND'}), 404
+        if not (_has_any_role(g.current_user, 'admin')
+                or _workorder_user_can_operate(current, g.current_user, db)):
+            return jsonify({
+                'error': '只有工单负责人或管理员可以切换处置方式',
+                'code': 'WORKORDER_SERVICE_MODE_FORBIDDEN',
+            }), 403
+        if current['status'] not in ('accepted', 'dispatched', 'in_progress'):
+            return jsonify({
+                'error': '当前工单阶段不允许切换处置方式',
+                'code': 'WORKORDER_SERVICE_MODE_STATE_CONFLICT',
+            }), 409
+        previous_mode = _workorder_service_mode(current)
+        if previous_mode == service_mode:
+            return jsonify({
+                'success': True, 'service_mode': service_mode, 'already_selected': True,
+                'remote_started_at': current['remote_started_at'] or '',
+            })
+        remote_contact = str(data.get('remote_contact') or current['remote_contact'] or '').strip()
+        remote_process = str(data.get('remote_process') or current['remote_process'] or '').strip()
+        remote_result = str(data.get('remote_result') or current['remote_result'] or '').strip()
+        preserving_remote_attempt = (
+            previous_mode == 'remote' and service_mode == 'onsite'
+            and current['status'] == 'in_progress'
+        )
+        if preserving_remote_attempt and not all((remote_contact, remote_process, remote_result)):
+            db.rollback()
+            return jsonify({
+                'error': '转现场前请完整记录协助对象、协助经过和未解决结果',
+                'code': 'WORKORDER_REMOTE_HANDOFF_DETAILS_REQUIRED',
+                'fields': ['remote_contact', 'remote_process', 'remote_result'],
+            }), 400
+        updates = ['service_mode=?']
+        params = [service_mode]
+        if service_mode == 'remote' and current['status'] == 'in_progress' and not current['remote_started_at']:
+            updates.append("remote_started_at=datetime('now','localtime')")
+        if preserving_remote_attempt:
+            updates.extend(['remote_contact=?', 'remote_process=?', 'remote_result=?'])
+            params.extend([remote_contact[:1000], remote_process[:1000], remote_result[:1000]])
+        params.append(current['id'])
+        changed = db.execute(
+            f"UPDATE work_orders SET {','.join(updates)} WHERE id=? AND status IN ('accepted','dispatched','in_progress')",
+            params,
+        )
+        if changed.rowcount != 1:
+            db.rollback()
+            return jsonify({
+                'error': '工单状态已变化，处置方式未修改，请刷新后重试',
+                'code': 'WORKORDER_SERVICE_MODE_STATE_CONFLICT',
+            }), 409
+        mode_label = '远程协助' if service_mode == 'remote' else '现场处置'
+        handoff_note = (f'；已保留远程协助记录：{remote_result[:120]}'
+                        if preserving_remote_attempt else '')
+        db.execute(
+            """INSERT INTO timeline_events
+               (source_type,source_id,event_type,operator,remark)
+               VALUES (?,?,?,?,?)""",
+            ('workorder', current['id'], 'service_mode_changed', _current_actor_name(),
+             f'处置方式切换为{mode_label}；既有车辆和备件记录保持不变{handoff_note}'),
+        )
+        updated = db.execute('SELECT * FROM work_orders WHERE id=?', (current['id'],)).fetchone()
+        db.commit()
+        return jsonify({
+            'success': True,
+            'service_mode': service_mode,
+            'remote_started_at': updated['remote_started_at'] or '',
+            'remote_contact': updated['remote_contact'] or '',
+            'remote_process': updated['remote_process'] or '',
+            'remote_result': updated['remote_result'] or '',
+        })
+
+
 @app.route('/api/workorders/<order_no>/status', methods=['PUT'])
 @login_required
 def update_workorder_status(order_no):
@@ -8135,19 +8240,22 @@ def update_workorder_status(order_no):
     }
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
-        cur = db.execute("SELECT status, related_alert_id, used_parts, site_id, check_in_time, assignee FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
+        cur = db.execute("SELECT * FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
         if not cur:
             return jsonify({'error': 'not found'}), 404
         if not _workorder_user_can_operate(cur, g.current_user, db):
             return jsonify({'error': '只能操作分配给自己的工单'}), 403
         if new_status not in valid_transitions.get(cur['status'], []):
             return jsonify({'error': f'invalid transition from {cur["status"]} to {new_status}'}), 400
-        # 流程门禁（移动端强制）：到场签到后方可开始处置，防办公室内远程空转
-        if (data.get('client') == 'mobile' and new_status == 'in_progress'
+        # 现场模式的签到门禁由服务端统一执行，不能因 Web 来源绕过。
+        if (new_status == 'in_progress' and _workorder_service_mode(cur) == 'onsite'
                 and not _workorder_effective_checkin_time(db, cur, g.current_user)):
             return jsonify({'error': '请先到场签到后再开始处置'}), 400
         updates = ["status=?"]
         params = [new_status]
+        if (new_status == 'in_progress' and _workorder_service_mode(cur) == 'remote'
+                and 'remote_started_at' in cur.keys() and not cur['remote_started_at']):
+            updates.append("remote_started_at=datetime('now','localtime')")
         if new_status == 'closed':
             updates.append("resolved_at=datetime('now','localtime')")
         if 'remark' in data:
@@ -8226,16 +8334,17 @@ def submit_workorder_review(order_no):
             'error': '工单照片只能通过照片上传或删除入口维护',
             'code': 'WORKORDER_IMAGES_READ_ONLY',
         }), 400
-    resolution_note = (data.get('resolution_note') or data.get('remark') or '').strip()
-    if not resolution_note:
-        return jsonify({'error': '请填写现场处置说明后再提交核验'}), 400
+    resolution_note = str(data.get('resolution_note') or data.get('remark') or '').strip()
+    remote_contact = str(data.get('remote_contact') or '').strip()
+    remote_process = str(data.get('remote_process') or '').strip()
+    remote_result = str(data.get('remote_result') or '').strip()
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
         if not _table_has_column(db, 'work_orders', 'review_submitter_id'):
             db.execute('ALTER TABLE work_orders ADD COLUMN review_submitter_id INTEGER')
         if not _table_has_column(db, 'work_orders', 'review_cycle'):
             db.execute('ALTER TABLE work_orders ADD COLUMN review_cycle INTEGER DEFAULT 0')
-        cur = db.execute("SELECT id, status, images, assignee, site_id, title, check_in_time FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
+        cur = db.execute("SELECT * FROM work_orders WHERE order_no=?", (order_no,)).fetchone()
         if not cur:
             return jsonify({'error': '工单不存在'}), 404
         if not _workorder_user_can_operate(cur, g.current_user, db):
@@ -8244,7 +8353,26 @@ def submit_workorder_review(order_no):
             return jsonify({'success': True, 'status': 'reviewing', 'already_submitted': True})
         if cur['status'] == 'closed':
             return jsonify({'success': True, 'status': 'closed', 'already_closed': True})
-        if (cur['status'] != 'closed'
+        service_mode = _workorder_service_mode(cur)
+        if service_mode == 'remote':
+            missing_fields = [label for value, label in (
+                (remote_contact, '协助对象'), (remote_process, '协助经过'), (remote_result, '处理结果')
+            ) if not value]
+            if missing_fields:
+                return jsonify({
+                    'error': f'请填写远程协助的{"、".join(missing_fields)}后再提交核验',
+                    'code': 'WORKORDER_REMOTE_FIELDS_REQUIRED',
+                    'fields': missing_fields,
+                }), 400
+            if any(len(value) > 1000 for value in (remote_contact, remote_process, remote_result)):
+                return jsonify({
+                    'error': '远程协助记录单项不能超过 1000 字',
+                    'code': 'WORKORDER_REMOTE_FIELD_TOO_LONG',
+                }), 400
+            resolution_note = resolution_note or remote_result
+        elif not resolution_note:
+            return jsonify({'error': '请填写现场处置说明后再提交核验'}), 400
+        if (service_mode == 'onsite' and cur['status'] != 'closed'
                 and not _workorder_effective_checkin_time(db, cur, g.current_user)):
             return jsonify({
                 'error': '请先完成现场到场签到后再提交核验',
@@ -8252,16 +8380,29 @@ def submit_workorder_review(order_no):
             }), 409
         if cur['status'] != 'in_progress':
             return jsonify({'error': f'当前状态 {cur["status"]} 不允许提交核验'}), 400
-        # 提交核验前必须有处置影像。不能因来源是 Web 就绕过证据要求。
-        gate = _evidence_gate(db, 'workorder', cur['id'], 1)
-        if gate:
-            return jsonify(gate), 409
+        # 现场处置仍必须具备合格影像；远程协助以结构化过程记录为必需证据，照片只作补充。
+        if service_mode == 'onsite':
+            gate = _evidence_gate(db, 'workorder', cur['id'], 1)
+            if gate:
+                return jsonify(gate), 409
         submitted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        db.execute("""UPDATE work_orders
+        changed = db.execute("""UPDATE work_orders
                       SET status='reviewing', remark=?, review_submitted_at=?,
-                          review_submitter_id=?,review_cycle=COALESCE(review_cycle,0)+1
-                      WHERE order_no=?""",
-                   (resolution_note, submitted_at, g.current_user['id'], order_no))
+                          review_submitter_id=?,review_cycle=COALESCE(review_cycle,0)+1,
+                          remote_contact=?,remote_process=?,remote_result=?,
+                          remote_submitted_at=CASE WHEN ?='remote' THEN ? ELSE remote_submitted_at END
+                      WHERE order_no=? AND status='in_progress'""",
+                   (resolution_note, submitted_at, g.current_user['id'],
+                    remote_contact if service_mode == 'remote' else cur['remote_contact'],
+                    remote_process if service_mode == 'remote' else cur['remote_process'],
+                    remote_result if service_mode == 'remote' else cur['remote_result'],
+                    service_mode, submitted_at, order_no))
+        if changed.rowcount != 1:
+            db.rollback()
+            return jsonify({
+                'error': '工单状态已变化，提交未生效，请刷新后重试',
+                'code': 'WORKORDER_REVIEW_STATE_CONFLICT',
+            }), 409
         review_cycle = db.execute('SELECT review_cycle FROM work_orders WHERE order_no=?',
                                   (order_no,)).fetchone()['review_cycle']
         db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
@@ -8349,9 +8490,10 @@ def approve_workorder(order_no):
             return jsonify({'success': True, 'status': 'closed', 'already_closed': True})
         if cur['status'] != 'reviewing':
             return jsonify({'error': f'当前状态 {cur["status"]} 不允许核验通过'}), 400
-        gate = _evidence_gate(db, 'workorder', cur['id'], 1)
-        if gate:
-            return jsonify(gate), 409
+        if _workorder_service_mode(cur) == 'onsite':
+            gate = _evidence_gate(db, 'workorder', cur['id'], 1)
+            if gate:
+                return jsonify(gate), 409
         risky_evidence = db.execute("""
             SELECT id, flag_reason, taken_at, duplicate_of_id
             FROM operation_attachments
@@ -8599,7 +8741,11 @@ def api_workorder_photos(order_no):
             WHERE source_type='workorder' AND source_id=? AND is_deleted=0
             ORDER BY created_at DESC
         """, (wo['id'],)).fetchall()
-        photos = [dict(a) for a in atts]
+        photos = []
+        for attachment in atts:
+            photo = dict(attachment)
+            photo.update(_attachment_similarity_payload(db, photo))
+            photos.append(photo)
         
         # 获取拍照模板 + 统计进度
         event_type = wo_dict.get('event_type', '')
@@ -8749,13 +8895,9 @@ def _batch_link_wo_photos(order_no, urls, file_size=0, provenance=None,
                     "SELECT id FROM operation_attachments WHERE sha256_hash=? AND is_deleted=0 ORDER BY id LIMIT 1",
                     (sha256_hash,),
                 ).fetchone()
-            if not duplicate and perceptual_hash:
-                candidates = db.execute(
-                    "SELECT id, perceptual_hash FROM operation_attachments WHERE perceptual_hash!='' AND is_deleted=0 ORDER BY id DESC LIMIT 2000"
-                ).fetchall()
-                duplicate = next((row for row in candidates
-                                  if _hash_distance(perceptual_hash, row['perceptual_hash']) <= 6), None)
             duplicate_id = duplicate['id'] if duplicate else None
+            similar, similar_distance = ((None, None) if duplicate else
+                                         _find_similar_attachment(db, perceptual_hash))
             received_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             session = _capture_session_row(
                 db, provenance.get('capture_session'), user_id=g.current_user.get('id'),
@@ -8779,6 +8921,17 @@ def _batch_link_wo_photos(order_no, urls, file_size=0, provenance=None,
                 client_taken_at=provenance.get('client_taken_at'),
                 exif_taken_at=provenance.get('exif_taken_at'), gps_lat=trusted_gps_lat,
                 gps_lng=trusted_gps_lng, duplicate_of_id=duplicate_id, session=session)
+            try:
+                attachment_extra = json.loads(provenance.get('extra_json') or '{}')
+            except (TypeError, json.JSONDecodeError):
+                attachment_extra = {}
+            if not isinstance(attachment_extra, dict):
+                attachment_extra = {}
+            if similar:
+                attachment_extra.update({
+                    'similar_attachment_id': similar['id'],
+                    'similar_hash_distance': similar_distance,
+                })
             db.execute("""INSERT INTO operation_attachments
                     (filename, stored_path, file_type, mime_type, file_size, description,
                      source_type, source_id, site_id, uploader_id, uploader_name,
@@ -8798,7 +8951,8 @@ def _batch_link_wo_photos(order_no, urls, file_size=0, provenance=None,
                      _b_rec_cat, _b_match_status, _b_match_conf,
                      _b_review_required, _b_req_id, provenance.get('capture_source') or 'unknown',
                      sha256_hash, duplicate_id, perceptual_hash,
-                     provenance.get('watermark_code') or '', provenance.get('extra_json') or ''))
+                     provenance.get('watermark_code') or '',
+                     json.dumps(attachment_extra, ensure_ascii=False)))
             new_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
             _record_attachment_evaluation(
                 db, new_id, assessment,
@@ -8822,7 +8976,7 @@ def _batch_link_wo_photos(order_no, urls, file_size=0, provenance=None,
                     "SELECT flag_reason, flag_rule FROM operation_attachments WHERE id=?", (new_id,)
                 ).fetchone()
                 reasons = [flagged['flag_reason']] if flagged and flagged['flag_reason'] else []
-                reasons.append(f'与历史影像#{duplicate_id}重复或高度相似')
+                reasons.append(f'与历史影像#{duplicate_id}为同一文件')
                 db.execute("""UPDATE operation_attachments
                     SET is_flagged=1, flag_reason=?, flag_rule=?, review_required=1, review_status='pending'
                     WHERE id=?""", ('；'.join(reasons), (flagged['flag_rule'] if flagged and flagged['flag_rule'] else 'duplicate'), new_id))
@@ -9100,6 +9254,8 @@ def api_workorder_upload_photo(order_no):
             (sha256_hash,),
         ).fetchone()
         duplicate_id = duplicate['id'] if duplicate else None
+        similar, similar_distance = ((None, None) if duplicate else
+                                     _find_similar_attachment(db, perceptual_hash))
         assessment = _assess_attachment_evidence(
             db, source_type='workorder', source_id=current['id'], site_id=effective_site_id,
             uploader_id=effective_uploader_id, received_at=now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -9114,8 +9270,8 @@ def api_workorder_upload_photo(order_no):
                  gps_lat, gps_lng, taken_at, category,
                  watermark_text, recognized_category, match_status, match_confidence,
                  review_required, requirement_id, capture_source, sha256_hash,
-                 duplicate_of_id, perceptual_hash)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 duplicate_of_id, perceptual_hash, extra_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (file.filename or fname, url,
                  'image', ext, len(file_data),
                  description,
@@ -9129,7 +9285,11 @@ def api_workorder_upload_photo(order_no):
                  category,
                  _wm, _rec_cat, _match_status, _match_conf,
                  _review_required, _req_id, capture_source, sha256_hash,
-                 duplicate_id, perceptual_hash))
+                 duplicate_id, perceptual_hash,
+                 json.dumps({
+                     'similar_attachment_id': similar['id'],
+                     'similar_hash_distance': similar_distance,
+                 }, ensure_ascii=False) if similar else ''))
             aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             _flag_attachment(
                 db, aid, effective_site_id, 'workorder', current['id'], gps_lat, gps_lng, taken_at,
@@ -9140,7 +9300,7 @@ def api_workorder_upload_photo(order_no):
                     "SELECT flag_reason, flag_rule FROM operation_attachments WHERE id=?", (aid,)
                 ).fetchone()
                 reasons = [flagged['flag_reason']] if flagged and flagged['flag_reason'] else []
-                reasons.append(f'与历史影像#{duplicate_id}重复或高度相似')
+                reasons.append(f'与历史影像#{duplicate_id}为同一文件')
                 db.execute("""UPDATE operation_attachments
                     SET is_flagged=1, flag_reason=?, flag_rule=?, review_required=1, review_status='pending'
                     WHERE id=?""", ('；'.join(reasons), (flagged['flag_rule'] if flagged and flagged['flag_rule'] else 'duplicate'), aid))
@@ -9896,6 +10056,29 @@ def _attachment_status_payload(attachment):
     }
 
 
+def _attachment_similarity_payload(db, attachment):
+    """Project only the new-upload perceptual reference stored in extra_json."""
+    try:
+        extra = json.loads(attachment.get('extra_json') or '{}')
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    try:
+        reference_id = int(extra.get('similar_attachment_id') or 0)
+    except (TypeError, ValueError):
+        reference_id = 0
+    if reference_id and not db.execute(
+            "SELECT 1 FROM operation_attachments WHERE id=? AND COALESCE(is_deleted,0)=0",
+            (reference_id,)).fetchone():
+        reference_id = 0
+    return {
+        'similar_attachment_id': reference_id or None,
+        'similar_hash_distance': extra.get('similar_hash_distance'),
+        'similar_hint': '画面相似，可核对参考影像' if reference_id else '',
+    }
+
+
 def _persist_inspection_attachment_link(db, attachment_id, item):
     """Persist a server-resolved inspection link on the attachment row.
 
@@ -10105,6 +10288,7 @@ def _decorate_attachment(db, attachment):
     if result.get('uploader_real_name'):
         result['uploader_name'] = result['uploader_real_name']
     result.update(_attachment_presentation(db, result))
+    result.update(_attachment_similarity_payload(db, result))
     result['display_url'] = _attachment_display_url(result)
     result.pop('uploader_real_name', None)
     return result
@@ -16481,10 +16665,28 @@ def audit_pending():
 
         # 2. 工单审核：只以“待办结工单”为审核单元，照片是该单据的证据，
         # 不再拆成独立照片审核，避免照片审核完成后工单从审核队列消失。
-        wos = db.execute("""
+        workorder_columns = {row['name'] for row in db.execute('PRAGMA table_info(work_orders)').fetchall()}
+        service_mode_sql = ("COALESCE(w.service_mode,'onsite')" if 'service_mode' in workorder_columns
+                            else "'onsite'")
+        remote_contact_sql = ("COALESCE(w.remote_contact,'')" if 'remote_contact' in workorder_columns
+                              else "''")
+        remote_process_sql = ("COALESCE(w.remote_process,'')" if 'remote_process' in workorder_columns
+                              else "''")
+        remote_result_sql = ("COALESCE(w.remote_result,'')" if 'remote_result' in workorder_columns
+                             else "''")
+        remote_started_sql = 'w.remote_started_at' if 'remote_started_at' in workorder_columns else 'NULL'
+        remote_submitted_sql = ('w.remote_submitted_at' if 'remote_submitted_at' in workorder_columns
+                                else 'NULL')
+        wos = db.execute(f"""
             SELECT w.id, w.order_no, w.site_id, s.name as site_name, w.event_type,
                    w.title, w.description, w.remark, w.status, w.images, w.assignee,
-                   w.created_at, w.check_in_time, w.review_submitted_at
+                   w.created_at, w.check_in_time, w.review_submitted_at,
+                   {service_mode_sql} AS service_mode,
+                   {remote_contact_sql} AS remote_contact,
+                   {remote_process_sql} AS remote_process,
+                   {remote_result_sql} AS remote_result,
+                   {remote_started_sql} AS remote_started_at,
+                   {remote_submitted_sql} AS remote_submitted_at
             FROM work_orders w
             LEFT JOIN sites s ON w.site_id = s.id
             WHERE w.status = 'reviewing'
@@ -16494,11 +16696,11 @@ def audit_pending():
             wo_dict = dict(wo)
             if allowed is not None and wo_dict.get('site_id') not in allowed:
                 continue
-            # 取工单全部有效照片，供管理员在同一审核弹窗内判断是否办结。
+            # 现场正式证据参与数量；远程补充材料只提供查看，不冒充现场合格照片。
             photo_rows = db.execute(f"""
                 SELECT id, filename, stored_path, description, category, created_at, uploader_name,
                        review_status, reject_reason, taken_at, capture_source, is_flagged,
-                       flag_reason, flag_rule, duplicate_of_id,
+                       flag_reason, flag_rule, duplicate_of_id, sha256_hash, extra_json,
                        {evidence_qualification_sql.replace('a.', '')} AS evidence_qualification,
                        {evidence_basis_sql.replace('a.', '')} AS evidence_basis,
                        {evidence_reason_sql.replace('a.', '')} AS evidence_reason,
@@ -16506,18 +16708,43 @@ def audit_pending():
                 FROM operation_attachments a
                 WHERE a.source_type='workorder' AND a.source_id=?
                   AND file_type='image' AND is_deleted=0
-                  AND COALESCE(evidence_qualification,'review')='qualified'
-                  AND COALESCE(json_extract(CASE WHEN json_valid(extra_json)
-                        THEN extra_json ELSE '{{}}' END, '$.material_role'),'formal')!='supplement'
+                  AND (
+                    (COALESCE(evidence_qualification,'review')='qualified'
+                     AND COALESCE(json_extract(CASE WHEN json_valid(extra_json)
+                           THEN extra_json ELSE '{{}}' END, '$.material_role'),'formal')!='supplement')
+                    OR (?='remote'
+                        AND COALESCE(json_extract(CASE WHEN json_valid(extra_json)
+                              THEN extra_json ELSE '{{}}' END, '$.material_role'),'formal')='supplement')
+                  )
                 ORDER BY created_at DESC
-            """, (wo_dict['id'],)).fetchall()
-            total_photos = len(photo_rows)
+            """, (wo_dict['id'], wo_dict.get('service_mode') or 'onsite')).fetchall()
             workorder_attachment_details = []
             for photo in photo_rows:
                 detail = dict(photo)
+                detail.update(_attachment_similarity_payload(db, detail))
                 detail.update(_attachment_status_payload(detail))
+                try:
+                    extra = json.loads(detail.get('extra_json') or '{}')
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    extra = {}
+                supplemental = bool(
+                    wo_dict.get('service_mode') == 'remote'
+                    and isinstance(extra, dict)
+                    and extra.get('material_role') == 'supplement')
+                detail['supplemental'] = supplemental
+                detail['material_role'] = 'supplement' if supplemental else 'formal'
+                if supplemental:
+                    detail.update({
+                        'is_effective_evidence': 0,
+                        'is_valid_evidence': 0,
+                        'evidence_qualification_label': '远程协助补充材料，不计现场合格照片',
+                    })
                 detail['display_url'] = _attachment_display_url(detail)
                 workorder_attachment_details.append(detail)
+            total_photos = sum(
+                1 for detail in workorder_attachment_details
+                if detail.get('evidence_qualification') == 'qualified'
+                and not detail.get('supplemental'))
             result.append({
                 'source_type': 'workorder_review',
                 'source_label': '工单办结审核',
@@ -16528,9 +16755,17 @@ def audit_pending():
                 'source_name': wo_dict.get('order_no', ''),
                 'source_title': wo_dict.get('title', ''),
                 'actual_photos': total_photos,
-                'required_photos': 1,
+                'required_photos': 0 if wo_dict.get('service_mode') == 'remote' else 1,
                 'original_description': wo_dict.get('description', '') or '',
                 'resolution_note': wo_dict.get('remark', '') or '',
+                'service_mode': wo_dict.get('service_mode') or 'onsite',
+                'service_mode_label': ('远程协助' if wo_dict.get('service_mode') == 'remote'
+                                       else '现场处置'),
+                'remote_contact': wo_dict.get('remote_contact', '') or '',
+                'remote_process': wo_dict.get('remote_process', '') or '',
+                'remote_result': wo_dict.get('remote_result', '') or '',
+                'remote_started_at': wo_dict.get('remote_started_at', '') or '',
+                'remote_submitted_at': wo_dict.get('remote_submitted_at', '') or '',
                 'created_at': wo_dict.get('created_at', '') or '',
                 'check_in_time': wo_dict.get('check_in_time', '') or '',
                 'submit_time': wo_dict.get('review_submitted_at', '') or '',
@@ -16646,6 +16881,7 @@ def audit_pending():
                    a.site_id, s.name as site_name, a.source_type, a.source_id,
                    a.created_at as submit_time, a.stored_path, a.filename, a.taken_at,
                    a.is_flagged, a.flag_reason, a.flag_rule, a.capture_source,
+                   a.duplicate_of_id, a.sha256_hash,
                    a.review_status, a.uploader_id, a.uploader_name,
                    {evidence_qualification_sql} AS evidence_qualification,
                    {evidence_basis_sql} AS evidence_basis,
@@ -16710,6 +16946,9 @@ def audit_pending():
                         'evidence_reason': pd.get('evidence_reason') or '',
                         'evidence_next_action': pd.get('evidence_next_action') or '',
                     }
+                    attachment_detail['duplicate_of_id'] = pd.get('duplicate_of_id')
+                    attachment_detail['sha256_hash'] = pd.get('sha256_hash') or ''
+                    attachment_detail.update(_attachment_similarity_payload(db, attachment_detail))
                     attachment_detail.update(_attachment_status_payload(pd))
                     attachment_detail['display_url'] = _attachment_display_url(attachment_detail)
                     inspection_batch['attachment_details'].append(attachment_detail)
@@ -18129,13 +18368,16 @@ def _site_photo_watermark_layout(draw, image_size, source_lines, content_box=Non
 
 
 def _trusted_camera_frame_contract(value):
-    """Return the portrait crop contract rendered by the in-app trusted camera."""
+    """Return a trusted-camera display contract, including legacy portrait clients."""
     if not isinstance(value, dict):
         return None
     orientation = str(value.get('orientation') or '').strip().lower()
     ratio = str(value.get('ratio') or '').strip()
     mode = str(value.get('mode') or '').strip().lower()
-    if orientation != 'portrait' or ratio != '3:4' or mode != 'center_cover':
+    if (orientation, ratio, mode) == ('portrait', '3:4', 'center_cover'):
+        return {'orientation': orientation, 'ratio': ratio, 'mode': mode}
+    if mode != 'full_frame' or (orientation, ratio) not in {
+            ('portrait', '3:4'), ('landscape', '4:3')}:
         return None
     return {'orientation': orientation, 'ratio': ratio, 'mode': mode}
 
@@ -18170,9 +18412,26 @@ def _create_site_photo_display_copy(image_bytes, original_file, server_watermark
         source_image = ImageOps.exif_transpose(source).copy()
         frame_contract = _trusted_camera_frame_contract(capture_frame)
         source_crop_box = None
-        if frame_contract:
+        if frame_contract and frame_contract['mode'] == 'center_cover':
             image, source_crop_box = _site_photo_center_cover_frame(
                 source_image, frame_contract)
+            canvas_size = image.size
+            content_box = [0, 0, image.width, image.height]
+        elif frame_contract and frame_contract['mode'] == 'full_frame':
+            image = source_image.convert('RGB')
+            source_crop_box = [0, 0, image.width, image.height]
+            max_side = 1920
+            if max(image.size) > max_side:
+                scale = max_side / max(image.size)
+                image = image.resize((max(1, int(round(image.width * scale))),
+                                      max(1, int(round(image.height * scale)))),
+                                     Image.Resampling.LANCZOS)
+            actual_landscape = image.width >= image.height
+            frame_contract = dict(
+                frame_contract,
+                orientation='landscape' if actual_landscape else 'portrait',
+                ratio='4:3' if actual_landscape else '3:4',
+            )
             canvas_size = image.size
             content_box = [0, 0, image.width, image.height]
         else:
@@ -18239,20 +18498,20 @@ def _create_site_photo_display_copy(image_bytes, original_file, server_watermark
                 'layout_box': None,
                 'rendered_lines': [],
                 'image_size': [image.width, image.height],
+                'image_orientation': ('landscape' if image.width >= image.height else 'portrait'),
                 'content_box': content_box,
             }
             if render_watermark:
                 draw = ImageDraw.Draw(image, 'RGBA')
                 layout = _site_photo_watermark_layout(draw, image.size, lines, content_box)
                 left, top, right, bottom = layout['box']
-                radius = max(3, layout['padding'])
-                draw.rounded_rectangle(
-                    (left, top, right, bottom), radius=radius, fill=(0, 0, 0, 148))
                 y = top + layout['padding']
                 for line, line_height in zip(layout['lines'], layout['line_heights']):
                     draw.text(
                         (left + layout['padding'], y), line,
-                        fill=(255, 255, 255, 245), font=layout['font'])
+                        fill=(255, 255, 255, 245), font=layout['font'],
+                        stroke_width=max(1, layout['font_size'] // 18),
+                        stroke_fill=(0, 0, 0, 210))
                     y += line_height + layout['line_gap']
                 watermark_metadata.update({
                     'rendered': True,
@@ -18339,6 +18598,21 @@ def _hash_distance(left, right):
         return (int(left, 16) ^ int(right, 16)).bit_count()
     except (TypeError, ValueError):
         return 65
+
+
+def _find_similar_attachment(db, perceptual_hash, threshold=6):
+    """Return a review-only visual similarity hint; never a duplicate identity."""
+    if not perceptual_hash:
+        return None, None
+    rows = db.execute(
+        "SELECT id, perceptual_hash FROM operation_attachments "
+        "WHERE perceptual_hash!='' AND is_deleted=0 ORDER BY id DESC LIMIT 2000"
+    ).fetchall()
+    for row in rows:
+        distance = _hash_distance(perceptual_hash, row['perceptual_hash'])
+        if distance <= threshold:
+            return row, distance
+    return None, None
 
 
 _WATERMARK_OCR = None
@@ -27046,6 +27320,17 @@ def mobile_upload_site_photo():
     item_id = data.get('item_id')
     plan_id = data.get('plan_id')
     requested_item_name = (data.get('item_name') or '').strip()
+    try:
+        capture_image_width = int(data.get('capture_image_width') or 0)
+        capture_image_height = int(data.get('capture_image_height') or 0)
+    except (TypeError, ValueError):
+        capture_image_width = 0
+        capture_image_height = 0
+    capture_image_orientation = str(data.get('capture_image_orientation') or '').strip().lower()
+    if capture_image_orientation not in {
+            '', 'up', 'up-mirrored', 'down', 'down-mirrored',
+            'left-mirrored', 'right', 'right-mirrored', 'left'}:
+        capture_image_orientation = ''
     keep_as_supplement = bool(data.get('keep_as_supplement'))
     if capture_source == 'watermark_album':
         capture_source = 'supplement'
@@ -27273,6 +27558,12 @@ def mobile_upload_site_photo():
                 'item_name': requested_item_name,
                 'classification_source': 'inspection_item' if inspection_item else 'watermark_ocr',
             }
+            if capture_source == 'camera':
+                extra['client_image_facts'] = {
+                    'width': capture_image_width if capture_image_width > 0 else None,
+                    'height': capture_image_height if capture_image_height > 0 else None,
+                    'orientation': capture_image_orientation,
+                }
             if manual_report_capture:
                 extra['capture_context'] = 'manual_report'
             if recovery_attachment:
@@ -27891,6 +28182,7 @@ def mobile_workorder_image(order_no):
     data = request.get_json(silent=True) or {}
     image = data.get('image', '')
     idempotency_key = str(data.get('_idempotency_key') or '').strip()
+    capture_source = str(data.get('capture_source') or '').strip()
     if not image:
         return jsonify({'error': '缺少图片数据'}), 400
     with get_db() as db:
@@ -27911,21 +28203,33 @@ def mobile_workorder_image(order_no):
                 'error': '工单尚未进入处置阶段，不能上传处置照片',
                 'code': 'WORKORDER_NOT_IN_PROGRESS',
             }), 409
-        if not _workorder_effective_checkin_time(db, wo, g.current_user):
+        remote_supplement = (
+            _workorder_service_mode(wo) == 'remote' and capture_source == 'supplement')
+        if capture_source == 'supplement' and not remote_supplement:
+            return jsonify({
+                'error': '补充材料仅用于远程协助；现场处置请完成签到后使用现场相机',
+                'code': 'WORKORDER_REMOTE_SUPPLEMENT_REQUIRED',
+            }), 409
+        if not remote_supplement and not _workorder_effective_checkin_time(
+                db, wo, g.current_user):
             return jsonify({
                 'error': '请先完成本站到站签到后再上传处置照片',
                 'code': 'WORKORDER_CHECKIN_REQUIRED',
             }), 409
+    if capture_source not in ('camera', 'supplement'):
+        return jsonify({
+            'error': '工单影像来源无效，请从当前处置入口重新添加',
+            'code': 'WORKORDER_IMAGE_SOURCE_INVALID',
+        }), 400
     if not idempotency_key or len(idempotency_key) > 160:
         return jsonify({'error': '缺少有效上传标识', 'code': 'IDEMPOTENCY_KEY_REQUIRED'}), 400
-    capture_source = str(data.get('capture_source') or '').strip()
     display_watermark = data.get('display_watermark') is not False
     capture_frame = _trusted_camera_frame_contract({
         'orientation': data.get('capture_frame_orientation'),
         'ratio': data.get('capture_frame_ratio'),
         'mode': data.get('capture_frame_mode'),
     }) if capture_source == 'camera' and str(data.get('capture_client') or '').strip() == 'trusted_camera_v1' else None
-    if not capture_frame:
+    if capture_source == 'camera' and not capture_frame:
         return jsonify({
             'error': '正式拍照取景边界无效，请重新进入相机',
             'code': 'CAPTURE_FRAME_INVALID',
@@ -27959,42 +28263,48 @@ def mobile_workorder_image(order_no):
             current = db.execute('''SELECT w.*, s.name AS site_name
                                     FROM work_orders w LEFT JOIN sites s ON s.id=w.site_id
                                     WHERE w.order_no=?''', (order_no,)).fetchone()
-            session = _capture_session_row(
+            session = (_capture_session_row(
                 db, data.get('capture_session'), user_id=g.current_user['id'],
                 site_id=int(current['site_id'] or 0) if current else 0,
                 work_order_id=current['id'] if current else None,
-                received_at=_parse_dt(now_str), capture_source='camera') if current else None
-        if not session:
+                received_at=_parse_dt(now_str), capture_source='camera')
+                if current and capture_source == 'camera' else None)
+        if capture_source == 'camera' and not session:
             return jsonify({
                 'error': '现场拍摄授权无效、已过期或与当前工单不一致',
                 'code': 'CAPTURE_SESSION_REQUIRED',
             }), 409
         site_name = str(current['site_name'] or '').strip()
         workorder_name = f"{order_no} · {_workorder_display_title(dict(current))}"
-        trusted_gps_lat = float(session['gps_lat'])
-        trusted_gps_lng = float(session['gps_lng'])
-        display_data, display_file = _create_site_photo_display_copy(
-            img_data, original_file, {
+        trusted_gps_lat = float(session['gps_lat']) if session else None
+        trusted_gps_lng = float(session['gps_lng']) if session else None
+        if capture_source == 'camera':
+            display_data, display_file = _create_site_photo_display_copy(
+                img_data, original_file, {
+                    'site_name': site_name,
+                    'item_label': '工单',
+                    'item_name': workorder_name,
+                    'capture_time': now_str,
+                    'gps_lat': trusted_gps_lat,
+                    'gps_lng': trusted_gps_lng,
+                    'anti_counterfeit_code': session['anti_counterfeit_code'],
+                }, capture_frame=capture_frame, render_watermark=display_watermark)
+            watermark_fields = {
                 'site_name': site_name,
                 'item_label': '工单',
                 'item_name': workorder_name,
-                'capture_time': now_str,
+                'taken_at': now_str,
                 'gps_lat': trusted_gps_lat,
                 'gps_lng': trusted_gps_lng,
-                'anti_counterfeit_code': session['anti_counterfeit_code'],
-            }, capture_frame=capture_frame, render_watermark=display_watermark)
-        watermark = display_file['server_watermark']
-        watermark_fields = {
-            'site_name': site_name,
-            'item_label': '工单',
-            'item_name': workorder_name,
-            'taken_at': now_str,
-            'gps_lat': trusted_gps_lat,
-            'gps_lng': trusted_gps_lng,
-            'code': session['anti_counterfeit_code'],
-            'confidence': 1.0,
-            'source': 'server_capture_session',
-        }
+                'code': session['anti_counterfeit_code'],
+                'confidence': 1.0,
+                'source': 'server_capture_session',
+            }
+        else:
+            display_data, display_file = _create_site_photo_display_copy(
+                img_data, original_file, render_watermark=False)
+            watermark_fields = {}
+        watermark = display_file['server_watermark'] or {}
         provenance = {
             'sha256_hash': request_hash,
             'perceptual_hash': _image_difference_hash(img_data),
@@ -28003,11 +28313,11 @@ def mobile_workorder_image(order_no):
             'exif_taken_at': metadata.get('taken_at'),
             'gps_lat': trusted_gps_lat,
             'gps_lng': trusted_gps_lng,
-            'capture_source': 'camera',
+            'capture_source': capture_source,
             'capture_session': data.get('capture_session'),
             'display_mime_type': display_file['mime_type'],
             'display_file_size': len(display_data),
-            'watermark_code': session['anti_counterfeit_code'],
+            'watermark_code': session['anti_counterfeit_code'] if session else '',
             'watermark_text': '\n'.join(watermark.get('rendered_lines') or []),
             '_server_upload': True,
         }
@@ -28022,7 +28332,8 @@ def mobile_workorder_image(order_no):
         original_filepath = _private_site_photo_target(original_locator)
         url = f'/uploads/workorder_photos/{filename}'
         extra = {
-            'metadata_source': 'server_capture_session',
+            'metadata_source': ('server_capture_session'
+                                if capture_source == 'camera' else 'remote_supplement'),
             'original_size': len(img_data),
             'original_file': {
                 'stored_path': original_locator,
@@ -28046,7 +28357,7 @@ def mobile_workorder_image(order_no):
                 'neutral_background': display_file['neutral_background'],
                 'capture_frame': display_file.get('capture_frame'),
             },
-            'display_watermark': display_watermark,
+            'display_watermark': bool(display_watermark and capture_source == 'camera'),
             'watermark_fields': watermark_fields,
             'site_name': site_name,
             'work_order_id': current['id'],
@@ -28054,6 +28365,7 @@ def mobile_workorder_image(order_no):
             'item_name': workorder_name,
             'capture_frame': display_file.get('capture_frame'),
             'classification_source': 'workorder',
+            'material_role': ('evidence' if capture_source == 'camera' else 'supplement'),
         }
         provenance['extra_json'] = json.dumps(extra, ensure_ascii=False, separators=(',', ':'))
         _persist_site_photo_materials(
@@ -37112,8 +37424,6 @@ def api_manual_reports_create():
     photo_urls = list(dict.fromkeys(url for url in photo_urls if isinstance(url, str) and url.startswith('/uploads/')))
     if not photo_urls:
         return jsonify({'error': '请至少提交一张现场照片'}), 400
-    if len(photo_urls) > 6:
-        return jsonify({'error': '现场照片最多 6 张'}), 400
     gps_lat = data.get('gps_lat')
     gps_lng = data.get('gps_lng')
     # 上报人必须来自已认证的请求上下文，不能信任客户端传入的 user id。
