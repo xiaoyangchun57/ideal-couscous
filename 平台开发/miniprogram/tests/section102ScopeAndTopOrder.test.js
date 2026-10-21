@@ -373,6 +373,7 @@ test('成功态不含原生 input/textarea/picker 组件', () => {
 
     // ===== 测试 4：切回有缓存的模式，范围匹配可复用 =====
     {
+      cachedUser = { role: 'admin', capabilities: { station_monitoring_public: false } };
       let reagentCallCount = 0;
       api.responsibleSites = () => Promise.resolve(makeSiteResponse('all', [{ id: 1 }]));
       api.reagentOverview = () => {
@@ -413,8 +414,9 @@ test('成功态不含原生 input/textarea/picker 组件', () => {
       console.log('✔ 切回有缓存模式：范围匹配直接复用，不重新请求');
     }
 
-    // ===== 测试 5：切回有缓存模式，范围不匹配必须重载 =====
+    // ===== 测试 5：试剂范围变化不污染站点模式范围 =====
     {
+      cachedUser = { role: 'admin', capabilities: { station_monitoring_public: false } };
       let sitesCallCount = 0;
       let reagentCallCount = 0;
       api.responsibleSites = (opts) => {
@@ -448,18 +450,20 @@ test('成功态不含原生 input/textarea/picker 组件', () => {
       assert.equal(page._loadedScope.reagents, 'all');
       assert.equal(reagentCallCount, reagentMineCalls + 1, '切换范围调用了试剂 API');
 
-      // 切回站点模式 — 站点缓存是 mine，但当前 scope 是 all → 必须重载
+      // 切回站点模式 — 恢复站点自己的 mine 范围并复用缓存
       page.onTabSites();
       await flush();
-      assert.equal(sitesCallCount, sitesMineCalls + 1, '范围不匹配时站点模式重新加载');
-      assert.equal(page._loadedScope.stations, 'all', '站点重载后范围更新为 all');
+      assert.equal(sitesCallCount, sitesMineCalls, '试剂范围变化不应触发站点模式重载');
+      assert.equal(page.data.scope, 'mine', '切回站点模式恢复站点自己的范围');
+      assert.equal(page._loadedScope.stations, 'mine', '站点缓存范围保持不变');
 
       passed++; tests++;
-      console.log('✔ 切回有缓存模式：范围不匹配时重新加载');
+      console.log('✔ 模式范围隔离：试剂 all 不污染站点 mine 缓存');
     }
 
     // ===== 测试 6：无 canViewAll 时不显示且零请求 =====
     {
+      cachedUser = { capabilities: { station_monitoring_public: false } };
       let sitesCallCount = 0;
       let reagentCallCount = 0;
       api.responsibleSites = () => {

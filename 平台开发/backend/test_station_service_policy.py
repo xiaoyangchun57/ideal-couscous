@@ -9,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import app as web_app
+import station_monitoring_api as monitoring_api
 from migrate_station_ingestion import apply_migration
 
 
@@ -272,7 +273,7 @@ class StationServicePolicyTest(unittest.TestCase):
 
         headers = self.headers('policy-admin')
         with mock.patch.object(
-                web_app, '_station_monitoring_batch_projections_cached',
+                monitoring_api, '_station_monitoring_batch_projections_cached',
                 side_effect=projections):
             current_sites = self.client.get(
                 '/api/sites?service_scope=current', headers=headers).get_json()
@@ -419,16 +420,14 @@ class StationServicePolicyTest(unittest.TestCase):
         trend_points = [
             {
                 'business_metric': 'ph',
-                'scheduled_at': slot['scheduled_at'],
-                'status': 'value' if index == 0 else 'missing',
-                'value': 7.1 if index == 0 else None,
+                'scheduled_at': slot['scheduled_at'], 'observed_at': slot['scheduled_at'],
+                'status': 'value', 'value': 7.1,
                 'unit': '',
-                'quality': 'valid' if index == 0 else None,
-                'observed_at': None,
+                'quality': 'valid',
                 'received_at': None,
                 'deadline_at': slot['result_window_end_at'],
             }
-            for index, slot in enumerate(slots)
+            for slot in slots[:1]
         ]
         trend_configuration = {
             **configuration,
@@ -437,15 +436,16 @@ class StationServicePolicyTest(unittest.TestCase):
             'standard_unit': '',
         }
         with mock.patch.object(
-                web_app, '_monitoring_site_context', return_value=({}, None)), mock.patch.object(
-                web_app, 'monitoring_factor_configurations',
+                monitoring_api, '_monitoring_site_context', return_value=({}, None)), mock.patch.object(
+                monitoring_api, 'monitoring_factor_configurations',
                 return_value=[trend_configuration]), mock.patch.object(
-                web_app, 'monitoring_trend_slots', return_value=trend_points), mock.patch.object(
-                web_app, 'monitoring_business_slot_diagnostics', return_value={
+                monitoring_api, 'monitoring_result_trend_page',
+                return_value=(trend_points, False, None)), mock.patch.object(
+                monitoring_api, 'monitoring_business_slot_diagnostics', return_value={
                     'late_points': 0, 'suspect_points': 0,
                     'duplicate_records': 0, 'conflict_slots': 0,
                 }), mock.patch.object(
-                web_app, 'monitoring_expected_business_slots', return_value=slots):
+                monitoring_api, 'monitoring_expected_business_slots', return_value=slots):
             trend = self.client.get(
                 f'/api/station-monitoring/sites/{self.site_id}/trend',
                 headers=self.headers('policy-admin'),
@@ -458,7 +458,7 @@ class StationServicePolicyTest(unittest.TestCase):
         self.assertEqual(trend.status_code, 200, trend.get_json())
         self.assertEqual(
             [point['scheduled_at'] for point in trend.get_json()['points']],
-            ['2026-10-12T02:00:00+00:00', '2026-10-12T10:00:00+00:00'],
+            ['2026-10-12T02:00:00+00:00'],
         )
         self.assertEqual(trend.get_json()['coverage']['expected_points'], 2)
         self.assertEqual(trend.get_json()['coverage']['missing_points'], 1)

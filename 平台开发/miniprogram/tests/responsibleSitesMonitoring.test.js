@@ -17,7 +17,11 @@ global.wx = {
 };
 require('../pages/responsible-sites/responsible-sites.js');
 
-const originals = { stationMonitoringSites: api.stationMonitoringSites, responsibleSites: api.responsibleSites };
+const originals = {
+  stationMonitoringSites: api.stationMonitoringSites,
+  responsibleSites: api.responsibleSites,
+  reagentOverview: api.reagentOverview,
+};
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const makePage = () => {
   const page = Object.assign({}, definition, { data: JSON.parse(JSON.stringify(definition.data)) });
@@ -51,7 +55,7 @@ const makePage = () => {
     const page = makePage();
     page.onShow();
     await flush();
-    assert.deepEqual(calls[0], { scope: 'mine', keyword: '' }, 'first request must use mine');
+    assert.deepEqual(calls[0], { scope: 'all', keyword: '' }, 'public monitoring opens the full current-service directory');
     assert.equal(page.data.canViewAll, true, 'scope switch follows server capability');
     assert.equal(page.data.sites[0].is_responsible, true);
     assert.equal(page.data.sites[0].latest_cycle.arrived_count_display, 2, 'arrived count takes precedence over legacy formed count');
@@ -62,6 +66,20 @@ const makePage = () => {
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'expected_factors_unconfigured' }).status_label, '应监测因子未设置');
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'time_configuration_missing' }).status_label, '时间配置缺失');
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'no_evaluable_period' }).status_label, '暂无可评价时段');
+
+    const reagentCalls = [];
+    api.reagentOverview = options => {
+      reagentCalls.push(options);
+      return Promise.resolve({
+        scope: options.scope, available_scopes: ['mine'], scope_counts: { mine: 1 }, items: [],
+      });
+    };
+    page.onTabReagent();
+    await flush();
+    assert.deepEqual(reagentCalls[0], { scope: 'mine' }, 'public monitoring does not widen reagent scope');
+    page.onTabSites();
+    await flush();
+    assert.equal(page.data.scope, 'all', 'returning to monitoring restores its full-directory scope');
 
     let staticCalls = 0;
     let closedMonitoringCalls = 0;
@@ -85,14 +103,11 @@ const makePage = () => {
         items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
       });
     };
-    page.onScopeAll();
-    await flush();
-    assert.deepEqual(calls[1], { scope: 'all', keyword: '' });
     assert.equal(page.data.scope, 'all');
     page.onKeywordInput({ detail: { value: ' 水站 A&B ' } });
     page.onSearch();
     await flush();
-    assert.deepEqual(calls[2], { scope: 'all', keyword: '水站 A&B' });
+    assert.deepEqual(calls[1], { scope: 'all', keyword: '水站 A&B' });
     assert.equal(page.data.keyword, '水站 A&B');
 
     const returnRefresh = [];
@@ -142,7 +157,7 @@ const makePage = () => {
     };
     page.onClearSearch();
     await flush();
-    assert.deepEqual(calls[3], { scope: 'all', keyword: '' });
+    assert.deepEqual(calls[2], { scope: 'all', keyword: '' });
 
     api.stationMonitoringSites = () => Promise.resolve({
       scope: 'mine', available_scopes: ['mine'], scope_counts: { mine: 0, all: null }, items: []

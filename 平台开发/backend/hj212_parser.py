@@ -31,6 +31,7 @@ class HJ212Factor:
     quality: str
     issue_code: str | None = None
     value_kind: str | None = None
+    raw_value_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +172,8 @@ def _parse_factors(content: str, command: str) -> list[HJ212Factor]:
             issue_code = "hj212_invalid_numeric"
         protocol_code = "HJ212:w01019-Rtd" if code.lower() == "w01019" else f"HJ212:{code.lower()}"
         factors.append(HJ212Factor(
-            protocol_code, code, number, quality, issue_code, selected_kind.lower()))
+            protocol_code, code, number, quality, issue_code, selected_kind.lower(),
+            value if number is not None else None))
     return factors
 
 

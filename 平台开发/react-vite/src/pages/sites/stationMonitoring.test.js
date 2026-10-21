@@ -8,6 +8,7 @@ import {
   cycleStatusView,
   hasAdminRole,
   mergeMonitoringSites,
+  mergeMonitoringTrendPages,
   monitoringStatusView,
   monitoringSummaryItems,
   monitoringDefaultTrendMetric,
@@ -59,6 +60,20 @@ test('monitoring merge preserves the legacy site status and retains last success
   assert.equal(retained[0].monitoring_reason, '有效观测在周期内');
 });
 
+test('public monitoring can add current-service stations without widening their management fields', () => {
+  const merged = mergeMonitoringSites(
+    [{ id: 7, name: '本人站点', private_management_field: '仅本人可见' }],
+    { items: [
+      { site_id: 7, name: '本人站点', monitoring_status: 'normal' },
+      { site_id: 8, name: '公共监测站点', monitoring_status: 'attention' },
+    ] },
+  );
+  assert.deepEqual(merged.map((item) => item.id), [7, 8]);
+  assert.equal(merged[0].private_management_field, '仅本人可见');
+  assert.equal(merged[1].private_management_field, undefined);
+  assert.equal(merged[1].monitoring_status, 'attention');
+});
+
 test('monitoring directory rejects scope total and site-set mismatches', () => {
   const sites = [{ id: 7 }, { id: 8 }];
   const valid = {
@@ -77,6 +92,12 @@ test('monitoring directory rejects scope total and site-set mismatches', () => {
   assert.equal(validateMonitoringDirectoryPayload(
     sites, { ...valid, items: [{ site_id: 7 }, { site_id: 9 }] },
     { scope: 'all', serviceScope: 'current' }).ok, false);
+  assert.equal(validateMonitoringDirectoryPayload(
+    [{ id: 7 }], valid,
+    { scope: 'all', serviceScope: 'current', allowMonitoringSuperset: true }).ok, true);
+  assert.equal(validateMonitoringDirectoryPayload(
+    [{ id: 7 }, { id: 9 }], valid,
+    { scope: 'all', serviceScope: 'current', allowMonitoringSuperset: true }).ok, false);
 });
 
 test('summary and axes expose explicit unavailable and unknown states', () => {
@@ -131,6 +152,7 @@ test('trend view preserves the server window, unit, coverage and zero values', (
       coverage_rate: 1, valid_points: 6, displayed_points: 6, expected_points: 6, gap_count: 0, missing_points: 0,
       late_points: 1, suspect_points: 4, duplicate_records: 2, conflict_slots: 3,
     },
+    pagination: { has_more: true, next_cursor: 'older-page' },
   });
   assert.equal(available.available, true);
   assert.equal(available.items[0].value, 0);
@@ -142,6 +164,8 @@ test('trend view preserves the server window, unit, coverage and zero values', (
   assert.equal(available.suspectPoints, 4);
   assert.equal(available.duplicateRecords, 2);
   assert.equal(available.conflictSlots, 3);
+  assert.equal(available.hasMore, true);
+  assert.equal(available.nextCursor, 'older-page');
   assert.deepEqual(monitoringTrendChartOption(available).series[0].data, [
     ['2026-09-18T00:00:00+00:00', 0],
   ]);
@@ -154,6 +178,32 @@ test('trend view preserves the server window, unit, coverage and zero values', (
   });
   assert.equal(monitoringCoverageLabel(suspectOnly), '0.0% (0/6)');
   assert.equal(suspectOnly.suspectPoints, 1);
+});
+
+test('trend page merge prepends older results, removes boundary duplicates and keeps the next cursor', () => {
+  const merged = mergeMonitoringTrendPages({
+    site_id: 7,
+    metric: 'ph',
+    points: [
+      { business_metric: 'ph', observed_at: '2026-10-20T08:00:00+00:00', endpoint_id: 1, value: 7.2 },
+      { business_metric: 'ph', observed_at: '2026-10-20T12:00:00+00:00', endpoint_id: 1, value: 7.3 },
+    ],
+    pagination: { has_more: true, next_cursor: 'page-2' },
+  }, {
+    site_id: 7,
+    metric: 'ph',
+    points: [
+      { business_metric: 'ph', observed_at: '2026-10-20T04:00:00+00:00', endpoint_id: 1, value: 7.1 },
+      { business_metric: 'ph', observed_at: '2026-10-20T08:00:00+00:00', endpoint_id: 1, value: 7.2 },
+    ],
+    pagination: { has_more: false, next_cursor: null },
+  });
+  assert.deepEqual(merged.points.map((item) => item.observed_at), [
+    '2026-10-20T04:00:00+00:00',
+    '2026-10-20T08:00:00+00:00',
+    '2026-10-20T12:00:00+00:00',
+  ]);
+  assert.deepEqual(merged.pagination, { has_more: false, next_cursor: null });
 });
 
 test('site directory snapshot survives page re-entry but is isolated by session identity roles capabilities and scope', () => {

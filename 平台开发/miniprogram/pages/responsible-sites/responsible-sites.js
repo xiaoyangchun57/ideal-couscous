@@ -39,6 +39,7 @@ Page({
     // 已提交范围的缓存标记：各模式最后一次成功加载的范围
     // 用于切回已有缓存的模式时判断是否可直接复用
     this._loadedScope = { stations: null, reagents: null };
+    this._stationScope = null;
   },
 
   onPageScroll(event) { this._reagentScrollTop = Number(event && event.scrollTop) || 0; },
@@ -57,6 +58,7 @@ Page({
     } else if (this._stationReturnSnapshot) {
       const snapshot = this._stationReturnSnapshot;
       this._stationReturnSnapshot = null;
+      this._stationScope = snapshot.scope;
       this._reagentScrollTop = snapshot.scrollTop || 0;
       this.setData({
         activeTab: snapshot.activeTab,
@@ -71,7 +73,10 @@ Page({
       }
     }
     if (this.data.activeTab === 'reagents') this.loadReagents();
-    else this.loadSites(this.data.scope || 'mine', this.data.keyword || '');
+    else {
+      const scope = this._stationScope || (monitoringPublic ? 'all' : (this.data.scope || 'mine'));
+      this.loadSites(scope, this.data.keyword || '');
+    }
   },
 
   loadSites(scope, keyword) {
@@ -92,6 +97,7 @@ Page({
       const resolvedScope = res.scope === 'all' ? 'all' : 'mine';
       const resolvedKeyword = requestedKeyword;
       this._loadedScope.stations = resolvedScope;
+      this._stationScope = resolvedScope;
       this.setData({
         sites: (res.items || []).map(site => Object.assign({}, site, {
           type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点'),
@@ -115,6 +121,7 @@ Page({
           const availableScopes = Array.isArray(res.available_scopes) ? res.available_scopes : ['mine'];
           const resolvedScope = res.scope === 'all' ? 'all' : 'mine';
           this._loadedScope.stations = resolvedScope;
+          this._stationScope = resolvedScope;
           this.setData({
             sites: (res.items || []).map(site => Object.assign({}, site, {
               type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点'),
@@ -194,10 +201,11 @@ Page({
   onTabSites() {
     if (this.data.activeTab === 'stations') return;
     // 缓存范围匹配才可直接复用，否则按当前共享范围重载
-    const currentScope = this.data.pendingScope || this.data.scope;
+    const currentScope = this._stationScope
+      || (this.data.monitoringPublic ? 'all' : (this.data.pendingScope || this.data.scope));
     const hasCachedSites = this.data.sites.length > 0;
     const scopeMatches = this._loadedScope.stations === currentScope;
-    this.setData({ activeTab: 'stations' });
+    this.setData({ activeTab: 'stations', scope: currentScope, pendingScope: null });
     if (hasCachedSites && scopeMatches) return;
     // 范围不匹配或无缓存：按最新意图加载
     this.loadSites(currentScope, this.data.keyword || '');
@@ -205,9 +213,12 @@ Page({
 
   onTabReagent() {
     if (this.data.activeTab === 'reagents') return;
-    this.setData({ activeTab: 'reagents' });
     // 模式切换按最新 pending/已提交范围加载
-    const currentScope = this.data.pendingScope || this.data.scope;
+    const user = getUser() || {};
+    const roles = Array.isArray(user.roles) && user.roles.length ? user.roles : [user.role];
+    const currentScope = roles.includes('admin')
+      ? (this.data.pendingScope || this.data.scope) : 'mine';
+    this.setData({ activeTab: 'reagents', scope: currentScope, pendingScope: null });
     // 有缓存且范围匹配则直接复用缓存（不重新请求）
     const hasCachedReagents = this._reagentOverview && Array.isArray(this._reagentOverview.items) && this._reagentOverview.items.length > 0;
     const scopeMatches = this._loadedScope.reagents === currentScope;

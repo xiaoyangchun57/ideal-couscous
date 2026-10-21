@@ -30,6 +30,8 @@ MIGRATIONS = (
     ("20261013_012_hj212_numeric_factor_definitions", Path(__file__).with_name("migrations") / "20261013_012_hj212_numeric_factor_definitions.sql"),
     ("20261013_013_station_service_policy", Path(__file__).with_name("migrations") / "20261013_013_station_service_policy.sql"),
     ("20261016_014_station_ingest_retention_windows", Path(__file__).with_name("migrations") / "20261016_014_station_ingest_retention_windows.sql"),
+    ("20261020_015_station_factor_display_precision", Path(__file__).with_name("migrations") / "20261020_015_station_factor_display_precision.sql"),
+    ("20261021_016_station_raw_value_text", Path(__file__).with_name("migrations") / "20261021_016_station_raw_value_text.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -44,6 +46,12 @@ STATION_EXPECTED_FACTORS_MIGRATION_VERSION = "20261013_011_station_expected_fact
 HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION = "20261013_012_hj212_numeric_factor_definitions"
 STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
 STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION = "20261016_014_station_ingest_retention_windows"
+STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION = "20261020_015_station_factor_display_precision"
+STATION_RAW_VALUE_TEXT_MIGRATION_VERSION = "20261021_016_station_raw_value_text"
+STATION_NON_RELATIONAL_INCREMENTAL_MIGRATIONS = frozenset({
+    STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION,
+    STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,
+})
 STATION_INGEST_RETENTION_WINDOW_TABLES = frozenset({
     "station_ingest_current_state",
     "station_ingest_recent_receipts",
@@ -68,6 +76,9 @@ CONTROLLED_EXISTING_SCHEMA_CHANGES = {
         "sites": """ALTER TABLE sites
             ADD COLUMN master_status TEXT NOT NULL DEFAULT 'active'
             CHECK (master_status IN ('active', 'retired'))""",
+    },
+    STATION_RAW_VALUE_TEXT_MIGRATION_VERSION: {
+        "observation_values": "ALTER TABLE observation_values ADD COLUMN raw_value_text TEXT",
     },
 }
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
@@ -389,6 +400,19 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
             or retention_windows_migration[0] != migration_checksum(
                 STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)):
         raise MigrationError("station ingest retention-window migration is missing or incompatible")
+    raw_value_text_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+    ).fetchone()
+    if raw_value_text_migration:
+        if raw_value_text_migration[0] != migration_checksum(
+                STATION_RAW_VALUE_TEXT_MIGRATION_VERSION):
+            raise MigrationError("station raw-value-text migration is incompatible")
+        observation_value_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(observation_values)")
+        }
+        if "raw_value_text" not in observation_value_columns:
+            raise MigrationError("station raw-value-text column is missing")
     required_read_indexes = {
         "idx_ingest_raw_logical_key",
         "idx_ingest_raw_authenticated_endpoint_received",
@@ -576,13 +600,21 @@ def apply_migration(
                 raise MigrationError(
                     "startup migration found unknown schema migration versions: "
                     + ", ".join(sorted(unknown_versions)))
-            missing_prior = [version for version in known_versions[:-1] if version not in existing_versions]
+            migration_014_index = known_versions.index(
+                STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)
+            missing_prior = [
+                version for version in known_versions[:migration_014_index]
+                if version not in existing_versions
+            ]
             if missing_prior:
                 raise MigrationError(
                     "startup migration requires complete migrations 001 through 013; missing: "
                     + ", ".join(missing_prior))
-            if pending_versions not in ((), (STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,)):
-                raise MigrationError("startup migration permits only migration 014")
+            pending = [
+                item for item in pending
+                if item[0] == STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION
+            ]
+            pending_versions = tuple(version for version, _ in pending)
             fast_014_only = bool(pending_versions)
         if not pending:
             verify_station_monitoring_contract(connection)
@@ -595,8 +627,12 @@ def apply_migration(
     backup_path = backup_database(database, backup_dir) if backup_dir is not None else None
     connection: sqlite3.Connection | None = None
     before_foreign_rows: frozenset[tuple[object, ...]] | None = None
-    foreign_key_tables = (
-        STATION_INGEST_RETENTION_WINDOW_TABLES if fast_014_only else None)
+    if fast_014_only:
+        foreign_key_tables = STATION_INGEST_RETENTION_WINDOW_TABLES
+    elif set(pending_versions) <= STATION_NON_RELATIONAL_INCREMENTAL_MIGRATIONS:
+        foreign_key_tables = frozenset()
+    else:
+        foreign_key_tables = None
     try:
         connection = sqlite3.connect(str(database), isolation_level=None)
         connection.execute("PRAGMA foreign_keys=ON")

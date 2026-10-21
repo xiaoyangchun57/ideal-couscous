@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_line": "cross-module-freeze",
   "candidate_tags": [
-    "release-20261020-miniprogram-backend-compat-r27"
+    "release-20261021-station-data-closure-r28"
   ],
   "historical_tags": [
     "release-20260810-cross-module-freeze",
@@ -33,6 +33,7 @@
     "release-20261017-cross-module-freeze-r26",
     "release-20261017-cross-module-freeze-v2-r26",
     "release-20261019-cross-module-freeze-v3-r26",
-    "release-20261019-cross-module-freeze-v4-r26"
+    "release-20261019-cross-module-freeze-v4-r26",
+    "release-20261020-miniprogram-backend-compat-r27"
   ]
 }

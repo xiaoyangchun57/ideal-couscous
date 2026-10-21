@@ -65,50 +65,21 @@
         </view>
       </view>
 
-      <!-- 最近一期结果 -->
+      <!-- 最新实际结果 -->
       <view class="mon-section">
         <view class="mon-section-head">
-          <text class="mon-section-title">最近一期结果</text>
-          <text class="mon-section-count" wx:if="{{site.monitoring.latest_cycle.scheduled_at}}">已到 {{site.monitoring.latest_cycle.arrived_count_display}} / 应到 {{site.monitoring.latest_cycle.expected_count_display}}</text>
-        </view>
-        <view class="card mon-values-card" wx:if="{{site.monitoring.latest_cycle}}">
-          <block wx:if="{{site.monitoring.latest_cycle.scheduled_at}}">
-          <view class="mon-value-row">
-            <text class="mon-value-name">检测时点</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_cycle.scheduled_at}}</text>
-          </view>
-          <view class="mon-value-row">
-            <text class="mon-value-name">结果状态</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_cycle.status_label}}</text>
-          </view>
-          <view class="mon-value-row">
-            <text class="mon-value-name">最近完整时点（辅助）</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_cycle.latest_complete_cycle_at || '暂无完整周期'}}</text>
-          </view>
-          <view class="mon-value-row" wx:for="{{site.monitoring.latest_cycle.factors}}" wx:key="business_metric">
-            <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}} · {{item.status === 'value' ? '已形成' : item.status === 'pending' ? '形成中' : item.status === 'missing' ? '缺测' : '待核对'}}</text>
-            <view class="mon-value-right"><text class="mon-value-num">{{item.status === 'value' ? (item.value_display !== undefined && item.value_display !== null ? item.value_display : item.value) : '—'}}</text><text class="mon-value-unit">{{item.standard_unit}}</text></view>
-          </view>
-          </block>
-          <view class="mon-value-row" wx:else>
-            <text class="mon-value-name">结果状态</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_cycle.status_label}}</text>
-          </view>
-        </view>
-      </view>
-
-      <!-- 各因子最近可用值 -->
-      <view class="mon-section">
-        <view class="mon-section-head">
-          <text class="mon-section-title">各因子最近可用值</text>
+          <text class="mon-section-title">最新结果</text>
           <text class="mon-section-count" wx:if="{{site.monitoring.latest_values.length > 0}}">{{site.monitoring.latest_values.length}} 项</text>
         </view>
-        <text class="mon-hero-reason mon-hero-reason--muted">各项可能来自不同检测周期，不代表同一次完整检测</text>
         <view class="card mon-values-card" wx:if="{{site.monitoring.latest_values.length > 0}}">
-          <view class="mon-value-row" wx:for="{{site.monitoring.latest_values}}" wx:key="protocol_code">
+          <view class="mon-value-row">
+            <text class="mon-value-name">结果时间</text>
+            <text class="mon-value-unit">{{site.monitoring.latest_result_at}}</text>
+          </view>
+          <view class="mon-value-row" wx:for="{{site.monitoring.latest_results}}" wx:key="business_metric">
             <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
             <view class="mon-value-right">
-              <text class="mon-value-num">{{item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value}}</text>
+              <text class="mon-value-num">{{item.status === 'value' ? (item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value) : item.status === 'review_required' ? '待核对' : '缺失'}}</text>
               <text class="mon-value-unit">{{item.standard_unit}}</text>
             </view>
           </view>

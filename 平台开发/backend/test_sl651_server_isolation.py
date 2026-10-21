@@ -177,7 +177,147 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
         with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'").fetchone()[0], 3)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'"
+            ).fetchone()[0], 2)
+            self.assertEqual(connection.execute(
+                "SELECT receipt_count FROM station_ingest_slot_summaries"
+            ).fetchone()[0], 2)
+
+    async def test_hj212_without_profile_or_schedule_folds_same_value_within_four_hour_slot(self):
+        station = "NOSCHEDULE"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ-NO-SCHEDULE','No schedule','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.commit()
+
+        first = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100100001",
+            cp=("DataTime=20261020080000;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        repeated = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100200001",
+            cp=("DataTime=20261020080000;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        next_minute = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100300001",
+            cp=("DataTime=20261020080100;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        auth = self.storage.authenticate(first)
+        first_id, first_folded = self.storage.persist_parsed(
+            first, auth, "2026-10-20T02:01:00+00:00")
+        repeated_id, repeated_folded = self.storage.persist_parsed(
+            repeated, auth, "2026-10-20T02:02:00+00:00")
+        next_id, next_folded = self.storage.persist_parsed(
+            next_minute, auth, "2026-10-20T02:03:00+00:00")
+        self.assertEqual((first_folded, repeated_folded, next_folded), (False, True, True))
+        self.assertEqual(repeated_id, first_id)
+        self.assertEqual(next_id, first_id)
+        self.assertEqual(ingest_server.normalize_raw_frame(self.database, first_id), "accepted")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                "ingest_raw_frames", "observation_batches", "observation_values",
+                "monitoring_business_observations", "monitoring_status_events",
+            ))
+            canonical_time = connection.execute(
+                """SELECT batch.observed_at,batch.received_at
+                   FROM observation_batches batch WHERE batch.raw_frame_id=?""",
+                (first_id,),
+            ).fetchone()
+            summary = connection.execute(
+                """SELECT COUNT(*),SUM(receipt_count) FROM station_ingest_slot_summaries
+                   WHERE endpoint_id=?""", (endpoint_id,)
+            ).fetchone()
+        self.assertEqual(counts, (1, 1, 2, 0, 0))
+        self.assertEqual(tuple(canonical_time), (
+            "2026-10-20T00:00:00+00:00", "2026-10-20T02:01:00+00:00"))
+        self.assertEqual(tuple(summary), (1, 3))
+
+    async def test_hj212_explicit_schedule_folds_repeats_and_retains_changes_and_new_cycle(self):
+        station = "SCHEDULED"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ-SCHEDULED','Scheduled','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',1800,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        payloads = (
+            ("20261020100100001", "20261020100000", 74.5),
+            ("20261020100200001", "20261020100100", 74.5),
+            ("20261020100300001", "20261020100200", 75.5),
+            ("20261020140100001", "20261020140000", 75.5),
+        )
+        raw_ids = []
+        folded = []
+        for offset, (qn, data_time, conductivity) in enumerate(payloads):
+            frame = parse_hj212_frame(make_hj212(
+                station=station, password=password, qn=qn,
+                cp=(f"DataTime={data_time};w01001-Rtd=7.1;w01001-Flag=N;"
+                    f"w01014-Rtd={conductivity};w01014-Flag=N"),
+            ))
+            raw_id, was_folded = self.storage.persist_parsed(
+                frame, self.storage.authenticate(frame),
+                f"2026-10-20T{2 + offset:02d}:01:00+00:00",
+            )
+            raw_ids.append(raw_id)
+            folded.append(was_folded)
+            if not was_folded:
+                self.assertEqual(
+                    ingest_server.normalize_raw_frame(self.database, raw_id), "accepted")
+
+        self.assertEqual(folded, [False, True, False, False])
+        self.assertEqual(raw_ids[1], raw_ids[0])
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                "ingest_raw_frames", "observation_batches", "observation_values",
+                "monitoring_business_observations", "monitoring_status_events",
+            ))
+            summary = connection.execute(
+                """SELECT COUNT(*),SUM(receipt_count) FROM station_ingest_slot_summaries
+                   WHERE endpoint_id=?""", (endpoint_id,)
+            ).fetchone()
+            values_per_batch = [row[0] for row in connection.execute(
+                """SELECT COUNT(value.id) FROM observation_batches batch
+                   LEFT JOIN observation_values value ON value.observation_batch_id=batch.id
+                   GROUP BY batch.id ORDER BY batch.id"""
+            )]
+        self.assertEqual(counts, (3, 3, 5, 5, 0))
+        self.assertEqual(tuple(summary), (3, 4))
+        self.assertEqual(values_per_batch, [2, 1, 2])
 
     async def test_unbound_hj212_receipts_keep_the_same_connection_without_an_application_reply(self):
         password = "long-ascii-password"
@@ -448,17 +588,21 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (latest_item["business_metric"], latest_item["standard_value"],
                  latest_item["function_code"], latest_item["projection_version"]),
-                ("ph", 7.1, 2061, "station-monitoring-business-v3"),
+                ("ph", 9.1, 2011, "station-monitoring-normalizer-v4"),
             )
             trend = client.get(
                 f"/api/station-monitoring/sites/{site_id}/trend"
-                "?metric=ph&start=2026-09-11T04:00:00%2B00:00&end=2026-09-11T08:00:00%2B00:00",
+                "?metric=ph&start=2026-09-11T04:00:00%2B00:00&end=2026-09-11T09:00:00%2B00:00",
                 headers=headers,
             )
             self.assertEqual(trend.status_code, 200, trend.get_json())
             self.assertEqual(
                 [point["value"] for point in trend.get_json()["points"] if point["status"] == "value"],
-                [7.1],
+                [7.1, 8.8, 9.1],
+            )
+            self.assertEqual(
+                trend.get_json()["points"][-1]["observed_at"],
+                "2026-09-11T08:01:00+00:00",
             )
 
     def _create_l1_web_credentials(self) -> tuple[int, str]:

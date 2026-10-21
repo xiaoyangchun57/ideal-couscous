@@ -244,15 +244,23 @@ export const api = {
     const query = params.toString();
     return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
   },
-  stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
+  stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview?detail=summary`, options),
+  stationMonitoringDiagnostics: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/diagnostics`, options),
   stationExpectedFactors: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, options),
   updateStationExpectedFactors: (siteId, data, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, {
     ...options,
     method: 'PUT',
     body: data,
   }),
-  stationMonitoringTrend: (siteId, metric, options = {}) => {
+  stationMonitoringTrend: (siteId, metric, {
+    range, start, end, cursor, limit, ...options
+  } = {}) => {
     const params = new URLSearchParams({ metric });
+    if (range !== undefined) params.set('range', range);
+    if (start !== undefined) params.set('start', start);
+    if (end !== undefined) params.set('end', end);
+    if (cursor !== undefined) params.set('cursor', cursor);
+    if (limit !== undefined) params.set('limit', String(limit));
     return strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/trend?${params}`, options);
   },
   stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),

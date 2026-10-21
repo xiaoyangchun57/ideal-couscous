@@ -2,11 +2,13 @@ import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import app as web_app
+import station_monitoring_api as monitoring_api
 from migrate_station_ingestion import apply_migration
 
 
@@ -164,17 +166,57 @@ class StationMonitoringPublicGateTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(len(response.get_json()['items']), 2)
 
-    def test_public_mode_keeps_role_and_site_scope_rules(self):
+    def test_public_mode_allows_all_current_monitoring_reads_without_widening_other_modules(self):
         self.set_mode('public')
         operator_headers = self.headers('gate-operator')
         own = self.client.get('/api/station-monitoring/sites', headers=operator_headers)
         self.assertEqual(own.status_code, 200, own.get_json())
         self.assertEqual([item['site_id'] for item in own.get_json()['items']], [self.site_id])
-        self.assertEqual(self.client.get(
-            '/api/station-monitoring/sites?scope=all', headers=operator_headers).status_code, 403)
-        self.assertEqual(self.client.get(
-            f'/api/station-monitoring/sites/{self.other_site_id}/overview',
-            headers=operator_headers).status_code, 403)
+        all_sites = self.client.get(
+            '/api/station-monitoring/sites?scope=all', headers=operator_headers)
+        self.assertEqual(all_sites.status_code, 200, all_sites.get_json())
+        self.assertEqual(all_sites.get_json()['available_scopes'], ['mine', 'all'])
+        self.assertEqual(
+            [item['site_id'] for item in all_sites.get_json()['items']],
+            [self.site_id, self.other_site_id])
+        with mock.patch.object(
+                monitoring_api, '_monitoring_site_context',
+                wraps=monitoring_api._monitoring_site_context) as site_context:
+            overview = self.client.get(
+                f'/api/station-monitoring/sites/{self.other_site_id}/overview',
+                headers=operator_headers)
+        self.assertEqual(overview.status_code, 200, overview.get_json())
+        self.assertEqual(overview.get_json()['site']['id'], self.other_site_id)
+        self.assertTrue(any(
+            call.kwargs.get('allow_public_read') is True
+            for call in site_context.call_args_list
+        ))
+        factors = self.client.get(
+            f'/api/station-monitoring/sites/{self.other_site_id}/expected-factors',
+            headers=operator_headers)
+        self.assertEqual(factors.status_code, 200, factors.get_json())
+        self.assertFalse(factors.get_json()['can_edit'])
+        trend = self.client.get(
+            f'/api/station-monitoring/sites/{self.other_site_id}/trend?metric=ph',
+            headers=operator_headers)
+        self.assertEqual(trend.status_code, 409, trend.get_json())
+        self.assertEqual(trend.get_json()['code'], 'MONITORING_NOT_CONNECTED')
+        for suffix in ('summary', 'latest', 'instruments'):
+            response = self.client.get(
+                f'/api/station-monitoring/sites/{self.other_site_id}/{suffix}',
+                headers=operator_headers)
+            self.assertEqual(response.status_code, 409, (suffix, response.get_json()))
+            self.assertEqual(response.get_json()['code'], 'MONITORING_NOT_CONNECTED')
+
+        profile = self.client.get(
+            f'/api/mobile/site-profile/{self.other_site_id}', headers=operator_headers)
+        self.assertEqual(profile.status_code, 403, profile.get_json())
+        save = self.client.put(
+            f'/api/station-monitoring/sites/{self.other_site_id}/expected-factors',
+            headers=operator_headers,
+            json={'metrics': ['ph'], 'version': 0, 'idempotency_key': 'public-read-only'},
+        )
+        self.assertEqual(save.status_code, 403, save.get_json())
 
         reviewer = self.login('gate-reviewer')
         self.assertTrue(reviewer['user']['capabilities']['station_monitoring_public'])
@@ -182,6 +224,51 @@ class StationMonitoringPublicGateTest(unittest.TestCase):
                                     headers=self.headers('gate-admin'))
         self.assertEqual(admin_all.status_code, 200, admin_all.get_json())
         self.assertEqual(len(admin_all.get_json()['items']), 2)
+
+        ended = self.client.put(
+            f'/api/sites/{self.other_site_id}/service-policy',
+            headers=self.headers('gate-admin'),
+            json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '公共监测范围反例', 'confirmed': True,
+                'expected_version': 0, 'idempotency_key': 'public-read-ended-site',
+            },
+        )
+        self.assertEqual(ended.status_code, 200, ended.get_json())
+        current = self.client.get(
+            '/api/station-monitoring/sites?scope=all', headers=operator_headers)
+        self.assertEqual(
+            [item['site_id'] for item in current.get_json()['items']], [self.site_id])
+        ended_overview = self.client.get(
+            f'/api/station-monitoring/sites/{self.other_site_id}/overview',
+            headers=operator_headers)
+        self.assertEqual(ended_overview.status_code, 403, ended_overview.get_json())
+
+    def test_public_mode_still_denies_anonymous_and_disabled_accounts(self):
+        self.set_mode('public')
+        anonymous = self.client.get('/api/station-monitoring/sites?scope=all')
+        self.assertEqual(anonymous.status_code, 401, anonymous.get_json())
+        self.assertEqual(anonymous.get_json()['code'], 'AUTH_REQUIRED')
+
+        session = self.login('gate-operator')
+        with sqlite3.connect(self.database) as db:
+            db.execute("UPDATE users SET status='inactive' WHERE id=?", (self.operator_id,))
+            db.commit()
+        disabled = self.client.get(
+            '/api/station-monitoring/sites?scope=all',
+            headers={'Authorization': 'Bearer ' + session['token']},
+        )
+        self.assertEqual(disabled.status_code, 401, disabled.get_json())
+        self.assertEqual(disabled.get_json()['code'], 'ACCOUNT_DISABLED')
+        for suffix in ('summary', 'latest', 'instruments'):
+            path = f'/api/station-monitoring/sites/{self.other_site_id}/{suffix}'
+            anonymous = self.client.get(path)
+            self.assertEqual(anonymous.status_code, 401, (suffix, anonymous.get_json()))
+            self.assertEqual(anonymous.get_json()['code'], 'AUTH_REQUIRED')
+            disabled = self.client.get(
+                path, headers={'Authorization': 'Bearer ' + session['token']})
+            self.assertEqual(disabled.status_code, 401, (suffix, disabled.get_json()))
+            self.assertEqual(disabled.get_json()['code'], 'ACCOUNT_DISABLED')
 
     def test_static_directory_scope_search_and_profile_do_not_expose_monitoring(self):
         self.set_mode('admin')

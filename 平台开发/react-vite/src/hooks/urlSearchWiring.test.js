@@ -45,9 +45,10 @@ test('current concentrated rework keeps list identity columns and vehicle permis
   const vehicles = source('../pages/vehicles/VehiclesPage.jsx');
   const users = source('../pages/users/UsersPage.jsx');
 
-  const identityCell = sites.slice(sites.indexOf("title: '站点身份'"), sites.indexOf("title: '区县/地址'"));
-  assert.doesNotMatch(identityCell, /试点|copyable|record\.code/);
+  const identityCell = sites.slice(sites.indexOf("title: '站点'"), sites.indexOf("title: '负责人'"));
+  assert.doesNotMatch(identityCell, /试点|copyable/);
   assert.match(identityCell, /record\.name/);
+  assert.match(identityCell, /record\.code/);
   assert.match(identityCell, /stationTypeMap/);
 
   const ledgerColumns = equipment.slice(equipment.indexOf("title: '设备编码'"), equipment.indexOf("title: '操作'"));

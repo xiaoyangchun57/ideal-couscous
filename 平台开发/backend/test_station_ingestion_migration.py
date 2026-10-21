@@ -53,6 +53,14 @@ class StationIngestionMigrationTest(unittest.TestCase):
             self.assertEqual(str(site_columns["master_status"][4]).strip("'"), "active")
             self.assertTrue(migration._table_exists(connection, "site_name_aliases"))
             self.assertTrue(migration._table_exists(connection, "station_master_refresh_audits"))
+            value_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(observation_values)")
+            }
+            self.assertIn("raw_value_text", value_columns)
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+            ).fetchone())
         self.assertEqual(self._run_check(self.database), 0)
         second_applied, second_backup = migration.apply_migration(self.database, self.backups)
         self.assertFalse(second_applied)
@@ -498,6 +506,12 @@ class StationIngestionMigrationTest(unittest.TestCase):
             if statement.strip().upper().startswith("PRAGMA FOREIGN_KEY_CHECK(")
         ]
         self.assertGreater(len(affected_checks), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            self.assertIn(migration.STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION, versions)
+            self.assertNotIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+            self.assertNotIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
 
     def test_strict_014_only_path_rejects_missing_earlier_migration(self):
         self._apply_until(self.database, migration.STATION_SERVICE_POLICY_MIGRATION_VERSION)
@@ -508,6 +522,116 @@ class StationIngestionMigrationTest(unittest.TestCase):
             migration.apply_migration(
                 self.database, None, external_recovery_confirmed=True,
                 require_014_only=True)
+
+    def test_incremental_015_016_path_skips_foreign_key_table_scans(self):
+        self._apply_until(
+            self.database, migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION)
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            applied, backup = migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True)
+
+        self.assertTrue(applied)
+        self.assertIsNone(backup)
+        self.assertFalse(any(
+            statement.strip().upper().startswith("PRAGMA FOREIGN_KEY_CHECK")
+            for statement in statements
+        ))
+        with closing(sqlite3.connect(self.database)) as connection:
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+            precision = dict(connection.execute(
+                """SELECT business_metric,MIN(decimal_precision)
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   GROUP BY business_metric"""
+            ).fetchall())
+        self.assertIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+        self.assertIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
+        self.assertIn("raw_value_text", columns)
+        self.assertEqual(precision, {"conductivity": 2, "turbidity": 2})
+
+    def test_incremental_015_016_failure_rolls_back_schema_data_and_markers(self):
+        self._apply_until(
+            self.database, migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            before_precision = connection.execute(
+                """SELECT protocol_code,decimal_precision
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   ORDER BY protocol_code"""
+            ).fetchall()
+        original_execute = migration._execute_migration_sql
+
+        def fail_raw_value_text(connection, script):
+            if "ADD COLUMN raw_value_text" in script:
+                raise RuntimeError("injected 016 failure")
+            original_execute(connection, script)
+
+        with mock.patch.object(
+                migration, "_execute_migration_sql", side_effect=fail_raw_value_text):
+            with self.assertRaisesRegex(RuntimeError, "injected 016 failure"):
+                migration.apply_migration(
+                    self.database, None, external_recovery_confirmed=True)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            after_precision = connection.execute(
+                """SELECT protocol_code,decimal_precision
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   ORDER BY protocol_code"""
+            ).fetchall()
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+        self.assertEqual(after_precision, before_precision)
+        self.assertNotIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+        self.assertNotIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
+        self.assertNotIn("raw_value_text", columns)
+
+    def test_existing_015_database_adds_raw_value_text_and_repeats_without_writes(self):
+        self._apply_until(self.database, migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION)
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+            self.assertIn("raw_value_text", columns)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+            ).fetchone()[0], 1)
+        second_applied, second_backup = migration.apply_migration(
+            self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_recorded_016_without_raw_value_text_column_is_rejected(self):
+        self._apply_until(self.database, migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,
+                 migration.migration_checksum(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION),
+                 "2026-10-21T00:00:00+00:00", "isolated-corrupt-016"),
+            )
+            connection.commit()
+            with self.assertRaisesRegex(
+                    migration.MigrationError, "raw-value-text column is missing"):
+                migration.verify_station_monitoring_schema(connection)
 
     def test_checksum_conflict_is_rejected(self):
         migration.apply_migration(self.database, self.backups)

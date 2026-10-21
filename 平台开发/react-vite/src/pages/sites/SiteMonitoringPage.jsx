@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Badge, Button, Card, Checkbox, Col, Descriptions, Empty, List, Row, Select, Space, Spin, Tag, Typography,
+  Alert, Button, Checkbox, DatePicker, Drawer, Empty, Modal, Radio, Select, Space, Spin, Tag, Typography,
 } from 'antd';
-import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import {
+  ArrowsAltOutlined, FileSearchOutlined, ReloadOutlined, SettingOutlined,
+} from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import EChart from '../../components/EChart';
 import {
-  AXIS_META, axisView, capabilityLabel, communicationStatusView, cycleStatusView, formatMonitoringTime, monitoringCoverageLabel, monitoringStatusView,
-  monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption, monitoringTrendFactors, monitoringTrendView,
+  communicationStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
+  monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption,
+  monitoringTrendFactors, monitoringTrendView,
 } from './stationMonitoring';
 import './SiteMonitoringPage.css';
 
-const { Title, Text } = Typography;
+const { Text, Title } = Typography;
+const TREND_PAGE_SIZE = 100;
 
 function expectedFactorSaveKey(siteId) {
   const randomPart = globalThis.crypto?.randomUUID?.()
@@ -20,162 +24,156 @@ function expectedFactorSaveKey(siteId) {
   return `station-expected-factors-${siteId}-${randomPart}`;
 }
 
-function AxisCard({ axis }) {
-  return (
-    <div role="group" aria-label={axis.label} style={{ border: '1px solid rgba(127, 127, 127, 0.24)', borderRadius: 6, padding: 12, minHeight: 112 }}>
-      <Space direction="vertical" size={4}>
-        <Text strong>{axis.label}</Text>
-        <Badge status={axis.badgeStatus} text={axis.stateLabel} />
-        {axis.lastRecordAt && <Text type="secondary">{axis.key === 'data' ? '最近正式观测' : '最近记录'}：{formatMonitoringTime(axis.lastRecordAt)}</Text>}
-        {axis.nextExpectedAt && <Text type="secondary">下次应到：{formatMonitoringTime(axis.nextExpectedAt)}</Text>}
-        {axis.reason && <Text type="secondary">{axis.reason}</Text>}
-        {!axis.state && <Text type="secondary">服务端未提供该分轴事实</Text>}
-      </Space>
-    </div>
-  );
-}
-
-function LatestValues({ values }) {
-  if (!Array.isArray(values) || values.length === 0) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已形成的有效观测" />;
+function trendRequestOptions(rangeKey, customRange, cursor) {
+  const options = { range: rangeKey === 'custom' ? '7d' : rangeKey, limit: TREND_PAGE_SIZE };
+  if (rangeKey === 'custom' && customRange?.[0] && customRange?.[1]) {
+    options.start = customRange[0].startOf('day').toISOString();
+    options.end = customRange[1].endOf('day').toISOString();
   }
+  if (cursor) options.cursor = cursor;
+  return options;
+}
+
+function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onSelectMetric }) {
+  const valueByMetric = new Map(latestValues.map((item) => [item.business_metric, item]));
+  const resultTime = latestValues[0]?.observed_at || latestCycle?.scheduled_at || null;
+
+  if (!latestValues.length) {
+    return (
+      <section className="station-monitoring-section" aria-labelledby="latest-results-title">
+        <div className="station-monitoring-section__heading">
+          <Title id="latest-results-title" level={4}>最新结果</Title>
+          <Text className="station-monitoring-fact">结果时间：暂无结果</Text>
+        </div>
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前站点暂无可展示的有效结果" />
+      </section>
+    );
+  }
+
   return (
-    <List
-      size="small"
-      dataSource={values}
-      renderItem={(item) => (
-        <List.Item>
-          <Space direction="vertical" size={0}>
-            <Text strong>{monitoringFactorName(item)}</Text>
-            <Text>{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}</Text>
-          </Space>
-          <Text type="secondary">{formatMonitoringTime(item.observed_at)}</Text>
-        </List.Item>
-      )}
-    />
+    <section className="station-monitoring-section" aria-labelledby="latest-results-title">
+      <div className="station-monitoring-section__heading">
+        <Title id="latest-results-title" level={4}>最新结果</Title>
+        <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(resultTime)}</Text>
+      </div>
+      <div className="station-monitoring-metrics">
+        {factors.map((factor) => {
+          const metric = factor.business_metric;
+          const value = valueByMetric.get(metric);
+          const missing = !value || value.status === 'review_required';
+          return (
+            <button
+              type="button"
+              key={metric}
+              className={`station-monitoring-metric${selectedMetric === metric ? ' is-selected' : ''}`}
+              onClick={() => onSelectMetric(metric)}
+            >
+              <span className="station-monitoring-metric__name">{monitoringFactorName(factor)}</span>
+              <span className={`station-monitoring-metric__value${missing ? ' is-missing' : ''}`}>
+                {missing ? '缺失' : (value.standard_value_display ?? value.standard_value)}
+              </span>
+              <span className="station-monitoring-metric__unit">{value?.standard_unit || factor.standard_unit || ' '}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
-function LatestCycle({ cycle }) {
-  const view = cycleStatusView(cycle);
-  const factors = Array.isArray(cycle?.factors) ? cycle.factors : [];
-  const arrivedCount = cycle?.arrived_count ?? cycle?.formed_count ?? 0;
-  return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }} items={[
-        { key: 'status', label: '结果状态', children: <Tag color={view.color}>{view.label}</Tag> },
-        { key: 'slot', label: '结果时点', children: formatMonitoringTime(cycle?.scheduled_at) },
-        { key: 'deadline', label: '结果截止', children: formatMonitoringTime(cycle?.deadline_at) },
-        { key: 'count', label: '已到/应到', children: `${arrivedCount}/${cycle?.expected_count || 0}` },
-        { key: 'last-complete', label: '最近完整时点（辅助）', children: formatMonitoringTime(cycle?.latest_complete_cycle_at) },
-      ]} />
-      {factors.length ? <List size="small" dataSource={factors} renderItem={(item) => {
-        const labels = { value: '已形成', pending: '形成中', missing: '缺测', review_required: '待核对' };
-        return <List.Item>
-          <Space direction="vertical" size={0}>
-            <Text strong>{monitoringFactorName(item)}</Text>
-            <Text type="secondary">{labels[item.status] || item.status || '待确认'}{item.reason ? `：${item.reason}` : ''}</Text>
-          </Space>
-          <Text>{item.status === 'value' ? `${item.value} ${item.standard_unit || ''}` : '—'}</Text>
-        </List.Item>;
-      }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={view.label} />}
-    </Space>
-  );
-}
-
-export default function SiteMonitoringPage() {
-  const { siteId } = useParams();
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState('monitoring');
   const [selectedMetric, setSelectedMetric] = useState('');
+  const [rangeKey, setRangeKey] = useState('7d');
+  const [customRange, setCustomRange] = useState(() => [dayjs().subtract(7, 'day'), dayjs()]);
   const [trendData, setTrendData] = useState(null);
   const [trendError, setTrendError] = useState('');
   const [trendLoading, setTrendLoading] = useState(false);
+  const [trendExpanded, setTrendExpanded] = useState(false);
   const [expectedConfig, setExpectedConfig] = useState(null);
   const [expectedDraft, setExpectedDraft] = useState([]);
   const [expectedError, setExpectedError] = useState('');
-  const [expectedErrorTitle, setExpectedErrorTitle] = useState('应监测因子配置加载失败');
+  const [expectedErrorTitle, setExpectedErrorTitle] = useState('监测因子设置加载失败');
   const [expectedOutcomeUncertain, setExpectedOutcomeUncertain] = useState(false);
   const [expectedRetrySave, setExpectedRetrySave] = useState(false);
   const [expectedNotice, setExpectedNotice] = useState('');
-  const [expectedLoading, setExpectedLoading] = useState(true);
+  const [expectedLoading, setExpectedLoading] = useState(false);
   const [expectedSaving, setExpectedSaving] = useState(false);
   const requestRef = useRef({ id: 0, controller: null });
-  const trendRequestRef = useRef({ id: 0, controller: null, metric: '' });
+  const trendRequestRef = useRef({ id: 0, controller: null, signature: '' });
   const expectedRequestRef = useRef({ id: 0, controller: null });
-  const expectedSiteIdRef = useRef(null);
   const expectedSaveKeyRef = useRef({ signature: '', key: '' });
-  const loadedSiteIdRef = useRef(null);
 
-  const loadExpectedFactors = useCallback(async () => {
-    expectedRequestRef.current.controller?.abort();
-    const controller = new AbortController();
-    const requestId = expectedRequestRef.current.id + 1;
-    expectedRequestRef.current = { id: requestId, controller };
-    if (expectedSiteIdRef.current !== siteId) {
-      setExpectedConfig(null);
-      setExpectedDraft([]);
-      expectedSaveKeyRef.current = { signature: '', key: '' };
-      setExpectedOutcomeUncertain(false);
-      setExpectedRetrySave(false);
-    }
-    setExpectedLoading(true);
-    setExpectedError('');
-    setExpectedErrorTitle('应监测因子配置加载失败');
-    setExpectedNotice('');
-    try {
-      const next = await api.stationExpectedFactors(siteId, { signal: controller.signal });
-      if (expectedRequestRef.current.id !== requestId) return;
-      if (String(next?.site_id) !== String(siteId) || !Array.isArray(next?.candidates)) {
-        throw new Error('服务端返回的应监测因子配置与当前站点不匹配，请重试');
-      }
-      expectedSiteIdRef.current = siteId;
-      setExpectedConfig(next);
-      setExpectedDraft(Array.isArray(next.selected_metrics) ? next.selected_metrics : []);
-    } catch (err) {
-      if (expectedRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
-      setExpectedError(err?.message || '应监测因子配置加载失败');
-    } finally {
-      if (expectedRequestRef.current.id === requestId) setExpectedLoading(false);
-    }
-  }, [siteId]);
-
-  const load = useCallback(async (options = {}) => {
-    const expectedFactorVersion = options?.expectedFactorVersion ?? null;
+  const loadOverview = useCallback(async (options = {}) => {
+    if (!siteId) return null;
     requestRef.current.controller?.abort();
     const controller = new AbortController();
     const requestId = requestRef.current.id + 1;
     requestRef.current = { id: requestId, controller };
-    if (loadedSiteIdRef.current !== siteId) setData(null);
     setLoading(true);
     setError('');
     try {
       const next = await api.stationMonitoringOverview(siteId, { signal: controller.signal });
-      if (requestRef.current.id !== requestId) return;
+      if (requestRef.current.id !== requestId) return null;
       if (!next?.site || String(next.site.id) !== String(siteId)) {
         throw new Error('服务端返回的站点监测资料与当前站点不匹配，请重试');
       }
-      if (expectedFactorVersion != null
-          && Number(next.site.expected_factor_version) !== Number(expectedFactorVersion)) {
-        throw new Error('应监测因子已保存，但监测状态尚未同步到最新版本，请重试');
+      if (options.expectedFactorVersion != null
+          && Number(next.site.expected_factor_version) !== Number(options.expectedFactorVersion)) {
+        throw new Error('监测因子已保存，但结果范围尚未同步到最新版本，请重试刷新');
       }
-      loadedSiteIdRef.current = siteId;
       setData(next);
       return next;
-    } catch (err) {
-      if (requestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
-      setError(err?.message || '站点监测信息加载失败');
+    } catch (loadError) {
+      if (requestRef.current.id !== requestId || loadError?.code === 'REQUEST_ABORTED') return null;
+      setError(loadError?.message || '站点监测信息加载失败');
       return null;
     } finally {
       if (requestRef.current.id === requestId) setLoading(false);
     }
   }, [siteId]);
 
+  const loadExpectedFactors = useCallback(async () => {
+    if (!siteId) return;
+    expectedRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = expectedRequestRef.current.id + 1;
+    expectedRequestRef.current = { id: requestId, controller };
+    setExpectedLoading(true);
+    setExpectedError('');
+    setExpectedErrorTitle('监测因子设置加载失败');
+    setExpectedNotice('');
+    try {
+      const next = await api.stationExpectedFactors(siteId, { signal: controller.signal });
+      if (expectedRequestRef.current.id !== requestId) return;
+      if (String(next?.site_id) !== String(siteId) || !Array.isArray(next?.candidates)) {
+        throw new Error('服务端返回的监测因子设置与当前站点不匹配，请重试');
+      }
+      setExpectedConfig(next);
+      setExpectedDraft(Array.isArray(next.selected_metrics) ? next.selected_metrics : []);
+      expectedSaveKeyRef.current = { signature: '', key: '' };
+      setExpectedOutcomeUncertain(false);
+      setExpectedRetrySave(false);
+    } catch (loadError) {
+      if (expectedRequestRef.current.id !== requestId || loadError?.code === 'REQUEST_ABORTED') return;
+      setExpectedError(loadError?.message || '监测因子设置加载失败');
+    } finally {
+      if (expectedRequestRef.current.id === requestId) setExpectedLoading(false);
+    }
+  }, [siteId]);
+
   useEffect(() => {
-    load();
+    if (!open || !siteId) return undefined;
+    setData(null);
+    setMode('monitoring');
+    setRangeKey('7d');
+    setCustomRange([dayjs().subtract(7, 'day'), dayjs()]);
+    setTrendData(null);
+    setTrendError('');
+    loadOverview();
     loadExpectedFactors();
     return () => {
       requestRef.current.id += 1;
@@ -185,54 +183,20 @@ export default function SiteMonitoringPage() {
       expectedRequestRef.current.id += 1;
       expectedRequestRef.current.controller?.abort();
     };
-  }, [load, loadExpectedFactors]);
-
-  const loadTrend = useCallback(async (metric) => {
-    trendRequestRef.current.controller?.abort();
-    if (!metric) {
-      setTrendData(null);
-      setTrendError('');
-      setTrendLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    const requestId = trendRequestRef.current.id + 1;
-    const keepPrevious = trendRequestRef.current.metric === metric;
-    trendRequestRef.current = { id: requestId, controller, metric };
-    if (!keepPrevious) setTrendData(null);
-    setTrendLoading(true);
-    setTrendError('');
-    try {
-      const next = await api.stationMonitoringTrend(siteId, metric, { signal: controller.signal });
-      if (trendRequestRef.current.id !== requestId) return;
-      if (String(next?.site_id) !== String(siteId) || next?.metric !== metric) {
-        throw new Error('服务端返回的趋势与当前站点或因子不匹配，请重试');
-      }
-      setTrendData(next);
-    } catch (err) {
-      if (trendRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
-      setTrendError(err?.message || '趋势加载失败');
-    } finally {
-      if (trendRequestRef.current.id === requestId) setTrendLoading(false);
-    }
-  }, [siteId]);
-
-  useEffect(() => {
-    loadTrend(selectedMetric);
-  }, [loadTrend, selectedMetric]);
+  }, [loadExpectedFactors, loadOverview, open, siteId]);
 
   const overviewFactors = useMemo(() => {
     const payload = data?.factors || data?.monitoring?.factors;
     return Array.isArray(payload) ? payload : [];
   }, [data]);
+  const latestValues = useMemo(() => (
+    Array.isArray(data?.monitoring?.latest_values) ? data.monitoring.latest_values : []
+  ), [data]);
   const trendFactors = useMemo(() => monitoringTrendFactors(
     overviewFactors,
     expectedConfig?.selected_metrics,
     expectedConfig?.configured === true,
   ), [expectedConfig, overviewFactors]);
-  const latestValues = useMemo(() => (
-    Array.isArray(data?.monitoring?.latest_values) ? data.monitoring.latest_values : []
-  ), [data]);
 
   useEffect(() => {
     setSelectedMetric((current) => (
@@ -240,6 +204,45 @@ export default function SiteMonitoringPage() {
         ? current : monitoringDefaultTrendMetric(trendFactors, latestValues)
     ));
   }, [latestValues, trendFactors]);
+
+  const loadTrend = useCallback(async ({ cursor = null } = {}) => {
+    if (!open || mode !== 'monitoring' || !siteId || !selectedMetric) return;
+    if (rangeKey === 'custom' && (!customRange?.[0] || !customRange?.[1])) return;
+    trendRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const requestId = trendRequestRef.current.id + 1;
+    const options = trendRequestOptions(rangeKey, customRange, cursor);
+    const signature = JSON.stringify({ siteId, selectedMetric, ...options, cursor: undefined });
+    trendRequestRef.current = { id: requestId, controller, signature };
+    setTrendLoading(true);
+    setTrendError('');
+    try {
+      const next = await api.stationMonitoringTrend(siteId, selectedMetric, {
+        ...options,
+        signal: controller.signal,
+      });
+      if (trendRequestRef.current.id !== requestId) return;
+      if (String(next?.site_id) !== String(siteId) || next?.metric !== selectedMetric) {
+        throw new Error('服务端返回的趋势与当前站点或因子不匹配，请重试');
+      }
+      setTrendData((current) => (
+        cursor && trendRequestRef.current.signature === signature
+          ? mergeMonitoringTrendPages(current, next)
+          : next
+      ));
+    } catch (loadError) {
+      if (trendRequestRef.current.id !== requestId || loadError?.code === 'REQUEST_ABORTED') return;
+      setTrendError(loadError?.message || '趋势加载失败');
+    } finally {
+      if (trendRequestRef.current.id === requestId) setTrendLoading(false);
+    }
+  }, [customRange, mode, open, rangeKey, selectedMetric, siteId]);
+
+  useEffect(() => {
+    setTrendData(null);
+    setTrendError('');
+    loadTrend();
+  }, [loadTrend]);
 
   const saveExpectedFactors = useCallback(async () => {
     if (!expectedConfig?.can_edit || expectedDraft.length === 0) return;
@@ -251,10 +254,7 @@ export default function SiteMonitoringPage() {
     );
     const signature = JSON.stringify(metrics);
     if (expectedSaveKeyRef.current.signature !== signature) {
-      expectedSaveKeyRef.current = {
-        signature,
-        key: expectedFactorSaveKey(siteId),
-      };
+      expectedSaveKeyRef.current = { signature, key: expectedFactorSaveKey(siteId) };
     }
     setExpectedSaving(true);
     setExpectedError('');
@@ -271,162 +271,167 @@ export default function SiteMonitoringPage() {
       expectedSaveKeyRef.current = { signature: '', key: '' };
       setExpectedOutcomeUncertain(false);
       setExpectedRetrySave(false);
-      const refreshed = await load({
-        expectedFactorVersion: next.version,
-      });
       setExpectedConfig(next);
       setExpectedDraft(Array.isArray(next.selected_metrics) ? next.selected_metrics : metrics);
+      const refreshed = await loadOverview({ expectedFactorVersion: next.version });
       if (!refreshed) {
-        setExpectedErrorTitle('配置已保存，监测状态刷新失败');
-        setExpectedError('因子配置已保存，但监测状态刷新失败；当前勾选已保留，请重试页面刷新。');
+        setExpectedErrorTitle('设置已保存，结果刷新失败');
+        setExpectedError('监测因子已保存，当前选择已保留；请重试刷新结果。');
         return;
       }
-      setExpectedNotice(next.replayed ? '已确认此前保存结果，无需重复写入。' : '应监测因子已保存；最近一期结果将按新范围继续形成。');
-    } catch (err) {
-      if (err?.code === 'EXPECTED_FACTORS_VERSION_CONFLICT') {
+      setExpectedNotice(next.replayed ? '已确认此前保存结果。' : '监测因子已保存。');
+      setMode('monitoring');
+    } catch (saveError) {
+      if (saveError?.code === 'EXPECTED_FACTORS_VERSION_CONFLICT') {
         setExpectedOutcomeUncertain(false);
         setExpectedRetrySave(false);
-        setExpectedErrorTitle('配置版本冲突');
-        setExpectedError('配置已被其他操作更新；当前勾选已保留，请先刷新配置再确认。');
-      } else if (err?.code === 'REQUEST_TIMEOUT' || err?.code === 'NETWORK_ERROR') {
+        setExpectedErrorTitle('设置版本冲突');
+        setExpectedError('设置已被其他操作更新；当前选择已保留，请刷新后再确认。');
+      } else if (saveError?.code === 'REQUEST_TIMEOUT' || saveError?.code === 'NETWORK_ERROR') {
         setExpectedOutcomeUncertain(true);
         setExpectedRetrySave(true);
         setExpectedErrorTitle('保存结果待确认');
-        setExpectedError('保存响应已中断，配置可能已经提交。当前勾选和本次重试标识均已保留，请再次提交以确认结果，不会重复生成配置。');
-      } else if (err?.code === 'EXPECTED_FACTORS_BUSY') {
+        setExpectedError('响应中断，设置可能已经提交。当前选择和重试标识已保留，请再次提交确认。');
+      } else if (saveError?.code === 'EXPECTED_FACTORS_BUSY') {
         setExpectedOutcomeUncertain(false);
         setExpectedRetrySave(true);
-        setExpectedErrorTitle('配置保存暂时繁忙');
-        setExpectedError('本次尚未写入，当前勾选和重试标识均已保留，请直接重试保存。');
+        setExpectedErrorTitle('设置保存暂时繁忙');
+        setExpectedError('本次尚未写入，当前选择已保留，请直接重试。');
       } else {
         setExpectedOutcomeUncertain(false);
         setExpectedRetrySave(false);
-        setExpectedErrorTitle('应监测因子保存失败');
-        setExpectedError(err?.message || '保存失败，当前勾选已保留，可直接重试');
+        setExpectedErrorTitle('监测因子保存失败');
+        setExpectedError(saveError?.message || '保存失败，当前选择已保留，可直接重试');
       }
     } finally {
       setExpectedSaving(false);
     }
-  }, [expectedConfig, expectedDraft, load, siteId]);
+  }, [expectedConfig, expectedDraft, loadOverview, siteId]);
 
   const visibleData = data && String(data.site?.id) === String(siteId) ? data : null;
-
-  if (loading && !visibleData) return <div style={{ padding: 40, textAlign: 'center' }}><Spin size="large" /></div>;
-  if (error && !visibleData) {
-    return <Alert type="error" showIcon message="站点监测加载失败" description={error} action={<Button aria-label="重试" icon={<ReloadOutlined />} onClick={load}>重试</Button>} style={{ margin: 24 }} />;
-  }
-  if (!visibleData) return <Empty description="暂无站点监测资料" style={{ margin: 40 }} />;
-
-  const site = visibleData.site || {};
-  const monitoring = visibleData.monitoring || {};
-  const status = monitoringStatusView(site);
+  const site = visibleData?.site || {};
+  const monitoring = visibleData?.monitoring || {};
   const communication = communicationStatusView(monitoring.communication || site.communication);
   const latestCycle = monitoring.latest_cycle || site.latest_cycle || {};
-  const axesPayload = visibleData.axes || monitoring.axes || {};
-  const axes = Object.keys(AXIS_META).map((key) => axisView(key, axesPayload[key] || {}));
-  const capabilities = visibleData.capabilities || monitoring.capabilities || {};
   const trend = monitoringTrendView(trendData, { loading: trendLoading, error: trendError });
   const savedExpectedMetrics = Array.isArray(expectedConfig?.selected_metrics)
     ? expectedConfig.selected_metrics : [];
   const expectedChanged = JSON.stringify(expectedDraft) !== JSON.stringify(savedExpectedMetrics);
-  const returnQuery = searchParams.toString();
-  const returnPath = `/sites${returnQuery ? `?${returnQuery}` : ''}`;
-  const archiveParams = new URLSearchParams(searchParams);
-  archiveParams.set('archive', siteId);
+  const factorOptions = trendFactors.map((factor) => ({
+    value: factor.business_metric,
+    label: monitoringFactorName(factor),
+  }));
+
+  const trendPanel = (
+    <div className="station-monitoring-trend">
+      <div className="station-monitoring-trend__controls">
+        <Select
+          aria-label="趋势因子"
+          value={selectedMetric || undefined}
+          options={factorOptions}
+          onChange={setSelectedMetric}
+          placeholder="选择监测因子"
+          style={{ minWidth: 150 }}
+        />
+        <Radio.Group
+          optionType="button"
+          buttonStyle="solid"
+          value={rangeKey}
+          onChange={(event) => setRangeKey(event.target.value)}
+          options={[
+            { label: '24小时', value: '24h' },
+            { label: '7天', value: '7d' },
+            { label: '30天', value: '30d' },
+            { label: '自定义', value: 'custom' },
+          ]}
+        />
+        {rangeKey === 'custom' ? <DatePicker.RangePicker
+          value={customRange}
+          allowClear={false}
+          onChange={(value) => setCustomRange(value)}
+          disabledDate={(current) => current && current.isAfter(dayjs(), 'day')}
+        /> : null}
+        <Button aria-label="放大趋势" icon={<ArrowsAltOutlined />} onClick={() => setTrendExpanded(true)} />
+      </div>
+      {trendError ? <Alert type="warning" showIcon message="趋势加载失败" description={trendError}
+        action={<Button size="small" onClick={() => loadTrend()}>重试</Button>} /> : null}
+      {trendLoading && !trend.available ? <div className="site-monitoring-trend__loading"><Spin /></div> : null}
+      {!trendLoading && !trend.available && !trendError ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={trend.emptyReason} /> : null}
+      {trend.available ? <>
+        <EChart aria-label="监测趋势图" option={monitoringTrendChartOption(trend)} className="site-monitoring-trend__chart" />
+        <div className="station-monitoring-trend__footer">
+          <Text className="station-monitoring-fact">已加载 {trend.items.length} 条结果</Text>
+          {trend.hasMore ? <Button loading={trendLoading} onClick={() => loadTrend({ cursor: trend.nextCursor })}>继续加载</Button> : null}
+        </div>
+      </> : null}
+    </div>
+  );
+
+  const drawerTitle = visibleData ? (
+    <div className="station-monitoring-drawer__title">
+      <div>
+        <Text className="station-monitoring-drawer__code">{site.code || '未提供站点编码'}</Text>
+        <Title level={3}>{site.name || '未命名站点'}</Title>
+        <Space wrap size={12}>
+          <Tag color={communication.color}>{communication.label}</Tag>
+          <Text className="station-monitoring-fact">最新接收：{formatMonitoringTime(site.last_received_at || site.last_communication_at)}</Text>
+          {site.service_policy?.service_status === 'ended' ? <Tag>服务已结束</Tag> : null}
+        </Space>
+      </div>
+      <Space wrap>
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={() => loadOverview()}>刷新</Button>
+        <Button icon={<FileSearchOutlined />} onClick={() => onOpenArchive?.(siteId)}>站点档案</Button>
+        <Button icon={<SettingOutlined />} onClick={() => setMode((current) => current === 'settings' ? 'monitoring' : 'settings')}>
+          {mode === 'settings' ? '返回监测' : '因子设置'}
+        </Button>
+      </Space>
+    </div>
+  ) : '站点监测';
 
   return (
-    <div className="workspace-page site-monitoring-page" style={{ padding: 24 }}>
-      <div className="site-monitoring-page__scroll" role="region" aria-label="站点监测正文" tabIndex={0}>
-      <Space direction="vertical" size={18} style={{ width: '100%' }}>
-        <Space align="start" wrap>
-          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(returnPath)}>返回站点目录</Button>
-          <Button onClick={() => navigate(`/sites?${archiveParams.toString()}`)}>站点档案</Button>
-          <Button aria-label="刷新" icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
-          <div>
-            <Space size={8} wrap>
-              <Title level={3} style={{ margin: 0 }}>{site.name || '未命名站点'}</Title>
-              <Tag color={status.color}>{status.label}</Tag>
-            </Space>
-            <Text type="secondary">{site.code || '未提供站点编码'}</Text>
-          </div>
-        </Space>
-
-        {error && <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error} action={<Button aria-label="重新加载" size="small" loading={loading} icon={<ReloadOutlined />} onClick={load}>重新加载</Button>} />}
-        {status.contractMissing && <Alert type="warning" showIcon message="监测状态暂不可确认" description="服务端尚未返回 monitoring_status 契约字段，页面不会用旧站点状态推断监测结果。" />}
-
-        <Card title="可信状态">
-          <Descriptions
-            column={{ xs: 1, sm: 2, md: 3 }}
-            items={[
-              { key: 'status', label: '监测状态', children: <Tag color={status.color}>{status.label}</Tag> },
-              { key: 'communication-status', label: '数据接收', children: <Tag color={communication.color}>{communication.label}</Tag> },
-              { key: 'reason', label: '主原因', children: status.reason },
-              { key: 'communication', label: '最后收到报文', children: formatMonitoringTime(site.last_received_at || site.last_communication_at) },
-              { key: 'observation', label: '最后有效观测', children: formatMonitoringTime(site.last_valid_observation_at) },
-            ]}
+    <>
+      <Drawer
+        rootClassName="station-monitoring-drawer"
+        title={drawerTitle}
+        placement="right"
+        width="min(960px, 64vw)"
+        open={open}
+        onClose={onClose}
+        destroyOnHidden={false}
+      >
+        {loading && !visibleData ? <div className="station-monitoring-drawer__loading"><Spin size="large" /></div> : null}
+        {error && !visibleData ? <Alert type="error" showIcon message="站点监测加载失败" description={error}
+          action={<Button icon={<ReloadOutlined />} onClick={() => loadOverview()}>重试</Button>} /> : null}
+        {visibleData && mode === 'monitoring' ? <div className="station-monitoring-drawer__body">
+          {expectedNotice ? <Alert type="success" showIcon message={expectedNotice} /> : null}
+          {error ? <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error}
+            action={<Button size="small" onClick={() => loadOverview()}>重新加载</Button>} /> : null}
+          <LatestResults
+            factors={trendFactors}
+            latestValues={latestValues}
+            latestCycle={latestCycle}
+            selectedMetric={selectedMetric}
+            onSelectMetric={setSelectedMetric}
           />
-        </Card>
-
-        <Card title="最近一期结果" extra={<Tag color={cycleStatusView(latestCycle).color}>{cycleStatusView(latestCycle).label}</Tag>}>
-          <LatestCycle cycle={latestCycle} />
-        </Card>
-
-        <Row gutter={[16, 16]}>
-          <Col xs={24} xl={12}>
-            <Card title="各因子最近可用值" extra={<Tag>{capabilityLabel(capabilities.latest)}</Tag>}>
-              <Alert type="info" showIcon message="各项可能来自不同检测周期，不代表同一次完整检测" style={{ marginBottom: 12 }} />
-              <LatestValues values={monitoring.latest_values} />
-            </Card>
-          </Col>
-          <Col xs={24} xl={12}>
-            <Card title="最近24小时趋势" extra={<Select aria-label="趋势因子" value={selectedMetric || undefined} placeholder="选择监测因子" onChange={setSelectedMetric} options={trendFactors.map((item) => ({ value: item.business_metric, label: `${monitoringFactorName(item)}${item.standard_unit ? ` (${item.standard_unit})` : ''}` }))} style={{ minWidth: 180 }} />}>
-              {trend.loading && !trendData ? <div className="site-monitoring-trend__loading"><Spin /></div> : null}
-              {trend.error ? <Alert type="warning" showIcon message="趋势加载失败" description={trend.error} action={<Button size="small" icon={<ReloadOutlined />} onClick={() => loadTrend(selectedMetric)}>重试</Button>} /> : null}
-              {!trend.loading && !trend.error && !trend.available ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={trend.emptyReason} /> : null}
-              {trend.available ? <>
-                <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
-                  { key: 'window', label: '时间窗口', children: `${formatMonitoringTime(trend.windowStart)} 至 ${formatMonitoringTime(trend.windowEnd)}` },
-                  { key: 'unit', label: '单位', children: trend.unit || '单位待确认' },
-                  { key: 'coverage', label: '覆盖率', children: monitoringCoverageLabel(trend) },
-                  { key: 'gaps', label: '缺口', children: trend.gapCount == null ? '周期未配置' : `${trend.gapCount} 段，缺 ${trend.missingPoints} 点` },
-                  { key: 'slot-state', label: '时点状态', children: `可疑 ${trend.suspectPoints}，迟到 ${trend.latePoints}，冲突 ${trend.conflictSlots}，重复记录 ${trend.duplicateRecords}` },
-                ]} />
-                <EChart aria-label="监测趋势图" option={monitoringTrendChartOption(trend)} className="site-monitoring-trend__chart" />
-              </> : null}
-            </Card>
-          </Col>
-        </Row>
-
-        <Card title="数据事实">
-          <Row gutter={[12, 12]}>{axes.map((axis) => <Col xs={24} sm={12} key={axis.key}><AxisCard axis={axis} /></Col>)}</Row>
-        </Card>
-
-        <Card
-          title="应监测因子"
-          extra={expectedConfig?.configured
-            ? <Text type="secondary">版本 {expectedConfig.version} · {formatMonitoringTime(expectedConfig.effective_from)} 生效</Text>
-            : null}
-        >
-          {expectedLoading && !expectedConfig ? <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div> : null}
-          {expectedError ? <Alert
-            type="warning"
-            showIcon
-            message={expectedErrorTitle}
-            description={expectedError}
+          <section className="station-monitoring-section" aria-labelledby="trend-title">
+            <div className="station-monitoring-section__heading">
+              <Title id="trend-title" level={4}>结果趋势</Title>
+            </div>
+            {trendPanel}
+          </section>
+        </div> : null}
+        {visibleData && mode === 'settings' ? <section className="station-monitoring-settings" aria-labelledby="settings-title">
+          <div className="station-monitoring-section__heading">
+            <Title id="settings-title" level={4}>监测因子设置</Title>
+            <Button onClick={() => setMode('monitoring')}>返回监测</Button>
+          </div>
+          {expectedLoading && !expectedConfig ? <div className="station-monitoring-drawer__loading"><Spin /></div> : null}
+          {expectedError ? <Alert type="warning" showIcon message={expectedErrorTitle} description={expectedError}
             action={<Button size="small" onClick={expectedRetrySave ? saveExpectedFactors : loadExpectedFactors}>
-              {expectedOutcomeUncertain ? '再次提交确认' : expectedRetrySave ? '重试保存' : '刷新配置'}
-            </Button>}
-            style={{ marginBottom: 12 }}
-          /> : null}
-          {expectedNotice ? <Alert type="success" showIcon message={expectedNotice} style={{ marginBottom: 12 }} /> : null}
-          {expectedConfig && !expectedConfig.configured ? <Alert
-            type="warning"
-            showIcon
-            message="应监测因子未设置"
-            description="未设置前不会按协议映射自动判为正常；请按本站实际业务范围至少选择一项。"
-            style={{ marginBottom: 12 }}
-          /> : null}
-          {expectedConfig ? <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              {expectedOutcomeUncertain ? '再次提交确认' : expectedRetrySave ? '重试保存' : '刷新设置'}
+            </Button>} /> : null}
+          {expectedNotice ? <Alert type="success" showIcon message={expectedNotice} /> : null}
+          {expectedConfig ? <>
             <Checkbox.Group
               value={expectedDraft}
               disabled={!expectedConfig.can_edit || expectedSaving}
@@ -434,32 +439,41 @@ export default function SiteMonitoringPage() {
                 setExpectedDraft(metrics);
                 setExpectedNotice('');
               }}
-              style={{ width: '100%' }}
+              className="station-monitoring-settings__grid"
             >
-              <Row gutter={[12, 12]}>
-                {expectedConfig.candidates.map((candidate) => <Col xs={24} sm={12} lg={8} key={candidate.business_metric}>
-                  <Checkbox value={candidate.business_metric}>
-                    {candidate.label}
-                    {!candidate.mapping_available ? <Tag color="gold" style={{ marginLeft: 6 }}>当前无映射</Tag> : null}
-                  </Checkbox>
-                </Col>)}
-              </Row>
+              {(expectedConfig.candidates || []).map((candidate) => (
+                <Checkbox value={candidate.business_metric} key={candidate.business_metric}>
+                  {candidate.label}
+                  {!candidate.mapping_available ? <Tag color="gold">当前无映射</Tag> : null}
+                </Checkbox>
+              ))}
             </Checkbox.Group>
-            {!expectedConfig.can_edit ? <Text type="secondary">当前账号仅可查看，不能修改本站设置。</Text> : null}
+            {!expectedConfig.can_edit ? <Text className="station-monitoring-fact">当前账号仅可查看本站设置。</Text> : null}
             {expectedConfig.can_edit ? <Space wrap>
-              <Button
-                type="primary"
-                loading={expectedSaving}
-                disabled={!expectedChanged || expectedDraft.length === 0}
-                onClick={saveExpectedFactors}
-              >保存设置</Button>
-              {expectedDraft.length === 0 ? <Text type="danger">至少选择一项应监测因子</Text> : null}
-              <Text type="secondary">未勾选项不进入当前完整性分母；历史正式结果不会删除。</Text>
+              <Button type="primary" loading={expectedSaving}
+                disabled={!expectedChanged || expectedDraft.length === 0} onClick={saveExpectedFactors}>保存设置</Button>
+              {expectedDraft.length === 0 ? <Text type="danger">至少选择一项监测因子</Text> : null}
+              <Button onClick={() => {
+                setExpectedDraft(savedExpectedMetrics);
+                setExpectedError('');
+                setMode('monitoring');
+              }}>取消</Button>
             </Space> : null}
-          </Space> : null}
-        </Card>
-      </Space>
-      </div>
-    </div>
+          </> : null}
+        </section> : null}
+      </Drawer>
+      <Modal
+        open={trendExpanded}
+        onCancel={() => setTrendExpanded(false)}
+        footer={null}
+        width={1100}
+        title={`${monitoringFactorName(trendFactors.find((item) => item.business_metric === selectedMetric) || {})}结果趋势`}
+        destroyOnHidden={false}
+      >
+        <div className="station-monitoring-trend station-monitoring-trend--expanded">{trendPanel}</div>
+      </Modal>
+    </>
   );
 }
+
+export default StationMonitoringDrawer;

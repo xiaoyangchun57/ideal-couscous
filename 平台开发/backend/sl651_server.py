@@ -988,10 +988,11 @@ class StationIngestServer:
             if frame.command not in {"2011", "2061"}:
                 self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(None, False)
-            configuration_pending = (
-                auth.status == "authenticated"
-                and not self.storage.endpoint_has_monitoring_profile(int(auth.endpoint_id or 0))
-            )
+            # A bound authenticated HJ212 endpoint is the station identity. Missing
+            # optional monitoring rows must not quarantine otherwise valid standard
+            # factors; normalization records an explicit issue when time semantics
+            # remain insufficient for a formal business slot.
+            configuration_pending = False
             raw_id, duplicate = self.storage.persist_parsed(
                 frame, auth, received_at, configuration_pending=configuration_pending,
             )

@@ -17,7 +17,6 @@ const antdZhCN = zhCN?.default || zhCN;
 
 const CockpitPage = lazy(() => import('./pages/cockpit/CockpitPage'));
 const SitesPage = lazy(() => import('./pages/sites/SitesPage'));
-const SiteMonitoringPage = lazy(() => import('./pages/sites/SiteMonitoringPage'));
 const StationAccessPage = lazy(() => import('./pages/sites/StationAccessPage'));
 const AlertsPage = lazy(() => import('./pages/alerts/AlertsPage'));
 const WorkOrdersPage = lazy(() => import('./pages/workorders/WorkOrdersPage'));
@@ -106,7 +105,7 @@ function AppRoutes() {
           <PageRoute path="/sites/data-access"><CapabilityRoute capability="station_monitoring_public"><Deferred><StationAccessPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="sites/:siteId" element={(
-          <PageRoute path="/sites"><CapabilityRoute capability="station_monitoring_public"><Deferred><SiteMonitoringPage /></Deferred></CapabilityRoute></PageRoute>
+          <PageRoute path="/sites"><CapabilityRoute capability="station_monitoring_public"><Deferred><SitesPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="alerts" element={(
           <PageRoute path="/alerts"><Deferred><AlertsPage /></Deferred></PageRoute>

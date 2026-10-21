@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Table, Input, Select, Button, Space, Tag, Badge,
   Modal, Descriptions, Tabs, Typography, message, Spin, Empty, Alert,
@@ -21,11 +21,12 @@ import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
+import { StationMonitoringDrawer } from './SiteMonitoringPage';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import {
-  communicationStatusView, cycleStatusView, hasAdminRole, mergeMonitoringSites,
-  formatMonitoringTime, monitoringStatusView, monitoringSummaryItems, readSiteDirectorySnapshot, siteDirectoryLoadMode,
+  communicationStatusView, hasAdminRole, mergeMonitoringSites,
+  formatMonitoringTime, readSiteDirectorySnapshot, siteDirectoryLoadMode,
   stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
 } from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
@@ -83,12 +84,13 @@ function getStatusCfg(status) {
 // ---------------------------------------------------------------------------
 export default function SitesPage() {
   const navigate = useNavigate();
+  const { siteId: routeMonitoringSiteId } = useParams();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, token } = useAuth();
   const isAdmin = hasAdminRole(user);
   const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
-  const monitoringScope = isAdmin ? 'all' : 'mine';
+  const monitoringScope = monitoringPublic ? 'all' : 'mine';
   const siteServiceScope = isAdmin && searchParams.get('service_scope') === 'all' ? 'all' : 'current';
   const serviceScope = isAdmin ? siteServiceScope : 'current';
   const monitoringRequestKey = stationDirectorySnapshotKey(
@@ -109,7 +111,6 @@ export default function SitesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [monitoringLoading, setMonitoringLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
-  const [monitoringSummary, setMonitoringSummary] = useState(siteSnapshot.summary || {});
   const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(siteSnapshot.scopeFacts || null);
   const [monitoringError, setMonitoringError] = useState(null);
   const directoryLoading = initialLoading || !activeSiteSnapshot?.ready;
@@ -125,16 +126,34 @@ export default function SitesPage() {
       const normalized = value.trim();
       if (normalized) next.set('q', normalized);
       else next.delete('q');
+      next.delete('page');
       return next;
     }, { replace: true });
   }, [setSearchParams]);
   const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
     urlSearchText, commitSearchText,
   );
-  const listQuery = searchParams.toString();
-  const monitoringDetailPath = useCallback((siteId) => (
-    `/sites/${siteId}${listQuery ? `?${listQuery}` : ''}`
-  ), [listQuery]);
+  const listQuery = useMemo(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('monitoring');
+    return next.toString();
+  }, [searchParams]);
+  const monitoringSiteId = routeMonitoringSiteId || searchParams.get('monitoring');
+  const tablePage = Math.max(1, Number(searchParams.get('page')) || 1);
+  const openMonitoring = useCallback((siteId) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('monitoring', String(siteId));
+    setSearchParams(next);
+  }, [searchParams, setSearchParams]);
+  const closeMonitoring = useCallback(() => {
+    if (routeMonitoringSiteId) {
+      navigate(`/sites${listQuery ? `?${listQuery}` : ''}`, { replace: true });
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('monitoring');
+    setSearchParams(next, { replace: true });
+  }, [listQuery, navigate, routeMonitoringSiteId, searchParams, setSearchParams]);
 
   // ---- archive modal ----
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
@@ -197,7 +216,6 @@ export default function SitesPage() {
     setFetchError(null);
     setMonitoringError(null);
     if (!previousSnapshot?.ready) {
-      setMonitoringSummary({});
       setMonitoringScopeFacts(null);
     }
     const monitoringResultPromise = monitoringPublic
@@ -214,7 +232,6 @@ export default function SitesPage() {
       ) || snapshotData;
       sitesRef.current = stored;
       setSiteSnapshot(stored);
-      setMonitoringSummary(stored.summary || {});
       setMonitoringScopeFacts(stored.scopeFacts || null);
       return stored;
     };
@@ -268,7 +285,11 @@ export default function SitesPage() {
       }
       const monitoringPayload = monitoringResult.value;
       const monitoringContract = validateMonitoringDirectoryPayload(
-        rows, monitoringPayload, { scope: monitoringScope, serviceScope },
+        rows, monitoringPayload, {
+          scope: monitoringScope,
+          serviceScope,
+          allowMonitoringSuperset: monitoringPublic && !isAdmin,
+        },
       );
       if (!monitoringContract.ok) {
         setMonitoringError(monitoringContract.error);
@@ -321,7 +342,6 @@ export default function SitesPage() {
       || { key: monitoringRequestKey, rows: [], summary: {}, scopeFacts: null, resultSnapshot: null, ready: false };
     sitesRef.current = cached;
     setSiteSnapshot(cached);
-    setMonitoringSummary(cached.summary || {});
     setMonitoringScopeFacts(cached.scopeFacts || null);
     setInitialLoading(siteDirectoryLoadMode(cached) === 'initial');
     setRefreshing(false);
@@ -721,12 +741,13 @@ export default function SitesPage() {
     const normalizedValue = typeof value === 'string' ? value.trim() : value;
     if (normalizedValue) nextParams.set(key, normalizedValue);
     else nextParams.delete(key);
+    nextParams.delete('page');
     setSearchParams(nextParams, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const resetFilters = useCallback(() => {
     const nextParams = new URLSearchParams(searchParams);
-    ['q', 'type', 'district', 'manager'].forEach(key => nextParams.delete(key));
+    ['q', 'type', 'district', 'manager', 'page'].forEach(key => nextParams.delete(key));
     setSearchParams(nextParams, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -736,100 +757,68 @@ export default function SitesPage() {
   const columns = useMemo(
     () => [
       {
-        title: '站点身份',
+        title: '站点',
         key: 'identity',
-        width: 230,
+        width: 220,
         ellipsis: true,
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
         render: (_, record) => (
           <div>
             <Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
-            <div style={{ marginTop: 2 }}>
-              <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
+            <div style={{ marginTop: 4 }}>
+              <Text type="secondary">{record.code || '未提供编码'}</Text>
+              <Tag color={typeColorMap[record.type] || 'default'} style={{ ...tagStyle, marginLeft: 8 }}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
             </div>
           </div>
         ),
       },
       {
-        title: '区县/地址',
-        key: 'location',
-        width: 180,
-        ellipsis: true,
-        render: (_, record) => {
-          if (!record.district && !record.address) {
-            return <Text type="secondary">未录入</Text>;
-          }
-          return (
-            <span>
-              {record.district ? <Text type="secondary">{record.district}</Text> : null}
-              {record.district && record.address ? <Text type="secondary"> · </Text> : null}
-              {record.address ? <Text>{record.address}</Text> : null}
-            </span>
-          );
-        },
-      },
-      {
-        title: '运维服务',
-        key: 'service_policy',
-        width: 145,
-        render: (_, record) => {
-          const service = serviceStatusMeta[record.service_status] || serviceStatusMeta.active;
-          const reporting = reportingConditionMeta[record.reporting_condition] || reportingConditionMeta.normal;
-          return (
-            <Space direction="vertical" size={0}>
-              <Tag color={service.color}>{record.service_status_label || service.label}</Tag>
-              {record.service_status !== 'ended' ? <Tag color={reporting.color}>{record.reporting_condition_label || reporting.label}</Tag> : null}
-            </Space>
-          );
-        },
-      },
-      ...(monitoringPublic ? [{
-        title: '监测状态',
-        dataIndex: 'communication',
-        key: 'communication',
-        width: 145,
-        render: (_, record) => {
-          if (record.service_status === 'ended') {
-            return <Space direction="vertical" size={0}><Tag>服务结束</Tag><Text type="secondary" style={{ fontSize: 12 }}>保留历史数据</Text></Space>;
-          }
-          const statusView = monitoringStatusView(record);
-          const communicationView = communicationStatusView(record.communication);
-          return <Space direction="vertical" size={0}><Tag color={statusView.color}>{statusView.label}</Tag><Text type="secondary" ellipsis={{ tooltip: statusView.reason }} style={{ fontSize: 12, maxWidth: 130 }}>{statusView.reason}</Text><Badge color={communicationView.color} text={communicationView.label} /><Text type="secondary" style={{ fontSize: 12 }}>{record.communication?.last_received_at ? dayjs(record.communication.last_received_at).format('MM-DD HH:mm') : '暂无报文'}</Text></Space>;
-        },
-      }, {
-        title: '最近一期结果',
-        dataIndex: 'latest_cycle',
-        key: 'latest_cycle',
-        width: 170,
-        render: (_, record) => {
-          if (record.service_status === 'ended') {
-            return <Space direction="vertical" size={0}><Tag>服务结束</Tag><Text type="secondary" style={{ fontSize: 12 }}>不参与当前评价</Text></Space>;
-          }
-          const view = cycleStatusView(record.latest_cycle);
-          const cycle = record.latest_cycle || {};
-          const arrivedCount = cycle.arrived_count ?? cycle.formed_count ?? 0;
-          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} /><Text type="secondary" style={{ fontSize: 12 }}>{cycle.scheduled_at ? `${dayjs(cycle.scheduled_at).format('MM-DD HH:mm')} · 已到 ${arrivedCount}/${cycle.expected_count || 0}` : view.label}</Text></Space>;
-        },
-      }, {
-        title: '关键时间',
-        key: 'monitoring_times',
-        width: 235,
-        render: (_, record) => record.service_status === 'ended'
-          ? <Text type="secondary">服务结束，历史仍可查</Text>
-          : (
-            <Space direction="vertical" size={0}>
-              <Text style={{ fontSize: 12 }}>最后收到报文：{record.last_received_at || record.last_communication_at ? dayjs(record.last_received_at || record.last_communication_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>观测：{record.last_valid_observation_at ? dayjs(record.last_valid_observation_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
-            </Space>
-          ),
-      }] : []),
-      {
         title: '负责人',
         dataIndex: 'manager',
         key: 'manager',
-        width: 100,
+        width: 110,
         ellipsis: true,
+        render: (value) => value || <Text type="secondary">未设置</Text>,
       },
+      {
+        title: '服务状态',
+        key: 'service_policy',
+        width: 120,
+        render: (_, record) => {
+          const service = serviceStatusMeta[record.service_status] || serviceStatusMeta.active;
+          return <Tag color={service.color}>{record.service_status_label || service.label}</Tag>;
+        },
+      },
+      ...(monitoringPublic ? [{
+        title: '接收情况',
+        dataIndex: 'communication',
+        key: 'communication',
+        width: 190,
+        render: (_, record) => {
+          const communicationView = communicationStatusView(record.communication);
+          const receivedAt = record.communication?.last_received_at || record.last_received_at || record.last_communication_at;
+          return <Space direction="vertical" size={2}>
+            <Badge color={communicationView.color} text={communicationView.label} />
+            <Text>{receivedAt ? dayjs(receivedAt).format('YYYY-MM-DD HH:mm') : '暂无接收记录'}</Text>
+          </Space>;
+        },
+      }, {
+        title: '最新结果时间',
+        dataIndex: 'latest_cycle',
+        key: 'latest_cycle',
+        width: 190,
+        render: (_, record) => {
+          const cycle = record.latest_cycle || {};
+          const arrivedCount = cycle.arrived_count ?? cycle.formed_count ?? 0;
+          const expectedCount = cycle.expected_count || 0;
+          const missingCount = Math.max(0, expectedCount - arrivedCount);
+          const resultAt = record.last_valid_observation_at || cycle.scheduled_at;
+          return <Space direction="vertical" size={2}>
+            <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无结果'}</Text>
+            {resultAt && missingCount > 0 ? <Tag color="orange">缺 {missingCount} 项</Tag> : null}
+          </Space>;
+        },
+      }] : []),
       {
         title: '操作',
         key: 'actions',
@@ -837,14 +826,14 @@ export default function SitesPage() {
         fixed: 'right',
         render: (_, record) => (
           <Space size={0}>
-            {monitoringPublic && <Button type="link" size="small" onClick={() => navigate(monitoringDetailPath(record.id))}>{record.service_status === 'ended' ? '历史' : '监测'}</Button>}
+            {monitoringPublic && <Button type="link" size="small" onClick={() => openMonitoring(record.id)}>{record.service_status === 'ended' ? '历史' : '监测'}</Button>}
             {isAdmin && <Button type="link" size="small" icon={<SettingOutlined />} onClick={() => openServicePolicy(record)}>服务状态</Button>}
             <Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button>
           </Space>
         ),
       },
     ],
-    [isAdmin, monitoringDetailPath, monitoringPublic, navigate, openArchive, openServicePolicy],
+    [isAdmin, monitoringPublic, openArchive, openMonitoring, openServicePolicy],
   );
 
   // ========================================================================
@@ -1441,10 +1430,6 @@ export default function SitesPage() {
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
-      statusItems={monitoringPublic && siteSnapshot.key === monitoringRequestKey
-        && !['loading', 'error'].includes(activeSiteSnapshot?.resultSnapshot?.state)
-        && Object.keys(monitoringSummary || {}).length > 0
-        ? monitoringSummaryItems(monitoringSummary) : []}
       primaryAction={<Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
         {isAdmin && monitoringPublic && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
@@ -1594,8 +1579,28 @@ export default function SitesPage() {
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={directoryLoading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
-          scroll={{ x: 1180, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
+          pagination={{
+            current: tablePage,
+            pageSize: 20,
+            showSizeChanger: false,
+            onChange: (page) => {
+              const next = new URLSearchParams(searchParams);
+              if (page > 1) next.set('page', String(page));
+              else next.delete('page');
+              setSearchParams(next, { replace: true });
+            },
+          }}
+          rowClassName={(record) => String(record.id) === String(monitoringSiteId)
+            ? 'station-monitoring-selected-row' : ''}
+          scroll={{ x: 960, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: false }} />
       )}
+
+      {monitoringPublic ? <StationMonitoringDrawer
+        siteId={monitoringSiteId}
+        open={Boolean(monitoringSiteId)}
+        onClose={closeMonitoring}
+        onOpenArchive={openArchive}
+      /> : null}
 
       <Modal
         title="新增站点"

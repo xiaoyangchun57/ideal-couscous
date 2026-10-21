@@ -18,7 +18,7 @@ from station_monitoring import (BUSINESS_PROJECTION_VERSION, HISTORICAL_REPROJEC
                                 NORMALIZATION_VERSION, business_slot_diagnostics,
                                 current_factor_configurations, latest_cycle, latest_values,
                                 normalize_raw_frame, reproject_historical_business_observations,
-                                trend, trend_slots)
+                                result_trend_page, trend, trend_slots)
 
 
 def make_hj212(*, station="TEST-HJ212-01", password="testpw", command="2011", qn="20260911164900001",
@@ -58,6 +58,11 @@ class HJ212ParserTest(unittest.TestCase):
             ("HJ212:w01001", 0.0, "valid"), ("HJ212:w01010", 20.5, "fault"),
             ("HJ212:w21003", 0.4, "fault"),
         ])
+
+    def test_parser_preserves_exact_numeric_token_for_display(self):
+        frame = parse_hj212_frame(make_hj212(factors="w01001-Rtd=7.2300,Flag=N"))
+        self.assertEqual(frame.factors[0].raw_value, 7.23)
+        self.assertEqual(frame.factors[0].raw_value_text, "7.2300")
     def test_parser_keeps_zero_flags_and_unknown_numeric_code_without_guessing(self):
         frame = parse_hj212_frame(make_hj212(factors=";".join((
             "w01001-Rtd=0,Flag=N", "w01019-Rtd=1.2,Flag=F", "005-Rtd=3,Flag=Q",
@@ -237,6 +242,28 @@ class HJ212IngestionContractTest(unittest.TestCase):
         factor = next(item for item in cycle["factors"] if item["business_metric"] == "ph")
         return cycle, factor, values, slots, points, diagnostics
 
+    def test_source_numeric_token_survives_storage_latest_and_trend_projection(self):
+        raw = make_hj212(
+            data_time="20260911164900", factors="w01001-Rtd=7.2300,Flag=N")
+        self.assertIsNone(self.server._process_raw(raw, "2026-09-11T08:50:00+00:00"))
+        raw_id = self._raw_ids()[0]
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), "accepted")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            stored = connection.execute(
+                "SELECT raw_value,raw_value_text FROM observation_values WHERE business_metric='ph'"
+            ).fetchone()
+            latest = latest_values(connection, 1, at_time="2026-09-11T09:00:00+00:00")
+            points, has_more, _ = result_trend_page(
+                connection, 1, "ph", "2026-09-11T08:00:00+00:00",
+                "2026-09-11T09:00:00+00:00", limit=10)
+        self.assertEqual(tuple(stored), (7.23, "7.2300"))
+        self.assertEqual(latest[0]["source_value_text"], "7.2300")
+        self.assertEqual(latest[0]["standard_value_display"], "7.2300")
+        self.assertFalse(has_more)
+        self.assertEqual(points[0]["source_value_text"], "7.2300")
+        self.assertEqual(points[0]["value_display"], "7.2300")
+
     def test_2061_avg_and_rtd_projects_only_typed_average_and_rebuilds_old_unknown(self):
         self._keep_only_ph_configuration()
         raw = make_real_shape_hj212(
@@ -274,7 +301,11 @@ class HJ212IngestionContractTest(unittest.TestCase):
         cycle, factor, values, slots, points, diagnostics = self._public_ph_state()
         self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]), ("incomplete", None))
         self.assertEqual((factor["status"], factor["value"]), ("missing", None))
-        self.assertEqual(values, [])
+        self.assertEqual([
+            (item["status"], item["standard_value"], item["source_type"],
+             item["observed_at"])
+            for item in values
+        ], [("value", 7.1, "hj212_2061_avg", "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots], [("missing", None)])
         self.assertEqual(points, [])
         self.assertEqual(diagnostics, {
@@ -311,7 +342,12 @@ class HJ212IngestionContractTest(unittest.TestCase):
         self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]), ("incomplete", None))
         self.assertEqual((factor["status"], factor["value"], factor["formal_candidate_count"]),
                          ("missing", None, 0))
-        self.assertEqual(values, [])
+        self.assertEqual([
+            (item["status"], item["standard_value"], item["source_type"],
+             item["slot_state"], item["observed_at"])
+            for item in values
+        ], [("value", 7.8, "realtime_observation", "realtime",
+             "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots], [("missing", None)])
         self.assertEqual(points, [])
         self.assertEqual(diagnostics, {
@@ -339,7 +375,12 @@ class HJ212IngestionContractTest(unittest.TestCase):
                          ("review_required", None))
         self.assertEqual((factor["status"], factor["value"], factor["formal_candidate_count"]),
                          ("review_required", None, 2))
-        self.assertEqual(values, [])
+        self.assertEqual([
+            (item["status"], item["standard_value"], item["source_value_text"],
+             item["source_type"], item["reason_code"], item["observed_at"])
+            for item in values
+        ], [("review_required", None, None, "hj212_2061_avg",
+             "valid_value_conflict", "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots],
                          [("review_required", None)])
         self.assertEqual(points, [])
@@ -375,7 +416,11 @@ class HJ212IngestionContractTest(unittest.TestCase):
         self.assertEqual(states, [("selected",), ("conflict",), ("conflict",)])
         self.assertEqual((factor["status"], factor["process_candidate_count"],
                           factor["formal_candidate_count"]), ("missing", 2, 0))
-        self.assertEqual(values, [])
+        self.assertEqual([
+            (item["status"], item["standard_value"], item["source_type"],
+             item["observed_at"])
+            for item in values
+        ], [("value", 7.2, "realtime_observation", "2026-09-11T10:11:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots],
                          [("missing", None), ("missing", None)])
 
@@ -495,6 +540,97 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ("2026-09-11T04:00:00+00:00", 2),
             ("2026-09-11T08:00:00+00:00", 1),
         ])
+
+    def test_2011_without_schedule_uses_profile_timezone_four_hour_slots(self):
+        self._keep_only_ph_configuration()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM monitoring_business_schedules")
+            connection.commit()
+        cases = (
+            ("20260911120000", "20260911120000001", "2026-09-11T04:00:05+00:00"),
+            ("20260911120100", "20260911120100001", "2026-09-11T04:01:05+00:00"),
+            ("20260911160000", "20260911160000001", "2026-09-11T08:00:05+00:00"),
+        )
+        for data_time, qn, received_at in cases:
+            self.server._process_raw_result(
+                make_hj212(qn=qn, data_time=data_time,
+                           factors="w01001-Rtd=7.1,Flag=N"),
+                received_at,
+            )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            summaries = connection.execute(
+                """SELECT slot_started_at,receipt_count
+                   FROM station_ingest_slot_summaries ORDER BY slot_started_at"""
+            ).fetchall()
+            raw_count = connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames"
+            ).fetchone()[0]
+        self.assertEqual(summaries, [
+            ("2026-09-11T04:00:00+00:00", 2),
+            ("2026-09-11T08:00:00+00:00", 1),
+        ])
+        self.assertEqual(raw_count, 2)
+
+    def test_same_slot_writes_only_changed_factors_and_new_cycle_keeps_same_values(self):
+        frames = (
+            ("20260911120000", "7.10", "20.00", "20260911120000001",
+             "2026-09-11T04:00:05+00:00"),
+            ("20260911120100", "7.10", "20.10", "20260911120100001",
+             "2026-09-11T04:01:05+00:00"),
+            ("20260911160000", "7.10", "20.10", "20260911160000001",
+             "2026-09-11T08:00:05+00:00"),
+        )
+        for data_time, ph, temperature, qn, received_at in frames:
+            self.server._process_raw_result(
+                make_hj212(
+                    qn=qn, data_time=data_time,
+                    factors=(f"w01001-Rtd={ph},w01001-Flag=N;"
+                             f"w01010-Rtd={temperature},w01010-Flag=N"),
+                ), received_at)
+
+        for raw_id in self._raw_ids():
+            self.assertEqual(normalize_raw_frame(self.database, raw_id), "accepted")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            value_rows = connection.execute(
+                """SELECT batch.observed_at,value.business_metric,value.standard_value
+                   FROM observation_values value
+                   JOIN observation_batches batch ON batch.id=value.observation_batch_id
+                   ORDER BY batch.observed_at,value.business_metric"""
+            ).fetchall()
+            business_rows = connection.execute(
+                """SELECT scheduled_at,business_metric,standard_value
+                   FROM monitoring_business_observations
+                   ORDER BY scheduled_at,business_metric,id"""
+            ).fetchall()
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM monitoring_status_events"
+            ).fetchone()[0], 0)
+            current_state = connection.execute(
+                """SELECT latest_authenticated_raw_frame_id,latest_authenticated_at
+                   FROM station_ingest_current_state"""
+            ).fetchone()
+            receipt_count = connection.execute(
+                "SELECT SUM(receipt_count) FROM station_ingest_receipt_hourly"
+            ).fetchone()[0]
+
+        self.assertEqual(value_rows, [
+            ("2026-09-11T04:00:00+00:00", "ph", 7.1),
+            ("2026-09-11T04:00:00+00:00", "water_temp", 20.0),
+            ("2026-09-11T04:01:00+00:00", "water_temp", 20.1),
+            ("2026-09-11T08:00:00+00:00", "ph", 7.1),
+            ("2026-09-11T08:00:00+00:00", "water_temp", 20.1),
+        ])
+        self.assertEqual(business_rows, [
+            ("2026-09-11T00:00:00+00:00", "ph", 7.1),
+            ("2026-09-11T00:00:00+00:00", "water_temp", 20.0),
+            ("2026-09-11T00:00:00+00:00", "water_temp", 20.1),
+            ("2026-09-11T04:00:00+00:00", "ph", 7.1),
+            ("2026-09-11T04:00:00+00:00", "water_temp", 20.1),
+        ])
+        self.assertEqual(current_state, (3, "2026-09-11T08:00:05+00:00"))
+        self.assertEqual(receipt_count, 3)
 
     def test_2011_factor_aliases_share_the_normalized_business_signature(self):
         with closing(sqlite3.connect(self.database)) as connection:

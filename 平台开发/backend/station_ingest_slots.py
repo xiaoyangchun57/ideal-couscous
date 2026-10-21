@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -20,6 +21,7 @@ class HJ212SlotIdentityResolver:
         self.connection = connection
         self._profiles: dict[int, list[sqlite3.Row]] = {}
         self._mappings: dict[int, list[sqlite3.Row]] = {}
+        self._schedules: dict[int, list[sqlite3.Row]] = {}
 
     def _endpoint_profiles(self, endpoint_id: int) -> list[sqlite3.Row]:
         if endpoint_id not in self._profiles:
@@ -45,6 +47,37 @@ class HJ212SlotIdentityResolver:
                 (endpoint_id,),
             ).fetchall()
         return self._mappings[endpoint_id]
+
+    def _endpoint_schedules(self, endpoint_id: int) -> list[sqlite3.Row]:
+        if endpoint_id not in self._schedules:
+            self._schedules[endpoint_id] = self.connection.execute(
+                """SELECT * FROM monitoring_business_schedules
+                   WHERE endpoint_id=? AND enabled=1
+                   ORDER BY (protocol_code IS NOT NULL) DESC,effective_from DESC,id DESC""",
+                (endpoint_id,),
+            ).fetchall()
+        return self._schedules[endpoint_id]
+
+    def _schedule_for(self, endpoint_id: int, protocol_code: str, observed_at: str):
+        return next((schedule for schedule in self._endpoint_schedules(endpoint_id)
+                     if schedule["protocol_code"] in {None, protocol_code}
+                     and schedule["effective_from"] <= observed_at
+                     and (schedule["effective_to"] is None
+                          or schedule["effective_to"] > observed_at)), None)
+
+    @staticmethod
+    def _slot_started_at(schedule, observed_at: datetime, fallback_timezone: str) -> str:
+        zone = ZoneInfo(schedule["timezone"] if schedule is not None else fallback_timezone)
+        observed = observed_at.astimezone(zone)
+        interval = int(schedule["interval_seconds"]) if schedule is not None else 4 * 60 * 60
+        anchor = time.fromisoformat(
+            schedule["anchor_local_time"] if schedule is not None else "00:00:00")
+        local_anchor = datetime.combine(observed.date(), anchor, zone)
+        if observed < local_anchor:
+            local_anchor -= timedelta(days=1)
+        elapsed = int((observed - local_anchor).total_seconds())
+        return (local_anchor + timedelta(seconds=(elapsed // interval) * interval)).astimezone(
+            timezone.utc).replace(microsecond=0).isoformat()
 
     def resolve(self, frame: ParsedHJ212Frame, endpoint_id: int) -> tuple[str, str] | None:
         if frame.command != "2011" or frame.data_time is None or not frame.factors:
@@ -72,8 +105,18 @@ class HJ212SlotIdentityResolver:
                 profile = candidate
                 observed_at = candidate_observed
                 break
-        if profile is None or observed_at is None:
-            return None
+        if profile is None:
+            try:
+                profile_timezone = "Asia/Shanghai"
+                observed_at = frame.data_time.replace(
+                    tzinfo=ZoneInfo(profile_timezone),
+                ).astimezone(timezone.utc).replace(microsecond=0)
+            except ZoneInfoNotFoundError:
+                return None
+            profile_instrument_asset_code = ""
+        else:
+            profile_timezone = profile["timezone"]
+            profile_instrument_asset_code = profile["instrument_asset_code"] or ""
 
         protocol_codes = {factor.protocol_code for factor in frame.factors}
         mapped_by_code = {}
@@ -83,20 +126,42 @@ class HJ212SlotIdentityResolver:
                     and (mapping["effective_to"] is None
                          or mapping["effective_to"] > observed_at.isoformat())):
                 mapped_by_code[mapping["protocol_code"]] = mapping
-        if set(mapped_by_code) != protocol_codes:
+        for protocol_code in protocol_codes - set(mapped_by_code):
+            definition = self.connection.execute(
+                """SELECT business_metric,standard_unit
+                   FROM monitoring_factor_definitions
+                   WHERE protocol_code=? AND is_published=1
+                     AND business_metric IS NOT NULL""",
+                (protocol_code,),
+            ).fetchone()
+            if definition is not None:
+                mapped_by_code[protocol_code] = {
+                    "business_metric": definition["business_metric"],
+                    "instrument_asset_code": None,
+                    "standard_unit": definition["standard_unit"],
+                }
+        if set(mapped_by_code) != protocol_codes or observed_at is None:
             return None
 
-        slot_local = frame.data_time.replace(
-            hour=(frame.data_time.hour // 4) * 4, minute=0, second=0, microsecond=0,
-            tzinfo=ZoneInfo(profile["timezone"]),
-        )
-        slot_started_at = slot_local.astimezone(ZoneInfo("UTC")).isoformat()
+        schedules = [
+            self._schedule_for(endpoint_id, protocol_code, observed_at.isoformat())
+            for protocol_code in protocol_codes
+        ]
+        schedule_ids = {schedule["id"] if schedule is not None else None
+                        for schedule in schedules}
+        if len(schedule_ids) != 1:
+            return None
+        schedule = schedules[0]
+        try:
+            slot_started_at = self._slot_started_at(schedule, observed_at, profile_timezone)
+        except ZoneInfoNotFoundError:
+            return None
         normalized_factors: dict[tuple[str, str, str, str], dict[str, object]] = {}
         for factor in frame.factors:
             mapping = mapped_by_code[factor.protocol_code]
             identity = (
                 mapping["business_metric"] or factor.protocol_code,
-                mapping["instrument_asset_code"] or profile["instrument_asset_code"] or "",
+                mapping["instrument_asset_code"] or profile_instrument_asset_code,
                 mapping["standard_unit"] or "",
                 factor.value_kind or "",
             )

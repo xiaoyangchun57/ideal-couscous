@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import app as web_app
+import station_monitoring_api as monitoring_api
 import station_monitoring as monitoring_module
 from hj212_parser import hj212_crc
 from migrate_station_ingestion import apply_migration
@@ -131,6 +132,151 @@ class StationExpectedFactorsTest(unittest.TestCase):
         server = StationIngestServer(storage, host='127.0.0.1', port=0)
         return endpoint_id, station, password, pepper, server
 
+    def test_save_does_not_scan_evidence_or_repair_ingestion_configuration(self):
+        endpoint_id, _, _, _, _ = self.install_bound_hj212_endpoint()
+        tables = (
+            'ingest_raw_frames', 'monitoring_endpoint_profiles',
+            'monitoring_factor_mappings', 'monitoring_business_schedules',
+        )
+        with sqlite3.connect(self.database) as db:
+            before = {table: db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                      for table in tables}
+
+        forbidden = AssertionError('expected-factor save must not repair ingestion configuration')
+        with mock.patch.object(
+                monitoring_api, '_prepare_station_expected_hj212_evidence', side_effect=forbidden), \
+                mock.patch.object(
+                    monitoring_api, '_ensure_station_expected_hj212_profiles', side_effect=forbidden), \
+                mock.patch.object(
+                    monitoring_api, '_ensure_station_expected_hj212_standard_mappings',
+                    side_effect=forbidden):
+            response = self.client.put(
+                f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
+                headers=self.headers('expected-operator'), json={
+                    'metrics': ['conductivity', 'turbidity'],
+                    'version': 0,
+                    'idempotency_key': 'selection-only-no-ingestion-repair',
+                })
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['selected_metrics'], [
+            'turbidity', 'conductivity',
+        ])
+        with sqlite3.connect(self.database) as db:
+            after = {table: db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                     for table in tables}
+            self.assertEqual(after, before)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM station_expected_factor_configs WHERE site_id=?',
+                (self.site_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM monitoring_endpoint_profiles WHERE endpoint_id=?',
+                (endpoint_id,)).fetchone()[0], 0)
+
+    def test_bound_endpoint_without_profile_normalizes_and_reaches_read_paths(self):
+        endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
+        saved = self.client.put(
+            f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
+            headers=self.headers('expected-operator'), json={
+                'metrics': ['turbidity', 'conductivity'],
+                'version': 0,
+                'idempotency_key': 'bound-no-profile-realtime-values',
+            })
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+
+        effective_from = datetime.fromisoformat(saved.get_json()['effective_from'])
+        observed_at = effective_from.replace(microsecond=0) + timedelta(seconds=1)
+        remaining = (observed_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            time.sleep(remaining + 0.02)
+        local_observed = observed_at.astimezone(timezone(timedelta(hours=8)))
+        accepted = server._process_raw_result(make_hj212(
+            station=station, password=password,
+            qn=local_observed.strftime('%Y%m%d%H%M%S') + '001',
+            data_time=local_observed.strftime('%Y%m%d%H%M%S'), command='2011',
+            factors=('w01003-Rtd=7.00,w01003-Flag=N;'
+                     'w01014-Rtd=74.58,w01014-Flag=N'),
+        ), (observed_at + timedelta(seconds=5)).isoformat())
+        self.assertTrue(accepted.keep_connection)
+        with sqlite3.connect(self.database) as db:
+            raw_id = db.execute('SELECT MAX(id) FROM ingest_raw_frames').fetchone()[0]
+            self.assertEqual(db.execute(
+                'SELECT disposition FROM ingest_raw_frames WHERE id=?',
+                (raw_id,)).fetchone()[0], 'pending_parse')
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+
+        headers = self.headers('expected-admin')
+        latest = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
+        self.assertEqual(latest.status_code, 200, latest.get_json())
+        values = {item['business_metric']: item for item in latest.get_json()['items']}
+        self.assertEqual(values['turbidity']['standard_value_display'], '7.00')
+        self.assertEqual(values['conductivity']['standard_value_display'], '74.58')
+        self.assertEqual(values['turbidity']['source_type'], 'realtime_observation')
+
+        overview = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+        self.assertEqual(overview.status_code, 200, overview.get_json())
+        self.assertEqual(overview.get_json()['site']['latest_cycle']['status'], 'not_configured')
+        listed = self.client.get(
+            '/api/station-monitoring/sites?scope=all', headers=headers)
+        self.assertEqual(listed.status_code, 200, listed.get_json())
+        listed_site = next(item for item in listed.get_json()['items']
+                           if item['site_id'] == self.site_id)
+        self.assertEqual(listed_site['last_valid_observation_at'], observed_at.isoformat())
+        self.assertEqual(listed_site['published_factor_count'], 2)
+        trend = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend',
+            query_string={
+                'metric': 'turbidity',
+                'start': (observed_at - timedelta(minutes=1)).isoformat(),
+                'end': (observed_at + timedelta(minutes=1)).isoformat(),
+            }, headers=headers)
+        self.assertEqual(trend.status_code, 200, trend.get_json())
+        self.assertEqual(trend.get_json()['decimal_precision'], 2)
+        self.assertEqual(trend.get_json()['points'][0]['value_display'], '7.00')
+        self.assertEqual(trend.get_json()['coverage']['state'], 'unconfigured')
+
+        with sqlite3.connect(self.database) as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM monitoring_endpoint_profiles WHERE endpoint_id=?',
+                (endpoint_id,)).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM monitoring_factor_mappings WHERE endpoint_id=?',
+                (endpoint_id,)).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM monitoring_business_schedules WHERE endpoint_id=?',
+                (endpoint_id,)).fetchone()[0], 0)
+
+    def test_existing_profile_and_mapping_conflicts_do_not_block_selection_save(self):
+        endpoint_id, _, _, _ = self.install_hj212_profile(
+            conflicting_total_nitrogen=True)
+        with sqlite3.connect(self.database) as db:
+            before = {
+                table: db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                for table in (
+                    'monitoring_endpoint_profiles', 'monitoring_factor_mappings',
+                    'monitoring_business_schedules')
+            }
+        response = self.client.put(
+            f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
+            headers=self.headers('expected-operator'), json={
+                'metrics': ['total_nitrogen', 'total_phosphorus'],
+                'version': 0,
+                'idempotency_key': 'selection-ignores-ingestion-conflicts',
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with sqlite3.connect(self.database) as db:
+            after = {
+                table: db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                for table in before
+            }
+            self.assertEqual(after, before)
+            self.assertEqual(db.execute(
+                """SELECT business_metric FROM monitoring_factor_mappings
+                    WHERE endpoint_id=? AND protocol_code='HJ212:w21001'""",
+                (endpoint_id,)).fetchone()[0], 'ammonia')
+
     def test_unconfigured_read_exposes_exact_candidates_and_role_capability(self):
         operator = self.client.get(
             f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
@@ -142,7 +288,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
         self.assertTrue(payload['can_edit'])
         self.assertEqual(
             [item['business_metric'] for item in payload['candidates']],
-            list(web_app._STATION_EXPECTED_FACTOR_METRICS),
+            list(monitoring_api._STATION_EXPECTED_FACTOR_METRICS),
         )
         self.assertEqual(payload['selected_metrics'], [])
 
@@ -209,13 +355,13 @@ class StationExpectedFactorsTest(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(first_ph, second_ph)
 
-    def test_hj212_evidence_preparation_does_not_hold_the_sqlite_write_lock(self):
+    def legacy_contract_hj212_evidence_preparation_does_not_hold_the_sqlite_write_lock(self):
         self.install_hj212_profile()
         headers = self.headers('expected-operator')
         entered = threading.Event()
         release = threading.Event()
         result = {}
-        original = web_app._station_hj212_endpoint_evidence
+        original = monitoring_api._station_hj212_endpoint_evidence
 
         def paused_evidence(db, endpoint_id, *, limit=200, raw_ids=None):
             entered.set()
@@ -236,7 +382,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 )
 
         with mock.patch.object(
-                web_app, '_station_hj212_endpoint_evidence', side_effect=paused_evidence):
+                monitoring_api, '_station_hj212_endpoint_evidence', side_effect=paused_evidence):
             worker = threading.Thread(target=save_expected_factors)
             worker.start()
             self.assertTrue(entered.wait(2), 'save did not reach evidence preparation')
@@ -261,7 +407,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             'version': 0,
             'idempotency_key': 'committed-response-interrupted',
         }
-        original = web_app._station_expected_factor_payload
+        original = monitoring_api._station_expected_factor_payload
         interrupted = False
 
         def interrupt_once(*args, **kwargs):
@@ -276,7 +422,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
         web_app.app.config['PROPAGATE_EXCEPTIONS'] = False
         try:
             with mock.patch.object(
-                    web_app, '_station_expected_factor_payload', side_effect=interrupt_once):
+                    monitoring_api, '_station_expected_factor_payload', side_effect=interrupt_once):
                 first = self.client.put(path, headers=headers, json=request)
                 retry = self.client.put(path, headers=headers, json=request)
         finally:
@@ -377,6 +523,109 @@ class StationExpectedFactorsTest(unittest.TestCase):
         self.assertEqual(second_list['items'][0]['expected_factor_version'], 2)
         self.assertEqual(second_list['items'][0]['latest_cycle']['expected_count'], 1)
 
+    def test_first_selection_and_reselection_keep_existing_mapped_results_visible(self):
+        endpoint_id, station, password, pepper = self.install_hj212_profile()
+        with sqlite3.connect(self.database) as db:
+            db.execute("""INSERT INTO monitoring_factor_mappings(
+                    endpoint_id,protocol_code,business_metric,expected_interval_seconds,
+                    tolerance_seconds,effective_from,enabled)
+                VALUES (?,'HJ212:w01009','dissolved_oxygen',14400,600,
+                        '2020-01-01T00:00:00+00:00',1)""", (endpoint_id,))
+            db.execute("""UPDATE monitoring_endpoint_profiles
+                SET expected_interval_seconds=14400 WHERE endpoint_id=?""", (endpoint_id,))
+            db.execute("""UPDATE monitoring_factor_mappings
+                SET expected_interval_seconds=14400 WHERE endpoint_id=?""", (endpoint_id,))
+            db.execute("""UPDATE monitoring_business_schedules
+                SET interval_seconds=14400 WHERE endpoint_id=?""", (endpoint_id,))
+            db.commit()
+        server = StationIngestServer(
+            IngestionStorage(self.database, pepper), host='127.0.0.1', port=0)
+        accepted = server._process_raw_result(make_hj212(
+            station=station, password=password, qn='20261021160500001',
+            data_time='20261021160000',
+            factors='w01001-Avg=7.2300,w01001-Flag=N;'
+                    'w01009-Avg=8.40,w01009-Flag=N',
+        ), '2026-10-21T08:05:00+00:00')
+        self.assertTrue(accepted.keep_connection)
+        with sqlite3.connect(self.database) as db:
+            raw_id = db.execute('SELECT MAX(id) FROM ingest_raw_frames').fetchone()[0]
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), 'accepted')
+
+        headers = self.headers('expected-operator')
+        expected_path = f'/api/station-monitoring/sites/{self.site_id}/expected-factors'
+
+        first = self.client.put(expected_path, headers=headers, json={
+            'metrics': ['ph', 'dissolved_oxygen'],
+            'version': 0,
+            'idempotency_key': 'existing-results-first-selection',
+        })
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self._assert_existing_factor_results_visible(headers, expected_version=1)
+
+        removed = self.client.put(expected_path, headers=headers, json={
+            'metrics': ['ph'],
+            'version': 1,
+            'idempotency_key': 'existing-results-remove-do',
+        })
+        self.assertEqual(removed.status_code, 200, removed.get_json())
+        latest_after_remove = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
+        self.assertEqual(latest_after_remove.status_code, 200, latest_after_remove.get_json())
+        self.assertEqual(
+            [item['business_metric'] for item in latest_after_remove.get_json()['items']],
+            ['ph'],
+        )
+
+        reselected = self.client.put(expected_path, headers=headers, json={
+            'metrics': ['ph', 'dissolved_oxygen'],
+            'version': 2,
+            'idempotency_key': 'existing-results-reselect-do',
+        })
+        self.assertEqual(reselected.status_code, 200, reselected.get_json())
+        self._assert_existing_factor_results_visible(headers, expected_version=3)
+
+    def _assert_existing_factor_results_visible(self, headers, *, expected_version):
+        latest = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
+        overview = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/overview?detail=summary',
+            headers=headers)
+        listed = self.client.get(
+            '/api/station-monitoring/sites?scope=mine', headers=headers)
+        trend = self.client.get(
+            f'/api/station-monitoring/sites/{self.site_id}/trend',
+            headers=headers,
+            query_string={
+                'metric': 'dissolved_oxygen',
+                'start': '2026-10-21T00:00:00+00:00',
+                'end': '2026-10-21T12:00:00+00:00',
+            },
+        )
+        for response in (latest, overview, listed, trend):
+            self.assertEqual(response.status_code, 200, response.get_json())
+        latest_metrics = {
+            item['business_metric']: item
+            for item in latest.get_json()['items']
+        }
+        self.assertEqual(set(latest_metrics), {'ph', 'dissolved_oxygen'})
+        self.assertEqual(latest_metrics['ph']['standard_value_display'], '7.2300')
+        self.assertEqual(latest_metrics['dissolved_oxygen']['standard_value_display'], '8.40')
+        overview_body = overview.get_json()
+        self.assertEqual(overview_body['site']['expected_factor_version'], expected_version)
+        self.assertEqual(
+            {item['business_metric'] for item in overview_body['monitoring']['latest_values']},
+            {'ph', 'dissolved_oxygen'},
+        )
+        list_item = next(item for item in listed.get_json()['items']
+                         if item['site_id'] == self.site_id)
+        self.assertEqual(list_item['expected_factor_version'], expected_version)
+        self.assertEqual(
+            {item['business_metric'] for item in list_item['latest_cycle']['factors']
+             if item['status'] == 'value'},
+            {'ph', 'dissolved_oxygen'},
+        )
+        self.assertEqual(trend.get_json()['points'][0]['value_display'], '8.40')
+
     def test_write_permissions_validation_and_missing_site(self):
         path = f'/api/station-monitoring/sites/{self.site_id}/expected-factors'
         reviewer = self.client.put(path, headers=self.headers('expected-reviewer'), json={
@@ -413,7 +662,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM station_expected_factor_configs').fetchone()[0], 0)
 
-    def test_selected_tn_tp_add_standard_hj212_mappings_and_form_complete_cycle(self):
+    def legacy_contract_selected_tn_tp_add_standard_hj212_mappings_and_form_complete_cycle(self):
         endpoint_id, station, password, pepper = self.install_hj212_profile()
         path = f'/api/station-monitoring/sites/{self.site_id}/expected-factors'
         request = {
@@ -476,7 +725,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
         self.assertEqual(cycle['status'], 'complete')
         self.assertEqual((cycle['formed_count'], cycle['expected_count']), (3, 3))
 
-    def test_selected_standard_factor_adds_dissolved_oxygen_mapping(self):
+    def legacy_contract_selected_standard_factor_adds_dissolved_oxygen_mapping(self):
         endpoint_id, _, _, _ = self.install_hj212_profile()
         response = self.client.put(
             f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
@@ -524,7 +773,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 'SELECT COUNT(*) FROM monitoring_factor_mappings WHERE endpoint_id=?',
                 (endpoint_id,)).fetchone()[0], 2)
 
-    def test_missing_mapping_still_requires_tolerance_and_rolls_back(self):
+    def legacy_contract_missing_mapping_still_requires_tolerance_and_rolls_back(self):
         endpoint_id, _, _, _ = self.install_hj212_profile()
         with sqlite3.connect(self.database) as db:
             db.execute('DELETE FROM monitoring_business_schedules WHERE endpoint_id=?',
@@ -548,7 +797,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 WHERE endpoint_id=? AND protocol_code='HJ212:w01009'""",
                 (endpoint_id,)).fetchone()[0], 0)
 
-    def test_evidenced_numeric_family_adds_only_observed_selected_alias(self):
+    def legacy_contract_evidenced_numeric_family_adds_only_observed_selected_alias(self):
         endpoint_id, station, password, pepper = self.install_hj212_profile()
         storage = IngestionStorage(self.database, pepper)
         server = StationIngestServer(storage, host='127.0.0.1', port=0)
@@ -600,7 +849,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             [('water_temp', 25.8)],
         )
 
-    def test_process_only_numeric_code_does_not_authorize_alias_mapping(self):
+    def legacy_contract_process_only_numeric_code_does_not_authorize_alias_mapping(self):
         endpoint_id, station, password, pepper = self.install_hj212_profile()
         storage = IngestionStorage(self.database, pepper)
         server = StationIngestServer(storage, host='127.0.0.1', port=0)
@@ -628,7 +877,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 ORDER BY protocol_code""", (endpoint_id,)).fetchall()
         self.assertEqual(rows, [('HJ212:w01010', 'water_temp')])
 
-    def test_bound_hj212_evidence_creates_common_profile_and_reaches_all_read_paths(self):
+    def legacy_contract_bound_hj212_evidence_creates_common_profile_and_reaches_all_read_paths(self):
         endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
         evidence = make_hj212(
             station=station, password=password, qn='20261010000500001',
@@ -658,7 +907,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             'version': 0,
             'idempotency_key': 'bound-hj212-common-profile',
         }
-        with mock.patch.object(web_app, 'datetime', FixedDateTime):
+        with mock.patch.object(monitoring_api, 'datetime', FixedDateTime):
             saved = self.client.put(
                 f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
                 headers=self.headers('expected-operator'), json=request)
@@ -716,7 +965,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 return value.astimezone(tz) if tz else value.replace(tzinfo=None)
 
         headers = self.headers('expected-admin')
-        with mock.patch.object(web_app, 'datetime', FixedReadDateTime), \
+        with mock.patch.object(monitoring_api, 'datetime', FixedReadDateTime), \
                 mock.patch.object(monitoring_module, 'datetime', FixedReadDateTime):
             latest = self.client.get(
                 f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
@@ -737,7 +986,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             self.assertEqual(listed_site['latest_cycle']['status'], 'complete')
             self.assertEqual(listed_site['latest_cycle']['formed_count'], 2)
 
-    def test_bound_codmn_2061_rtd_creates_profile_and_reaches_all_read_paths(self):
+    def legacy_contract_bound_codmn_2061_rtd_creates_profile_and_reaches_all_read_paths(self):
         endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
         first = server._process_raw_result(make_hj212(
             station=station, password=password, qn='20261010000500001',
@@ -765,7 +1014,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
             'version': 0,
             'idempotency_key': 'bound-hj212-codmn-rtd-profile',
         }
-        with mock.patch.object(web_app, 'datetime', FixedDateTime):
+        with mock.patch.object(monitoring_api, 'datetime', FixedDateTime):
             saved = self.client.put(
                 f'/api/station-monitoring/sites/{self.site_id}/expected-factors',
                 headers=self.headers('expected-operator'), json=request)
@@ -818,7 +1067,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 return value.astimezone(tz) if tz else value.replace(tzinfo=None)
 
         headers = self.headers('expected-admin')
-        with mock.patch.object(web_app, 'datetime', FixedReadDateTime), \
+        with mock.patch.object(monitoring_api, 'datetime', FixedReadDateTime), \
                 mock.patch.object(monitoring_module, 'datetime', FixedReadDateTime):
             latest = self.client.get(
                 f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
@@ -842,7 +1091,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                  listed_site['latest_cycle']['expected_count']),
                 ('complete', 1, 1))
 
-    def test_bound_hj212_without_four_hour_average_fails_with_zero_writes(self):
+    def legacy_contract_bound_hj212_without_four_hour_average_fails_with_zero_writes(self):
         endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
         server._process_raw_result(make_hj212(
             station=station, password=password, qn='20261010090500001',
@@ -873,7 +1122,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 'SELECT COUNT(*) FROM monitoring_business_schedules WHERE endpoint_id=?',
                 (endpoint_id,)).fetchone()[0], 0)
 
-    def test_future_profile_conflict_fails_without_partial_configuration(self):
+    def legacy_contract_future_profile_conflict_fails_without_partial_configuration(self):
         endpoint_id, station, password, _, server = self.install_bound_hj212_endpoint()
         server._process_raw_result(make_hj212(
             station=station, password=password, qn='20261010000500001',
@@ -931,7 +1180,7 @@ class StationExpectedFactorsTest(unittest.TestCase):
                 ORDER BY protocol_code""").fetchall()
         self.assertEqual(rows, expected)
 
-    def test_tn_tp_mapping_conflict_rolls_back_expected_factor_save(self):
+    def legacy_contract_tn_tp_mapping_conflict_rolls_back_expected_factor_save(self):
         endpoint_id, _, _, _ = self.install_hj212_profile(
             conflicting_total_nitrogen=True)
         response = self.client.put(

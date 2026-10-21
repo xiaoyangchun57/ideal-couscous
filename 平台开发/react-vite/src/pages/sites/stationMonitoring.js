@@ -168,19 +168,30 @@ export function mergeMonitoringSites(siteRows, monitoringPayload, previousRows =
   const items = Array.isArray(monitoringPayload)
     ? monitoringPayload
     : (monitoringPayload?.items || []);
+  const baseRows = Array.isArray(siteRows) ? siteRows : [];
+  const baseById = new Map(baseRows.map((item) => [String(item.id), item]));
   const byId = new Map(items.map((item) => [String(item.id ?? item.site_id), item]));
   const previousById = new Map(previousRows.map((item) => [String(item.id), item]));
-  return (Array.isArray(siteRows) ? siteRows : []).map((site) => {
+  if (monitoringPayload != null) {
+    const merged = items.map((monitoring) => {
+      const key = String(monitoring.id ?? monitoring.site_id);
+      const site = baseById.get(key) || { ...monitoring, id: monitoring.id ?? monitoring.site_id };
+      return mergeMonitoringSite(site, monitoring);
+    });
+    baseRows.forEach((site) => {
+      if (!byId.has(String(site.id))) merged.push(mergeMonitoringSite(site));
+    });
+    return merged;
+  }
+  return baseRows.map((site) => {
     const key = String(site.id);
-    const current = byId.get(key);
-    if (current) return mergeMonitoringSite(site, current);
-    const previous = monitoringPayload == null ? previousById.get(key) : null;
+    const previous = previousById.get(key);
     return previous ? mergeMonitoringSite(site, previous) : mergeMonitoringSite(site);
   });
 }
 
 export function validateMonitoringDirectoryPayload(
-  siteRows, payload, { scope, serviceScope } = {},
+  siteRows, payload, { scope, serviceScope, allowMonitoringSuperset = false } = {},
 ) {
   const items = Array.isArray(payload?.items) ? payload.items : null;
   const availableScopes = Array.isArray(payload?.available_scopes)
@@ -199,12 +210,12 @@ export function validateMonitoringDirectoryPayload(
   const summaryTotal = Number(payload?.summary?.total);
   const sameIds = uniqueSiteIds.size === uniqueMonitoringIds.size
     && [...uniqueSiteIds].every((id) => uniqueMonitoringIds.has(id));
+  const baseIsSubset = [...uniqueSiteIds].every((id) => uniqueMonitoringIds.has(id));
   if (uniqueSiteIds.size !== siteIds.length
       || uniqueMonitoringIds.size !== monitoringIds.length
       || !Number.isInteger(summaryTotal)
-      || summaryTotal !== siteIds.length
-      || items.length !== siteIds.length
-      || !sameIds) {
+      || summaryTotal !== items.length
+      || (allowMonitoringSuperset ? !baseIsSubset : !sameIds)) {
     return { ok: false, error: '监测汇总与当前站点列表数量不一致，请重新加载' };
   }
   return { ok: true };
@@ -290,9 +301,35 @@ export function monitoringDefaultTrendMetric(factors = [], latestValues = []) {
   return latest?.business_metric || factors.find((item) => item.business_metric)?.business_metric || '';
 }
 
+function monitoringTrendPointKey(item = {}) {
+  return [
+    item.business_metric || '', item.observed_at || item.scheduled_at || '',
+    item.endpoint_id ?? '', item.instrument_asset_code ?? '',
+  ].join('|');
+}
+
+export function mergeMonitoringTrendPages(current, next) {
+  if (!current || current.site_id !== next?.site_id || current.metric !== next?.metric) return next;
+  const points = new Map();
+  [...(current.points || []), ...(next.points || [])].forEach((item) => {
+    points.set(monitoringTrendPointKey(item), item);
+  });
+  return {
+    ...current,
+    ...next,
+    points: [...points.values()].sort((left, right) => (
+      new Date(left.observed_at || left.scheduled_at).getTime()
+      - new Date(right.observed_at || right.scheduled_at).getTime()
+    )),
+    window: current.window || next.window,
+    pagination: next.pagination || {},
+  };
+}
+
 export function monitoringTrendView(payload, { loading = false, error = '' } = {}) {
   const items = Array.isArray(payload?.points) ? payload.points : [];
   const coverage = payload?.coverage || {};
+  const pagination = payload?.pagination || {};
   const available = items.length > 0;
   return {
     available,
@@ -313,7 +350,9 @@ export function monitoringTrendView(payload, { loading = false, error = '' } = {
     suspectPoints: Number.isFinite(coverage.suspect_points) ? coverage.suspect_points : 0,
     duplicateRecords: Number.isFinite(coverage.duplicate_records) ? coverage.duplicate_records : 0,
     conflictSlots: Number.isFinite(coverage.conflict_slots) ? coverage.conflict_slots : 0,
-    emptyReason: '当前因子尚无可展示的检测周期',
+    hasMore: pagination.has_more === true,
+    nextCursor: pagination.next_cursor || null,
+    emptyReason: '当前因子在所选时间内暂无结果',
   };
 }
 
@@ -328,16 +367,25 @@ export function monitoringTrendChartOption(trend) {
   return {
     animation: false,
     grid: { left: 56, right: 20, top: 24, bottom: 48 },
-    tooltip: { trigger: 'axis', valueFormatter: (value) => `${value}${trend.unit ? ` ${trend.unit}` : ''}` },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params = []) => {
+        const point = params[0];
+        if (!point?.data) return '';
+        const time = formatMonitoringTime(point.data[0]);
+        const value = point.data[1] == null ? '缺失' : `${point.data[1]}${trend.unit ? ` ${trend.unit}` : ''}`;
+        return `${time}<br/>${trend.factorName || '监测结果'}：${value}`;
+      },
+    },
     xAxis: {
-      type: 'time', name: '正式业务时点', nameLocation: 'middle', nameGap: 32,
+      type: 'time', name: '结果时间', nameLocation: 'middle', nameGap: 32,
       axisLabel: { hideOverlap: true, formatter: '{MM}-{dd} {HH}:{mm}' },
     },
     yAxis: { type: 'value', name: trend.unit || '数值', scale: false },
     series: [{
       type: 'line', name: trend.factorName || '有效观测', showSymbol: trend.items.length < 80,
       connectNulls: false, data: trend.items.map((item) => [
-        item.scheduled_at || item.observed_at,
+        item.observed_at || item.scheduled_at,
         !item.status || item.status === 'value' ? item.value : null,
       ]),
     }],

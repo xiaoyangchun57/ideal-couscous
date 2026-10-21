@@ -39,12 +39,12 @@ function createPage() {
     assert.match(wxml, /wx:if="\{\{monitoringIntent\}\}"/);
     assert.match(wxml, /wx:elif="\{\{monitoringUnavailable\}\}"/);
     assert.match(wxml, /wx:elif="\{\{monitoringPublic && monitoringSource\}\}"/);
-    assert.match(wxml, /最近一期结果/);
-    assert.match(wxml, /已到 .*应到/);
+    assert.match(wxml, /最新结果/);
+    assert.match(wxml, /结果时间/);
     assert.doesNotMatch(wxml, /最近检测周期|周期未配置/);
-    assert.match(wxml, /各因子最近可用值/);
-    assert.match(wxml, /各项可能来自不同检测周期，不代表同一次完整检测/);
-    assert.match(wxml, /item\.value_display[^<]+item\.value/);
+    assert.doesNotMatch(wxml, /各因子最近可用值|各项可能来自不同检测周期/);
+    assert.match(wxml, /site\.monitoring\.latest_result_at/);
+    assert.match(wxml, /site\.monitoring\.latest_results/);
     assert.match(wxml, /item\.standard_value_display[^<]+item\.standard_value/);
     assert.doesNotMatch(wxml, /toFixed\(3\)/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
@@ -77,8 +77,21 @@ function createPage() {
     api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({
       site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true },
       monitoring: {
-        latest_cycle: { status: 'review_required', arrived_count: 3, formed_count: 2, expected_count: 4 },
-        latest_values: [], axes: {},
+        latest_cycle: {
+          status: 'review_required', scheduled_at: '2026-10-21T12:00:00+08:00',
+          arrived_count: 3, formed_count: 2, expected_count: 4,
+          factors: [{ business_metric: 'ph', status: 'missing' }],
+        },
+        factors: [
+          { business_metric: 'ph', factor_name_cn: 'pH', standard_unit: '' },
+          { business_metric: 'ammonia', factor_name_cn: '氨氮', standard_unit: 'mg/L' },
+        ],
+        latest_values: [{
+          business_metric: 'ph', factor_name_cn: 'pH', standard_value: 7.23,
+          standard_value_display: '7.2300', standard_unit: '',
+          observed_at: '2026-10-21T08:00:00+08:00', status: 'value',
+        }],
+        axes: {},
       },
     }); };
     api.partsInventory = () => {
@@ -124,6 +137,10 @@ function createPage() {
     assert.equal(monitoringPage.data.monitoringIntent, true);
     assert.equal(monitoringPage.data.site.monitoring.latest_cycle.arrived_count_display, 3);
     assert.equal(monitoringPage.data.site.monitoring.latest_cycle.status_label, '结果待核对');
+    assert.equal(monitoringPage.data.site.monitoring.latest_result_at, '2026-10-21T08:00:00+08:00');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[0].status, 'value');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[0].standard_value_display, '7.2300');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[1].status, 'missing');
 
     api.stationMonitoringOverview = () => Promise.reject({ status: 403, error: 'forbidden' });
     const gatedPage = createPage();

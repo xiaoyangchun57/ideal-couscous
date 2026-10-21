@@ -100,6 +100,34 @@ class StationMonitoringScaleTest(unittest.TestCase):
         self.assertEqual(overview['site']['site_id'], 1)
         self.assertEqual(len(overview['factors']), 9)
 
+    def test_expected_factor_save_does_not_scale_with_raw_history(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO users(
+                       id,username,password_hash,role,real_name,status)
+                   VALUES (1,'isolated-scale-admin','isolated','admin',
+                           'Isolated Scale Admin','active')""")
+            connection.execute(
+                'INSERT OR IGNORE INTO user_sites(user_id,site_id) VALUES (1,1)')
+            connection.commit()
+        current = self.client.get(
+            '/api/station-monitoring/sites/1/expected-factors', headers=self.headers)
+        self.assertEqual(current.status_code, 200, current.get_json())
+        payload = current.get_json()
+        started = time.perf_counter()
+        saved = self.client.put(
+            '/api/station-monitoring/sites/1/expected-factors', headers=self.headers,
+            json={
+                'metrics': payload['selected_metrics'],
+                'version': payload['version'],
+                'idempotency_key': f"isolated-scale-save-v13-{payload['version']}",
+            },
+        )
+        elapsed = time.perf_counter() - started
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        self.assertLess(elapsed, 5.0)
+        print('STATION_MONITORING_SCALE_SAVE_SECONDS=' + json.dumps(round(elapsed, 4)))
+
     def test_production_shape_query_plans_use_bounded_read_indexes(self):
         with closing(sqlite3.connect(self.database)) as connection:
             raw_plan = connection.execute(
@@ -132,6 +160,38 @@ class StationMonitoringScaleTest(unittest.TestCase):
                    SELECT MAX(latest_authenticated_at)
                    FROM station_ingest_current_state""",
             ).fetchall()
+            current_collection_plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT id,business_site_id,endpoint_id,observed_at,received_at,
+                          normalized_at,function_code
+                   FROM observation_batches INDEXED BY idx_observation_batch_site_observed
+                   WHERE business_site_id=? AND endpoint_id IN (?)
+                     AND is_current=1 AND projection_state='completed'
+                     AND observed_at>=? AND observed_at<=?
+                   ORDER BY observed_at DESC,id DESC LIMIT 256""",
+                (1, 1, '2026-10-01T00:00:00+00:00', '2026-10-11T00:00:00+00:00'),
+            ).fetchall()
+            fallback_latest_plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT observed_at
+                   FROM observation_batches INDEXED BY idx_observation_batch_site_observed
+                   WHERE business_site_id=? AND endpoint_id IN (?)
+                     AND is_current=1 AND projection_state='completed'
+                     AND observed_at<=?
+                   ORDER BY observed_at DESC,id DESC LIMIT 1""",
+                (1, 1, '2026-10-11T00:00:00+00:00'),
+            ).fetchall()
+            fallback_group_plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT id,business_site_id,endpoint_id,observed_at,received_at,
+                          normalized_at,function_code
+                   FROM observation_batches INDEXED BY idx_observation_batch_site_observed
+                   WHERE business_site_id=? AND endpoint_id IN (?)
+                     AND is_current=1 AND projection_state='completed'
+                     AND observed_at=?
+                   ORDER BY observed_at DESC,id DESC LIMIT 256""",
+                (1, 1, '2026-10-11T00:00:00+00:00'),
+            ).fetchall()
         self.assertIn(
             'idx_station_ingest_current_endpoint',
             ' '.join(str(row[3]) for row in raw_plan),
@@ -145,11 +205,26 @@ class StationMonitoringScaleTest(unittest.TestCase):
             ' '.join(str(row[3]) for row in auth_window_plan),
         )
         self.assertNotIn('ingest_raw_frames', ' '.join(str(row[3]) for row in last_authenticated_plan))
+        self.assertIn(
+            'idx_observation_batch_site_observed',
+            ' '.join(str(row[3]) for row in current_collection_plan),
+        )
+        self.assertIn(
+            'idx_observation_batch_site_observed',
+            ' '.join(str(row[3]) for row in fallback_latest_plan),
+        )
+        self.assertIn(
+            'idx_observation_batch_site_observed',
+            ' '.join(str(row[3]) for row in fallback_group_plan),
+        )
         print('STATION_MONITORING_SCALE_PLANS=' + json.dumps({
             'last_authenticated': [row[3] for row in last_authenticated_plan],
             'last_by_endpoint': [row[3] for row in raw_plan],
             'current_observations': [row[3] for row in recent_plan],
             'authentication_window': [row[3] for row in auth_window_plan],
+            'current_collection': [row[3] for row in current_collection_plan],
+            'fallback_latest_collection': [row[3] for row in fallback_latest_plan],
+            'fallback_collection_group': [row[3] for row in fallback_group_plan],
         }, sort_keys=True))
 
 

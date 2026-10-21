@@ -31,9 +31,22 @@ function presentLatestCycle(cycle) {
 
 function presentMonitoring(monitoring) {
   const source = monitoring && typeof monitoring === 'object' ? monitoring : {};
+  const latestValues = Array.isArray(source.latest_values) ? source.latest_values : [];
+  const factors = Array.isArray(source.factors) && source.factors.length
+    ? source.factors : latestValues;
+  const valueByMetric = new Map(latestValues.map(item => [item.business_metric, item]));
+  const latestResults = factors.map(factor => {
+    const value = valueByMetric.get(factor.business_metric);
+    if (!value) return Object.assign({}, factor, { status: 'missing' });
+    return Object.assign({}, factor, value, {
+      status: value.status === 'review_required' ? 'review_required' : 'value',
+    });
+  });
   return Object.assign({}, source, {
     latest_cycle: presentLatestCycle(source.latest_cycle),
-    latest_values: Array.isArray(source.latest_values) ? source.latest_values : [],
+    latest_values: latestValues,
+    latest_result_at: (latestValues.find(item => item && item.observed_at) || {}).observed_at || null,
+    latest_results: latestResults,
   });
 }
 

@@ -860,7 +860,10 @@ export default function AuditPage() {
     const failedApproveIds = failedApprovalPhotoIds(item.attachment_details, selectedPhotoIds, failedReviewPhotoIds);
     const rejectionReasonMissing = !canSubmitPhotoReview(item.attachment_ids, selectedPhotoIds, reviewComment);
     const isSelfReview = item.source_type === 'workorder_review' && reviewerNames.includes(item.assignee);
-    const missingResolution = item.source_type === 'workorder_review' && !item.resolution_note;
+    const remoteWorkorder = item.source_type === 'workorder_review' && item.service_mode === 'remote';
+    const missingResolution = item.source_type === 'workorder_review' && (remoteWorkorder
+      ? !item.remote_contact || !item.remote_process || !item.remote_result
+      : !item.resolution_note);
     const missingRequiredPhotos = item.source_type === 'workorder_review'
       && Number(item.actual_photos || 0) < Number(item.required_photos || 0);
     return (
@@ -891,7 +894,7 @@ export default function AuditPage() {
           description="请独立核对现场说明和全部影像；通过或退回都会记录当前审核人。" />}
         {(missingResolution || missingRequiredPhotos) && <Alert type="error" showIcon style={{ marginBottom: 12 }}
           message="当前证据不满足办结条件，只能退回现场补充"
-          description={[missingResolution ? '未记录现场处置说明' : '', missingRequiredPhotos ? '处置影像数量不足' : ''].filter(Boolean).join('；')} />}
+          description={[missingResolution ? (remoteWorkorder ? '远程协助记录不完整' : '未记录现场处置说明') : '', missingRequiredPhotos ? '处置影像数量不足' : ''].filter(Boolean).join('；')} />}
         {failedApproveIds.length > 0 && <Alert type="error" showIcon style={{ marginBottom: 12 }} message="影像加载失败，无法审核" description="请重新加载失败影像；驳回仍可用。" />}
         <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="类型">
@@ -905,10 +908,15 @@ export default function AuditPage() {
               <Descriptions.Item label="工单编号">{item.source_name}</Descriptions.Item>
               <Descriptions.Item label="负责人">{item.assignee || '未记录'}</Descriptions.Item>
               <Descriptions.Item label="创建时间">{item.created_at || '未记录'}</Descriptions.Item>
-              <Descriptions.Item label="到站签到">{item.check_in_time || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="处置方式">{item.service_mode_label || (remoteWorkorder ? '远程协助' : '现场处置')}</Descriptions.Item>
+              <Descriptions.Item label="到站签到">{remoteWorkorder ? '远程协助无需签到' : (item.check_in_time || '未记录')}</Descriptions.Item>
               <Descriptions.Item label="提交审核">{item.submit_time || <Text type="secondary">历史记录未保存该时间</Text>}</Descriptions.Item>
               <Descriptions.Item label="原始故障描述">{item.original_description || '未记录'}</Descriptions.Item>
-              <Descriptions.Item label="现场处置说明">{item.resolution_note || <Text type="danger">未记录，建议退回补充</Text>}</Descriptions.Item>
+              {remoteWorkorder ? <>
+                <Descriptions.Item label="协助对象">{item.remote_contact || <Text type="danger">未记录</Text>}</Descriptions.Item>
+                <Descriptions.Item label="协助经过">{item.remote_process || <Text type="danger">未记录</Text>}</Descriptions.Item>
+                <Descriptions.Item label="处理结果">{item.remote_result || <Text type="danger">未记录</Text>}</Descriptions.Item>
+              </> : <Descriptions.Item label="现场处置说明">{item.resolution_note || <Text type="danger">未记录，建议退回补充</Text>}</Descriptions.Item>}
             </>
           )}
           {['inspection', 'inspection_batch'].includes(item.source_type) && (
@@ -1025,7 +1033,7 @@ export default function AuditPage() {
         })()}
         {item.source_type === 'workorder_review' && item.attachment_details && (
           <div style={{ marginTop: 12 }}>
-            <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>处置影像（{item.actual_photos || 0}张）</Text>
+            <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>处置影像（现场合格 {item.actual_photos || 0} 张）</Text>
             {(item.attachment_details || []).length ? <Image.PreviewGroup>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {item.attachment_details.map((photo) => (
@@ -1036,6 +1044,10 @@ export default function AuditPage() {
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
                       拍摄时间：{photo.taken_at || '未记录'}
                     </Text>
+                    {photo.supplemental
+                      ? <Tag color="default" style={{ marginTop: 6 }}>远程补充材料，不计现场照片</Tag>
+                      : photo.capture_source === 'camera'
+                        ? <Tag color="blue" style={{ marginTop: 6 }}>系统现场取证</Tag> : null}
                   </div>
                 ))}
               </div>
