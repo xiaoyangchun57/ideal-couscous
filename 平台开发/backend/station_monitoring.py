@@ -1619,25 +1619,46 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
     evaluated_at = datetime.fromisoformat(at_time).astimezone(timezone.utc)
     collection_from = (evaluated_at - timedelta(
         seconds=LATEST_COLLECTION_LOOKBACK_SECONDS)).isoformat()
-    marks = ",".join("?" * len(site_ids))
-    rows = [dict(row) for row in connection.execute(
-        f"""SELECT business.id,business.business_site_id,business.business_metric,
-                   business.protocol_code,business.standard_value,business.standard_unit,
-                   business.quality,business.instrument_asset_code,business.endpoint_id,
-                   business.scheduled_at,business.observed_at,business.received_at,
-                   business.timeliness,business.slot_state,business.projection_version,
-                   batch.function_code,batch.normalized_at
-            FROM monitoring_business_observations business
-            JOIN observation_batches batch ON batch.id=business.observation_batch_id
-            WHERE business.business_site_id IN ({marks})
-              AND business.is_current=1 AND batch.is_current=1
-              AND business.scheduled_at>=? AND business.scheduled_at<=?
-            ORDER BY business.business_site_id,business.scheduled_at DESC,business.id DESC""",
-        [*site_ids, collection_from, at_time],
-    ).fetchall()]
+    cycles_by_site = {
+        site_id: latest_cycle(
+            connection, site_id, at_time=at_time,
+            configurations=configurations, include_latest_complete=False,
+            business_rows=[])
+        for site_id, configurations in configurations_by_site.items()
+    }
+    cycle_targets = [
+        (site_id, cycle["scheduled_at"])
+        for site_id, cycle in cycles_by_site.items()
+        if cycle.get("scheduled_at")
+    ]
     rows_by_site = {}
-    for row in rows:
-        rows_by_site.setdefault(row["business_site_id"], []).append(row)
+    for offset in range(0, len(cycle_targets), 200):
+        targets = cycle_targets[offset:offset + 200]
+        target_values = ",".join("(?,?)" for _ in targets)
+        target_params = [value for target in targets for value in target]
+        rows = connection.execute(
+            f"""WITH targets(business_site_id,scheduled_at) AS (
+                    VALUES {target_values}
+                )
+                SELECT business.id,business.business_site_id,business.business_metric,
+                       business.protocol_code,business.standard_value,business.standard_unit,
+                       business.quality,business.instrument_asset_code,business.endpoint_id,
+                       business.scheduled_at,business.observed_at,business.received_at,
+                       business.timeliness,business.slot_state,business.projection_version,
+                       batch.function_code,batch.normalized_at
+                FROM targets
+                JOIN monitoring_business_observations AS business
+                     INDEXED BY idx_monitoring_business_current_site_scheduled
+                  ON business.business_site_id=targets.business_site_id
+                 AND business.scheduled_at=targets.scheduled_at
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.is_current=1 AND batch.is_current=1
+                ORDER BY business.business_site_id,business.scheduled_at DESC,business.id DESC""",
+            target_params,
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            rows_by_site.setdefault(item["business_site_id"], []).append(item)
 
     candidate_batches = {site_id: [] for site_id in site_ids}
     batch_by_id = {}
@@ -1645,78 +1666,81 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
         site_id: sorted({int(item["endpoint_id"]) for item in configurations})
         for site_id, configurations in configurations_by_site.items()
     }
-    all_endpoint_ids = sorted({endpoint_id for endpoint_ids in endpoint_ids_by_site.values()
-                               for endpoint_id in endpoint_ids})
-    if all_endpoint_ids:
-        endpoint_marks = ",".join("?" * len(all_endpoint_ids))
-        recent_batches = connection.execute(
-            f"""WITH ranked AS (
+    batch_selects = []
+    for site_id, endpoint_ids in endpoint_ids_by_site.items():
+        if not endpoint_ids:
+            continue
+        endpoint_marks = ",".join("?" * len(endpoint_ids))
+        batch_selects.append((
+            f"""SELECT * FROM (
                     SELECT id,business_site_id,endpoint_id,observed_at,received_at,
-                           normalized_at,function_code,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY business_site_id
-                               ORDER BY observed_at DESC,id DESC) AS row_number
-                    FROM observation_batches INDEXED BY idx_observation_batch_site_observed
-                    WHERE business_site_id IN ({marks})
-                      AND endpoint_id IN ({endpoint_marks})
+                           normalized_at,function_code
+                    FROM observation_batches
+                         INDEXED BY idx_observation_batch_site_observed
+                    WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
                       AND is_current=1 AND projection_state='completed'
                       AND observed_at>=? AND observed_at<=?
-                )
-                SELECT id,business_site_id,endpoint_id,observed_at,received_at,
-                       normalized_at,function_code
-                FROM ranked WHERE row_number<=?""",
-            [*site_ids, *all_endpoint_ids, collection_from, at_time,
+                    ORDER BY observed_at DESC,id DESC LIMIT ?
+                )""",
+            [site_id, *endpoint_ids, collection_from, at_time,
              LATEST_COLLECTION_BATCH_LIMIT],
-        ).fetchall()
-        for row in recent_batches:
+        ))
+    for offset in range(0, len(batch_selects), 50):
+        selects = batch_selects[offset:offset + 50]
+        params = [value for _, values in selects for value in values]
+        for row in connection.execute(
+                " UNION ALL ".join(query for query, _ in selects), params).fetchall():
             item = dict(row)
             candidate_batches[item["business_site_id"]].append(item)
 
     missing_sites = [site_id for site_id in site_ids
                      if endpoint_ids_by_site[site_id] and not candidate_batches[site_id]]
     latest_by_site = {}
-    if missing_sites:
-        latest_selects = []
-        latest_params = []
-        for site_id in missing_sites:
-            endpoint_ids = endpoint_ids_by_site[site_id]
-            endpoint_marks = ",".join("?" * len(endpoint_ids))
-            latest_selects.append(
-                f"""SELECT ? AS business_site_id,
-                           (SELECT observed_at
-                            FROM observation_batches
-                                 INDEXED BY idx_observation_batch_site_observed
-                            WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
-                              AND is_current=1 AND projection_state='completed'
-                              AND observed_at<=?
-                            ORDER BY observed_at DESC,id DESC LIMIT 1) AS observed_at""")
-            latest_params.extend([site_id, site_id, *endpoint_ids, at_time])
-        for row in connection.execute(
-                " UNION ALL ".join(latest_selects), latest_params).fetchall():
-            if row["observed_at"] is not None:
-                latest_by_site[int(row["business_site_id"])] = row["observed_at"]
-
-    if latest_by_site:
-        group_selects = []
-        group_params = []
-        for site_id, observed_at in latest_by_site.items():
-            endpoint_ids = endpoint_ids_by_site[site_id]
-            endpoint_marks = ",".join("?" * len(endpoint_ids))
-            group_selects.append(
-                f"""SELECT * FROM (
-                        SELECT id,business_site_id,endpoint_id,observed_at,received_at,
-                               normalized_at,function_code
+    latest_selects = []
+    for site_id in missing_sites:
+        endpoint_ids = endpoint_ids_by_site[site_id]
+        endpoint_marks = ",".join("?" * len(endpoint_ids))
+        latest_selects.append((
+            f"""SELECT ? AS business_site_id,
+                       (SELECT observed_at
                         FROM observation_batches
                              INDEXED BY idx_observation_batch_site_observed
                         WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
                           AND is_current=1 AND projection_state='completed'
-                          AND observed_at=?
-                        ORDER BY observed_at DESC,id DESC LIMIT ?
-                    )""")
-            group_params.extend([site_id, *endpoint_ids, observed_at,
-                                 LATEST_COLLECTION_BATCH_LIMIT])
+                          AND observed_at<=?
+                        ORDER BY observed_at DESC,id DESC LIMIT 1) AS observed_at""",
+            [site_id, site_id, *endpoint_ids, at_time],
+        ))
+    for offset in range(0, len(latest_selects), 50):
+        selects = latest_selects[offset:offset + 50]
+        params = [value for _, values in selects for value in values]
         for row in connection.execute(
-                " UNION ALL ".join(group_selects), group_params).fetchall():
+                " UNION ALL ".join(query for query, _ in selects), params).fetchall():
+            if row["observed_at"] is not None:
+                latest_by_site[int(row["business_site_id"])] = row["observed_at"]
+
+    group_selects = []
+    for site_id, observed_at in latest_by_site.items():
+        endpoint_ids = endpoint_ids_by_site[site_id]
+        endpoint_marks = ",".join("?" * len(endpoint_ids))
+        group_selects.append((
+            f"""SELECT * FROM (
+                    SELECT id,business_site_id,endpoint_id,observed_at,received_at,
+                           normalized_at,function_code
+                    FROM observation_batches
+                         INDEXED BY idx_observation_batch_site_observed
+                    WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
+                      AND is_current=1 AND projection_state='completed'
+                      AND observed_at=?
+                    ORDER BY observed_at DESC,id DESC LIMIT ?
+                )""",
+            [site_id, *endpoint_ids, observed_at, LATEST_COLLECTION_BATCH_LIMIT],
+        ))
+    for offset in range(0, len(group_selects), 50):
+        selects = group_selects[offset:offset + 50]
+        params = [value for _, values in selects for value in values]
+        for row in connection.execute(
+                " UNION ALL ".join(query for query, _ in selects), params).fetchall():
             item = dict(row)
             candidate_batches[item["business_site_id"]].append(item)
 
@@ -1743,7 +1767,6 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             values_by_batch.setdefault(item["observation_batch_id"], []).append(item)
 
     values_by_site = {}
-    cycles_by_site = {}
     for site_id, configurations in configurations_by_site.items():
         site_rows = rows_by_site.get(site_id, [])
         batch_rows = candidate_batches.get(site_id, [])
@@ -1756,9 +1779,10 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
                 value_rows.append(item)
         values_by_site[site_id] = _current_collection_values_from_rows(
             configurations, batch_rows, value_rows)
-        cycles_by_site[site_id] = latest_cycle(
-            connection, site_id, at_time=at_time, configurations=configurations,
-            include_latest_complete=False, business_rows=site_rows)
+        if cycles_by_site[site_id].get("scheduled_at"):
+            cycles_by_site[site_id] = latest_cycle(
+                connection, site_id, at_time=at_time, configurations=configurations,
+                include_latest_complete=False, business_rows=site_rows)
     return values_by_site, cycles_by_site
 
 

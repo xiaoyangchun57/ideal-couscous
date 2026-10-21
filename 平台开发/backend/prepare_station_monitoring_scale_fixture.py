@@ -1,10 +1,11 @@
 """Build the isolated production-shape fixture used by station monitoring scale tests.
 
 The default fixture contains 36 sites, 2,160,000 legacy historical raw frames,
-and 468,000 projected business observations (1,000 slots for each of 13 factors
-at each site). It validates bounded reads over retained history; it is not the
-capacity model for new four-hour slot-summarized writes. The output is always a
-new, explicitly named SQLite file and never reuses the configured database.
+468,000 four-hour projected observations, and seven days of minute-repeat
+observations for the nine displayed factors. It reproduces the retained-history
+shape that previously made the cold all-site request exceed 15 seconds. The
+output is always a new, explicitly named SQLite file and never reuses the
+configured database.
 """
 
 import argparse
@@ -25,6 +26,7 @@ from migrate_station_ingestion import apply_migration
 SITE_COUNT = 36
 RAW_FRAME_COUNT = 2_160_000
 SLOTS_PER_FACTOR = 1_000
+DENSE_RECENT_MINUTES = 7 * 24 * 60
 FACTORS = (
     ('4C1A', 'ammonia'),
     ('4A11', 'codmn'),
@@ -45,6 +47,7 @@ EXPECTED_FACTORS = (
     'codmn', 'total_nitrogen', 'total_phosphorus', 'ammonia',
 )
 OBSERVATION_COUNT = SITE_COUNT * len(FACTORS) * SLOTS_PER_FACTOR
+DENSE_OBSERVATION_COUNT = SITE_COUNT * len(EXPECTED_FACTORS) * DENSE_RECENT_MINUTES
 CHUNK_SIZE = 20_000
 
 
@@ -299,6 +302,81 @@ def build_fixture(output: Path, force: bool = False) -> None:
             )
             connection.commit()
 
+        protocol_by_metric = {business_metric: protocol_code
+                              for protocol_code, business_metric in FACTORS}
+        dense_start = now - timedelta(minutes=DENSE_RECENT_MINUTES - 1)
+        dense_chunk_minutes = max(1, CHUNK_SIZE // len(EXPECTED_FACTORS))
+        for site_id in range(1, SITE_COUNT + 1):
+            for minute_start in range(0, DENSE_RECENT_MINUTES, dense_chunk_minutes):
+                minute_end = min(
+                    DENSE_RECENT_MINUTES, minute_start + dense_chunk_minutes)
+                batches = []
+                values = []
+                business_rows = []
+                for minute_index in range(minute_start, minute_end):
+                    observed_at = dense_start + timedelta(minutes=minute_index)
+                    observed_text = observed_at.isoformat()
+                    received_at = (observed_at + timedelta(seconds=10)).isoformat()
+                    observed_local = observed_at.astimezone(ZoneInfo('Asia/Shanghai'))
+                    scheduled_at = observed_local.replace(
+                        hour=(observed_local.hour // 4) * 4,
+                        minute=0, second=0, microsecond=0,
+                    ).astimezone(timezone.utc).isoformat()
+                    batch_offset = ((site_id - 1) * DENSE_RECENT_MINUTES
+                                    + minute_index)
+                    batch_id = OBSERVATION_COUNT + batch_offset + 1
+                    batches.append((
+                        batch_id, batch_id, site_id, site_id, batch_id,
+                        observed_text, observed_text, received_at,
+                        f'isolated-dense-{batch_id}', received_at,
+                    ))
+                    for factor_index, business_metric in enumerate(EXPECTED_FACTORS):
+                        protocol_code = protocol_by_metric[business_metric]
+                        value_id = (OBSERVATION_COUNT
+                                    + batch_offset * len(EXPECTED_FACTORS)
+                                    + factor_index + 1)
+                        value = float(site_id) + factor_index / 10.0
+                        unit = factor_units[protocol_code]
+                        values.append((
+                            value_id, batch_id, protocol_code, business_metric,
+                            value, unit, value, unit, f'INST-{site_id:03d}',
+                        ))
+                        business_rows.append((
+                            value_id, value_id, batch_id, site_id, site_id, site_id,
+                            protocol_code, business_metric, f'INST-{site_id:03d}',
+                            scheduled_at, observed_text, received_at, value, unit,
+                        ))
+                connection.executemany(
+                    """INSERT INTO observation_batches(
+                           id,raw_frame_id,endpoint_id,business_site_id,function_code,
+                           serial_number,reported_at,observed_at,received_at,granularity,
+                           aggregation_source,idempotency_key,normalization_version,
+                           batch_status,projection_state,is_current,normalized_at)
+                       VALUES (?,?,?,?,2061,?,?,?,?, 'periodic','device_reported',?,
+                               'station-monitoring-normalizer-v3','accepted','completed',1,?)""",
+                    batches,
+                )
+                connection.executemany(
+                    """INSERT INTO observation_values(
+                           id,observation_batch_id,protocol_code,business_metric,raw_value,
+                           raw_unit,standard_value,standard_unit,quality,
+                           instrument_asset_code,parser_version,is_published,is_current)
+                       VALUES (?,?,?,?,?,?,?,?, 'valid',?,'isolated-scale-dense',1,1)""",
+                    values,
+                )
+                connection.executemany(
+                    """INSERT INTO monitoring_business_observations(
+                           id,source_observation_value_id,observation_batch_id,schedule_id,
+                           endpoint_id,business_site_id,protocol_code,business_metric,
+                           instrument_asset_code,scheduled_at,observed_at,received_at,
+                           standard_value,standard_unit,quality,timeliness,slot_state,
+                           projection_version,is_current)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'valid','on_time','selected',
+                               'station-monitoring-business-v3',1)""",
+                    business_rows,
+                )
+                connection.commit()
+
         for _, sql in explicit_indexes:
             connection.execute(sql)
         connection.execute('ANALYZE')
@@ -310,6 +388,11 @@ def build_fixture(output: Path, force: bool = False) -> None:
             'observations': connection.execute(
                 'SELECT COUNT(*) FROM monitoring_business_observations').fetchone()[0],
         }
+        expected_observations = OBSERVATION_COUNT + DENSE_OBSERVATION_COUNT
+        if counts['observations'] != expected_observations:
+            raise RuntimeError(
+                f'unexpected observation count: {counts["observations"]} != '
+                f'{expected_observations}')
 
     if quick_check != 'ok':
         raise RuntimeError(f'generated fixture failed SQLite quick_check: {quick_check}')

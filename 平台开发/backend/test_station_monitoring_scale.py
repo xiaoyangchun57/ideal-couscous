@@ -66,7 +66,7 @@ class StationMonitoringScaleTest(unittest.TestCase):
                 'SELECT COUNT(*) FROM monitoring_business_observations').fetchone()[0]
             site_count = connection.execute('SELECT COUNT(*) FROM sites').fetchone()[0]
         self.assertGreaterEqual(raw_count, 2_000_000)
-        self.assertGreaterEqual(observation_count, 400_000)
+        self.assertEqual(observation_count, 3_733_920)
         self.assertEqual(site_count, 36)
 
         results = {}
@@ -138,13 +138,19 @@ class StationMonitoringScaleTest(unittest.TestCase):
                    WHERE endpoint_id IN (?) AND latest_authenticated_at IS NOT NULL""",
                 (1,),
             ).fetchall()
-            recent_plan = connection.execute(
+            exact_cycle_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
-                   SELECT id FROM monitoring_business_observations
-                   INDEXED BY idx_monitoring_business_current_site_scheduled
-                   WHERE business_site_id IN (?) AND is_current=1
-                     AND scheduled_at>=? AND scheduled_at<=?""",
-                (1, '2026-10-01T00:00:00+00:00', '2026-10-11T00:00:00+00:00'),
+                   WITH targets(business_site_id,scheduled_at) AS (
+                       VALUES (?,?)
+                   )
+                   SELECT business.id
+                   FROM targets
+                   JOIN monitoring_business_observations AS business
+                        INDEXED BY idx_monitoring_business_current_site_scheduled
+                     ON business.business_site_id=targets.business_site_id
+                    AND business.scheduled_at=targets.scheduled_at
+                   WHERE business.is_current=1""",
+                (1, '2026-10-11T00:00:00+00:00'),
             ).fetchall()
             auth_window_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
@@ -167,9 +173,9 @@ class StationMonitoringScaleTest(unittest.TestCase):
                    FROM observation_batches INDEXED BY idx_observation_batch_site_observed
                    WHERE business_site_id=? AND endpoint_id IN (?)
                      AND is_current=1 AND projection_state='completed'
-                     AND observed_at>=? AND observed_at<=?
+                     AND observed_at<=?
                    ORDER BY observed_at DESC,id DESC LIMIT 256""",
-                (1, 1, '2026-10-01T00:00:00+00:00', '2026-10-11T00:00:00+00:00'),
+                (1, 1, '2026-10-11T00:00:00+00:00'),
             ).fetchall()
             fallback_latest_plan = connection.execute(
                 """EXPLAIN QUERY PLAN
@@ -198,7 +204,7 @@ class StationMonitoringScaleTest(unittest.TestCase):
         )
         self.assertIn(
             'idx_monitoring_business_current_site_scheduled',
-            ' '.join(str(row[3]) for row in recent_plan),
+            ' '.join(str(row[3]) for row in exact_cycle_plan),
         )
         self.assertIn(
             'idx_station_ingest_receipt_hour',
@@ -220,7 +226,7 @@ class StationMonitoringScaleTest(unittest.TestCase):
         print('STATION_MONITORING_SCALE_PLANS=' + json.dumps({
             'last_authenticated': [row[3] for row in last_authenticated_plan],
             'last_by_endpoint': [row[3] for row in raw_plan],
-            'current_observations': [row[3] for row in recent_plan],
+            'exact_cycle_observations': [row[3] for row in exact_cycle_plan],
             'authentication_window': [row[3] for row in auth_window_plan],
             'current_collection': [row[3] for row in current_collection_plan],
             'fallback_latest_collection': [row[3] for row in fallback_latest_plan],

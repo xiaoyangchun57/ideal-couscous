@@ -2524,6 +2524,11 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                 counts[size] = len(statements)
                 self.assertEqual(len(items), size)
                 self.assertTrue(all(item['published_factor_count'] == 4 for item in items))
+                statement_text = '\n'.join(statements)
+                self.assertIn(
+                    'WITH targets(business_site_id,scheduled_at) AS', statement_text)
+                self.assertNotIn('business.scheduled_at>=', statement_text)
+                self.assertNotIn('ROW_NUMBER() OVER', statement_text)
         self.assertEqual(counts, {1: 15, 10: 15, 50: 15})
 
     def test_latest_cycle_uses_nine_expected_factors_even_when_thirteen_are_mapped(self):

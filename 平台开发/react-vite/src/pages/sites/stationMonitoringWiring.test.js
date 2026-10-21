@@ -178,7 +178,11 @@ test('monitoring drawer keeps the first layer light and omits diagnostics from n
   assert.doesNotMatch(detail, /接收与排障详情|排障详情加载失败|周期未配置|结果形成中/);
   assert.doesNotMatch(detail, /cycleByMetric/);
   assert.match(detail, /const missing = !value \|\| value\.status === 'review_required'/);
-  assert.match(sites, /const resultAt = record\.last_valid_observation_at \|\| cycle\.scheduled_at/);
+  assert.match(sites, /const resultAt = record\.last_valid_observation_at;/);
+  assert.doesNotMatch(sites, /record\.last_valid_observation_at \|\| cycle\.scheduled_at/);
+  assert.match(sites, /const resultMatchesCycle = Boolean\([^]*record\.last_valid_observation_at[^]*cycle\.scheduled_at[^]*dayjs\(record\.last_valid_observation_at\)\.isSame\(dayjs\(cycle\.scheduled_at\)\)/);
+  assert.match(sites, /resultMatchesCycle && missingCount > 0/);
+  assert.doesNotMatch(sites, /resultAt && missingCount > 0/);
 });
 
 test('access observation does not consume sensitive endpoint identity fields', () => {
