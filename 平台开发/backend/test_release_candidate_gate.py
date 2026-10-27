@@ -37,7 +37,7 @@ HISTORICAL_TAGS = (
     'release-20261020-miniprogram-backend-compat-r27',
     'release-20261021-station-data-closure-r28',
 )
-CURRENT_CANDIDATE = 'release-20261021-station-data-closure-r29'
+CURRENT_CANDIDATE = 'release-20261027-governance-station-combined-r29'
 
 
 class ReleaseCandidateGateTest(unittest.TestCase):

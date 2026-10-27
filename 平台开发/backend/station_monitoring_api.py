@@ -1216,9 +1216,10 @@ def _station_monitoring_list_version(db):
     )
 
 
-def _station_monitoring_batch_projections_cached(db, site_rows):
+def _station_monitoring_batch_projections_cached(db, site_rows, projection_version):
     site_rows = list(site_rows)
     cache_key = (os.path.abspath(_database_path()), _station_monitoring_cache_generation,
+                 projection_version,
                  tuple(tuple(row) for row in site_rows))
     while True:
         owner = False
@@ -1254,7 +1255,8 @@ def _station_monitoring_batch_projections_cached(db, site_rows):
                 inflight.set()
 
 
-def _station_monitoring_sites_body(db, scope, service_scope, keyword, user):
+def _station_monitoring_sites_body(
+        db, scope, service_scope, keyword, user, projection_version):
     is_admin = _has_any_role(user, 'admin')
     can_view_all = is_admin or _station_monitoring_access_mode() == 'public'
     responsible_ids = _active_master_site_ids(
@@ -1293,7 +1295,8 @@ def _station_monitoring_sites_body(db, scope, service_scope, keyword, user):
             'FROM sites s' + clause + ' ORDER BY ' + order,
             params,
         ).fetchall()
-    items = _station_monitoring_batch_projections_cached(db, site_rows)
+    items = _station_monitoring_batch_projections_cached(
+        db, site_rows, projection_version)
     policies = _station_service_policy_rows_batch(
         db, [item['site_id'] for item in items])
     responsible_set = set(responsible_ids)
@@ -1315,10 +1318,10 @@ def _station_monitoring_sites_body(db, scope, service_scope, keyword, user):
     }
 
 
-def _station_monitoring_cache_entry(db, body):
+def _station_monitoring_cache_entry(version, body):
     now = time.monotonic()
     return {
-        'version': _station_monitoring_list_version(db),
+        'version': version,
         'refresh_after': now + _STATION_MONITORING_LIST_REFRESH_SECONDS,
         'fresh_until': now + _STATION_MONITORING_LIST_CACHE_SECONDS,
         'stale_until': now + _STATION_MONITORING_LIST_STALE_SECONDS,
@@ -1329,6 +1332,16 @@ def _station_monitoring_cache_entry(db, body):
     }
 
 
+def _station_monitoring_sites_snapshot(scope, service_scope, keyword, user):
+    """Read the projection and its version from one SQLite snapshot."""
+    with get_db() as db:
+        db.execute('BEGIN')
+        version = _station_monitoring_list_version(db)
+        body = _station_monitoring_sites_body(
+            db, scope, service_scope, keyword, user, version)
+        return version, body
+
+
 def _refresh_station_monitoring_sites_cache(
         cache_key, scope, service_scope, keyword, user, site_ids, refresh_token,
         refresh_event):
@@ -1336,10 +1349,9 @@ def _refresh_station_monitoring_sites_cache(
         with _app_context():
             g.current_user = dict(user)
             g.user_site_ids = list(site_ids)
-            with get_db() as db:
-                body = _station_monitoring_sites_body(
-                    db, scope, service_scope, keyword, g.current_user)
-                entry = _station_monitoring_cache_entry(db, body)
+            version, body = _station_monitoring_sites_snapshot(
+                scope, service_scope, keyword, g.current_user)
+            entry = _station_monitoring_cache_entry(version, body)
         with _station_monitoring_list_cache_lock:
             cached = _station_monitoring_list_cache.get(cache_key)
             if cached and cached.get('refresh_token') is refresh_token:
@@ -1361,12 +1373,13 @@ def _refresh_station_monitoring_sites_cache(
 
 
 def _station_monitoring_sites_cold_body(
-        cache_key, scope, service_scope, keyword, user):
+        cache_key, scope, service_scope, keyword, user, expected_version):
     while True:
         owner = False
         with _station_monitoring_list_cache_lock:
             cached = _station_monitoring_list_cache.get(cache_key)
-            if cached and cached['stale_until'] > time.monotonic():
+            if (cached and cached['version'] == expected_version
+                    and cached['stale_until'] > time.monotonic()):
                 return cached['body']
             inflight = _station_monitoring_list_inflight.get(cache_key)
             if inflight is None:
@@ -1377,10 +1390,9 @@ def _station_monitoring_sites_cold_body(
             inflight.wait()
             continue
         try:
-            with get_db() as db:
-                body = _station_monitoring_sites_body(
-                    db, scope, service_scope, keyword, user)
-                entry = _station_monitoring_cache_entry(db, body)
+            version, body = _station_monitoring_sites_snapshot(
+                scope, service_scope, keyword, user)
+            entry = _station_monitoring_cache_entry(version, body)
             with _station_monitoring_list_cache_lock:
                 _station_monitoring_list_cache[cache_key] = entry
                 if len(_station_monitoring_list_cache) > 256:
@@ -1426,12 +1438,30 @@ def station_monitoring_sites():
         service_scope, keyword,
     )
     now = time.monotonic()
+    try:
+        with get_db() as db:
+            current_version = _station_monitoring_list_version(db)
+    except Exception:
+        failed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with _station_monitoring_list_cache_lock:
+            cached = _station_monitoring_list_cache.get(cache_key)
+            if cached and cached['stale_until'] > now:
+                cached['last_refresh_error_at'] = failed_at
+                response_body = dict(cached['body'])
+                response_body['result_snapshot'] = {
+                    'state': 'stale', 'refreshing': False,
+                    'source_updated_at': cached['body'].get('updated_at'),
+                    'last_refresh_error_at': failed_at,
+                }
+                return jsonify(response_body)
+        raise
     refresh = False
     refresh_token = None
     refresh_event = None
     with _station_monitoring_list_cache_lock:
         cached = _station_monitoring_list_cache.get(cache_key)
-        if cached and cached['stale_until'] > now:
+        if (cached and cached['version'] == current_version
+                and cached['stale_until'] > now):
             if (cached['refresh_after'] <= now and not cached['refreshing'] and
                     cache_key not in _station_monitoring_list_inflight):
                 cached['refreshing'] = True
@@ -1462,7 +1492,8 @@ def station_monitoring_sites():
         }
         return jsonify(response_body)
     return jsonify(_station_monitoring_sites_cold_body(
-        cache_key, scope, service_scope, keyword, dict(g.current_user)))
+        cache_key, scope, service_scope, keyword, dict(g.current_user),
+        current_version))
 
 
 def _station_monitoring_overview_projection_body(site_id, version):

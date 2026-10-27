@@ -540,12 +540,20 @@ class StationExpectedFactorsTest(unittest.TestCase):
             db.commit()
         server = StationIngestServer(
             IngestionStorage(self.database, pepper), host='127.0.0.1', port=0)
+        local_now = datetime.now(timezone.utc) + timedelta(hours=8)
+        observed_local = local_now.replace(
+            hour=(local_now.hour // 4) * 4, minute=0, second=0, microsecond=0)
+        observed_at = observed_local - timedelta(hours=8)
+        received_at = observed_at + timedelta(minutes=5)
+        self._existing_results_trend_start = (observed_at - timedelta(hours=4)).isoformat()
+        self._existing_results_trend_end = (observed_at + timedelta(hours=4)).isoformat()
         accepted = server._process_raw_result(make_hj212(
-            station=station, password=password, qn='20261021160500001',
-            data_time='20261021160000',
+            station=station, password=password,
+            qn=observed_local.strftime('%Y%m%d%H%M%S') + '001',
+            data_time=observed_local.strftime('%Y%m%d%H%M%S'),
             factors='w01001-Avg=7.2300,w01001-Flag=N;'
                     'w01009-Avg=8.40,w01009-Flag=N',
-        ), '2026-10-21T08:05:00+00:00')
+        ), received_at.isoformat())
         self.assertTrue(accepted.keep_connection)
         with sqlite3.connect(self.database) as db:
             raw_id = db.execute('SELECT MAX(id) FROM ingest_raw_frames').fetchone()[0]
@@ -597,8 +605,8 @@ class StationExpectedFactorsTest(unittest.TestCase):
             headers=headers,
             query_string={
                 'metric': 'dissolved_oxygen',
-                'start': '2026-10-21T00:00:00+00:00',
-                'end': '2026-10-21T12:00:00+00:00',
+                'start': self._existing_results_trend_start,
+                'end': self._existing_results_trend_end,
             },
         )
         for response in (latest, overview, listed, trend):

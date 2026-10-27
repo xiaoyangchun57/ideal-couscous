@@ -313,7 +313,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             display = format_business_value(7.34, configured_precision)
             self.assertEqual(float(display), 7.34, protocol_code)
 
-    def test_current_collection_does_not_mix_older_factor_values(self):
+    def test_latest_factor_values_keep_their_distinct_real_times(self):
         configurations = [
             {
                 'endpoint_id': 1, 'business_metric': 'ph',
@@ -374,10 +374,10 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             configurations, batches, values)
 
         self.assertEqual(
-            {item['business_metric'] for item in current}, {'ph', 'conductivity'})
+            {item['business_metric'] for item in current}, {'ph', 'conductivity', 'turbidity'})
         self.assertEqual(
             {item['collection_group_at'] for item in current},
-            {'2026-10-20T08:00:00+00:00'})
+            {'2026-10-20T08:00:00+00:00', '2026-10-20T04:00:00+00:00'})
 
     def test_current_collection_uses_trend_source_priority_and_preserves_conflicts(self):
         configurations = [
@@ -421,7 +421,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             value(21, 2, same_at, 'ph', 7.3, 'avg'),
         ]
         current = _current_collection_values_from_rows(configurations, batches, values)
-        self.assertEqual(len(current), 1)
+        self.assertEqual(len(current), 2)
         self.assertEqual(current[0]['business_metric'], 'ph')
         self.assertEqual(current[0]['standard_value'], 7.3)
         self.assertEqual(current[0]['function_code'], 2061)
@@ -432,7 +432,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         newer = _current_collection_values_from_rows(
             configurations, [batch(4, newer_at, 2011), *batches],
             [value(41, 4, newer_at, 'ph', 7.5, 'rtd'), *values])
-        self.assertEqual(len(newer), 1)
+        self.assertEqual(len(newer), 2)
         self.assertEqual(newer[0]['standard_value'], 7.5)
         self.assertEqual(newer[0]['function_code'], 2011)
         self.assertEqual(newer[0]['observed_at'], newer_at)
@@ -1557,10 +1557,17 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             self.assertEqual(mine.status_code, 200, mine.get_json())
             self.assertEqual(projected.call_count, 2)
 
-            self._insert_formal_observation('ph', 7.1, '2020-06-11T16:00:00+00:00')
-            still_cached = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
-            self.assertEqual(still_cached.status_code, 200, still_cached.get_json())
-            self.assertEqual(projected.call_count, 2)
+            observed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            self._insert_formal_observation('ph', 7.1, observed_at)
+            updated = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
+            self.assertEqual(updated.status_code, 200, updated.get_json())
+            self.assertEqual(projected.call_count, 3)
+            updated_site = next(
+                item for item in updated.get_json()['items'] if item['site_id'] == self.site_id)
+            updated_factor = next(
+                item for item in updated_site['latest_cycle']['factors']
+                if item['business_metric'] == 'ph')
+            self.assertEqual((updated_factor['status'], updated_factor['value']), ('value', 7.1))
 
             with monitoring_api._station_monitoring_list_cache_lock:
                 admin_key = [key for key in monitoring_api._station_monitoring_list_cache
@@ -1573,14 +1580,14 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
             while time.monotonic() < deadline:
                 with monitoring_api._station_monitoring_list_cache_lock:
                     refreshing = monitoring_api._station_monitoring_list_cache[admin_key]['refreshing']
-                if projected.call_count >= 3 and not refreshing:
+                if projected.call_count >= 4 and not refreshing:
                     break
                 time.sleep(0.01)
-            self.assertEqual(projected.call_count, 3)
+            self.assertEqual(projected.call_count, 4)
             self.assertFalse(refreshing)
             again = client.get('/api/station-monitoring/sites?scope=all', headers=admin)
             self.assertEqual(again.status_code, 200, again.get_json())
-            self.assertEqual(projected.call_count, 3)
+            self.assertEqual(projected.call_count, 4)
 
         original_overview = monitoring_api._station_monitoring_overview
         with mock.patch.object(
@@ -1736,7 +1743,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                 monitoring_api, '_station_monitoring_batch_projections',
                 side_effect=(old_items, new_items)) as projected:
             with mock.patch.object(web_app.time, 'monotonic', return_value=100.0):
-                first = monitoring_api._station_monitoring_batch_projections_cached(None, rows)
+                first = monitoring_api._station_monitoring_batch_projections_cached(
+                    None, rows, ('v1',))
                 final_entry = monitoring_api._station_monitoring_cache_entry
                 with mock.patch.object(monitoring_api, '_station_monitoring_list_version', return_value=('v1',)):
                     final_entry = final_entry(None, {'items': first})
@@ -1745,7 +1753,8 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                     neutral_expires_at = neutral_entry['expires_at']
 
             with mock.patch.object(web_app.time, 'monotonic', return_value=108.0):
-                second = monitoring_api._station_monitoring_batch_projections_cached(None, rows)
+                second = monitoring_api._station_monitoring_batch_projections_cached(
+                    None, rows, ('v1',))
 
         self.assertEqual(projected.call_count, 2)
         self.assertEqual(first[0]['marker'], 'old')
@@ -2320,7 +2329,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(summary['configuration']['configured_sites'], 0)
         self.assertEqual(summary['observation']['valid_sites'], 0)
 
-    def test_hj212_minute_candidates_never_compete_with_formal_2061_avg(self):
+    def test_future_minute_candidates_do_not_override_current_2061_result(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute(
@@ -2358,8 +2367,9 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                     """INSERT INTO observation_values(
                            observation_batch_id,protocol_code,business_metric,raw_value,raw_unit,
                            standard_value,standard_unit,quality,instrument_asset_code,parser_version)
-                       VALUES (?,'HJ212:w01001','ph',?,'pH',?,'pH','valid','INST-A','isolated')""",
-                    (batch.lastrowid, value, value),
+                       VALUES (?,'HJ212:w01001','ph',?,'pH',?,'pH','valid','INST-A',?)""",
+                    (batch.lastrowid, value, value,
+                     'hj212-text-v3:avg' if function_code == 2061 else 'hj212-text-v3:rtd'),
                 )
                 self.assertTrue(_project_business_observation(
                     connection, value_id=item.lastrowid, batch_id=batch.lastrowid,
@@ -2529,7 +2539,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                     'WITH targets(business_site_id,scheduled_at) AS', statement_text)
                 self.assertNotIn('business.scheduled_at>=', statement_text)
                 self.assertNotIn('ROW_NUMBER() OVER', statement_text)
-        self.assertEqual(counts, {1: 15, 10: 15, 50: 15})
+        self.assertEqual(counts, {1: 16, 10: 16, 50: 16})
 
     def test_latest_cycle_uses_nine_expected_factors_even_when_thirteen_are_mapped(self):
         with closing(sqlite3.connect(self.database)) as connection:

@@ -11,6 +11,11 @@ export const MONITORING_STATUS_META = {
 
 export const MONITORING_STATUS_ORDER = Object.keys(MONITORING_STATUS_META);
 
+export function monitoringMissingCount(cycle) {
+  const count = cycle?.missing_count;
+  return Number.isInteger(count) && count > 0 ? count : 0;
+}
+
 const SITE_DIRECTORY_SNAPSHOT_LIMIT = 8;
 const siteDirectorySnapshots = new Map();
 
@@ -288,7 +293,25 @@ export function monitoringTrendFactors(factors = [], selectedMetrics = [], confi
 export function formatMonitoringTime(value) {
   if (!value) return '暂无记录';
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+}
+
+export function monitoringLatestResults(factors = [], values = [], cycle = {}) {
+  const byMetric = new Map(values.map(item => [item.business_metric, item]));
+  const cycleFactors = new Map((cycle?.factors || []).map(item => [item.business_metric, item]));
+  const times = values.map(item => item.observed_at);
+  const commonTime = times.length && times.every(time => time && time === times[0]) ? times[0] : null;
+  return { commonTime, items: factors.map(factor => {
+    const value = byMetric.get(factor.business_metric);
+    const diagnostic = cycleFactors.get(factor.business_metric) || {};
+    const conflict = value?.status === 'review_required';
+    const fault = factor.state === 'fault';
+    const stale = diagnostic.reason_code === 'stale_observation';
+    const hasValue = Boolean(value && !conflict && value.standard_value != null);
+    const statusLabel = conflict ? '待核对' : fault ? (hasValue ? '故障 · 历史值' : '故障')
+      : stale ? '历史值' : !hasValue ? (factor.state === 'pending' ? '等待结果' : '缺失') : '';
+    return { ...factor, ...value, hasValue, statusLabel };
+  }) };
 }
 
 export function capabilityLabel(enabled) {

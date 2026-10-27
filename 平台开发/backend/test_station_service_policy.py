@@ -265,7 +265,7 @@ class StationServicePolicyTest(unittest.TestCase):
         for site_id in all_order[27:]:
             statuses[site_id] = 'raw_received_config_pending'
 
-        def projections(_db, rows):
+        def projections(_db, rows, _projection_version):
             return [{
                 'site_id': row['id'],
                 'monitoring_status': statuses[row['id']],

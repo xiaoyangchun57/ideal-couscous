@@ -299,8 +299,9 @@ class HJ212IngestionContractTest(unittest.TestCase):
             )
             connection.commit()
         cycle, factor, values, slots, points, diagnostics = self._public_ph_state()
-        self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]), ("incomplete", None))
-        self.assertEqual((factor["status"], factor["value"]), ("missing", None))
+        self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]),
+                         ("complete", "2026-09-11T04:00:00+00:00"))
+        self.assertEqual((factor["status"], factor["value"]), ("value", 7.1))
         self.assertEqual([
             (item["status"], item["standard_value"], item["source_type"],
              item["observed_at"])
@@ -339,9 +340,10 @@ class HJ212IngestionContractTest(unittest.TestCase):
         self.assertEqual(value, (7.8, f"{HJ212_PARSER_VERSION}:rtd", 1))
         self.assertEqual(business_count, 0)
         cycle, factor, values, slots, points, diagnostics = self._public_ph_state()
-        self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]), ("incomplete", None))
+        self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]),
+                         ("complete", "2026-09-11T04:00:00+00:00"))
         self.assertEqual((factor["status"], factor["value"], factor["formal_candidate_count"]),
-                         ("missing", None, 0))
+                         ("value", 7.8, 0))
         self.assertEqual([
             (item["status"], item["standard_value"], item["source_type"],
              item["slot_state"], item["observed_at"])
@@ -415,7 +417,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
         factor = next(item for item in cycle["factors"] if item["business_metric"] == "ph")
         self.assertEqual(states, [("selected",), ("conflict",), ("conflict",)])
         self.assertEqual((factor["status"], factor["process_candidate_count"],
-                          factor["formal_candidate_count"]), ("missing", 2, 0))
+                          factor["formal_candidate_count"]), ("value", 2, 0))
         self.assertEqual([
             (item["status"], item["standard_value"], item["source_type"],
              item["observed_at"])

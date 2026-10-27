@@ -151,7 +151,7 @@ services:
     command:
       - /bin/sh
       - -ec
-      - "umask 0007; exec python station_ingest_retention.py maintain-once --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --mirror-storage-dir /var/lib/station-ingest/mirror --lock-file /app/backend/data/.station-ingest-retention.lock --storage-mode ${SL651_STORAGE_MODE:-long_term} --batch-limit 500"
+      - "umask 0007; exec python station_ingest_retention.py maintain-once --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --lock-file /app/backend/data/.station-ingest-retention.lock --storage-mode ${SL651_STORAGE_MODE:-long_term} --batch-limit 500 --time-budget-seconds 2700"
     environment:
       TZ: Asia/Shanghai
       LD_PRELOAD: /opt/libsqlite-group-mode.so

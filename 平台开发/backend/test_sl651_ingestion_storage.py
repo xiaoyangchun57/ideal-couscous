@@ -14,7 +14,11 @@ from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, credential_hmac
 import station_ingest_retention as retention
-from station_ingest_retention import StoragePolicy, storage_policy_for_mode
+from station_ingest_retention import (
+    StoragePolicy,
+    storage_policy_for_governance,
+    storage_policy_for_mode,
+)
 
 
 def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=None):
@@ -171,6 +175,42 @@ class IngestionStorageTest(unittest.TestCase):
                 retention.check_storage_policy(self.database, policy)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], "degraded")
+
+    def test_governance_mode_uses_separate_explicit_hot_and_archive_budgets(self):
+        archive_root = self.root / "archive"
+        archive_root.mkdir()
+        policy = storage_policy_for_governance(
+            archive_root,
+            archive_minimum_total_bytes=9 * 1024 ** 3,
+            archive_minimum_free_bytes=3 * 1024 ** 3,
+            hot_minimum_total_bytes=28 * 1024 ** 3,
+            hot_minimum_free_bytes=6 * 1024 ** 3,
+        )
+
+        class ArchiveUsage:
+            total = 10 * 1024 ** 3
+            free = 4 * 1024 ** 3
+
+        class HotUsage:
+            total = 30 * 1024 ** 3
+            free = 7 * 1024 ** 3
+
+        with mock.patch.object(
+            retention.shutil, "disk_usage",
+            side_effect=lambda path: ArchiveUsage() if Path(path) == archive_root else HotUsage(),
+        ):
+            retention.check_storage_policy(self.database, policy)
+
+        class LowArchiveUsage:
+            total = 10 * 1024 ** 3
+            free = 2 * 1024 ** 3
+
+        with mock.patch.object(
+            retention.shutil, "disk_usage",
+            side_effect=lambda path: LowArchiveUsage() if Path(path) == archive_root else HotUsage(),
+        ):
+            with self.assertRaisesRegex(Exception, "archive storage is below"):
+                retention.check_storage_policy(self.database, policy)
 
     def test_wal_lock_wait_and_restart_recovery_keep_raw_evidence(self):
         self.add_endpoint()

@@ -36,8 +36,8 @@ const makePage = () => {
     assert.match(wxml, /最后收到报文/);
     assert.match(wxml, /接收：/);
     assert.match(wxml, /结果：/);
-    assert.match(wxml, /最近一期结果/);
-    assert.match(wxml, /已到 .*应到/);
+    assert.match(wxml, /最新结果时间/);
+    assert.doesNotMatch(wxml, /latest_cycle\.scheduled_at/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
     assert.doesNotMatch(wxml, /RTU|仪器状态|最后通信/);
     const calls = [];
@@ -63,6 +63,8 @@ const makePage = () => {
     assert.equal(presentLatestCycle({ formed_count: 4, expected_count: 5 }).arrived_count_display, 4);
     assert.equal(presentLatestCycle({ status: 'complete' }).status_label, '结果完整');
     assert.equal(presentLatestCycle({ status: 'pending' }).status_label, '结果形成中');
+    assert.equal(presentLatestCycle({ status: 'pending', arrived_count: 1, expected_count: 2 }).status_label, '结果缺项');
+    assert.equal(presentLatestCycle({ status: 'pending', formed_count: 1, expected_count: 2 }).status_label, '结果缺项');
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'expected_factors_unconfigured' }).status_label, '应监测因子未设置');
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'time_configuration_missing' }).status_label, '时间配置缺失');
     assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'no_evaluable_period' }).status_label, '暂无可评价时段');

@@ -25,7 +25,7 @@ import { StationMonitoringDrawer } from './SiteMonitoringPage';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import {
-  communicationStatusView, hasAdminRole, mergeMonitoringSites,
+  communicationStatusView, hasAdminRole, mergeMonitoringSites, monitoringMissingCount,
   formatMonitoringTime, readSiteDirectorySnapshot, siteDirectoryLoadMode,
   stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
 } from './stationMonitoring';
@@ -809,18 +809,11 @@ export default function SitesPage() {
         width: 190,
         render: (_, record) => {
           const cycle = record.latest_cycle || {};
-          const arrivedCount = cycle.arrived_count ?? cycle.formed_count ?? 0;
-          const expectedCount = cycle.expected_count || 0;
-          const missingCount = Math.max(0, expectedCount - arrivedCount);
+          const missingCount = monitoringMissingCount(cycle);
           const resultAt = record.last_valid_observation_at;
-          const resultMatchesCycle = Boolean(
-            record.last_valid_observation_at
-            && cycle.scheduled_at
-            && dayjs(record.last_valid_observation_at).isSame(dayjs(cycle.scheduled_at)),
-          );
           return <Space direction="vertical" size={2}>
             <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无结果'}</Text>
-            {resultMatchesCycle && missingCount > 0 ? <Tag color="orange">缺 {missingCount} 项</Tag> : null}
+            {missingCount > 0 ? <Tag color="orange">缺 {missingCount} 项</Tag> : null}
           </Space>;
         },
       }] : []),

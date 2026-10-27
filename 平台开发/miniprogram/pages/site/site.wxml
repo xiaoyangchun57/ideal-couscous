@@ -72,15 +72,19 @@
           <text class="mon-section-count" wx:if="{{site.monitoring.latest_values.length > 0}}">{{site.monitoring.latest_values.length}} 项</text>
         </view>
         <view class="card mon-values-card" wx:if="{{site.monitoring.latest_values.length > 0}}">
-          <view class="mon-value-row">
+          <view class="mon-value-row" wx:if="{{site.monitoring.latest_result_at}}">
             <text class="mon-value-name">结果时间</text>
-            <text class="mon-value-unit">{{site.monitoring.latest_result_at}}</text>
+            <text class="mon-value-unit">{{site.monitoring.latest_result_time_display}}</text>
           </view>
           <view class="mon-value-row" wx:for="{{site.monitoring.latest_results}}" wx:key="business_metric">
             <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
-            <view class="mon-value-right">
-              <text class="mon-value-num">{{item.status === 'value' ? (item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value) : item.status === 'review_required' ? '待核对' : '缺失'}}</text>
-              <text class="mon-value-unit">{{item.standard_unit}}</text>
+            <view>
+              <view class="mon-value-right">
+                <text class="mon-value-num">{{item.has_value ? (item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value) : item.status_label}}</text>
+                <text class="mon-value-unit">{{item.standard_unit}}</text>
+              </view>
+              <view class="mon-value-unit" wx:if="{{item.has_value && item.status_label}}">{{item.status_label}}</view>
+              <view class="mon-value-unit" wx:if="{{item.result_time_display}}">{{item.result_time_display}}</view>
             </view>
           </view>
         </view>

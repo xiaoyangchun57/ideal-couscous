@@ -11,7 +11,7 @@ import EChart from '../../components/EChart';
 import {
   communicationStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
   monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption,
-  monitoringTrendFactors, monitoringTrendView,
+  monitoringTrendFactors, monitoringTrendView, monitoringLatestResults,
 } from './stationMonitoring';
 import './SiteMonitoringPage.css';
 
@@ -35,8 +35,7 @@ function trendRequestOptions(rangeKey, customRange, cursor) {
 }
 
 function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onSelectMetric }) {
-  const valueByMetric = new Map(latestValues.map((item) => [item.business_metric, item]));
-  const resultTime = latestValues[0]?.observed_at || latestCycle?.scheduled_at || null;
+  const results = monitoringLatestResults(factors, latestValues, latestCycle);
 
   if (!latestValues.length) {
     return (
@@ -54,13 +53,13 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
     <section className="station-monitoring-section" aria-labelledby="latest-results-title">
       <div className="station-monitoring-section__heading">
         <Title id="latest-results-title" level={4}>最新结果</Title>
-        <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(resultTime)}</Text>
+        {results.commonTime ? <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(results.commonTime)}</Text> : null}
       </div>
       <div className="station-monitoring-metrics">
-        {factors.map((factor) => {
+        {results.items.map((factor) => {
           const metric = factor.business_metric;
-          const value = valueByMetric.get(metric);
-          const missing = !value || value.status === 'review_required';
+          const value = factor;
+          const missing = !value.hasValue;
           return (
             <button
               type="button"
@@ -70,9 +69,11 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
             >
               <span className="station-monitoring-metric__name">{monitoringFactorName(factor)}</span>
               <span className={`station-monitoring-metric__value${missing ? ' is-missing' : ''}`}>
-                {missing ? '缺失' : (value.standard_value_display ?? value.standard_value)}
+                {missing ? value.statusLabel : (value.standard_value_display ?? value.standard_value)}
               </span>
               <span className="station-monitoring-metric__unit">{value?.standard_unit || factor.standard_unit || ' '}</span>
+              {value.hasValue && value.statusLabel ? <span className="station-monitoring-metric__unit">{value.statusLabel}</span> : null}
+              {value.observed_at ? <span className="station-monitoring-metric__unit">{formatMonitoringTime(value.observed_at)}</span> : null}
             </button>
           );
         })}

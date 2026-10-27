@@ -22,7 +22,7 @@ BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v3"
 HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v3"
 _APPROVED_HJ212_2061_RTD_PROTOCOL_CODES = frozenset({"HJ212:w01019-Rtd"})
 LATEST_COLLECTION_LOOKBACK_SECONDS = 7 * 24 * 60 * 60
-LATEST_COLLECTION_BATCH_LIMIT = 256
+LATEST_COLLECTION_BATCH_LIMIT = 16384
 
 
 def is_formal_hj212_source(protocol_code: str, function_code: int | str | None,
@@ -773,7 +773,7 @@ def current_expected_factor_selections_batch(connection, site_ids, *, at_time: s
 
 
 def current_factor_configurations_batch(connection, site_ids, *, at_time: str | None = None,
-                                        expected_selections=None):
+                                        expected_selections=None, _current_endpoints_only=True):
     """Read mapped facts while keeping expected factors as the completeness contract.
 
     An unconfigured station must not lose already-normalized formal values.  In that
@@ -789,14 +789,19 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
                   else current_expected_factor_selections_batch(
                       connection, site_ids, at_time=at_time))
     marks = ",".join("?" * len(site_ids))
+    endpoint_join = ("""JOIN trusted_endpoints endpoint ON endpoint.id=profile.endpoint_id
+              AND endpoint.enabled=1 AND endpoint.endpoint_state='bound'
+              AND endpoint.business_site_id=profile.business_site_id"""
+                     if _current_endpoints_only else '')
     profile_rows = [dict(row) for row in connection.execute(
-        f"""SELECT endpoint_id,business_site_id,instrument_asset_code,
-                   effective_from AS profile_effective_from,
-                   effective_to AS profile_effective_to
-            FROM monitoring_endpoint_profiles
-            WHERE business_site_id IN ({marks}) AND enabled=1
-              AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
-            ORDER BY business_site_id,effective_from DESC,endpoint_id""",
+        f"""SELECT profile.endpoint_id,profile.business_site_id,profile.instrument_asset_code,
+                   profile.effective_from AS profile_effective_from,
+                   profile.effective_to AS profile_effective_to
+            FROM monitoring_endpoint_profiles profile
+            {endpoint_join}
+            WHERE profile.business_site_id IN ({marks}) AND profile.enabled=1
+              AND profile.effective_from<=? AND (profile.effective_to IS NULL OR profile.effective_to>?)
+            ORDER BY profile.business_site_id,profile.effective_from DESC,profile.endpoint_id""",
         [*site_ids, at_time, at_time],
     ).fetchall()]
     profiled_endpoint_ids = {int(row["endpoint_id"]) for row in profile_rows}
@@ -825,6 +830,7 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
                    profile.effective_from AS profile_effective_from, profile.effective_to AS profile_effective_to,
                    mapping.effective_from AS mapping_effective_from, mapping.effective_to AS mapping_effective_to
             FROM monitoring_endpoint_profiles profile
+            {endpoint_join}
             JOIN monitoring_factor_mappings mapping ON mapping.endpoint_id=profile.endpoint_id
             JOIN monitoring_factor_definitions definition ON definition.protocol_code=mapping.protocol_code
             WHERE profile.business_site_id IN ({marks}) AND profile.enabled=1
@@ -894,8 +900,11 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
             ]
             existing_metrics = {item["business_metric"] for item in existing}
             for item in existing:
+                item["expected_factor_effective_from"] = expected_by_metric[
+                    item["business_metric"]]["effective_from"]
                 item["protocol_configurations"] = [
-                    dict(protocol_configuration)
+                    dict(protocol_configuration,
+                         expected_factor_effective_from=item["expected_factor_effective_from"])
                     for protocol_configuration in item.get("protocol_configurations") or []
                 ]
                 if selection["effective_to"]:
@@ -927,8 +936,10 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
                     "ingestion_tolerance_seconds": None,
                     "profile_effective_from": profile["profile_effective_from"],
                     "profile_effective_to": profile["profile_effective_to"],
-                    "mapping_effective_from": expected["effective_from"],
+                    # Selection starts obligations, not the device's observation history.
+                    "mapping_effective_from": profile["profile_effective_from"],
                     "mapping_effective_to": selection["effective_to"],
+                    "expected_factor_effective_from": expected["effective_from"],
                     "_schedule_rows": schedule_rows,
                     "schedule_id": schedule["id"] if schedule else None,
                     "schedule_timezone": schedule["timezone"] if schedule else None,
@@ -971,10 +982,26 @@ def current_factor_configurations_batch(connection, site_ids, *, at_time: str | 
     return result
 
 
-def current_factor_configurations(connection, site_id: int, *, at_time: str | None = None):
+def current_factor_configurations(connection, site_id: int, *, at_time: str | None = None,
+                                  _current_endpoints_only=True):
     """Return every currently published factor, including factors that never reported."""
     return current_factor_configurations_batch(
-        connection, [site_id], at_time=at_time).get(site_id, [])
+        connection, [site_id], at_time=at_time,
+        _current_endpoints_only=_current_endpoints_only).get(site_id, [])
+
+
+def _historical_factor_configurations(connection, site_id: int, end: str,
+                                      *, _current_selection=False):
+    """Use effective dated site profiles, not a device's present binding, for history.
+
+    Result queries still constrain the persisted batch/business site identity;
+    rebinding an endpoint therefore cannot transfer its earlier site's evidence.
+    """
+    selections = (current_expected_factor_selections_batch(connection, [site_id])
+                  if _current_selection else None)
+    return current_factor_configurations_batch(
+        connection, [site_id], at_time=end, expected_selections=selections,
+        _current_endpoints_only=False).get(site_id, [])
 
 
 def expected_business_slots(connection, configuration: dict, start: str, end: str):
@@ -1022,6 +1049,8 @@ def expected_business_slots(connection, configuration: dict, start: str, end: st
                 utc_slot = local_slot.astimezone(timezone.utc).replace(microsecond=0)
                 utc_text = utc_slot.isoformat()
                 if not start_at <= utc_slot < end_at:
+                    continue
+                if utc_text < configuration.get("expected_factor_effective_from", ""):
                     continue
                 if utc_text < configuration["mapping_effective_from"] or (
                         configuration["mapping_effective_to"] and utc_text >= configuration["mapping_effective_to"]):
@@ -1186,11 +1215,15 @@ def latest_cycle(connection, site_id: int, *, at_time: str | None = None,
                   configurations: list[dict] | None = None,
                   include_latest_complete: bool = True,
                   business_rows: list[dict] | None = None):
-    """Build the authoritative latest four-hour cycle without promoting minute facts."""
+    """Describe expected-cycle diagnostics using available actual factor results."""
     at_time = at_time or _utc_now()
     evaluated_at = datetime.fromisoformat(at_time).astimezone(timezone.utc)
     configurations = (configurations if configurations is not None
                       else current_factor_configurations(connection, site_id, at_time=at_time))
+    if business_rows is None:
+        _, cycles = latest_values_and_cycles_batch(
+            connection, {site_id: configurations}, at_time=at_time)
+        return cycles[site_id]
     if configurations and not any(
             item.get("expected_factor_config_id") for item in configurations):
         return {
@@ -1478,7 +1511,7 @@ def _configuration_for_observation(configurations: list[dict], row: dict):
 
 def _current_collection_values_from_rows(
         configurations: list[dict], batch_rows: list[dict], value_rows: list[dict]) -> list[dict]:
-    """Return one actual collection group instead of mixing per-factor history."""
+    """Select each factor's latest real observation from bounded sparse batches."""
     values_by_batch = {}
     for row in value_rows:
         values_by_batch.setdefault(row["observation_batch_id"], []).append(row)
@@ -1500,10 +1533,7 @@ def _current_collection_values_from_rows(
     if not candidate_groups:
         return []
 
-    selected_key = max(candidate_groups, key=lambda key: (
-        key[1], key[2] == 2061,
-        max(item[2]["id"] for item in candidate_groups[key]), key[0]))
-    matched_rows = candidate_groups[selected_key]
+    matched_rows = [item for candidates in candidate_groups.values() for item in candidates]
 
     by_factor = {}
     for row, configuration, batch in matched_rows:
@@ -1513,6 +1543,12 @@ def _current_collection_values_from_rows(
 
     result = []
     for factor_key, candidates in by_factor.items():
+        selected_key = max(
+            ((item[2]['endpoint_id'], item[2]['observed_at'], item[2]['function_code'])
+             for item in candidates), key=lambda key: (key[1], key[2] == 2061))
+        candidates = [item for item in candidates
+                      if (item[2]['endpoint_id'], item[2]['observed_at'],
+                          item[2]['function_code']) == selected_key]
         distinct_values = {
             (item[0]["standard_value"], item[0]["standard_unit"])
             for item in candidates
@@ -1610,8 +1646,85 @@ def format_business_value(value, decimal_precision=None, *, source_value_text=No
         return str(value)
 
 
+def _latest_complete_actual_collection(configurations, batch_rows, value_rows):
+    """Only identify completeness when every configured factor shares a real time."""
+    batches_by_time = {}
+    values_by_time = {}
+    for batch in batch_rows:
+        batches_by_time.setdefault(batch['observed_at'], []).append(batch)
+    for value in value_rows:
+        values_by_time.setdefault(value['observed_at'], []).append(value)
+    for observed_at in sorted(values_by_time, reverse=True):
+        values = _current_collection_values_from_rows(
+            configurations, batches_by_time[observed_at], values_by_time[observed_at])
+        if len(values) == len(configurations) and all(v['status'] == 'value' for v in values):
+            return observed_at
+    return None
+
+
+def _cycle_with_available_results(connection, cycle, configurations, values, evaluated_at, faults):
+    """Keep schedule diagnostics, but never gate a real result on a formal window."""
+    if not cycle.get('factors'):
+        if cycle.get('reason_code') != 'no_evaluable_period' or not values:
+            return cycle
+        observed_times = [value.get('observed_at') for value in values if value.get('observed_at')]
+        cycle = dict(cycle, scheduled_at=max(observed_times, default=None), factors=[{
+            'business_metric': config['business_metric'],
+            'protocol_code': config.get('protocol_code'),
+            'standard_unit': config.get('standard_unit') or '',
+            'status': 'missing', 'value': None, 'value_display': None,
+            'available_at': None, 'deadline_at': None,
+            'reason_code': 'missing_observation',
+            'reason': '当前无可用的有效已发布观测',
+        } for config in configurations])
+    by_factor = {(v['endpoint_id'], v['business_metric'], v['instrument_asset_code']): v for v in values}
+    factors = []
+    for config, original in zip(configurations, cycle['factors']):
+        factor = dict(original)
+        value = by_factor.get((config['endpoint_id'], config['business_metric'], config['instrument_asset_code']))
+        fault = max((faults[code] for code in (config.get('protocol_codes') or [config.get('protocol_code')])
+                     if code in faults), default=None, key=lambda row: row['observed_at'])
+        if fault and (not value or fault['observed_at'] >= value['observed_at']):
+            factor.update(status='review_required', value=None, reason_code=fault['issue_type'],
+                          reason='较新的观测有故障标记，旧有效值不代表当前正常',
+                          observed_at=fault['observed_at'], received_at=None)
+        elif value:
+            next_at = next_business_slot(connection, config, value['observed_at'])
+            deadline = datetime.fromisoformat(business_slot_deadline(config, next_at)) if next_at else None
+            if value.get('status') == 'review_required':
+                factor.update(status='review_required', value=None, reason_code='valid_value_conflict',
+                              reason='同一来源同一观测时点存在不同有效值，需核对',
+                              observed_at=value['observed_at'], received_at=value['received_at'])
+            elif deadline and evaluated_at <= deadline:
+                factor.update(status='value', value=value['standard_value'],
+                              value_display=value['standard_value_display'], source_type=value['source_type'],
+                              protocol_code=value['protocol_code'], standard_unit=value['standard_unit'],
+                              observed_at=value['observed_at'], received_at=value['received_at'],
+                              reason_code=None, reason=None)
+            else:
+                factor.update(status='missing', value=None, reason_code='stale_observation',
+                              reason='已有结果超过当前时效范围', observed_at=value['observed_at'],
+                              received_at=value['received_at'])
+        else:
+            deadline_at = original.get('deadline_at')
+            pending = bool(deadline_at) and evaluated_at < datetime.fromisoformat(deadline_at)
+            factor.update(status='pending' if pending else 'missing', value=None,
+                          reason_code='analysis_pending' if pending else 'missing_observation',
+                          reason='当前无可用的有效已发布观测', observed_at=None, received_at=None)
+        factors.append(factor)
+    counts = {status: sum(f['status'] == status for f in factors)
+              for status in ('value', 'review_required', 'pending', 'missing')}
+    status = ('review_required' if counts['review_required'] else
+              'pending' if counts['pending'] else
+              'complete' if counts['value'] == len(factors) else 'incomplete')
+    return dict(cycle, factors=factors, status=status, formed_count=counts['value'],
+                arrived_count=counts['value'] + counts['review_required'],
+                review_required_count=counts['review_required'], missing_count=counts['missing'],
+                pending_count=counts['pending'], sufficient_for_business=status == 'complete')
+
+
 def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_time: str | None = None):
-    """Project one bounded, actual collection group per site plus formal cycle state."""
+    """Project bounded per-factor results without inventing a complete snapshot."""
     site_ids = list(configurations_by_site)
     if not site_ids:
         return {}, {}
@@ -1666,32 +1779,81 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
         site_id: sorted({int(item["endpoint_id"]) for item in configurations})
         for site_id, configurations in configurations_by_site.items()
     }
-    batch_selects = []
-    for site_id, endpoint_ids in endpoint_ids_by_site.items():
-        if not endpoint_ids:
-            continue
-        endpoint_marks = ",".join("?" * len(endpoint_ids))
-        batch_selects.append((
-            f"""SELECT * FROM (
-                    SELECT id,business_site_id,endpoint_id,observed_at,received_at,
-                           normalized_at,function_code
-                    FROM observation_batches
-                         INDEXED BY idx_observation_batch_site_observed
-                    WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
-                      AND is_current=1 AND projection_state='completed'
-                      AND observed_at>=? AND observed_at<=?
-                    ORDER BY observed_at DESC,id DESC LIMIT ?
-                )""",
-            [site_id, *endpoint_ids, collection_from, at_time,
-             LATEST_COLLECTION_BATCH_LIMIT],
-        ))
-    for offset in range(0, len(batch_selects), 50):
-        selects = batch_selects[offset:offset + 50]
-        params = [value for _, values in selects for value in values]
-        for row in connection.execute(
-                " UNION ALL ".join(query for query, _ in selects), params).fetchall():
-            item = dict(row)
-            candidate_batches[item["business_site_id"]].append(item)
+    values_by_batch = {}
+    cursors = {}
+    found_times = {site_id: {} for site_id in site_ids}
+    active = {site_id for site_id in site_ids if endpoint_ids_by_site[site_id]}
+    while active:
+        batch_selects = []
+        page_rows = {site_id: [] for site_id in active}
+        needed_by_site = {}
+        for site_id in sorted(active):
+            endpoint_ids = endpoint_ids_by_site[site_id]
+            endpoint_marks = ','.join('?' * len(endpoint_ids))
+            remaining = LATEST_COLLECTION_BATCH_LIMIT - len(candidate_batches[site_id])
+            cursor = cursors.get(site_id)
+            cursor_clause = ' AND (observed_at,id)<(?,?)' if cursor else ''
+            params = [site_id, *endpoint_ids, collection_from, at_time]
+            if cursor:
+                params.extend(cursor)
+            params.append(min(256, remaining))
+            needed_by_site[site_id] = {
+                cfg['business_metric'] for cfg in configurations_by_site[site_id]
+                if (cfg['endpoint_id'], cfg['business_metric'], cfg['instrument_asset_code'])
+                    not in found_times[site_id]
+                or (cursor and found_times[site_id][
+                    (cfg['endpoint_id'], cfg['business_metric'], cfg['instrument_asset_code'])] == cursor[0])
+            }
+            batch_selects.append((f'''SELECT * FROM (
+                SELECT id,business_site_id,endpoint_id,observed_at,received_at,normalized_at,function_code
+                FROM observation_batches INDEXED BY idx_observation_batch_site_observed
+                WHERE business_site_id=? AND endpoint_id IN ({endpoint_marks})
+                  AND is_current=1 AND projection_state='completed'
+                  AND observed_at>=? AND observed_at<=?{cursor_clause}
+                ORDER BY observed_at DESC,id DESC LIMIT ?)''', params))
+        for offset in range(0, len(batch_selects), 50):
+            selects = batch_selects[offset:offset + 50]
+            params = [value for _, items in selects for value in items]
+            for row in connection.execute(' UNION ALL '.join(sql for sql, _ in selects), params):
+                item = dict(row)
+                page_rows[item['business_site_id']].append(item)
+                batch_by_id[item['id']] = item
+        ids_by_metrics = {}
+        for site_id, batches in page_rows.items():
+            metrics = tuple(sorted(needed_by_site[site_id]))
+            ids_by_metrics.setdefault(metrics, []).extend(row['id'] for row in batches)
+        for metrics, identities in ids_by_metrics.items():
+            if not metrics:
+                continue
+            for offset in range(0, len(identities), 500):
+                batch_ids = identities[offset:offset + 500]
+                marks = ','.join('?' * len(batch_ids))
+                metric_marks = ','.join('?' * len(metrics))
+                rows = connection.execute(f'''SELECT id,observation_batch_id,protocol_code,business_metric,
+                    raw_value_text,raw_unit,standard_value,standard_unit,quality,instrument_asset_code,parser_version
+                    FROM observation_values WHERE observation_batch_id IN ({marks})
+                      AND business_metric IN ({metric_marks})
+                      AND is_current=1 AND is_published=1 AND quality='valid'
+                    ORDER BY observation_batch_id,id DESC''', [*batch_ids, *metrics])
+                for row in rows:
+                    item = dict(row)
+                    values_by_batch.setdefault(item['observation_batch_id'], []).append(item)
+                    batch = batch_by_id[item['observation_batch_id']]
+                    site_id = batch['business_site_id']
+                    candidate = dict(item, endpoint_id=batch['endpoint_id'], observed_at=batch['observed_at'])
+                    cfg = _configuration_for_observation(configurations_by_site[site_id], candidate)
+                    if cfg is not None:
+                        key = (cfg['endpoint_id'], cfg['business_metric'], cfg['instrument_asset_code'])
+                        found_times[site_id][key] = max(found_times[site_id].get(key, ''), batch['observed_at'])
+        for site_id, batches in page_rows.items():
+            candidate_batches[site_id].extend(batches)
+            if batches:
+                cursors[site_id] = (batches[-1]['observed_at'], batches[-1]['id'])
+            exhausted = len(batches) < 256 or len(candidate_batches[site_id]) >= LATEST_COLLECTION_BATCH_LIMIT
+            complete = (len(found_times[site_id]) == len(configurations_by_site[site_id])
+                        and batches and batches[-1]['observed_at'] < min(found_times[site_id].values()))
+            if exhausted or complete:
+                active.remove(site_id)
 
     missing_sites = [site_id for site_id in site_ids
                      if endpoint_ids_by_site[site_id] and not candidate_batches[site_id]]
@@ -1749,8 +1911,8 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             row["observed_at"], row["function_code"] == 2061, row["id"]), reverse=True)
         batch_by_id.update({row["id"]: row for row in batches})
 
-    values_by_batch = {}
-    all_batch_ids = list(batch_by_id)
+    all_batch_ids = [batch['id'] for site_id in missing_sites
+                     for batch in candidate_batches[site_id]]
     for offset in range(0, len(all_batch_ids), 500):
         batch_ids = all_batch_ids[offset:offset + 500]
         batch_marks = ",".join("?" * len(batch_ids))
@@ -1766,6 +1928,20 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             item = dict(row)
             values_by_batch.setdefault(item["observation_batch_id"], []).append(item)
 
+    faults_by_site = {}
+    for offset in range(0, len(site_ids), 200):
+        selected_sites = site_ids[offset:offset + 200]
+        marks = ','.join('?' for _ in selected_sites)
+        issues = connection.execute(f'''SELECT issue.business_site_id,issue.issue_type,
+                issue.object_summary AS protocol_code,batch.observed_at
+            FROM monitoring_quality_issues issue
+            JOIN observation_batches batch ON batch.id=issue.observation_batch_id AND batch.is_current=1
+            WHERE issue.business_site_id IN ({marks}) AND issue.status='open'
+              AND batch.observed_at>=? AND batch.observed_at<=?
+            ORDER BY batch.observed_at DESC,issue.id DESC''',
+            [*selected_sites, collection_from, at_time]).fetchall()
+        for issue in issues:
+            faults_by_site.setdefault(issue['business_site_id'], {}).setdefault(issue['protocol_code'], dict(issue))
     values_by_site = {}
     for site_id, configurations in configurations_by_site.items():
         site_rows = rows_by_site.get(site_id, [])
@@ -1783,12 +1959,17 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             cycles_by_site[site_id] = latest_cycle(
                 connection, site_id, at_time=at_time, configurations=configurations,
                 include_latest_complete=False, business_rows=site_rows)
+        cycles_by_site[site_id] = _cycle_with_available_results(
+            connection, cycles_by_site[site_id], configurations,
+            values_by_site[site_id], evaluated_at, faults_by_site.get(site_id, {}))
+        cycles_by_site[site_id]['latest_complete_cycle_at'] = _latest_complete_actual_collection(
+            configurations, batch_rows, value_rows)
     return values_by_site, cycles_by_site
 
 
 def trend(connection, site_id: int, metric: str, start: str, end: str, limit: int):
     configurations = [
-        item for item in current_factor_configurations(connection, site_id)
+        item for item in _historical_factor_configurations(connection, site_id, end)
         if item['business_metric'] == metric
     ]
     points = []
@@ -1828,7 +2009,8 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
                       before: tuple[str, int, str] | None = None):
     """Return one bounded page of filtered results ordered for chart display."""
     configurations = [
-        item for item in current_factor_configurations(connection, site_id, at_time=end)
+        item for item in _historical_factor_configurations(
+            connection, site_id, end, _current_selection=True)
         if item['business_metric'] == metric
     ]
     if not configurations:
@@ -2009,7 +2191,7 @@ def trend_slots(connection, site_id: int, metric: str, start: str, end: str,
                 *, at_time: str | None = None):
     """Return every configured slot, including explicit null-valued gaps."""
     configurations = [
-        item for item in current_factor_configurations(connection, site_id, at_time=end)
+        item for item in _historical_factor_configurations(connection, site_id, end)
         if item['business_metric'] == metric
     ]
     decimal_precision = max(
@@ -2091,7 +2273,7 @@ def trend_slots(connection, site_id: int, metric: str, start: str, end: str,
 
 def business_slot_diagnostics(connection, site_id: int, metric: str, start: str, end: str):
     configurations = [
-        item for item in current_factor_configurations(connection, site_id)
+        item for item in _historical_factor_configurations(connection, site_id, end)
         if item['business_metric'] == metric
     ]
     conflicts = set()

@@ -124,13 +124,13 @@
               <image class="mon-meta-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
               <text class="mon-meta-tx">最后收到报文 {{item.last_received_at || item.last_communication_at}}</text>
             </view>
-            <view class="mon-meta-item" wx:if="{{item.latest_cycle.scheduled_at}}">
+            <view class="mon-meta-item" wx:if="{{item.latest_result_time_display}}">
               <image class="mon-meta-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
-              <text class="mon-meta-tx">最近一期结果 {{item.latest_cycle.scheduled_at}} · 已到 {{item.latest_cycle.arrived_count_display}} / 应到 {{item.latest_cycle.expected_count_display}}</text>
+              <text class="mon-meta-tx">最新结果时间 {{item.latest_result_time_display}} · {{item.latest_cycle.status_label}}</text>
             </view>
             <view class="mon-meta-item" wx:elif="{{item.latest_cycle.status_label}}">
               <image class="mon-meta-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
-              <text class="mon-meta-tx">最近一期结果 · {{item.latest_cycle.status_label}}</text>
+              <text class="mon-meta-tx">结果状态 · {{item.latest_cycle.status_label}}</text>
             </view>
           </view>
           <view class="mon-site-bottom" wx:if="{{monitoringPublic && item.published_factor_count > 0}}">

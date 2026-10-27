@@ -20488,12 +20488,14 @@ def _local_day_utc_bounds(date_text):
 
 
 def _formal_business_observation_rows(db, start, end, site_ids=None, metric=None, limit=None,
-                                      *, qualities=('valid',)):
-    """Return one authoritative current observation for each unambiguous business slot."""
+                                      *, qualities=('valid',), time_basis='observed'):
+    """Select published actual results while retaining business source identities."""
     if not (_table_exists(db, 'monitoring_business_observations')
             and _table_exists(db, 'observation_batches')):
         return []
-    clauses = ['business.scheduled_at>=?', 'business.scheduled_at<?']
+    if time_basis not in {'observed', 'scheduled'}:
+        raise ValueError('invalid observation time basis')
+    clauses = [f'business.{time_basis}_at>=?', f'business.{time_basis}_at<?']
     params = [start, end]
     if site_ids is not None:
         normalized = list(dict.fromkeys(int(site_id) for site_id in site_ids))
@@ -20507,7 +20509,7 @@ def _formal_business_observation_rows(db, start, end, site_ids=None, metric=None
     quality_values = tuple(dict.fromkeys(qualities or ()))
     if not quality_values:
         return []
-    clauses.append(f"business.quality IN ({','.join('?' * len(quality_values))})")
+    clauses.append(f"value.quality IN ({','.join('?' * len(quality_values))})")
     params.extend(quality_values)
     limit_sql = ' LIMIT ?' if limit else ''
     if limit:
@@ -20521,34 +20523,42 @@ def _formal_business_observation_rows(db, start, end, site_ids=None, metric=None
                    batch.function_code
             FROM monitoring_business_observations business
             JOIN observation_batches batch ON batch.id=business.observation_batch_id
+            JOIN observation_values value ON value.id=business.source_observation_value_id
             WHERE business.is_current=1 AND batch.is_current=1
-              AND (business.protocol_code NOT LIKE 'HJ212:%'
-                   OR (batch.function_code=2061 AND business.projection_version=?))
+              AND value.is_current=1 AND value.is_published=1
+              AND batch.projection_state='completed'
               AND {' AND '.join(clauses)}
+        ), preferred AS (
+            SELECT formal.*,DENSE_RANK() OVER (
+                PARTITION BY business_site_id,endpoint_id,business_metric,
+                             COALESCE(instrument_asset_code,''),observed_at
+                ORDER BY CASE WHEN function_code=2061 THEN 0 ELSE 1 END
+            ) AS source_rank FROM formal
         ), unique_slots AS (
             SELECT business_site_id,endpoint_id,business_metric,
-                   COALESCE(instrument_asset_code,'') AS instrument_key,scheduled_at
-            FROM formal
-            GROUP BY business_site_id,endpoint_id,business_metric,instrument_key,scheduled_at
+                   COALESCE(instrument_asset_code,'') AS instrument_key,observed_at
+            FROM preferred WHERE source_rank=1
+            GROUP BY business_site_id,endpoint_id,business_metric,instrument_key,observed_at
             HAVING COUNT(DISTINCT printf('%.17g',standard_value)||char(31)||standard_unit)=1
         ), ranked AS (
             SELECT formal.*,ROW_NUMBER() OVER (
                 PARTITION BY formal.business_site_id,formal.endpoint_id,formal.business_metric,
-                             COALESCE(formal.instrument_asset_code,''),formal.scheduled_at
+                             COALESCE(formal.instrument_asset_code,''),formal.observed_at
                 ORDER BY CASE WHEN formal.protocol_code LIKE 'SL651:%' THEN 0
                               WHEN formal.protocol_code LIKE 'HJ212:%' THEN 1 ELSE 2 END,
                          formal.id
             ) AS slot_rank
-            FROM formal JOIN unique_slots slot
+            FROM preferred formal JOIN unique_slots slot
               ON slot.business_site_id=formal.business_site_id
              AND slot.endpoint_id=formal.endpoint_id
              AND slot.business_metric=formal.business_metric
              AND slot.instrument_key=COALESCE(formal.instrument_asset_code,'')
-             AND slot.scheduled_at=formal.scheduled_at
+             AND slot.observed_at=formal.observed_at
+            WHERE formal.source_rank=1
         )
         SELECT * FROM ranked WHERE slot_rank=1
-        ORDER BY scheduled_at,business_site_id,business_metric,id{limit_sql}""",
-        [MONITORING_BUSINESS_PROJECTION_VERSION, *params]).fetchall()]
+        ORDER BY observed_at,business_site_id,business_metric,id{limit_sql}""",
+        params).fetchall()]
 
 
 def _formal_arrival_summary(db, start, end, site_ids, *, evaluated_at=None):
@@ -20560,7 +20570,9 @@ def _formal_arrival_summary(db, start, end, site_ids, *, evaluated_at=None):
         return {'total_avg': 0, 'by_metric': []}
     evaluated_at = evaluated_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     configurations = monitoring_factor_configurations_batch(
-        db, site_ids, at_time=min(end, evaluated_at))
+        db, site_ids, at_time=min(end, evaluated_at),
+        _current_endpoints_only=(datetime.fromisoformat(end)
+                                 >= datetime.now(timezone.utc).replace(microsecond=0)))
     policy_events = _station_service_policy_events_batch(
         db, site_ids, through=min(end, evaluated_at))
     cutoff = min(datetime.fromisoformat(end), datetime.fromisoformat(evaluated_at))
@@ -20582,7 +20594,8 @@ def _formal_arrival_summary(db, start, end, site_ids, *, evaluated_at=None):
                 expected[key] = metric_name
                 sites_by_metric.setdefault(metric_name, set()).add(site_id)
                 site_expected[(site_id, metric_name)] = site_expected.get((site_id, metric_name), 0) + 1
-    observations = _formal_business_observation_rows(db, start, end, site_ids)
+    observations = _formal_business_observation_rows(
+        db, start, end, site_ids, time_basis='scheduled')
     actual_keys = {
         (row['business_site_id'], row['endpoint_id'], row['business_metric'],
          row.get('instrument_asset_code'), row['scheduled_at'])
@@ -20906,12 +20919,17 @@ def data_health():
         actual_map = {}
         over_map = {}
         latest_map = {}
+        expected_slots = set()
+        actual_slots = set()
+        over_slots = set()
         if _formal_monitoring_schema_ready(db):
             policy_events = _station_service_policy_events_batch(
                 db, scoped_site_ids, through=evaluated_at)
             current_policies = _station_service_policy_rows_batch(db, scoped_site_ids)
             configurations = monitoring_factor_configurations_batch(
-                db, scoped_site_ids, at_time=evaluated_at) if scoped_site_ids else {}
+                db, scoped_site_ids, at_time=evaluated_at,
+                _current_endpoints_only=(datetime.fromisoformat(end_utc)
+                                         >= datetime.now(timezone.utc).replace(microsecond=0))) if scoped_site_ids else {}
             observed_metrics = {
                 site_id: {item['business_metric'] for item in items}
                 for site_id, items in configurations.items()
@@ -20921,13 +20939,16 @@ def data_health():
             for site_id, items in configurations.items():
                 for configuration in items:
                     key = (site_id, configuration['business_metric'])
-                    expected_map[key] = expected_map.get(key, 0) + sum(
-                        datetime.fromisoformat(slot['result_window_end_at']) <= cutoff
-                        and _site_reporting_required_at(
-                            policy_events.get(site_id), site_id, slot['scheduled_at'])
-                        for slot in monitoring_expected_business_slots(
-                            db, configuration, start_utc, end_utc)
-                    )
+                    for slot in monitoring_expected_business_slots(
+                            db, configuration, start_utc, end_utc):
+                        slot_key = (site_id, configuration['endpoint_id'], key[1],
+                                    configuration.get('instrument_asset_code'), slot['scheduled_at'])
+                        if (datetime.fromisoformat(slot['result_window_end_at']) <= cutoff
+                                and _site_reporting_required_at(
+                                    policy_events.get(site_id), site_id, slot['scheduled_at'])
+                                and slot_key not in expected_slots):
+                            expected_slots.add(slot_key)
+                            expected_map[key] = expected_map.get(key, 0) + 1
                     freshness_seconds[key] = max(
                         freshness_seconds.get(key, 0),
                         int(configuration.get('expected_interval_seconds') or 0) * 2
@@ -20935,20 +20956,28 @@ def data_health():
                         + int(configuration.get('tolerance_seconds') or 0),
                     )
             formal_rows = _formal_business_observation_rows(
-                db, start_utc, end_utc, scoped_site_ids)
+                db, start_utc, end_utc, scoped_site_ids, time_basis='scheduled')
             for row in formal_rows:
                 if not _site_reporting_required_at(
                         policy_events.get(row['business_site_id']),
                         row['business_site_id'], row['scheduled_at']):
                     continue
                 key = (row['business_site_id'], row['business_metric'])
-                actual_map[key] = actual_map.get(key, 0) + 1
-                latest_map[key] = max(latest_map.get(key, ''), row['scheduled_at'])
+                latest_map[key] = max(latest_map.get(key, ''), row['observed_at'])
+                slot_key = (row['business_site_id'], row['endpoint_id'], row['business_metric'],
+                            row.get('instrument_asset_code'), row['scheduled_at'])
+                if slot_key not in expected_slots:
+                    continue
+                if slot_key not in actual_slots:
+                    actual_slots.add(slot_key)
+                    actual_map[key] = actual_map.get(key, 0) + 1
                 threshold = th.get(row['business_metric']) or {}
                 low, high = threshold.get('low'), threshold.get('high')
                 if ((low is not None and row['standard_value'] < low)
                         or (high is not None and row['standard_value'] > high)):
-                    over_map[key] = over_map.get(key, 0) + 1
+                    if slot_key not in over_slots:
+                        over_slots.add(slot_key)
+                        over_map[key] = over_map.get(key, 0) + 1
         else:
             # Compatibility for old isolated databases only.  Once the normalized
             # schema exists, the production path above never reads sensor_data.
@@ -37844,7 +37873,7 @@ def _formal_observation_review_reasons(db, observation):
                 reasons.append(f'【Q-001】低于阈值下限 {threshold["low"]}')
             elif threshold['high'] is not None and value > threshold['high']:
                 reasons.append(f'【Q-001】超出阈值上限 {threshold["high"]}')
-    recorded_at = datetime.fromisoformat(observation['scheduled_at'])
+    recorded_at = datetime.fromisoformat(observation['observed_at'])
     history = _formal_business_observation_rows(
         db, (recorded_at - timedelta(days=7)).isoformat(), recorded_at.isoformat(),
         [observation['business_site_id']], metric)
@@ -37857,7 +37886,7 @@ def _formal_observation_review_reasons(db, observation):
         if z_score > 3.0:
             reasons.append(f'【Q-002】趋势突变 Z={z_score:.1f}')
     recent_same = [row for row in history
-                   if recorded_at - datetime.fromisoformat(row['scheduled_at']) <= timedelta(hours=2)
+                   if recorded_at - datetime.fromisoformat(row['observed_at']) <= timedelta(hours=2)
                    and row['standard_value'] == value]
     if len(recent_same) >= 5:
         reasons.append(f'【Q-004】数据僵死: 2小时内{len(recent_same)}笔值相同')
@@ -37888,7 +37917,7 @@ def _generate_formal_data_reviews(db, date_from, *, site_id=None, metric=None, l
              smart_result,smart_score,status,monitoring_business_observation_id)
             VALUES (?,?,?,?,?,?,?,?,'smart_reviewed',?)''', (
                 row['business_site_id'], row['business_metric'], row['standard_value'],
-                row['scheduled_at'], 'suspicious', '; '.join(reasons),
+                row['observed_at'], 'suspicious', '; '.join(reasons),
                 'suspicious', 1.0, row['id']))
         inserted += 1
     return {'generated': inserted, 'scanned': len(rows)}

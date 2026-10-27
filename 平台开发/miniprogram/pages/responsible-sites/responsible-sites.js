@@ -1,7 +1,7 @@
 const api = require('../../services/api.js');
 const maps = require('../../services/maps.js');
 const { getUser } = require('../../utils/auth.js');
-const { presentLatestCycle } = require('../../utils/stationMonitoringPresentation.js');
+const { presentLatestCycle, formatResultTime } = require('../../utils/stationMonitoringPresentation.js');
 const {
   normalizeStationHubTarget,
   localBusinessDate,
@@ -102,6 +102,7 @@ Page({
         sites: (res.items || []).map(site => Object.assign({}, site, {
           type_cn: maps.map(maps.SITE_TYPE, site.type, '其他站点'),
           latest_cycle: presentLatestCycle(site.latest_cycle),
+          latest_result_time_display: formatResultTime(site.last_valid_observation_at),
         })),
         loading: false, scope: resolvedScope, pendingScope: null, keyword: resolvedKeyword,
         keywordInput: resolvedKeyword, availableScopes,

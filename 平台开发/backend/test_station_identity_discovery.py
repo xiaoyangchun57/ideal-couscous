@@ -36,9 +36,9 @@ def write_workbook(path: Path, rows):
 
 
 def make_hj212(*, station="IDENTITY-MN", password="synthetic-password", qn="20260911164900001",
-               command="2011", data_time="20260911164900"):
+               command="2011", data_time="20260911164900", value="7.0"):
     value_field = "Avg" if command == "2061" else "Rtd"
-    cp = (f"DataTime={data_time};w01001-{value_field}=7.0;w01001-Flag=N;"
+    cp = (f"DataTime={data_time};w01001-{value_field}={value};w01001-Flag=N;"
           f"005-{value_field}=3.0;005-Flag=N")
     body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
     return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
@@ -631,14 +631,16 @@ class StationIdentityAndDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             ).lastrowid
             connection.commit()
         first = self.server._process_raw_result(make_hj212(), "2026-09-11T08:49:05+00:00")
-        second = self.server._process_raw_result(make_hj212(qn="20260911165000002"), "2026-09-11T08:50:05+00:00")
+        second = self.server._process_raw_result(make_hj212(
+            qn="20260911165000002", data_time="20260911165000", value="7.1"),
+            "2026-09-11T08:50:05+00:00")
         self.assertTrue(first.keep_connection)
         self.assertTrue(second.keep_connection)
         with closing(sqlite3.connect(self.database)) as connection:
             raw_ids = [row[0] for row in connection.execute("SELECT id FROM ingest_raw_frames ORDER BY id")]
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='configuration_pending'").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state='pending_parse'").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='configuration_pending'").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state='pending_parse'").fetchone()[0], 2)
             connection.execute(
                 "INSERT INTO ingest_parse_attempts(raw_frame_id,parser_version,parse_status) VALUES (?,'extra-diagnostic','parsed_header')",
                 (raw_ids[0],),
@@ -740,7 +742,7 @@ class StationIdentityAndDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repeated["outcomes"], {"already_normalized": 2})
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_values WHERE is_published=1").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_values WHERE is_published=1").fetchone()[0], 4)
         with mock.patch.object(self.storage, "persist_parsed", side_effect=StorageError("capacity")):
             with self.assertRaises(StorageError):
                 self.server._process_raw_result(make_hj212(qn="20260911165100003"), "2026-09-11T08:51:05+00:00")
@@ -890,7 +892,7 @@ class StationIdentityAndDiscoveryTest(unittest.IsolatedAsyncioTestCase):
             ).fetchall(), [("resolved",)])
         replayed = discovery.replay_hj212(
             self.database, endpoint_id=endpoint_id, start_id=raw_ids[0], end_id=raw_ids[-1])
-        self.assertEqual(replayed["outcomes"], {"not_projectable": 1, "partial": 1})
+        self.assertEqual(replayed["outcomes"], {"accepted": 1, "not_projectable": 1})
 
 
 if __name__ == "__main__":

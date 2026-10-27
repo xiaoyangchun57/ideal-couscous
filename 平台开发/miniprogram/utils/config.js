@@ -1,6 +1,6 @@
 const ONLINE_API_BASE_URL = 'https://ops.hhyc-tec.cn';
 const DEFAULT_LOCAL_API_BASE_URL = 'http://127.0.0.1:5000';
-const PREPARED_REAL_DEVICE_API_BASE_URL = 'http://192.168.2.108:5000'; // local-api-prepared-value
+const PREPARED_REAL_DEVICE_API_BASE_URL = ''; // local-api-prepared-value
 
 function runtimeEnvVersion() {
   try {
