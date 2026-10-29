@@ -1,82 +1,31 @@
-# 2026-08-11 r4 candidate closure
+# 开发标准：实现与业务契约
 
-- r3 product review is returned. `release-20260810-cross-module-freeze`, `release-20260810-cross-module-freeze-r2`, and `release-20260810-cross-module-freeze-r3` are historical rejection targets and must not move; `release-20260811-cross-module-freeze-r4` is the only candidate allowed by `deploy/release-candidates.json`.
-- The deletion contract is server-owned: one-item soft delete only, no physical file deletion or batch deletion, admin role-set required, explicit `source_type=test` with no business id, all stored inspection/workorder/manual-report links checked server-side, fixed 409 evidence rejection, complete audit snapshot, idempotent repeat, and only `{ reason }` sent by the client.
-- Final r5 local automation was green: backend 249 tests; miniprogram Node 11 test files; syntax aggregate 122 JS/Python files; React test:api 39 tests; lint/build; backend py_compile (75 files); candidate guard; and diff check all exit 0. Exact results and product real UI acceptance are in `docs/RELEASE_TEST_HANDOFF.md`.
-- The first syntax command was an invocation error (missing `--node-root`/`--python-root`, exit 2), then the required aggregate command passed exit 0. This distinction must remain visible in handoff evidence.
-- No real UI result may be inferred from these automated/API checks. All r4-affected Web notification/routing, plan executor, image deletion, risk-gate, refresh-consistency, and WeChat rapid-click scenarios are explicitly `未验证` pending product-manager UI re-test.
-- Browser initialization stopped after the exact error `failed to write kernel assets: 系统找不到指定的路径。 (os error 3)`; no external browser fallback was used. WeChat official recovery stopped after two attempts (25730 fallback report, then 36992 `EEXIST`); no second IDE or retry was started.
+仅开发或审阅相关业务变更时读取。共同规则见根AGENTS.md；工作树与写入者见governance/CURRENT_WORKING_AGREEMENT.md；验证见governance/VALIDATION.md。当前任务范围由自包含交接确定，不从历史候选或测试记录推断。
 
-# 开发规范
+## 实现责任
 
-## 权限和数据范围
+- 开发执行已批准业务逻辑、接口和集成变更；设计获得明确前端写入授权时暂停重叠写入，并在交接后审业务契约。不得顺手重构、添加未批准依赖、批量格式化或覆盖已有改动。
+- 修改前阅读代码、调用方和相关差异。采用满足完整目标的最小变更，不把“最小”理解为只修一个局部而破坏下游。
+- 失败保留用户输入与上下文并给可执行原因；异步请求处理适用的过期响应、卸载、取消和重复触发。为已复现失败或直接风险选择措施，不机械给所有路径叠加状态和兼容层。
+- 跨模块契约变化由引入方证明直接消费者仍可用，不能把本次造成的断链推给别的任务。临时凭证、环境地址和展示值不得持久化为业务身份。
 
-- 权限按用户全部角色合并判定，不能只依赖主角色字段。
-- 数据范围必须在服务端按站点、组织和业务归属收口。管理员兼运维员可按授权处理自己的业务，但普通操作员不能借由前端入口跨越范围。
-- 待审备件接口必须返回 `spare_part_request`，并与 Web `PartsRequestAuditTab` 的详情字段一致；`parts_request` 只能作为兼容字段。
-- 备件审批详情和动作必须显式传递 `request_type`，避免同编号业务串表；审批统计必须覆盖两类备件。
-- 计划审核中 `executor_name` 固定表示执行人，`requester_name` 固定表示申报人；Web 和小程序不得交换语义。
-- 批量审核必须先完成全部范围校验，再写入任何结果；禁止部分成功。
+## 服务端与数据
 
-## 审核、通知和证据
+- 权限按全部角色判断，服务端校验站点、组织和业务归属；管理员、审核员与现场人员权限不可互代。
+- 关键状态迁移在事务内重读权限、状态、资源和适用版本；批量先验证全部对象再写入，失败零副作用；弱网重试使用稳定幂等键，不重复业务记录。
+- 客户端不得自证可信身份、数量、来源、位置或审核结果；不得用创建/上传时间冒充可信业务时间。
+- 审计和原始证据默认保留，不静默改写。已确认无效的计划、执行记录和影像可由专门管理员入口二次确认、填写原因、保留删除摘要后按授权彻底删除；实际库存与车辆履约流水不得静默抹除。数据库治理中的删除另按明确数据选择合同，不由本规范授予。
+- 影像可信来源由系统判断，审核判断业务内容。无可信来源或归属的材料不计有效证据、不进主审核；不能把技术判定扩张为用户必须理解的新状态机。
 
-- 待审核事项按业务单元聚合：巡检影像按“计划 + 站点”，工单按工单，禁止一张图片一条当前提醒。
-- 审核卡必须显示决策重点和可追溯详情。计划显示站点、路线、车辆和备件；工单显示处置说明和影像；影像显示检查项、分类、水印和风险。
-- 通知分为 current 和 history。读完、业务闭环或事项过期后进入历史；已读批次不得在刷新时重新生成，只有新的业务证据才可产生新提醒。
-- 所有重要状态变更应关闭对应的未读通知，并保留历史记录。
-- 单元测试、API 响应或微信开发者工具结果不能替代真实 Web UI 证据；没有实际工具证据的项目必须逐项标为未覆盖。
+## 相关模块变更时保留的既有契约
 
-## 巡检、工单和资源
+下列是现有契约约束，不是证明当前实现已通过；只有改相关模块才读取/验证。当前明确业务变更优先，不以本节恢复旧流程。
 
-- 审批状态、现场执行状态、资源状态、证据审核状态和整改状态必须分轴保存，不能从一个字段推断其他状态。
-- 整改必须创建独立整改包，重新申请资源、审批、出车和签到；不得复活旧车辆、旧签到、旧申请或已完成计划。
-- 车辆从批准到归还均视为占用。延期、出车和归还动作必须基于当前状态校验。
-- 备件只在实际现场领用时扣减；审批本身不能假定库存仍可用。
-- 创建时的校验不能替代执行时校验。签到、出车、资源审批、领用、提交和办结必须在事务内重新读取并校验冲突状态。
-- 客户端弱网重试必须带稳定幂等键；服务端重复请求不得重复创建审核项、通知或记录。
+- 备件：待审类型使用spare_part_request；parts_request只作兼容。审批详情和动作显式传request_type防同编号串表，统计覆盖对应类型；实际领用才扣库存，执行时重查资源，审批不保证届时可用。
+- 人员字段：executor_name为执行人，requester_name为申报人；各端不得交换。
+- 审核和通知：按业务单元聚合，巡检影像按计划与站点、工单按工单，不逐张生成当前提醒。current/history分开；闭环/过期/适用已读动作移入历史，刷新不重复生成。变更状态同步处理相关未读事项。
+- 资源和状态：审批、执行、资源与影像质量状态不得互相推断；已有车辆从批准到归还的占用规则、延期/出车/归还校验保留，任何调整按对应业务合同实施。
+- 巡检整改：旧“必须新建整改包、重新出车签到”不再作为开发要求。用户已确认改为不合格照片记录及月度扣分；历史清理和具体实现按对应已批准业务交接，不因整理规范执行清理或宣称上线。工单生命周期不由巡检规则推导。
+- 兼容接口注明实际消费者与迁移边界，不因历史文档写废弃就删除。旧文档中的plan-schedules等路径是追溯线索，不替代相关修改时的真实调用核对。
 
-## 审计和兼容
-
-- 审计数据禁止物理删除。已公开的删除端点如需保留兼容性，应返回明确的业务拒绝码并保留原记录、时间线和附件。
-- 兼容端点必须标明当前用途和迁移边界。旧周计划仅作兼容，当前计划主链路为 `plan-schedules`；仍在整改和审核中使用的接口不得笼统标为废弃。
-
-## 测试门槛
-
-- 变更共享状态机、权限或资源占用时，必须补充最小后端回归用例，覆盖成功、越权、冲突和重复请求。
-- 变更小程序纯逻辑时，新增可由 Node 直接运行的测试；涉及页面或微信 API 的行为，补充开发者工具验收项。
-- React 路由、登录返回地址、通知跳转和角色可见性改变时，至少补充对应逻辑测试。
-- 未复跑的结果必须标为“待最终验收”，不得沿用历史通过数量。
-
-## 2026-08-11 r4 候选门禁
-
-- r1/r2/r3 标签均为历史追溯对象；当前唯一候选为 `release-20260811-cross-module-freeze-r4`，机器可校验清单见 `deploy/release-candidates.json`。
-- 部署登记或部署前必须执行 `python deploy/verify_release_candidate.py --tag <tag>`。该命令只精确接受清单中的候选名，不创建、移动或删除 Git 标签。
-- 交接语法门槛统一执行 `python -B dev_scripts/check_syntax.py --node-root miniprogram --python-root backend`；脚本累计每个文件的失败并在任一失败时返回非零。
-
-## 2026-08-10 历史 r2 归档证据（不作为 r3）
-
-- r1 提交 `c78de8c`/标签 `release-20260810-cross-module-freeze` 与 r2 提交 `dce1e72`/标签 `release-20260810-cross-module-freeze-r2` 均已退回，只保留历史追溯，禁止部署、复用或移动；以下数量不是 r3 结果。
-- 后端全量测试：`230 passed`，退出码 0；运行期间有全局 `pytest-qt`、PySide6、NumPy 兼容警告，但不影响通过结果。
-- 小程序 Node `8/8`，React `27/27`；React lint/build、`python -m py_compile backend/app.py` 和 `git diff --check` 均通过。`git diff --check` 仅有 LF→CRLF 提示。
-- `python backend/test_api.py` 通过并读取 37 个站点。后端最终仅监听 `127.0.0.1:5000`，遗留 `0.0.0.0` 进程已清理。
-- 浏览器实测：`/audit?tab=plan&plan=38` 准确打开计划 #38；过期计划审批返回明确业务提示且待办不消失；不存在的数据审核对象显示无权限/不存在提示；消息 current/history 为 `0/22`。
-- 微信开发者工具实测：现有实例编译并加载本地代码成功；admin 当前/历史消息为 `0/22`；点击计划 #38 的真实通知准确进入 `/pages/plan-detail/plan-detail?id=38`；系统标红影像在提交前显示逐张核对确认，取消后不产生提交。
-- 安全回归覆盖旧巡检照片与工单直达端点角色/站点授权、批量原子校验和默认回环绑定。
-- r2 本地冻结标签为 `release-20260810-cross-module-freeze-r2`；仅交上线测试线，未推送、未部署，未操作线上数据库或容器。
-
-## 2026-08-10 r3 冻结规则
-
-- `release-20260810-cross-module-freeze-r3` 是唯一候选，只有最终后端全量 unittest、全部小程序 Node 测试和 JavaScript 语法检查、React test/lint/build、backend 全量 `py_compile`、`git diff --check` 以及本地服务集成正反向测试全部通过后才允许创建。
-- r1/r2 标签禁止部署、复用、移动或删除；本轮不推送、不部署、不修改线上数据库或线上容器。
-- 本地服务固定使用 `127.0.0.1:5000`，不能为了浏览器验收反复切换端口。
-- 浏览器通知面板、`spare_part_request` 精确定位及处理状态、Web 风险影像门禁、Web 消息空/失败状态和 Web 截图没有实际证据时必须记为未覆盖，不能用其他端证据替代。
-- 最终测试时间、测试数、退出码、残余边界和进程清理状态必须记录在 `docs/RELEASE_TEST_HANDOFF.md` 与 `docs/local-freeze-acceptance-2026-08-10.md`。
-
-## 2026-08-10 r3 实际复跑摘要
-
-- 后端全量 unittest：23:25:23-23:26:02，`227 tests`，exit 0；小程序 Node：23:26:12，`10 passed`，exit 0；小程序全量 JavaScript 语法：23:26:24-23:26:26，`46 files`，exit 0。
-- React `test:api`：23:26:34-23:26:35，`31 passed`，exit 0；lint：23:26:42-23:26:45，exit 0；build：23:26:53-23:26:57，exit 0。
-- backend 全量 `py_compile`：23:27:06-23:27:12，`66 files`，exit 0；`git diff --check`：23:27:21，exit 0，仅 LF→CRLF 警告。
-- `backend/test_api.py` 在服务运行中于 23:27:32 exit 0，读取 37 个站点；停止服务后于 23:27:47-23:27:50 exit 1，WinError 10061，反向失败符合预期。
-- 历史工具/API 状态记录（不作为 r4 UI 证据）：复用 `36992/9420` 时读取到 `executor_name=万松`、`requester_name=万松`，并观察到不存在计划失败恢复、风险影像取消门禁、消息空/失败/旧数据状态；r4 Web 计划执行人、备件通知、风险门禁、影像删除及微信快速连点仍均为 `未验证`，不可写为通过。
-- 最终测试后停止本轮后端/Vite 和挂起自动化脚本，保留用户已有微信开发者工具；未推送、未部署、未操作线上数据库或线上容器。
+原2026年8月候选、测试计数、端口和历史操作完整保留于governance/history/DEVELOPMENT_STANDARDS_before_20261029.md，仅作证据，不是当前执行命令。
