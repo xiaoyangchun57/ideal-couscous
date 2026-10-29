@@ -74,6 +74,32 @@ class IngestionStorageTest(unittest.TestCase):
         rows = self.rows("ingest_raw_frames")
         self.assertEqual([row[9] for row in rows], ["unknown_endpoint", "credential_failed"])
 
+    def test_repeated_transport_limits_are_aggregated_without_detail_growth(self):
+        for error_type in (
+            "source_cooling", "source_connection_limit", "source_connection_burst",
+        ):
+            self.storage.record_connection_error(error_type)
+            self.storage.record_connection_error(error_type)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors"
+            ).fetchone()[0], 0)
+            rows = connection.execute(
+                """SELECT error_type,SUM(occurrence_count)
+                     FROM station_ingest_error_hourly
+                    GROUP BY error_type ORDER BY error_type"""
+            ).fetchall()
+            state = connection.execute(
+                """SELECT latest_error_type FROM station_ingest_current_state
+                    WHERE source_key='transport:unidentified'"""
+            ).fetchone()
+        self.assertEqual(rows, [
+            ("source_connection_burst", 2),
+            ("source_connection_limit", 2),
+            ("source_cooling", 2),
+        ])
+        self.assertEqual(state[0], "source_connection_burst")
+
     def test_duplicates_keep_raw_receipts_without_duplicate_canonical_record(self):
         self.add_endpoint()
         server = StationIngestServer(self.storage)

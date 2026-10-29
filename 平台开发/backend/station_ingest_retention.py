@@ -52,18 +52,14 @@ LEGACY_RAW_INDEXES = (
     "idx_ingest_raw_station_auth_received",
 )
 CLEANUP_INDEXES = {
-    "idx_ingest_parse_raw_cleanup":
-        "CREATE INDEX IF NOT EXISTS idx_ingest_parse_raw_cleanup ON ingest_parse_attempts(raw_frame_id)",
     "idx_ingest_errors_raw_cleanup":
         "CREATE INDEX IF NOT EXISTS idx_ingest_errors_raw_cleanup ON ingest_errors(raw_frame_id)",
-    "idx_observation_batches_raw_cleanup":
-        "CREATE INDEX IF NOT EXISTS idx_observation_batches_raw_cleanup ON observation_batches(raw_frame_id)",
-    "idx_monitoring_quality_raw_cleanup":
-        "CREATE INDEX IF NOT EXISTS idx_monitoring_quality_raw_cleanup ON monitoring_quality_issues(raw_frame_id)",
     "idx_ingest_raw_duplicate_cleanup":
         "CREATE INDEX IF NOT EXISTS idx_ingest_raw_duplicate_cleanup ON ingest_raw_frames(duplicate_of_raw_frame_id)",
 }
 RAW_PRUNE_SCAN_LIMIT = 256
+EXACT_DUPLICATE_BATCH_TIME_BUDGET_SECONDS = 30.0
+EXACT_DUPLICATE_CHECKPOINT_VERSION = "station-ingest-exact-duplicate-checkpoint-v1"
 
 
 class _StatementDeadlineExceeded(RuntimeError):
@@ -1188,6 +1184,411 @@ def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) 
     return path, digest
 
 
+def read_detail_archive_record(
+    connection: sqlite3.Connection, detail_kind: str, source_id: int,
+) -> dict[str, Any]:
+    """Read and verify one archived detail row through the recorded archive part."""
+    parts = connection.execute(
+        """SELECT archive_path,content_sha256,record_count,mirror_path,mirror_verified_at
+           FROM station_ingest_detail_archive_parts
+           WHERE detail_kind=? AND first_source_id<=? AND last_source_id>=?
+           ORDER BY id DESC""",
+        (detail_kind, source_id, source_id),
+    ).fetchall()
+    for part in parts:
+        path = _archive_read_path(part[0], part[3], part[4])
+        digest = hashlib.sha256()
+        count = 0
+        selected = None
+        evidence: dict[str, dict[str, Any]] = {}
+        try:
+            with gzip.open(path, "rb") as stream:
+                for line in stream:
+                    digest.update(line)
+                    count += 1
+                    item = json.loads(line.decode("utf-8"))
+                    if item.get("record_type") == "raw_evidence":
+                        payload = base64.b64decode(item["frame_b64"], validate=True)
+                        if hashlib.sha256(payload).hexdigest() != item["frame_sha256"]:
+                            raise RetentionError("detail archive raw evidence digest mismatch")
+                        evidence[str(item["evidence_key"])] = item
+                    elif int(item.get("id", -1)) == source_id:
+                        selected = item
+        except RetentionError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+            raise RetentionError("detail archive cannot be read; retry after storage recovery") from exc
+        if digest.hexdigest() != str(part[1]) or count != int(part[2]):
+            raise RetentionError("detail archive content verification failed")
+        if selected is not None:
+            if selected.get("evidence_key"):
+                selected = dict(selected)
+                selected["evidence"] = evidence.get(str(selected["evidence_key"]))
+                if selected["evidence"] is None:
+                    raise RetentionError("detail archive raw evidence is unavailable")
+            return selected
+    raise RetentionError("archived detail record is unavailable")
+
+
+def _exact_duplicate_rows(
+    connection: sqlite3.Connection, raw_ids: list[int], cutoff: str,
+) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    for identifiers in _batches(raw_ids):
+        marks = ",".join("?" * len(identifiers))
+        rows.extend(connection.execute(
+            f"""SELECT duplicate.id,duplicate.endpoint_id,duplicate.station_code,
+                       duplicate.received_at,duplicate.frame_sha256,
+                       duplicate.logical_key_sha256,duplicate.raw_frame,
+                       duplicate.body_length,duplicate.crc_status,
+                       duplicate.authentication_status,duplicate.disposition,
+                       duplicate.duplicate_of_raw_frame_id,duplicate.persistence_state,
+                       canonical.endpoint_id AS canonical_endpoint_id,
+                       canonical.station_code AS canonical_station_code,
+                       canonical.received_at AS canonical_received_at,
+                       canonical.frame_sha256 AS canonical_frame_sha256,
+                       canonical.logical_key_sha256 AS canonical_logical_key_sha256,
+                       canonical.raw_frame AS canonical_raw_frame,
+                       canonical.body_length AS canonical_body_length,
+                       canonical.crc_status AS canonical_crc_status,
+                       canonical.authentication_status AS canonical_authentication_status,
+                       canonical.disposition AS canonical_disposition,
+                       canonical.persistence_state AS canonical_persistence_state
+                FROM ingest_raw_frames duplicate
+                JOIN ingest_raw_frames canonical
+                  ON canonical.id=duplicate.duplicate_of_raw_frame_id
+                 AND duplicate.disposition='duplicate'
+                 AND duplicate.endpoint_id=canonical.endpoint_id
+                 AND duplicate.logical_key_sha256=canonical.logical_key_sha256
+                 AND duplicate.frame_sha256=canonical.frame_sha256
+                WHERE duplicate.id IN ({marks}) AND duplicate.received_at<?
+                ORDER BY duplicate.id""",
+            (*identifiers, cutoff),
+        ).fetchall())
+    return rows
+
+
+def _open_errors_for_raw_ids(
+    connection: sqlite3.Connection, raw_ids: list[int],
+) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    for identifiers in _batches(raw_ids):
+        marks = ",".join("?" * len(identifiers))
+        rows.extend(connection.execute(
+            f"""SELECT error.*,raw.endpoint_id,raw.station_code,
+                       CASE WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                            WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                              THEN 'station:' || raw.station_code
+                            ELSE 'transport:unidentified' END AS source_key
+                FROM ingest_errors error
+                LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                WHERE error.status='open' AND error.raw_frame_id IN ({marks})
+                ORDER BY error.raw_frame_id,error.id""",
+            identifiers,
+        ).fetchall())
+    return rows
+
+
+def _open_errors_by_ids(
+    connection: sqlite3.Connection, error_ids: list[int],
+) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    for identifiers in _batches(error_ids):
+        marks = ",".join("?" * len(identifiers))
+        rows.extend(connection.execute(
+            f"""SELECT error.*,raw.endpoint_id,raw.station_code,
+                       CASE WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                            WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                              THEN 'station:' || raw.station_code
+                            ELSE 'transport:unidentified' END AS source_key
+                FROM ingest_errors error
+                LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                WHERE error.status='open' AND error.id IN ({marks})
+                ORDER BY error.id""",
+            identifiers,
+        ).fetchall())
+    return rows
+
+
+def _error_group_token(group: tuple[str, str]) -> str:
+    return json.dumps(group, separators=(",", ":"))
+
+
+def _bounded_error_representatives(
+    connection: sqlite3.Connection,
+    minimums: dict[tuple[str, str], tuple[str, int]],
+    batch_errors: list[sqlite3.Row], *, scan_limit: int,
+    deadline: float | None, search_state: dict[str, dict[str, Any]],
+) -> tuple[
+    dict[tuple[str, str], sqlite3.Row], dict[str, list[str]],
+    dict[str, dict[str, Any]], set[tuple[str, str]], dict[str, int],
+]:
+    """Find newer representatives from the batch first, then resume bounded index pages."""
+    representatives: dict[tuple[str, str], sqlite3.Row] = {}
+    plans: dict[str, list[str]] = {}
+    for row in sorted(
+            batch_errors,
+            key=lambda item: (str(item["created_at"]), int(item["id"])), reverse=True):
+        group = (str(row["source_key"]), str(row["error_type"]))
+        minimum = minimums.get(group)
+        if minimum is not None and group not in representatives and (
+                str(row["created_at"]), int(row["id"])) > minimum:
+            representatives[group] = row
+
+    unresolved = [group for group in minimums if group not in representatives]
+    page_limit = max(1, scan_limit // max(1, len(unresolved)))
+    next_state: dict[str, dict[str, Any]] = {}
+    exhausted: set[tuple[str, str]] = set()
+    scanned_rows = 0
+    searched_groups = 0
+    for group in unresolved:
+        if _deadline_expired(deadline):
+            raise _StatementDeadlineExceeded("exact_error_representative_scan")
+        source_key, error_type = group
+        minimum_created_at, minimum_id = minimums[group]
+        token = _error_group_token(group)
+        state = search_state.get(token, {})
+        if (state.get("minimum_created_at") != minimum_created_at
+                or int(state.get("minimum_id", -1)) != minimum_id):
+            state = {}
+        if state.get("exhausted"):
+            exhausted.add(group)
+            next_state[token] = dict(state)
+            continue
+        remaining_budget = scan_limit - scanned_rows
+        if remaining_budget <= 0:
+            deferred_state = {
+                "source_key": source_key,
+                "error_type": error_type,
+                "minimum_created_at": minimum_created_at,
+                "minimum_id": minimum_id,
+            }
+            for key in ("after_created_at", "after_id"):
+                if state.get(key) is not None:
+                    deferred_state[key] = state[key]
+            next_state[token] = deferred_state
+            continue
+        current_page_limit = min(page_limit, remaining_budget)
+        after_created_at = state.get("after_created_at")
+        after_id = state.get("after_id")
+        cursor_clause = ""
+        parameters: list[Any] = [error_type]
+        if after_created_at is not None and after_id is not None:
+            cursor_clause = " AND (error.created_at<? OR (error.created_at=? AND error.id<?))"
+            parameters.extend([after_created_at, after_created_at, int(after_id)])
+        sql = f"""SELECT error.*,raw.endpoint_id,raw.station_code,
+                         CASE WHEN raw.endpoint_id IS NOT NULL THEN 'endpoint:' || raw.endpoint_id
+                              WHEN raw.station_code IS NOT NULL AND raw.station_code<>''
+                                THEN 'station:' || raw.station_code
+                              ELSE 'transport:unidentified' END AS source_key
+                  FROM ingest_errors error INDEXED BY idx_ingest_errors_open
+                  LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+                  WHERE error.error_type=? AND error.status='open'{cursor_clause}
+                  ORDER BY error.created_at DESC,error.id DESC LIMIT ?"""
+        parameters.append(current_page_limit)
+        if error_type not in plans:
+            with _statement_deadline(
+                    connection, deadline, "exact_error_representative_plan"):
+                plans[error_type] = [str(row[3]) for row in connection.execute(
+                    "EXPLAIN QUERY PLAN " + sql, parameters)]
+        with _statement_deadline(
+                connection, deadline, "exact_error_representative_scan"):
+            rows = connection.execute(sql, parameters).fetchall()
+        searched_groups += 1
+        scanned_rows += len(rows)
+        reached_candidate = False
+        for row in rows:
+            row_group = (str(row["source_key"]), str(row["error_type"]))
+            if row_group != group:
+                continue
+            identity = (str(row["created_at"]), int(row["id"]))
+            if identity > minimums[group]:
+                representatives[group] = row
+            else:
+                reached_candidate = True
+            break
+        if group in representatives:
+            continue
+        if reached_candidate or len(rows) < current_page_limit:
+            exhausted.add(group)
+            next_state[token] = {
+                "source_key": source_key,
+                "error_type": error_type,
+                "minimum_created_at": minimum_created_at,
+                "minimum_id": minimum_id,
+                "exhausted": True,
+            }
+            continue
+        last = rows[-1]
+        next_state[token] = {
+            "source_key": source_key,
+            "error_type": error_type,
+            "minimum_created_at": minimum_created_at,
+            "minimum_id": minimum_id,
+            "after_created_at": str(last["created_at"]),
+            "after_id": int(last["id"]),
+        }
+    return (
+        representatives, plans, next_state, exhausted,
+        {
+            "groups": len(minimums), "searched_groups": searched_groups,
+            "page_limit": page_limit, "rows": scanned_rows,
+        },
+    )
+
+def _online_raw_evidence(exact: sqlite3.Row) -> tuple[int, bytes] | None:
+    candidates = (
+        (int(exact["duplicate_of_raw_frame_id"]), bytes(exact["canonical_raw_frame"] or b"")),
+        (int(exact["id"]), bytes(exact["raw_frame"] or b"")),
+    )
+    available = []
+    for raw_id, payload in candidates:
+        if not payload:
+            continue
+        if hashlib.sha256(payload).hexdigest() != str(exact["frame_sha256"]):
+            raise RetentionError("online exact duplicate evidence digest mismatch")
+        available.append((raw_id, payload))
+    if len(available) == 2 and available[0][1] != available[1][1]:
+        raise RetentionError("online exact duplicate evidence content mismatch")
+    return available[0] if available else None
+
+
+def _write_exact_duplicate_error_bundle(
+    root: Path, error_records: list[dict[str, Any]],
+    evidence_records: list[dict[str, Any]], *, deadline: float | None,
+) -> tuple[Path, str, list[dict[str, Any]], bool]:
+    records = evidence_records + error_records
+    lines = []
+    digest = hashlib.sha256()
+    for record in records:
+        if _deadline_expired(deadline):
+            raise _StatementDeadlineExceeded("exact_error_archive_write")
+        line = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        lines.append(line)
+        digest.update(line)
+    content_digest = digest.hexdigest()
+    directory = root / "detail-archives"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (
+        f"ingest_error-{error_records[0]['id']}-{error_records[-1]['id']}-"
+        f"{content_digest[:16]}.jsonl.gz")
+    created = not path.exists()
+    if created:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with gzip.open(temporary, "wb") as stream:
+                for line in lines:
+                    if _deadline_expired(deadline):
+                        raise _StatementDeadlineExceeded("exact_error_archive_write")
+                    stream.write(line)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    verified = hashlib.sha256()
+    actual = []
+    try:
+        with gzip.open(path, "rb") as stream:
+            for line in stream:
+                if _deadline_expired(deadline):
+                    raise _StatementDeadlineExceeded("exact_error_archive_verify")
+                verified.update(line)
+                actual.append(json.loads(line.decode("utf-8")))
+    except _StatementDeadlineExceeded:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetentionError("exact duplicate error archive cannot be verified") from exc
+    if verified.hexdigest() != content_digest or actual != records:
+        raise RetentionError("exact duplicate error archive content verification failed")
+    return path, content_digest, records, created
+
+
+def _archived_raw_evidence_batch(
+    connection: sqlite3.Connection, raw_ids: list[int], *, deadline: float | None,
+) -> dict[int, bytes]:
+    """Read each referenced raw archive part at most once for this cleanup batch."""
+    if not raw_ids:
+        return {}
+    references: list[sqlite3.Row] = []
+    for identifiers in _batches(raw_ids):
+        marks = ",".join("?" * len(identifiers))
+        with _statement_deadline(connection, deadline, "exact_archive_reference_scan"):
+            references.extend(connection.execute(
+                f"""SELECT evidence.source_raw_frame_id,evidence.archive_part_id,
+                           evidence.archive_record_index,evidence.record_sha256,
+                           evidence.frame_sha256,part.archive_path,part.content_sha256,
+                           metadata.mirror_path,metadata.mirror_verified_at
+                    FROM monitoring_archive_evidence_refs evidence
+                    JOIN monitoring_raw_archive_parts part ON part.id=evidence.archive_part_id
+                    LEFT JOIN monitoring_raw_archive_part_metadata metadata
+                      ON metadata.archive_part_id=part.id
+                    WHERE evidence.source_raw_frame_id IN ({marks})""",
+                identifiers,
+            ).fetchall())
+    by_part: dict[int, list[sqlite3.Row]] = {}
+    for reference in references:
+        by_part.setdefault(int(reference["archive_part_id"]), []).append(reference)
+    recovered: dict[int, bytes] = {}
+    for part_references in by_part.values():
+        first = part_references[0]
+        try:
+            path = _archive_read_path(
+                first["archive_path"], first["mirror_path"], first["mirror_verified_at"])
+            wanted = {int(row["archive_record_index"]): row for row in part_references}
+            selected: dict[int, bytes] = {}
+            digest = hashlib.sha256()
+            with gzip.open(path, "rb") as stream:
+                for index, line in enumerate(stream):
+                    if _deadline_expired(deadline):
+                        raise _StatementDeadlineExceeded("exact_archive_evidence_read")
+                    digest.update(line)
+                    if index in wanted:
+                        selected[index] = line
+            if digest.hexdigest() != str(first["content_sha256"]):
+                continue
+            for index, reference in wanted.items():
+                line = selected.get(index)
+                if line is None or hashlib.sha256(line).hexdigest() != str(
+                        reference["record_sha256"]):
+                    continue
+                item = json.loads(line.decode("ascii"))
+                payload = base64.b64decode(item["frame_b64"], validate=True)
+                if hashlib.sha256(payload).hexdigest() != str(reference["frame_sha256"]):
+                    continue
+                recovered[int(reference["source_raw_frame_id"])] = payload
+        except _StatementDeadlineExceeded:
+            raise
+        except (RetentionError, OSError, ValueError, KeyError, UnicodeDecodeError,
+                json.JSONDecodeError):
+            continue
+    return recovered
+
+
+def _register_detail_archive_part(
+    connection: sqlite3.Connection, kind: str, records: list[dict[str, Any]],
+    path: Path, digest: str, *, source_records: list[dict[str, Any]] | None = None,
+) -> None:
+    source_records = records if source_records is None else source_records
+    ids = [int(row["id"]) for row in source_records]
+    connection.execute(
+        """INSERT OR IGNORE INTO station_ingest_detail_archive_parts(
+               detail_kind,archive_path,content_sha256,first_source_id,last_source_id,
+               record_count,range_start,range_end,verified_at,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (kind, str(path), digest, min(ids), max(ids), len(records),
+         min(str(row.get("created_at") or row.get("bucket_hour")) for row in source_records),
+         max(str(row.get("created_at") or row.get("bucket_hour")) for row in source_records),
+         _now(), _now()),
+    )
+    registered = connection.execute(
+        """SELECT detail_kind,content_sha256,first_source_id,last_source_id,record_count
+           FROM station_ingest_detail_archive_parts WHERE archive_path=?""",
+        (str(path),),
+    ).fetchone()
+    expected = (kind, digest, min(ids), max(ids), len(records))
+    if registered is None or tuple(registered) != expected:
+        raise RetentionError("detail archive registration does not match verified content")
+
+
 def _archive_detail_batch(
     database: Path, root: Path, kind: str, cutoff: str, *, batch_limit: int,
 ) -> int:
@@ -1266,16 +1667,7 @@ def _archive_detail_batch(
             ).fetchone()[0]
         if current != len(ids):
             raise RetentionError("detail rows changed while archive was being written")
-        connection.execute(
-            """INSERT OR IGNORE INTO station_ingest_detail_archive_parts(
-                   detail_kind,archive_path,content_sha256,first_source_id,last_source_id,
-                   record_count,range_start,range_end,verified_at,created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (kind, str(path), digest, ids[0], ids[-1], len(ids),
-             min(str(row.get("created_at") or row.get("bucket_hour")) for row in records),
-             max(str(row.get("created_at") or row.get("bucket_hour")) for row in records),
-             _now(), _now()),
-        )
+        _register_detail_archive_part(connection, kind, records, path, digest)
         if kind == "error_summary":
             connection.execute(
                 f"DELETE FROM station_ingest_error_hourly WHERE rowid IN ({placeholders})", ids)
@@ -1335,6 +1727,62 @@ def _protected_raw_ids(connection: sqlite3.Connection, raw_ids: list[int]) -> se
         for query in queries:
             protected.update(int(row[0]) for row in connection.execute(
                 query.format(marks=marks), batch,
+            ))
+    return protected
+
+
+def _exact_cleanup_non_error_protection(
+    connection: sqlite3.Connection, raw_ids: list[int], receipt_cutoff: str,
+) -> set[int]:
+    """Return protections that remain after historical errors and receipts are retired."""
+    protected: set[int] = set()
+    queries = (
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN observation_values value ON value.observation_batch_id=batch.id
+           WHERE value.quality IN ('valid','suspect') AND value.is_published=1
+             AND batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_business_observations business ON business.observation_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_hourly_value_series hourly ON hourly.source_last_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN monitoring_hourly_values hourly ON hourly.source_last_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM observation_batches batch
+           JOIN observation_batches replacement ON replacement.replaces_batch_id=batch.id
+           WHERE batch.raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM monitoring_quality_issues
+           WHERE status='open' AND raw_frame_id IN ({marks})""",
+        """SELECT batch.raw_frame_id FROM monitoring_quality_issues issue
+           JOIN observation_batches batch ON batch.id=issue.observation_batch_id
+           WHERE issue.status='open' AND batch.raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM monitoring_normalization_retries
+           WHERE state IN ('pending','retrying','exhausted') AND raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_slot_summaries
+           WHERE canonical_raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_dedup_keys
+           WHERE protected=1 AND canonical_raw_frame_id IN ({marks})""",
+        """SELECT canonical_raw_frame_id FROM station_ingest_duplicate_links
+           WHERE canonical_raw_frame_id IN ({marks})""",
+        """SELECT duplicate_of_raw_frame_id FROM ingest_raw_frames
+           WHERE duplicate_of_raw_frame_id IN ({marks})""",
+        """SELECT raw_frame_id FROM station_ingest_recent_receipts
+           WHERE received_at>=? AND raw_frame_id IN ({marks})""",
+        """SELECT latest_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_raw_frame_id IN ({marks})""",
+        """SELECT latest_authenticated_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_authenticated_raw_frame_id IN ({marks})""",
+        """SELECT latest_credential_failed_raw_frame_id FROM station_ingest_current_state
+           WHERE latest_credential_failed_raw_frame_id IN ({marks})""",
+    )
+    for batch in _batches(raw_ids):
+        marks = ",".join("?" * len(batch))
+        for query in queries:
+            parameters = (receipt_cutoff, *batch) if "received_at>=?" in query else batch
+            protected.update(int(row[0]) for row in connection.execute(
+                query.format(marks=marks), parameters,
             ))
     return protected
 
@@ -1460,23 +1908,57 @@ def _delete_confirmed_duplicate_rows(
     return deleted
 
 
-def ensure_duplicate_cleanup_indexes(database: Path) -> dict[str, Any]:
-    """Create resumable cleanup-only indexes and report their file-space impact."""
+def ensure_duplicate_cleanup_indexes(
+    database: Path, *, time_budget_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Create only the two indexes required by measured cleanup protection queries."""
+    if time_budget_seconds is not None and time_budget_seconds <= 0:
+        raise RetentionError("cleanup index time budget must be positive")
     started_at = datetime.now(timezone.utc)
+    deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
     before_bytes = Path(database).stat().st_size
     with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
-        existing = {row[0] for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'")}
+        with _statement_deadline(connection, deadline, "exact_index_inventory"):
+            existing = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
         created = []
+        index_stages = []
         for name, statement in CLEANUP_INDEXES.items():
+            stage_started = time.monotonic()
+            stage_before_bytes = Path(database).stat().st_size
             if name not in existing:
-                connection.execute(statement)
-                created.append(name)
+                try:
+                    _begin_immediate_with_deadline(connection, deadline, f"exact_index_lock:{name}")
+                    with _statement_deadline(connection, deadline, f"exact_index_create:{name}"):
+                        connection.execute(statement)
+                    connection.commit()
+                    created.append(name)
+                    existing.add(name)
+                except Exception as exc:
+                    if connection.in_transaction:
+                        connection.rollback()
+                    if isinstance(exc, _StatementDeadlineExceeded):
+                        exc.checkpoint = {"index_stages": index_stages}
+                    raise
+            index_stages.append({
+                "name": name,
+                "created": name in created,
+                "elapsed_seconds": round(time.monotonic() - stage_started, 3),
+                "database_growth_bytes": max(
+                    0, Path(database).stat().st_size - stage_before_bytes),
+            })
+        try:
+            plans = _exact_duplicate_cleanup_query_plans(connection, deadline=deadline)
+        except _StatementDeadlineExceeded as exc:
+            exc.checkpoint = {"index_stages": index_stages}
+            raise
     return {
         "created": created,
+        "index_stages": index_stages,
         "database_growth_bytes": max(0, Path(database).stat().st_size - before_bytes),
         "elapsed_seconds": round(
             (datetime.now(timezone.utc) - started_at).total_seconds(), 3),
+        "query_plans": plans,
     }
 
 
@@ -1491,6 +1973,672 @@ def drop_duplicate_cleanup_indexes(database: Path) -> list[str]:
         connection.commit()
     return removed
 
+
+def _exact_duplicate_cleanup_query_plans(
+    connection: sqlite3.Connection, *, deadline: float | None = None,
+) -> dict[str, list[str]]:
+    queries = {
+        "bounded_raw_scan": (
+            "SELECT id FROM ingest_raw_frames WHERE id>? AND id<=? ORDER BY id LIMIT ?",
+            (0, 1, 1),
+        ),
+        "open_error_protection": (
+            "SELECT raw_frame_id FROM ingest_errors WHERE status='open' AND raw_frame_id IN (?)",
+            (1,),
+        ),
+        "canonical_reference_protection": (
+            "SELECT duplicate_of_raw_frame_id FROM ingest_raw_frames WHERE duplicate_of_raw_frame_id IN (?)",
+            (1,),
+        ),
+    }
+    plans = {}
+    for name, (sql, params) in queries.items():
+        with _statement_deadline(connection, deadline, f"exact_query_plan:{name}"):
+            plans[name] = [
+                str(row[3]) for row in connection.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+            ]
+    return plans
+
+
+def _require_exact_duplicate_cleanup_indexes(connection: sqlite3.Connection) -> None:
+    existing = {str(row[0]) for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name IN (?,?)",
+        tuple(CLEANUP_INDEXES),
+    )}
+    missing = [name for name in CLEANUP_INDEXES if name not in existing]
+    if missing:
+        raise RetentionError(
+            "exact duplicate cleanup indexes are missing; run prepare-exact-duplicate-cleanup first: "
+            + ",".join(missing))
+
+
+def _require_exact_duplicate_cleanup_ready(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        """SELECT migration_version,status FROM station_ingest_cutover_state
+           WHERE cutover_name='station-ingest-startup-ready-v1'"""
+    ).fetchone()
+    if row is None or str(row[0]) != "20261016_014_station_ingest_retention_windows":
+        raise RetentionError("station-ingestion startup-ready state is missing or incompatible")
+    if str(row[1]) != "completed":
+        raise RetentionError("station-ingestion startup-ready state is not completed")
+
+
+def _parse_fixed_cutoff(value: str, label: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise RetentionError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise RetentionError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _normalize_candidate_ranges(
+    values: list[str] | tuple[tuple[int, int], ...] | None,
+) -> tuple[tuple[int, int], ...]:
+    if not values:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    for value in values:
+        if isinstance(value, str):
+            try:
+                start_text, end_text = value.split("-", 1)
+                start, end = int(start_text), int(end_text)
+            except (TypeError, ValueError) as exc:
+                raise RetentionError(
+                    f"invalid exact duplicate candidate range: {value}") from exc
+        else:
+            start, end = int(value[0]), int(value[1])
+        if start <= 0 or end < start:
+            raise RetentionError(
+                f"invalid exact duplicate candidate range: {start}-{end}")
+        ranges.append((start, end))
+    ranges.sort()
+    for previous, current in zip(ranges, ranges[1:]):
+        if current[0] <= previous[1]:
+            raise RetentionError("exact duplicate candidate ranges must not overlap")
+    return tuple(ranges)
+
+
+def _candidate_scope(candidate_ranges: tuple[tuple[int, int], ...]) -> str | None:
+    if not candidate_ranges:
+        return None
+    encoded = json.dumps(candidate_ranges, separators=(",", ":")).encode("ascii")
+    return "ranges-sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _exact_duplicate_checkpoint_state_name(
+    *, cutoff: str, receipt_cutoff: str, upper_raw_id: int,
+    candidate_scope: str | None,
+) -> str:
+    identity = json.dumps({
+        "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+        "upper_raw_id": upper_raw_id, "candidate_scope": candidate_scope,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return EXACT_DUPLICATE_CHECKPOINT_VERSION + ":" + hashlib.sha256(identity).hexdigest()
+
+
+def _matches_exact_duplicate_checkpoint(
+    checkpoint: Any, *, cutoff: str, receipt_cutoff: str, upper_raw_id: int,
+    candidate_scope: str | None,
+) -> bool:
+    return bool(
+        isinstance(checkpoint, dict)
+        and checkpoint.get("cutoff") == cutoff
+        and checkpoint.get("receipt_cutoff") == receipt_cutoff
+        and checkpoint.get("upper_raw_id") == upper_raw_id
+        and checkpoint.get("candidate_scope") == candidate_scope)
+
+
+def _store_exact_duplicate_checkpoint(
+    connection: sqlite3.Connection, checkpoint: dict[str, Any],
+) -> None:
+    state_name = _exact_duplicate_checkpoint_state_name(
+        cutoff=str(checkpoint["cutoff"]),
+        receipt_cutoff=str(checkpoint["receipt_cutoff"]),
+        upper_raw_id=int(checkpoint["upper_raw_id"]),
+        candidate_scope=checkpoint.get("candidate_scope"),
+    )
+    connection.execute(
+        """INSERT INTO station_ingest_cutover_state(
+               cutover_name,migration_version,status,detail,updated_at)
+           VALUES (?,?,'completed',?,?)
+           ON CONFLICT(cutover_name) DO UPDATE SET
+             migration_version=excluded.migration_version,
+             status=excluded.status,detail=excluded.detail,updated_at=excluded.updated_at""",
+        (state_name, EXACT_DUPLICATE_CHECKPOINT_VERSION,
+         json.dumps({"exact_duplicate_checkpoint": checkpoint}, sort_keys=True), _now()),
+    )
+
+
+def _latest_exact_duplicate_checkpoint(
+    connection: sqlite3.Connection, *, cutoff: str, receipt_cutoff: str, upper_raw_id: int,
+    candidate_scope: str | None = None,
+) -> dict[str, Any] | None:
+    state_name = _exact_duplicate_checkpoint_state_name(
+        cutoff=cutoff, receipt_cutoff=receipt_cutoff, upper_raw_id=upper_raw_id,
+        candidate_scope=candidate_scope)
+    state = connection.execute(
+        "SELECT detail FROM station_ingest_cutover_state WHERE cutover_name=?",
+        (state_name,),
+    ).fetchone()
+    if state is not None:
+        try:
+            checkpoint = json.loads(str(state[0])).get("exact_duplicate_checkpoint")
+        except (TypeError, json.JSONDecodeError):
+            checkpoint = None
+        if _matches_exact_duplicate_checkpoint(
+                checkpoint, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id, candidate_scope=candidate_scope):
+            return checkpoint
+
+    cursor = connection.execute(
+        """SELECT detail FROM station_ingest_retention_runs
+           WHERE status='completed' AND cutoff_time=? ORDER BY id DESC""",
+        (cutoff,),
+    )
+    while True:
+        rows = cursor.fetchmany(200)
+        if not rows:
+            break
+        for row in rows:
+            try:
+                checkpoint = json.loads(str(row[0])).get("exact_duplicate_checkpoint")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if _matches_exact_duplicate_checkpoint(
+                    checkpoint, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                    upper_raw_id=upper_raw_id, candidate_scope=candidate_scope):
+                cursor.close()
+                had_transaction = connection.in_transaction
+                _store_exact_duplicate_checkpoint(connection, checkpoint)
+                if not had_transaction and connection.in_transaction:
+                    connection.commit()
+                return checkpoint
+    return None
+
+
+def purge_exact_duplicate_batch(
+    database: Path, *, cutoff: str, receipt_cutoff: str, upper_raw_id: int,
+    cursor: int | None = None, batch_limit: int = 500, scan_limit: int = 2000,
+    time_budget_seconds: float | None = None, archive_root: Path | None = None,
+    candidate_ranges: tuple[tuple[int, int], ...] | None = None,
+    validate_environment: bool = True,
+) -> dict[str, Any]:
+    """Delete one resumable batch of storage-identical rows already linked as duplicates."""
+    batch_started_at = time.monotonic()
+    cutoff = _parse_fixed_cutoff(cutoff, "cutoff")
+    receipt_cutoff = _parse_fixed_cutoff(receipt_cutoff, "receipt cutoff")
+    if cutoff >= receipt_cutoff:
+        raise RetentionError("cutoff must be earlier than receipt cutoff")
+    if upper_raw_id <= 0 or batch_limit <= 0 or scan_limit <= 0:
+        raise RetentionError("upper raw id, batch limit and scan limit must be positive")
+    if scan_limit < batch_limit:
+        raise RetentionError("scan limit must be greater than or equal to batch limit")
+    if time_budget_seconds is not None and time_budget_seconds <= 0:
+        raise RetentionError("exact duplicate cleanup time budget must be positive")
+    candidate_ranges = _normalize_candidate_ranges(candidate_ranges)
+    if candidate_ranges and candidate_ranges[-1][1] > upper_raw_id:
+        raise RetentionError("candidate range exceeds upper raw id")
+    candidate_scope = _candidate_scope(candidate_ranges)
+    scan_ranges = candidate_ranges or ((1, upper_raw_id),)
+    deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
+    with closing(sqlite3.connect(str(database), timeout=30, isolation_level=None)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        with _statement_deadline(connection, deadline, "exact_checkpoint_load"):
+            if validate_environment:
+                _require_exact_duplicate_cleanup_ready(connection)
+                _require_exact_duplicate_cleanup_indexes(connection)
+            checkpoint = _latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id, candidate_scope=candidate_scope)
+        range_index = int(checkpoint.get("range_index", 0)) if checkpoint else 0
+        initial_cursor = scan_ranges[0][0] - 1
+        stored_cursor = int(checkpoint.get("cursor", initial_cursor)) if checkpoint else initial_cursor
+        if cursor is not None and cursor != stored_cursor:
+            raise RetentionError(
+                f"cursor does not match committed checkpoint: expected {stored_cursor}")
+        cursor = stored_cursor
+        totals = {
+            "receipts_deleted": int(checkpoint.get("receipts_deleted", 0)) if checkpoint else 0,
+            "scanned": int(checkpoint.get("scanned", 0)) if checkpoint else 0,
+            "exact_candidates": int(checkpoint.get("exact_candidates", 0)) if checkpoint else 0,
+            "deleted": int(checkpoint.get("deleted", 0)) if checkpoint else 0,
+            "retained_protected": int(checkpoint.get("retained_protected", 0)) if checkpoint else 0,
+            "retained_not_exact": int(checkpoint.get("retained_not_exact", 0)) if checkpoint else 0,
+            "errors_archived": int(checkpoint.get("errors_archived", 0)) if checkpoint else 0,
+        }
+        if checkpoint and checkpoint.get("complete"):
+            return dict(checkpoint, retry_required=False)
+        committed_totals = dict(totals)
+        pending_ids = sorted({
+            int(raw_id) for raw_id in (checkpoint or {}).get("pending_raw_ids", [])
+            if int(raw_id) > 0
+        })
+        search_state = (checkpoint or {}).get("representative_search", {})
+        if not isinstance(search_state, dict):
+            search_state = {}
+
+        window_rows: list[sqlite3.Row] = []
+        if not pending_ids:
+            while range_index < len(scan_ranges):
+                range_start, range_end = scan_ranges[range_index]
+                if cursor < range_start - 1 or cursor > range_end:
+                    cursor = range_start - 1
+                with _statement_deadline(connection, deadline, "exact_window_scan"):
+                    window_rows = connection.execute(
+                        """SELECT id FROM ingest_raw_frames
+                           WHERE id>? AND id<=? ORDER BY id LIMIT ?""",
+                        (cursor, range_end, scan_limit),
+                    ).fetchall()
+                if window_rows:
+                    break
+                range_index += 1
+                if range_index < len(scan_ranges):
+                    cursor = scan_ranges[range_index][0] - 1
+        window_ids = [int(row["id"]) for row in window_rows]
+        combined_ids = sorted(set(pending_ids).union(window_ids))
+        with _statement_deadline(connection, deadline, "exact_identity_scan"):
+            exact_rows = _exact_duplicate_rows(connection, combined_ids, cutoff)
+        exact_by_id = {int(row["id"]): row for row in exact_rows}
+        exact_ids = sorted(exact_by_id)
+
+        with _statement_deadline(connection, deadline, "exact_open_error_scan"):
+            batch_errors = _open_errors_for_raw_ids(connection, combined_ids)
+        errors_by_raw: dict[int, list[sqlite3.Row]] = {}
+        candidate_errors: list[sqlite3.Row] = []
+        minimums: dict[tuple[str, str], tuple[str, int]] = {}
+        for error in batch_errors:
+            raw_id = int(error["raw_frame_id"])
+            errors_by_raw.setdefault(raw_id, []).append(error)
+            if raw_id not in exact_by_id:
+                continue
+            candidate_errors.append(error)
+            group = (str(error["source_key"]), str(error["error_type"]))
+            identity = (str(error["created_at"]), int(error["id"]))
+            minimums[group] = max(minimums.get(group, identity), identity)
+
+        representatives, representative_plans, next_search_state, exhausted_groups, search_stats = (
+            _bounded_error_representatives(
+                connection, minimums, batch_errors, scan_limit=scan_limit,
+                deadline=deadline, search_state=search_state)
+        )
+        candidate_errors_by_group: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for error in candidate_errors:
+            group = (str(error["source_key"]), str(error["error_type"]))
+            candidate_errors_by_group.setdefault(group, []).append(error)
+        for group in exhausted_groups:
+            candidates = candidate_errors_by_group.get(group, [])
+            if candidates:
+                representatives[group] = max(
+                    candidates, key=lambda row: (str(row["created_at"]), int(row["id"])))
+        unresolved_groups = set(minimums).difference(representatives)
+        representative_pending_ids = {
+            raw_id for raw_id, errors in errors_by_raw.items()
+            if raw_id in exact_by_id and any(
+                (str(error["source_key"]), str(error["error_type"])) in unresolved_groups
+                for error in errors)
+        }
+        representative_raw_ids = {
+            int(row["raw_frame_id"]) for row in representatives.values()
+        }
+
+        with _statement_deadline(connection, deadline, "exact_non_error_protection"):
+            non_error_protected = _exact_cleanup_non_error_protection(
+                connection, exact_ids, receipt_cutoff)
+
+        planned_deletable: list[int] = []
+        planned_errors: list[sqlite3.Row] = []
+        retained_protected: set[int] = set()
+        retained_error_representatives: set[int] = set()
+        next_pending = set(pending_ids)
+        processed_cursor = cursor
+        stop_reason = "scan_window"
+        targets = pending_ids + window_ids
+        window_id_set = set(window_ids)
+        for raw_id in targets:
+            if _deadline_expired(deadline):
+                raise _StatementDeadlineExceeded("exact_batch_plan")
+            next_pending.discard(raw_id)
+            exact = exact_by_id.get(raw_id)
+            if exact is None:
+                if raw_id in window_id_set:
+                    processed_cursor = raw_id
+                continue
+            if raw_id in non_error_protected:
+                retained_protected.add(raw_id)
+                if raw_id in window_id_set:
+                    processed_cursor = raw_id
+                continue
+            raw_errors = errors_by_raw.get(raw_id, [])
+            raw_groups = {
+                (str(error["source_key"]), str(error["error_type"])) for error in raw_errors
+            }
+            if raw_groups.intersection(unresolved_groups):
+                next_pending.add(raw_id)
+                if raw_id in window_id_set:
+                    processed_cursor = raw_id
+                continue
+            if raw_id in representative_raw_ids:
+                retained_protected.add(raw_id)
+                retained_error_representatives.add(raw_id)
+                if raw_id in window_id_set:
+                    processed_cursor = raw_id
+                continue
+            if (len(planned_deletable) >= batch_limit
+                    or len(planned_errors) + len(raw_errors) > batch_limit):
+                if raw_id in pending_ids:
+                    next_pending.add(raw_id)
+                stop_reason = "batch_limit"
+                break
+            planned_deletable.append(raw_id)
+            planned_errors.extend(raw_errors)
+            if raw_id in window_id_set:
+                processed_cursor = raw_id
+
+        if not pending_ids and not window_rows:
+            processed_cursor = upper_raw_id
+
+        blocked_raw_ids: list[int] = []
+        evidence_by_raw: dict[int, tuple[int, bytes]] = {}
+        error_raw_ids = sorted({int(error["raw_frame_id"]) for error in planned_errors})
+        if error_raw_ids and archive_root is None:
+            blocked_raw_ids = error_raw_ids
+            stop_reason = "archive_root_unavailable"
+        elif error_raw_ids:
+            missing_online_ids: list[int] = []
+            for raw_id in error_raw_ids:
+                exact = exact_by_id[raw_id]
+                evidence = _online_raw_evidence(exact)
+                if evidence is None:
+                    missing_online_ids.extend(
+                        [int(exact["duplicate_of_raw_frame_id"]), raw_id])
+                else:
+                    evidence_by_raw[raw_id] = evidence
+            archived_evidence = _archived_raw_evidence_batch(
+                connection, sorted(set(missing_online_ids)), deadline=deadline)
+            for raw_id in error_raw_ids:
+                if raw_id in evidence_by_raw:
+                    continue
+                exact = exact_by_id[raw_id]
+                for source_id in (int(exact["duplicate_of_raw_frame_id"]), raw_id):
+                    payload = archived_evidence.get(source_id)
+                    if payload is not None and hashlib.sha256(payload).hexdigest() == str(
+                            exact["frame_sha256"]):
+                        evidence_by_raw[raw_id] = (source_id, payload)
+                        break
+                if raw_id not in evidence_by_raw:
+                    blocked_raw_ids.append(raw_id)
+            if blocked_raw_ids:
+                stop_reason = "archive_evidence_unavailable"
+
+        if blocked_raw_ids:
+            planned_deletable = []
+            planned_errors = []
+            evidence_by_raw = {}
+            retained_protected = set()
+            retained_error_representatives = set()
+            next_pending = set(pending_ids)
+            processed_cursor = cursor
+
+        planned_errors.sort(key=lambda row: int(row["id"]))
+        processed_window_ids = [raw_id for raw_id in window_ids if raw_id <= processed_cursor]
+        processed_new_exact_ids = [
+            raw_id for raw_id in exact_ids
+            if raw_id in window_id_set and raw_id <= processed_cursor
+        ]
+        planned_error_ids = {int(error["id"]) for error in planned_errors}
+        used_representatives = {
+            (str(error["source_key"]), str(error["error_type"])): representatives[
+                (str(error["source_key"]), str(error["error_type"]))]
+            for error in planned_errors
+        }
+
+        evidence_records_by_key: dict[str, dict[str, Any]] = {}
+        error_records: list[dict[str, Any]] = []
+        for error in sorted(planned_errors, key=lambda row: int(row["id"])):
+            raw_id = int(error["raw_frame_id"])
+            exact = exact_by_id[raw_id]
+            evidence_source_id, payload = evidence_by_raw[raw_id]
+            evidence_key = (
+                f"{int(exact['duplicate_of_raw_frame_id'])}:{str(exact['frame_sha256'])}")
+            evidence_records_by_key.setdefault(evidence_key, {
+                "record_type": "raw_evidence",
+                "evidence_key": evidence_key,
+                "source_raw_frame_id": evidence_source_id,
+                "canonical_raw_frame_id": int(exact["duplicate_of_raw_frame_id"]),
+                "frame_sha256": str(exact["frame_sha256"]),
+                "frame_b64": base64.b64encode(payload).decode("ascii"),
+            })
+            record = dict(error)
+            record.update({
+                "record_type": "ingest_error",
+                "evidence_key": evidence_key,
+                "evidence_source_raw_frame_id": evidence_source_id,
+                "canonical_raw_frame_id": int(exact["duplicate_of_raw_frame_id"]),
+                "duplicate_raw_frame_id": raw_id,
+            })
+            error_records.append(record)
+
+        archive_path = None
+        archive_digest = None
+        archive_records: list[dict[str, Any]] = []
+        archive_created = False
+        if error_records:
+            archive_path, archive_digest, archive_records, archive_created = (
+                _write_exact_duplicate_error_bundle(
+                    Path(archive_root), error_records,
+                    list(evidence_records_by_key.values()), deadline=deadline))
+
+        try:
+            _begin_immediate_with_deadline(connection, deadline, "exact_write_lock")
+            with _statement_deadline(connection, deadline, "exact_write_batch"):
+                receipt_ids: list[int] = []
+                for identifiers in _batches(processed_window_ids):
+                    marks = ",".join("?" * len(identifiers))
+                    receipt_ids.extend(int(row[0]) for row in connection.execute(
+                        f"""SELECT rowid FROM station_ingest_recent_receipts
+                            WHERE raw_frame_id IN ({marks}) AND received_at<?""",
+                        (*identifiers, receipt_cutoff),
+                    ))
+                for identifiers in _batches(receipt_ids):
+                    marks = ",".join("?" * len(identifiers))
+                    connection.execute(
+                        f"DELETE FROM station_ingest_recent_receipts WHERE rowid IN ({marks})",
+                        identifiers)
+
+                current_exact = _exact_duplicate_rows(
+                    connection, planned_deletable, cutoff)
+                if [dict(row) for row in current_exact] != [
+                        dict(exact_by_id[raw_id]) for raw_id in planned_deletable]:
+                    raise RetentionError("exact duplicate rows changed before cleanup commit")
+                current_errors = _open_errors_for_raw_ids(connection, planned_deletable)
+                if [dict(row) for row in current_errors] != [
+                        dict(row) for row in planned_errors]:
+                    raise RetentionError("ingest error rows changed before archive commit")
+                current_non_error_protected = _exact_cleanup_non_error_protection(
+                    connection, planned_deletable, receipt_cutoff)
+                if current_non_error_protected:
+                    raise RetentionError("raw frame protection changed before cleanup commit")
+
+                expected_representatives = {
+                    int(row["id"]): dict(row) for row in used_representatives.values()
+                }
+                current_representatives = {
+                    int(row["id"]): dict(row) for row in _open_errors_by_ids(
+                        connection, sorted(expected_representatives))
+                }
+                if current_representatives != expected_representatives:
+                    raise RetentionError("error representative changed before cleanup commit")
+
+                if error_records:
+                    _register_detail_archive_part(
+                        connection, "ingest_error", archive_records,
+                        archive_path, archive_digest, source_records=error_records)
+                    for identifiers in _batches(sorted(planned_error_ids)):
+                        marks = ",".join("?" * len(identifiers))
+                        connection.execute(
+                            f"DELETE FROM ingest_errors WHERE id IN ({marks})", identifiers)
+                remaining_protected = _protected_raw_ids(connection, planned_deletable)
+                if remaining_protected:
+                    raise RetentionError(
+                        "raw frame became protected before cleanup commit: "
+                        + ",".join(str(raw_id) for raw_id in sorted(remaining_protected)[:20]))
+                deleted = _delete_confirmed_duplicate_rows(connection, planned_deletable)
+                if deleted != len(planned_deletable):
+                    raise RetentionError("exact duplicate delete count changed before commit")
+
+                totals["receipts_deleted"] += len(receipt_ids)
+                totals["scanned"] += len(processed_window_ids)
+                totals["exact_candidates"] += len(processed_new_exact_ids)
+                totals["deleted"] += deleted
+                totals["retained_protected"] += len(retained_protected)
+                totals["retained_not_exact"] += (
+                    len(processed_window_ids) - len(processed_new_exact_ids))
+                totals["errors_archived"] += len(planned_error_ids)
+                pending_result = sorted(next_pending)
+                representative_pending_result = sorted(
+                    next_pending.intersection(representative_pending_ids))
+                complete = (
+                    range_index >= len(scan_ranges) and not pending_result
+                    if candidate_ranges else
+                    processed_cursor >= upper_raw_id and not pending_result
+                )
+                if complete:
+                    stop_reason = "upper_bound_reached"
+                elif stop_reason == "scan_window" and pending_result:
+                    stop_reason = "representative_search_pending"
+                result = {
+                    "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+                    "upper_raw_id": upper_raw_id, "cursor": processed_cursor,
+                    "candidate_scope": candidate_scope,
+                    "candidate_ranges": [list(item) for item in candidate_ranges],
+                    "range_index": range_index,
+                    **totals, "phase": "raw", "complete": complete,
+                    "retry_required": not complete, "stop_reason": stop_reason,
+                    "archive_blocked_count": len(blocked_raw_ids),
+                    "archive_blocked_raw_ids": blocked_raw_ids[:20],
+                    "pending_raw_ids": pending_result,
+                    "pending_count": len(pending_result),
+                    "representative_pending_count": len(representative_pending_result),
+                    "representative_pending_raw_ids": representative_pending_result[:20],
+                    "representative_search": next_search_state,
+                    "representative_search_groups": search_stats["groups"],
+                    "representative_search_searched_groups": search_stats["searched_groups"],
+                    "representative_search_page_limit": search_stats["page_limit"],
+                    "representative_search_rows": search_stats["rows"],
+                    "retained_error_representative_count": len(
+                        retained_error_representatives),
+                    "retained_error_representative_raw_ids": sorted(
+                        retained_error_representatives)[:20],
+                    "batch_deleted": deleted,
+                    "batch_errors_archived": len(planned_error_ids),
+                    "batch_evidence_records": len(evidence_records_by_key),
+                    "error_representative_query_plans": representative_plans,
+                    "batch_elapsed_seconds": round(time.monotonic() - batch_started_at, 3),
+                }
+                connection.execute(
+                    """INSERT INTO station_ingest_retention_runs(
+                           cutoff_time,archived_parse_attempts,archived_errors,
+                           archived_error_summaries,deleted_raw_frames,
+                           retained_protected_frames,status,detail,created_at)
+                       VALUES (?,0,0,0,?,?,'completed',?,?)""",
+                    (cutoff, deleted, len(retained_protected),
+                     json.dumps({"exact_duplicate_checkpoint": result}, sort_keys=True), _now()),
+                )
+                _store_exact_duplicate_checkpoint(connection, result)
+            if _deadline_expired(deadline):
+                raise _StatementDeadlineExceeded("exact_commit")
+            connection.commit()
+            return result
+        except Exception as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if archive_created and archive_path is not None:
+                registered = connection.execute(
+                    "SELECT 1 FROM station_ingest_detail_archive_parts WHERE archive_path=?",
+                    (str(archive_path),),
+                ).fetchone()
+                if registered is None:
+                    archive_path.unlink(missing_ok=True)
+            if isinstance(exc, _StatementDeadlineExceeded):
+                exc.checkpoint = {
+                    "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+                    "upper_raw_id": upper_raw_id, "cursor": cursor,
+                    "candidate_scope": candidate_scope,
+                    "candidate_ranges": [list(item) for item in candidate_ranges],
+                    "range_index": range_index, **committed_totals,
+                }
+            raise
+
+
+def run_exact_duplicate_cleanup_job(
+    database: Path, *, cutoff: str, receipt_cutoff: str, upper_raw_id: int,
+    candidate_ranges: tuple[tuple[int, int], ...], batch_limit: int = 500,
+    scan_limit: int = 2000, time_budget_seconds: float | None = None,
+    archive_root: Path | None = None,
+) -> dict[str, Any]:
+    """Run scoped exact cleanup batches in one process with one absolute deadline."""
+    started_at = time.monotonic()
+    candidate_ranges = _normalize_candidate_ranges(candidate_ranges)
+    if not candidate_ranges:
+        raise RetentionError("exact duplicate cleanup job requires candidate ranges")
+    if time_budget_seconds is not None and time_budget_seconds <= 0:
+        raise RetentionError("exact duplicate cleanup job time budget must be positive")
+    deadline = None if time_budget_seconds is None else started_at + time_budget_seconds
+    with closing(sqlite3.connect(str(database), timeout=30)) as connection:
+        _require_exact_duplicate_cleanup_ready(connection)
+        _require_exact_duplicate_cleanup_indexes(connection)
+        indexes = {
+            "created": [], "verified": sorted(CLEANUP_INDEXES),
+            "query_plans": _exact_duplicate_cleanup_query_plans(
+                connection, deadline=deadline),
+        }
+    batch_summaries: list[dict[str, Any]] = []
+    previous_progress: tuple[Any, ...] | None = None
+    while True:
+        if deadline is not None and _deadline_expired(deadline):
+            checkpoint = batch_summaries[-1] if batch_summaries else {
+                "candidate_scope": _candidate_scope(candidate_ranges), "cursor": 0}
+            raise _StatementDeadlineExceeded("exact_job", checkpoint)
+        remaining = (
+            EXACT_DUPLICATE_BATCH_TIME_BUDGET_SECONDS if deadline is None else
+            min(EXACT_DUPLICATE_BATCH_TIME_BUDGET_SECONDS,
+                max(0.001, deadline - time.monotonic())))
+        result = purge_exact_duplicate_batch(
+            database, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+            upper_raw_id=upper_raw_id, batch_limit=batch_limit,
+            scan_limit=scan_limit, time_budget_seconds=remaining,
+            archive_root=archive_root, candidate_ranges=candidate_ranges,
+            validate_environment=False)
+        batch_summaries.append({
+            "cursor": result["cursor"], "range_index": result["range_index"],
+            "batch_deleted": result["batch_deleted"],
+            "batch_errors_archived": result["batch_errors_archived"],
+            "scanned": result["scanned"], "deleted": result["deleted"],
+            "stop_reason": result["stop_reason"],
+            "elapsed_seconds": result["batch_elapsed_seconds"],
+        })
+        progress = (
+            result["range_index"], result["cursor"], result["scanned"],
+            result["deleted"], result["errors_archived"],
+            tuple(result["pending_raw_ids"]),
+            json.dumps(result["representative_search"], sort_keys=True),
+        )
+        hard_stop = result["stop_reason"] in {
+            "archive_root_unavailable", "archive_evidence_unavailable"}
+        if result["complete"] or hard_stop or progress == previous_progress:
+            return {
+                "candidate_scope": result["candidate_scope"],
+                "candidate_ranges": result["candidate_ranges"],
+                "indexes": indexes, "batches": len(batch_summaries),
+                "batch_summaries": batch_summaries, "result": result,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                "retry_required": not result["complete"],
+            }
+        previous_progress = progress
 
 def reduce_confirmed_minute_duplicates(
     database: Path, *, after_id: int = 0, batch_limit: int = 500,
@@ -2403,6 +3551,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "archive", "aggregate", "bootstrap", "maintain", "maintain-once",
             "reduce-indexes", "compact-copy", "compact-prepared",
+            "prepare-exact-duplicate-cleanup", "purge-exact-duplicates",
+            "run-exact-duplicate-cleanup", "drop-exact-duplicate-cleanup-indexes",
         ),
     )
     parser.add_argument("--database", required=True, type=Path)
@@ -2420,6 +3570,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hot-minimum-total-bytes", type=int)
     parser.add_argument("--hot-minimum-free-bytes", type=int)
     parser.add_argument("--time-budget-seconds", type=float)
+    parser.add_argument("--cutoff")
+    parser.add_argument("--receipt-cutoff")
+    parser.add_argument("--upper-raw-id", type=int)
+    parser.add_argument("--cursor", type=int)
+    parser.add_argument("--scan-limit", type=int, default=2000)
+    parser.add_argument("--candidate-range", action="append", default=[])
     arguments = parser.parse_args(argv)
     try:
         if arguments.action == "aggregate":
@@ -2440,6 +3596,49 @@ def main(argv: list[str] | None = None) -> int:
             result = bootstrap_retention_state(arguments.database)
         elif arguments.action == "reduce-indexes":
             result = reduce_legacy_indexes(arguments.database)
+        elif arguments.action == "prepare-exact-duplicate-cleanup":
+            lock_file = arguments.lock_file or arguments.database.with_suffix(
+                arguments.database.suffix + ".station-ingest-retention.lock")
+            with MaintenanceLock(lock_file):
+                result = ensure_duplicate_cleanup_indexes(
+                    arguments.database, time_budget_seconds=arguments.time_budget_seconds)
+        elif arguments.action == "drop-exact-duplicate-cleanup-indexes":
+            lock_file = arguments.lock_file or arguments.database.with_suffix(
+                arguments.database.suffix + ".station-ingest-retention.lock")
+            with MaintenanceLock(lock_file):
+                result = {"dropped": drop_duplicate_cleanup_indexes(arguments.database)}
+        elif arguments.action in ("purge-exact-duplicates", "run-exact-duplicate-cleanup"):
+            if not arguments.cutoff or not arguments.receipt_cutoff:
+                raise RetentionError(
+                    f"{arguments.action} requires --cutoff and --receipt-cutoff")
+            if arguments.upper_raw_id is None:
+                raise RetentionError(f"{arguments.action} requires --upper-raw-id")
+            if arguments.raw_storage_dir is None:
+                raise RetentionError(f"{arguments.action} requires --raw-storage-dir")
+            lock_file = arguments.lock_file or arguments.database.with_suffix(
+                arguments.database.suffix + ".station-ingest-retention.lock")
+            with MaintenanceLock(lock_file):
+                if arguments.action == "run-exact-duplicate-cleanup":
+                    result = run_exact_duplicate_cleanup_job(
+                        arguments.database, cutoff=arguments.cutoff,
+                        receipt_cutoff=arguments.receipt_cutoff,
+                        upper_raw_id=arguments.upper_raw_id,
+                        candidate_ranges=_normalize_candidate_ranges(
+                            arguments.candidate_range),
+                        batch_limit=arguments.batch_limit,
+                        scan_limit=arguments.scan_limit,
+                        time_budget_seconds=arguments.time_budget_seconds,
+                        archive_root=arguments.raw_storage_dir)
+                else:
+                    result = purge_exact_duplicate_batch(
+                        arguments.database, cutoff=arguments.cutoff,
+                        receipt_cutoff=arguments.receipt_cutoff,
+                        upper_raw_id=arguments.upper_raw_id, cursor=arguments.cursor,
+                        batch_limit=arguments.batch_limit, scan_limit=arguments.scan_limit,
+                        time_budget_seconds=arguments.time_budget_seconds,
+                        archive_root=arguments.raw_storage_dir,
+                        candidate_ranges=_normalize_candidate_ranges(
+                            arguments.candidate_range))
         elif arguments.action == "compact-prepared":
             if arguments.target is None:
                 raise RetentionError("compact-prepared requires --target")
@@ -2471,6 +3670,12 @@ def main(argv: list[str] | None = None) -> int:
                     arguments.database, arguments.target, policy,
                     batch_limit=arguments.batch_limit,
                 )
+    except _StatementDeadlineExceeded as exc:
+        print(json.dumps({
+            "action": arguments.action, "status": "partial", "error": str(exc),
+            "checkpoint": exc.checkpoint,
+        }, sort_keys=True), file=sys.stderr)
+        return 75
     except (RetentionError, sqlite3.Error) as exc:
         print(json.dumps({
             "action": arguments.action, "status": "failed", "error": str(exc),

@@ -28,12 +28,16 @@ from station_ingest_retention import (
     bootstrap_retention_state,
     compact_isolated_copy,
     compact_prepared_database,
+    drop_duplicate_cleanup_indexes,
+    ensure_duplicate_cleanup_indexes,
     maintain_retention,
     prepare_recent_slot_summaries,
     prepare_startup_state,
+    purge_exact_duplicate_batch,
     read_raw_evidence,
     reduce_confirmed_minute_duplicates,
     reduce_legacy_indexes,
+    run_exact_duplicate_cleanup_job,
     run_periodic_maintenance,
 )
 from station_ingest_cutover import prepare_cutover
@@ -70,6 +74,7 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
     def _insert_raw(
         self, received_at, payload, *, logical_key=None, authentication="authenticated",
         disposition="accepted", persistence="persisted", endpoint_id=None, station_code=None,
+        duplicate_of=None,
     ):
         digest = hashlib.sha256(payload).hexdigest()
         endpoint_id = self.endpoint_id if endpoint_id is None else endpoint_id
@@ -79,10 +84,10 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
                 """INSERT INTO ingest_raw_frames(
                        endpoint_id,station_code,received_at,frame_sha256,logical_key_sha256,
                        raw_frame,body_length,crc_status,authentication_status,disposition,
-                       persistence_state)
-                   VALUES (?,?,?,?,?,?,?,'valid',?,?,?)""",
+                       duplicate_of_raw_frame_id,persistence_state)
+                   VALUES (?,?,?,?,?,?,?,'valid',?,?,?,?)""",
                 (endpoint_id, station_code, received_at, digest, logical_key,
-                 payload, len(payload), authentication, disposition, persistence),
+                 payload, len(payload), authentication, disposition, duplicate_of, persistence),
             ).lastrowid
             connection.execute(
                 """INSERT INTO ingest_frame_protocols(raw_frame_id,protocol_family,parser_version)
@@ -91,6 +96,16 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
             )
             connection.commit()
         return raw_id
+
+    def _mark_startup_ready(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_cutover_state(
+                       cutover_name,migration_version,status,detail,updated_at)
+                   VALUES ('station-ingest-startup-ready-v1',
+                           '20261016_014_station_ingest_retention_windows',
+                           'completed','{}','2026-10-16T12:00:00+00:00')""")
+            connection.commit()
 
     def _copy_archive_to_mirror(self, archive_path, mirror_root):
         relative = Path(archive_path).resolve().relative_to(self.root.resolve())
@@ -455,6 +470,1344 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM station_ingest_retention_runs"
             ).fetchone()[0], 2)
+
+    def test_exact_duplicate_cleanup_preserves_canonical_results_and_active_protection(self):
+        self._mark_startup_ready()
+        index_result = ensure_duplicate_cleanup_indexes(self.database)
+        self.assertEqual(set(index_result["created"]), set(retention.CLEANUP_INDEXES))
+        self.assertTrue(any("INTEGER PRIMARY KEY" in item
+                            for item in index_result["query_plans"]["bounded_raw_scan"]))
+        self.assertTrue(any("idx_ingest_errors_raw_cleanup" in item
+                            for item in index_result["query_plans"]["open_error_protection"]))
+        self.assertTrue(any("idx_ingest_raw_duplicate_cleanup" in item
+                            for item in index_result["query_plans"]["canonical_reference_protection"]))
+
+        old = "2026-10-01T08:00:00+00:00"
+        canonical = self._insert_raw(old, b"same-frame", logical_key="same-key")
+        removable = self._insert_raw(
+            old, b"same-frame", logical_key="same-key", disposition="duplicate",
+            duplicate_of=canonical)
+        expired_receipt = self._insert_raw(
+            old, b"same-frame", logical_key="same-key", disposition="duplicate",
+            duplicate_of=canonical)
+        active_receipt = self._insert_raw(
+            old, b"same-frame", logical_key="same-key", disposition="duplicate",
+            duplicate_of=canonical)
+        published = self._insert_raw(
+            old, b"same-frame", logical_key="same-key", disposition="duplicate",
+            duplicate_of=canonical)
+        changed_frame = self._insert_raw(
+            old, b"corrected-frame", logical_key="same-key", disposition="duplicate",
+            duplicate_of=canonical)
+        changed_key = self._insert_raw(
+            old, b"same-frame", logical_key="corrected-key", disposition="duplicate",
+            duplicate_of=canonical)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status) VALUES (?,?,?,?,?,'authenticated')""",
+                (
+                    (expired_receipt, f"endpoint:{self.endpoint_id}", self.endpoint_id,
+                     "RETENTION-MN", "2026-10-10T00:00:00+00:00"),
+                    (active_receipt, f"endpoint:{self.endpoint_id}", self.endpoint_id,
+                     "RETENTION-MN", "2026-10-15T00:00:00+00:00"),
+                ),
+            )
+            batch_id = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,1,2011,0,?,?,?,'realtime','device_reported',?,'test',
+                           'accepted','completed',?)""",
+                (published, self.endpoint_id, old, old, old,
+                 f"published-{published}", old),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO observation_values(
+                       observation_batch_id,protocol_code,business_metric,standard_value,
+                       standard_unit,quality,parser_version,is_published)
+                   VALUES (?,'HJ212:w01001','ph',7.1,'pH','valid','test',1)""",
+                (batch_id,),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=changed_key, batch_limit=20, scan_limit=20)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["receipts_deleted"], 1)
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["retained_protected"], 2)
+        with closing(sqlite3.connect(self.database)) as connection:
+            remaining = {int(row[0]) for row in connection.execute(
+                "SELECT id FROM ingest_raw_frames")}
+            self.assertIn(canonical, remaining)
+            self.assertNotIn(removable, remaining)
+            self.assertNotIn(expired_receipt, remaining)
+            self.assertIn(active_receipt, remaining)
+            self.assertIn(published, remaining)
+            self.assertIn(changed_frame, remaining)
+            self.assertIn(changed_key, remaining)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM observation_values WHERE observation_batch_id=?",
+                (batch_id,),
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts"
+            ).fetchone()[0], 1)
+
+    def test_exact_duplicate_cleanup_archives_historical_open_error_and_keeps_latest_problem(self):
+        self._mark_startup_ready()
+        self._configure_hj212_ph()
+        ensure_duplicate_cleanup_indexes(self.database)
+        old = "2026-10-01T08:00:00+00:00"
+        canonical = self._insert_raw(old, b"error-pair", logical_key="error-pair")
+        with closing(sqlite3.connect(self.database)) as connection:
+            batch_id = connection.execute(
+                """INSERT INTO observation_batches(
+                       raw_frame_id,endpoint_id,business_site_id,function_code,serial_number,
+                       reported_at,observed_at,received_at,granularity,aggregation_source,
+                       idempotency_key,normalization_version,batch_status,projection_state,normalized_at)
+                   VALUES (?,?,1,2011,0,?,?,?,'realtime','device_reported',?,'test',
+                           'accepted','completed',?)""",
+                (canonical, self.endpoint_id, old, old, old,
+                 f"canonical-result-{canonical}", old),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO observation_values(
+                       observation_batch_id,protocol_code,business_metric,raw_value_text,
+                       standard_value,standard_unit,quality,parser_version,is_published)
+                   VALUES (?,'HJ212:w01001','ph','7.100',7.1,'pH','valid','test',1)""",
+                (batch_id,),
+            )
+            connection.commit()
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"error-pair", logical_key="error-pair",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-problem", logical_key="latest-problem")
+        with closing(sqlite3.connect(self.database)) as connection:
+            historical_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,status,created_at)
+                   VALUES (?,'hj212_non_data_command','','open',?)""",
+                (duplicate, "2026-10-01T08:01:01+00:00"),
+            ).lastrowid
+            latest_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,status,created_at)
+                   VALUES (?,'hj212_non_data_command','current problem representative','open',?)""",
+                (latest_raw, "2026-10-15T08:00:01+00:00"),
+            ).lastrowid
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            import station_monitoring
+            before = station_monitoring.result_trend_page(
+                connection, 1, "ph", "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00")[0]
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["errors_archived"], 1)
+        self.assertGreaterEqual(result["batch_elapsed_seconds"], 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            current = connection.execute(
+                "SELECT status,error_detail FROM ingest_errors WHERE id=?", (latest_error,)
+            ).fetchone()
+            self.assertEqual(tuple(current), ("open", "current problem representative"))
+            archived = retention.read_detail_archive_record(
+                connection, "ingest_error", historical_error)
+            self.assertEqual(archived["status"], "open")
+            self.assertEqual(archived["error_detail"], "")
+            self.assertEqual(archived["evidence_source_raw_frame_id"], canonical)
+            self.assertEqual(
+                base64.b64decode(archived["evidence"]["frame_b64"]), b"error-pair")
+            after = station_monitoring.result_trend_page(
+                connection, 1, "ph", "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00")[0]
+            self.assertEqual(after, before)
+
+        repeated = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+        self.assertEqual(repeated["errors_archived"], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                """SELECT COUNT(*) FROM station_ingest_detail_archive_parts
+                   WHERE detail_kind='ingest_error'"""
+            ).fetchone()[0], 1)
+
+    def test_exact_duplicate_cleanup_without_old_archive_uses_online_evidence(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"no-evidence", logical_key="no-evidence")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"no-evidence", logical_key="no-evidence",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"newer-error", logical_key="newer-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open',?)""",
+                ((duplicate, "2026-10-01T08:01:01+00:00"),
+                 (latest_raw, "2026-10-15T08:00:01+00:00")),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["errors_archived"], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE raw_frame_id=?", (duplicate,)
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
+            ).fetchone()[0], 1)
+
+    def test_exact_duplicate_cleanup_ignores_unreadable_old_archive_when_online_raw_is_valid(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"corrupt-evidence", logical_key="corrupt")
+        archive_raw_day(self.database, "2026-10-01", self.policy)
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"corrupt-evidence", logical_key="corrupt",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"current-error", logical_key="current-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            historical_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open',?)""",
+                (duplicate, "2026-10-01T08:01:01+00:00"),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open',?)""",
+                (latest_raw, "2026-10-15T08:00:01+00:00"),
+            )
+            archive_path = Path(connection.execute(
+                "SELECT archive_path FROM monitoring_raw_archive_parts"
+            ).fetchone()[0])
+            connection.commit()
+        archive_path.write_bytes(b"not-a-valid-gzip-archive")
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            self.assertTrue(result["complete"])
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE raw_frame_id=?", (duplicate,)
+            ).fetchone()[0], 0)
+            archived = retention.read_detail_archive_record(
+                connection, "ingest_error", historical_error)
+            self.assertEqual(
+                base64.b64decode(archived["evidence"]["frame_b64"]), b"corrupt-evidence")
+
+    def test_exact_duplicate_cleanup_bounds_error_archive_and_uses_open_error_index(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"bulk-error", logical_key="bulk-error")
+        duplicates = [
+            self._insert_raw(
+                "2026-10-01T08:01:00+00:00", b"bulk-error",
+                logical_key="bulk-error", disposition="duplicate", duplicate_of=canonical)
+            for _ in range(120)
+        ]
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-bulk-error",
+            logical_key="latest-bulk-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((raw_id, "2026-10-01T08:01:01+00:00") for raw_id in duplicates),
+            )
+            latest_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open','2026-10-15T08:00:01+00:00')""",
+                (latest_raw,),
+            ).lastrowid
+            connection.commit()
+
+        results = []
+        while not results or not results[-1]["complete"]:
+            results.append(purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=duplicates[-1], batch_limit=100, scan_limit=200,
+                archive_root=self.root))
+
+        self.assertEqual([result["batch_deleted"] for result in results], [100, 20])
+        self.assertEqual(
+            [result["batch_errors_archived"] for result in results], [100, 20])
+        self.assertEqual(results[-1]["deleted"], 120)
+        self.assertEqual(results[-1]["errors_archived"], 120)
+        plans = results[0]["error_representative_query_plans"][
+            "hj212_non_data_command"]
+        self.assertTrue(any("idx_ingest_errors_open" in plan for plan in plans))
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE status='open'"
+            ).fetchone()[0], 1)
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_errors WHERE id=?", (latest_error,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
+            ).fetchone()[0], len(results))
+
+    def test_exact_duplicate_cleanup_prefers_current_window_representative_across_sources(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"source-a", logical_key="source-a")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"source-a", logical_key="source-a",
+            disposition="duplicate", duplicate_of=canonical)
+        newer_a = self._insert_raw(
+            "2026-10-02T08:00:00+00:00", b"newer-a", logical_key="newer-a")
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_b = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('RETENTION-B','credential-b',1,'bound')"""
+            ).lastrowid
+            connection.commit()
+        noisy_b = self._insert_raw(
+            "2026-10-27T08:00:00+00:00", b"noisy-b", logical_key="noisy-b",
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((duplicate, "2026-10-01T08:01:01+00:00"),
+                 (newer_a, "2026-10-02T08:00:01+00:00")),
+            )
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((noisy_b, f"2026-10-27T08:{index // 60:02d}:{index % 60:02d}+00:00")
+                 for index in range(2001)),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-21T00:00:00+00:00",
+            receipt_cutoff="2026-10-25T00:00:00+00:00",
+            upper_raw_id=noisy_b, batch_limit=100, scan_limit=2000,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["cursor"], noisy_b)
+        self.assertEqual(result["batch_deleted"], 1)
+        self.assertEqual(result["representative_pending_count"], 0)
+        self.assertEqual(result["representative_search_rows"], 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (newer_a,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_resumes_representative_page_and_processes_other_source(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_b = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('RETENTION-B','credential-b',1,'bound')"""
+            ).lastrowid
+            endpoint_c = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('RETENTION-C','credential-c',1,'bound')"""
+            ).lastrowid
+            connection.commit()
+        canonical_a = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"page-a", logical_key="page-a")
+        duplicate_a = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"page-a", logical_key="page-a",
+            disposition="duplicate", duplicate_of=canonical_a)
+        canonical_b = self._insert_raw(
+            "2026-10-01T09:00:00+00:00", b"page-b", logical_key="page-b",
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        duplicate_b = self._insert_raw(
+            "2026-10-01T09:01:00+00:00", b"page-b", logical_key="page-b",
+            disposition="duplicate", duplicate_of=canonical_b,
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        newer_b = self._insert_raw(
+            "2026-10-02T09:00:00+00:00", b"newer-b", logical_key="newer-b",
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        noisy_c = self._insert_raw(
+            "2026-10-27T08:00:00+00:00", b"noisy-c", logical_key="noisy-c",
+            endpoint_id=endpoint_c, station_code="RETENTION-C")
+        newer_a = self._insert_raw(
+            "2026-10-02T08:00:00+00:00", b"newer-page-a", logical_key="newer-page-a")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((duplicate_a, "2026-10-01T08:01:01+00:00"),
+                 (duplicate_b, "2026-10-01T09:01:01+00:00"),
+                 (newer_b, "2026-10-02T09:00:01+00:00"),
+                 (newer_a, "2026-10-02T08:00:01+00:00")),
+            )
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((noisy_c, f"2026-10-27T08:{index // 60:02d}:{index % 60:02d}+00:00")
+                 for index in range(2001)),
+            )
+            connection.commit()
+
+        first = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-21T00:00:00+00:00",
+            receipt_cutoff="2026-10-25T00:00:00+00:00",
+            upper_raw_id=newer_b, batch_limit=100, scan_limit=2000,
+            archive_root=self.root)
+
+        self.assertFalse(first["complete"])
+        self.assertEqual(first["cursor"], newer_b)
+        self.assertEqual(first["batch_deleted"], 1)
+        self.assertEqual(first["pending_raw_ids"], [duplicate_a])
+        self.assertEqual(first["representative_search_rows"], 2000)
+        self.assertTrue(first["representative_search"])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate_a,)
+            ).fetchone())
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate_b,)
+            ).fetchone())
+
+        second = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-21T00:00:00+00:00",
+            receipt_cutoff="2026-10-25T00:00:00+00:00",
+            upper_raw_id=newer_b, batch_limit=100, scan_limit=2000,
+            archive_root=self.root)
+
+        self.assertTrue(second["complete"])
+        self.assertEqual(second["deleted"], 2)
+        self.assertEqual(second["pending_raw_ids"], [])
+        self.assertEqual(second["representative_search"], {})
+        self.assertLess(second["representative_search_rows"], 2000)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate_a,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (newer_a,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_retains_missing_representative_and_continues_source(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            endpoint_b = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES ('RETENTION-B','credential-b',1,'bound')"""
+            ).lastrowid
+            connection.commit()
+        canonical_a = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"last-a", logical_key="last-a")
+        duplicate_a = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"last-a", logical_key="last-a",
+            disposition="duplicate", duplicate_of=canonical_a)
+        canonical_b = self._insert_raw(
+            "2026-10-01T09:00:00+00:00", b"last-b", logical_key="last-b",
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        duplicate_b = self._insert_raw(
+            "2026-10-01T09:01:00+00:00", b"last-b", logical_key="last-b",
+            disposition="duplicate", duplicate_of=canonical_b,
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        newer_b = self._insert_raw(
+            "2026-10-02T09:00:00+00:00", b"newer-last-b", logical_key="newer-last-b",
+            endpoint_id=endpoint_b, station_code="RETENTION-B")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((duplicate_a, "2026-10-01T08:01:01+00:00"),
+                 (duplicate_b, "2026-10-01T09:01:01+00:00"),
+                 (newer_b, "2026-10-02T09:00:01+00:00")),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-21T00:00:00+00:00",
+            receipt_cutoff="2026-10-25T00:00:00+00:00",
+            upper_raw_id=newer_b, batch_limit=100, scan_limit=100,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["batch_deleted"], 1)
+        self.assertEqual(result["retained_error_representative_raw_ids"], [duplicate_a])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate_a,)
+            ).fetchone())
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate_b,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_never_deletes_same_batch_representative(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"same-batch", logical_key="same-batch")
+        older = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"same-batch", logical_key="same-batch",
+            disposition="duplicate", duplicate_of=canonical)
+        newer = self._insert_raw(
+            "2026-10-02T08:01:00+00:00", b"same-batch", logical_key="same-batch",
+            disposition="duplicate", duplicate_of=canonical)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((older, "2026-10-01T08:01:01+00:00"),
+                 (newer, "2026-10-02T08:01:01+00:00")),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-21T00:00:00+00:00",
+            receipt_cutoff="2026-10-25T00:00:00+00:00",
+            upper_raw_id=newer, batch_limit=100, scan_limit=100,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["batch_deleted"], 1)
+        self.assertEqual(result["retained_error_representative_raw_ids"], [newer])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (older,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (newer,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_shares_scan_budget_across_error_groups(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"many-groups", logical_key="many-groups")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"many-groups", logical_key="many-groups",
+            disposition="duplicate", duplicate_of=canonical)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,?,'open','2026-10-01T08:01:01+00:00')""",
+                ((duplicate, f"bounded_group_{index:02d}") for index in range(11)),
+            )
+            connection.commit()
+
+        results = []
+        while not results or not results[-1]["complete"]:
+            results.append(purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-21T00:00:00+00:00",
+                receipt_cutoff="2026-10-25T00:00:00+00:00",
+                upper_raw_id=duplicate, batch_limit=1, scan_limit=5,
+                archive_root=self.root))
+
+        self.assertEqual(
+            [result["representative_search_rows"] for result in results], [5, 5, 1])
+        self.assertEqual(
+            [result["representative_search_searched_groups"] for result in results],
+            [5, 5, 1])
+        self.assertEqual(results[0]["pending_raw_ids"], [duplicate])
+        self.assertEqual(results[1]["pending_raw_ids"], [duplicate])
+        self.assertEqual(results[2]["pending_raw_ids"], [])
+        self.assertEqual(results[2]["retained_error_representative_raw_ids"], [duplicate])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_retains_last_open_error_representative(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"last-error", logical_key="last-error")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"last-error", logical_key="last-error",
+            disposition="duplicate", duplicate_of=canonical)
+        with closing(sqlite3.connect(self.database)) as connection:
+            error_id = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open','2026-10-01T08:01:01+00:00')""",
+                (duplicate,),
+            ).lastrowid
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["retained_error_representative_raw_ids"], [duplicate])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_errors WHERE id=?", (error_id,)
+            ).fetchone())
+
+    def test_exact_duplicate_cleanup_without_online_or_archived_raw_stops_before_object(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"", logical_key="empty-evidence")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"", logical_key="empty-evidence",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-empty-error",
+            logical_key="latest-empty-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'hj212_non_data_command','open',?)""",
+                ((duplicate, "2026-10-01T08:01:01+00:00"),
+                 (latest_raw, "2026-10-15T08:00:01+00:00")),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["stop_reason"], "archive_evidence_unavailable")
+        self.assertEqual(result["archive_blocked_raw_ids"], [duplicate])
+        self.assertLess(result["cursor"], duplicate)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_error_archive_deadline_keeps_database_unchanged(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"archive-deadline", logical_key="archive-deadline")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"archive-deadline",
+            logical_key="archive-deadline", disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-archive-deadline",
+            logical_key="latest-archive-deadline")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open',?)""",
+                ((duplicate, "2026-10-01T08:01:01+00:00"),
+                 (latest_raw, "2026-10-15T08:00:01+00:00")),
+            )
+            connection.commit()
+
+        interruption = retention._StatementDeadlineExceeded("exact_error_archive_verify")
+        with mock.patch.object(
+                retention, "_write_exact_duplicate_error_bundle", side_effect=interruption):
+            with self.assertRaises(retention._StatementDeadlineExceeded):
+                purge_exact_duplicate_batch(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+                    archive_root=self.root, time_budget_seconds=30)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE raw_frame_id=?", (duplicate,)
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_cleanup_rejects_online_raw_digest_mismatch(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"original", logical_key="digest-mismatch")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"original", logical_key="digest-mismatch",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-digest-error",
+            logical_key="latest-digest-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE ingest_raw_frames SET raw_frame=? WHERE id=?",
+                (b"tampered", duplicate),
+            )
+            connection.executemany(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open',?)""",
+                ((duplicate, "2026-10-01T08:01:01+00:00"),
+                 (latest_raw, "2026-10-15T08:00:01+00:00")),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(RetentionError, "online exact duplicate evidence digest"):
+            purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+                archive_root=self.root)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_cleanup_concurrent_error_change_rolls_back_and_removes_bundle(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"concurrent", logical_key="concurrent")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"concurrent", logical_key="concurrent",
+            disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-concurrent",
+            logical_key="latest-concurrent")
+        with closing(sqlite3.connect(self.database)) as connection:
+            historical_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,status,created_at)
+                   VALUES (?,'decode_problem','before','open','2026-10-01T08:01:01+00:00')""",
+                (duplicate,),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open','2026-10-15T08:00:01+00:00')""",
+                (latest_raw,),
+            )
+            connection.commit()
+        original = retention._write_exact_duplicate_error_bundle
+
+        def write_then_change(*args, **kwargs):
+            result = original(*args, **kwargs)
+            with closing(sqlite3.connect(self.database)) as connection:
+                connection.execute(
+                    "UPDATE ingest_errors SET error_detail='after' WHERE id=?",
+                    (historical_error,),
+                )
+                connection.commit()
+            return result
+
+        with mock.patch.object(
+                retention, "_write_exact_duplicate_error_bundle",
+                side_effect=write_then_change):
+            with self.assertRaisesRegex(RetentionError, "error rows changed"):
+                purge_exact_duplicate_batch(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+                    archive_root=self.root)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+        self.assertEqual(list((self.root / "detail-archives").glob("*.gz")), [])
+
+    def test_exact_duplicate_error_archive_rolls_back_with_cleanup_transaction_and_retries(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"archive-rollback", logical_key="rollback-error")
+        archive_raw_day(self.database, "2026-10-01", self.policy)
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"archive-rollback",
+            logical_key="rollback-error", disposition="duplicate", duplicate_of=canonical)
+        latest_raw = self._insert_raw(
+            "2026-10-15T08:00:00+00:00", b"latest-rollback-error",
+            logical_key="latest-rollback-error")
+        with closing(sqlite3.connect(self.database)) as connection:
+            historical_error = connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open','2026-10-01T08:01:01+00:00')""",
+                (duplicate,),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,status,created_at)
+                   VALUES (?,'decode_problem','open','2026-10-15T08:00:01+00:00')""",
+                (latest_raw,),
+            )
+            connection.commit()
+        original = retention._delete_confirmed_duplicate_rows
+
+        def fail_after_delete(connection, raw_ids):
+            original(connection, raw_ids)
+            raise sqlite3.OperationalError("injected archived cleanup failure")
+
+        with mock.patch.object(
+                retention, "_delete_confirmed_duplicate_rows", side_effect=fail_after_delete):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "archived cleanup failure"):
+                purge_exact_duplicate_batch(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+                    archive_root=self.root)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_errors WHERE id=?", (historical_error,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_detail_archive_parts"
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+        retried = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+            archive_root=self.root)
+        self.assertEqual(retried["deleted"], 1)
+        self.assertEqual(retried["errors_archived"], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            archived = retention.read_detail_archive_record(
+                connection, "ingest_error", historical_error)
+            self.assertEqual(archived["raw_frame_id"], duplicate)
+
+    def test_exact_duplicate_cleanup_resumes_fixed_window_and_ignores_other_running_state(self):
+        self._mark_startup_ready()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_cutover_state(
+                       cutover_name,migration_version,status,detail,updated_at)
+                   VALUES ('retention-windows-v1','20261016_014_station_ingest_retention_windows',
+                           'running','{}','2026-10-16T12:00:00+00:00')""")
+            connection.commit()
+        ensure_duplicate_cleanup_indexes(self.database)
+        duplicate_ids = []
+        for index in range(4):
+            payload = f"pair-{index}".encode()
+            canonical = self._insert_raw(
+                f"2026-10-01T08:{index:02d}:00+00:00", payload,
+                logical_key=f"key-{index}")
+            duplicate_ids.append(self._insert_raw(
+                f"2026-10-01T08:{index:02d}:30+00:00", payload,
+                logical_key=f"key-{index}", disposition="duplicate",
+                duplicate_of=canonical))
+        upper_raw_id = duplicate_ids[-1]
+        later_canonical = self._insert_raw(
+            "2026-10-01T09:00:00+00:00", b"later", logical_key="later")
+        later_duplicate = self._insert_raw(
+            "2026-10-01T09:00:30+00:00", b"later", logical_key="later",
+            disposition="duplicate", duplicate_of=later_canonical)
+
+        results = []
+        while not results or not results[-1]["complete"]:
+            results.append(purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=upper_raw_id, batch_limit=1, scan_limit=3))
+
+        self.assertGreater(len(results), 1)
+        self.assertEqual(results[-1]["cursor"], upper_raw_id)
+        self.assertEqual(results[-1]["deleted"], 4)
+        with self.assertRaisesRegex(RetentionError, "cursor does not match"):
+            purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=upper_raw_id, cursor=0, batch_limit=1, scan_limit=3)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (later_duplicate,)
+            ).fetchone())
+
+    def test_scoped_cleanup_keeps_global_checkpoint_and_combines_empty_ranges(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"scoped", logical_key="scoped")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"scoped", logical_key="scoped",
+            disposition="duplicate", duplicate_of=canonical)
+        outside_canonical = self._insert_raw(
+            "2026-10-01T08:02:00+00:00", b"outside", logical_key="outside")
+        outside_duplicate = self._insert_raw(
+            "2026-10-01T08:03:00+00:00", b"outside", logical_key="outside",
+            disposition="duplicate", duplicate_of=outside_canonical)
+        cutoff = "2026-10-09T12:00:00+00:00"
+        receipt_cutoff = "2026-10-13T12:00:00+00:00"
+        upper_raw_id = outside_duplicate + 100
+        global_checkpoint = {
+            "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+            "upper_raw_id": upper_raw_id, "cursor": 94000,
+            "scanned": 92000, "deleted": 0, "complete": False,
+        }
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,archived_parse_attempts,archived_errors,
+                       archived_error_summaries,deleted_raw_frames,
+                       retained_protected_frames,status,detail,created_at)
+                   VALUES (?,0,0,0,0,0,'completed',?,?)""",
+                (cutoff, json.dumps({"exact_duplicate_checkpoint": global_checkpoint}), cutoff),
+            )
+            connection.commit()
+
+        ranges = ((canonical, duplicate), (outside_duplicate + 50, outside_duplicate + 60))
+        result = run_exact_duplicate_cleanup_job(
+            self.database, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+            upper_raw_id=upper_raw_id, candidate_ranges=ranges,
+            batch_limit=10, scan_limit=10, time_budget_seconds=30,
+            archive_root=self.root)
+
+        self.assertFalse(result["retry_required"])
+        self.assertTrue(result["result"]["complete"])
+        self.assertEqual(result["result"]["deleted"], 1)
+        self.assertEqual(result["result"]["range_index"], len(ranges))
+        self.assertEqual(result["batches"], 2)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (outside_duplicate,)
+            ).fetchone())
+            preserved = retention._latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id)
+            self.assertEqual(preserved["cursor"], 94000)
+            run_count = connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0]
+
+        repeated = run_exact_duplicate_cleanup_job(
+            self.database, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+            upper_raw_id=upper_raw_id, candidate_ranges=ranges,
+            batch_limit=10, scan_limit=10, time_budget_seconds=30,
+            archive_root=self.root)
+        self.assertTrue(repeated["result"]["complete"])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], run_count)
+
+    def test_scoped_cleanup_uses_r5_candidate_ranges_without_scanning_gaps(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        ranges = (
+            (2000001, 2002000), (4000001, 4002000),
+            (6000001, 6002000), (7107831, 7109830),
+        )
+        duplicate_ids = []
+        canonical_ids = []
+        for start, _ in ranges:
+            with closing(sqlite3.connect(self.database)) as connection:
+                connection.execute(
+                    "DELETE FROM sqlite_sequence WHERE name='ingest_raw_frames'")
+                connection.execute(
+                    "INSERT INTO sqlite_sequence(name,seq) VALUES ('ingest_raw_frames',?)",
+                    (start - 2,),
+                )
+                connection.commit()
+            payload = f"range-{start}".encode()
+            canonical = self._insert_raw(
+                "2026-10-01T08:00:00+00:00", payload,
+                logical_key=f"range-{start}")
+            duplicate = self._insert_raw(
+                "2026-10-01T08:01:00+00:00", payload,
+                logical_key=f"range-{start}", disposition="duplicate",
+                duplicate_of=canonical)
+            self.assertEqual(duplicate, start)
+            canonical_ids.append(canonical)
+            duplicate_ids.append(duplicate)
+
+        result = run_exact_duplicate_cleanup_job(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=ranges[-1][1], candidate_ranges=ranges,
+            batch_limit=100, scan_limit=2000, time_budget_seconds=30,
+            archive_root=self.root)
+
+        self.assertTrue(result["result"]["complete"])
+        self.assertEqual(result["result"]["scanned"], 4)
+        self.assertEqual(result["result"]["exact_candidates"], 4)
+        self.assertEqual(result["result"]["deleted"], 4)
+        self.assertEqual(result["batches"], 5)
+        with closing(sqlite3.connect(self.database)) as connection:
+            remaining = {int(row[0]) for row in connection.execute(
+                "SELECT id FROM ingest_raw_frames")}
+        self.assertTrue(set(canonical_ids).issubset(remaining))
+        self.assertTrue(set(duplicate_ids).isdisjoint(remaining))
+
+    def test_checkpoint_recovery_survives_more_than_200_unrelated_runs(self):
+        cutoff = "2026-10-09T12:00:00+00:00"
+        receipt_cutoff = "2026-10-13T12:00:00+00:00"
+        upper_raw_id = 7109830
+        candidate_ranges = ((2000001, 2002000),)
+        candidate_scope = retention._candidate_scope(candidate_ranges)
+        global_checkpoint = {
+            "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+            "upper_raw_id": upper_raw_id, "candidate_scope": None,
+            "cursor": 94000, "complete": False,
+        }
+        scoped_checkpoint = {
+            "cutoff": cutoff, "receipt_cutoff": receipt_cutoff,
+            "upper_raw_id": upper_raw_id, "candidate_scope": candidate_scope,
+            "candidate_ranges": [list(item) for item in candidate_ranges],
+            "range_index": 1, "cursor": 2002000, "complete": True,
+        }
+        with closing(sqlite3.connect(self.database)) as connection:
+            for checkpoint in (global_checkpoint, scoped_checkpoint):
+                connection.execute(
+                    """INSERT INTO station_ingest_retention_runs(
+                           cutoff_time,archived_parse_attempts,archived_errors,
+                           archived_error_summaries,deleted_raw_frames,
+                           retained_protected_frames,status,detail,created_at)
+                       VALUES (?,0,0,0,0,0,'completed',?,?)""",
+                    (cutoff, json.dumps({"exact_duplicate_checkpoint": checkpoint}), cutoff),
+                )
+            for index in range(250):
+                connection.execute(
+                    """INSERT INTO station_ingest_retention_runs(
+                           cutoff_time,archived_parse_attempts,archived_errors,
+                           archived_error_summaries,deleted_raw_frames,
+                           retained_protected_frames,status,detail,created_at)
+                       VALUES (?,0,0,0,0,0,'completed',?,?)""",
+                    ("2026-10-10T00:00:00+00:00",
+                     json.dumps({"unrelated": index}),
+                     "2026-10-28T00:00:00+00:00"),
+                )
+            connection.commit()
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            recovered_global = retention._latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id)
+            recovered_scope = retention._latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id, candidate_scope=candidate_scope)
+            self.assertEqual(recovered_global["cursor"], 94000)
+            self.assertTrue(recovered_scope["complete"])
+            stable_count = connection.execute(
+                """SELECT COUNT(*) FROM station_ingest_cutover_state
+                   WHERE cutover_name LIKE ?""",
+                (retention.EXACT_DUPLICATE_CHECKPOINT_VERSION + ":%",),
+            ).fetchone()[0]
+            self.assertEqual(stable_count, 2)
+            connection.execute("DELETE FROM station_ingest_retention_runs")
+            connection.commit()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(retention._latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id)["cursor"], 94000)
+            self.assertTrue(retention._latest_exact_duplicate_checkpoint(
+                connection, cutoff=cutoff, receipt_cutoff=receipt_cutoff,
+                upper_raw_id=upper_raw_id,
+                candidate_scope=candidate_scope)["complete"])
+
+    def test_cleanup_job_caps_each_batch_at_30_seconds(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        candidate_ranges = ((1, 2),)
+        result = {
+            "candidate_scope": retention._candidate_scope(candidate_ranges),
+            "candidate_ranges": [[1, 2]], "range_index": 1, "cursor": 2,
+            "scanned": 2, "deleted": 1, "errors_archived": 0,
+            "pending_raw_ids": [], "representative_search": {},
+            "batch_deleted": 1, "batch_errors_archived": 0,
+            "batch_elapsed_seconds": 0.01, "stop_reason": "upper_bound_reached",
+            "complete": True,
+        }
+        with mock.patch.object(
+                retention, "purge_exact_duplicate_batch", return_value=result) as purge:
+            completed = run_exact_duplicate_cleanup_job(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=2, candidate_ranges=candidate_ranges,
+                time_budget_seconds=900, archive_root=self.root)
+        self.assertFalse(completed["retry_required"])
+        self.assertEqual(
+            purge.call_args.kwargs["time_budget_seconds"],
+            retention.EXACT_DUPLICATE_BATCH_TIME_BUDGET_SECONDS)
+
+    def test_cleanup_job_missing_indexes_fails_without_creation_or_cleanup(self):
+        self._mark_startup_ready()
+        with mock.patch.object(retention, "purge_exact_duplicate_batch") as purge:
+            with self.assertRaisesRegex(RetentionError, "indexes are missing"):
+                run_exact_duplicate_cleanup_job(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=2, candidate_ranges=((1, 2),),
+                    time_budget_seconds=900, archive_root=self.root)
+        purge.assert_not_called()
+        with closing(sqlite3.connect(self.database)) as connection:
+            existing = {str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+            self.assertTrue(set(retention.CLEANUP_INDEXES).isdisjoint(existing))
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_cleanup_failure_rolls_back_delete_and_checkpoint(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"rollback", logical_key="rollback")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"rollback", logical_key="rollback",
+            disposition="duplicate", duplicate_of=canonical)
+        original = retention._delete_confirmed_duplicate_rows
+
+        def fail_after_delete(connection, raw_ids):
+            original(connection, raw_ids)
+            raise sqlite3.OperationalError("injected cleanup failure")
+
+        with mock.patch.object(
+                retention, "_delete_confirmed_duplicate_rows", side_effect=fail_after_delete):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "injected cleanup failure"):
+                purge_exact_duplicate_batch(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=duplicate, batch_limit=10, scan_limit=10)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_cleanup_ignores_unrelated_expired_receipts(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"target", logical_key="target")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"target", logical_key="target",
+            disposition="duplicate", duplicate_of=canonical)
+        active = self._insert_raw(
+            "2026-10-01T08:02:00+00:00", b"target", logical_key="target",
+            disposition="duplicate", duplicate_of=canonical)
+        unrelated = [
+            self._insert_raw(
+                "2026-10-01T09:00:00+00:00", f"unrelated-{index}".encode(),
+                logical_key=f"unrelated-{index}")
+            for index in range(600)
+        ]
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status) VALUES (?,?,?,?,?,'authenticated')""",
+                (active, f"endpoint:{self.endpoint_id}", self.endpoint_id,
+                 "RETENTION-MN", "2026-10-15T00:00:00+00:00"),
+            )
+            connection.executemany(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status) VALUES (?,?,?,?,?,'authenticated')""",
+                ((raw_id, f"unrelated:{raw_id}", self.endpoint_id, "RETENTION-MN",
+                  "2026-10-01T00:00:00+00:00") for raw_id in unrelated),
+            )
+            connection.commit()
+
+        result = purge_exact_duplicate_batch(
+            self.database, cutoff="2026-10-09T12:00:00+00:00",
+            receipt_cutoff="2026-10-13T12:00:00+00:00",
+            upper_raw_id=active, batch_limit=10, scan_limit=10,
+            time_budget_seconds=30)
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["receipts_deleted"], 0)
+        self.assertEqual(result["retained_protected"], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (active,)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts WHERE received_at<?",
+                ("2026-10-13T12:00:00+00:00",),
+            ).fetchone()[0], len(unrelated))
+
+    def test_exact_duplicate_cleanup_deadline_rolls_back_receipts_raw_and_checkpoint(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        canonical = self._insert_raw(
+            "2026-10-01T08:00:00+00:00", b"deadline", logical_key="deadline")
+        duplicate = self._insert_raw(
+            "2026-10-01T08:01:00+00:00", b"deadline", logical_key="deadline",
+            disposition="duplicate", duplicate_of=canonical)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status) VALUES (?,?,?,?,?,'authenticated')""",
+                (duplicate, f"endpoint:{self.endpoint_id}", self.endpoint_id,
+                 "RETENTION-MN", "2026-10-01T00:00:00+00:00"),
+            )
+            connection.commit()
+
+        original = retention._delete_confirmed_duplicate_rows
+
+        def expire_after_delete(connection, raw_ids):
+            original(connection, raw_ids)
+            raise retention._StatementDeadlineExceeded("exact_write_batch")
+
+        with mock.patch.object(
+                retention, "_delete_confirmed_duplicate_rows",
+                side_effect=expire_after_delete):
+            with self.assertRaises(retention._StatementDeadlineExceeded) as raised:
+                purge_exact_duplicate_batch(
+                    self.database, cutoff="2026-10-09T12:00:00+00:00",
+                    receipt_cutoff="2026-10-13T12:00:00+00:00",
+                    upper_raw_id=duplicate, batch_limit=10, scan_limit=10,
+                    time_budget_seconds=30)
+
+        self.assertEqual(raised.exception.checkpoint["cursor"], 0)
+        self.assertEqual(raised.exception.checkpoint["receipts_deleted"], 0)
+        self.assertEqual(raised.exception.checkpoint["deleted"], 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM ingest_raw_frames WHERE id=?", (duplicate,)
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM station_ingest_recent_receipts WHERE raw_frame_id=?",
+                (duplicate,),
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_retention_runs"
+            ).fetchone()[0], 0)
+
+    def test_exact_duplicate_index_deadline_reports_completed_stages(self):
+        interruption = retention._StatementDeadlineExceeded(
+            "exact_query_plan:bounded_raw_scan")
+        with mock.patch.object(
+                retention, "_exact_duplicate_cleanup_query_plans",
+                side_effect=interruption):
+            with self.assertRaises(retention._StatementDeadlineExceeded) as raised:
+                ensure_duplicate_cleanup_indexes(self.database, time_budget_seconds=30)
+
+        stages = raised.exception.checkpoint["index_stages"]
+        self.assertEqual([stage["name"] for stage in stages], list(retention.CLEANUP_INDEXES))
+        self.assertTrue(all("elapsed_seconds" in stage for stage in stages))
+        self.assertTrue(all("database_growth_bytes" in stage for stage in stages))
+        with closing(sqlite3.connect(self.database)) as connection:
+            existing = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertTrue(set(retention.CLEANUP_INDEXES).issubset(existing))
+
+    def test_exact_duplicate_cleanup_cli_deadline_returns_partial_checkpoint(self):
+        self._mark_startup_ready()
+        ensure_duplicate_cleanup_indexes(self.database)
+        interruption = retention._StatementDeadlineExceeded(
+            "exact_write_batch", {"cursor": 0, "deleted": 0})
+        stderr = io.StringIO()
+        with mock.patch.object(
+                retention, "purge_exact_duplicate_batch", side_effect=interruption), \
+                mock.patch.object(sys, "stderr", stderr):
+            code = retention.main([
+                "purge-exact-duplicates", "--database", str(self.database),
+                "--cutoff", "2026-10-09T12:00:00+00:00",
+                "--receipt-cutoff", "2026-10-13T12:00:00+00:00",
+                "--upper-raw-id", "1", "--time-budget-seconds", "30",
+                "--raw-storage-dir", str(self.root),
+            ])
+        self.assertEqual(code, 75)
+        result = json.loads(stderr.getvalue())
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["checkpoint"], {"cursor": 0, "deleted": 0})
+
+    def test_exact_duplicate_cleanup_cli_requires_ready_state_and_supports_index_exit(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(retention.main([
+                "prepare-exact-duplicate-cleanup", "--database", str(self.database),
+            ]), 0)
+        prepared = json.loads(stdout.getvalue())
+        self.assertEqual(prepared["action"], "prepare-exact-duplicate-cleanup")
+        with self.assertRaisesRegex(RetentionError, "startup-ready state"):
+            purge_exact_duplicate_batch(
+                self.database, cutoff="2026-10-09T12:00:00+00:00",
+                receipt_cutoff="2026-10-13T12:00:00+00:00",
+                upper_raw_id=1)
+        self._mark_startup_ready()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(retention.main([
+                "purge-exact-duplicates", "--database", str(self.database),
+                "--cutoff", "2026-10-09T12:00:00+00:00",
+                "--receipt-cutoff", "2026-10-13T12:00:00+00:00",
+                "--upper-raw-id", "1",
+                "--raw-storage-dir", str(self.root),
+            ]), 0)
+        self.assertTrue(json.loads(stdout.getvalue())["result"]["complete"])
+        self.assertEqual(
+            set(drop_duplicate_cleanup_indexes(self.database)), set(retention.CLEANUP_INDEXES))
 
     def test_maintenance_keeps_summary_boundary_and_prunes_strictly_older_rows(self):
         with closing(sqlite3.connect(self.database)) as connection:

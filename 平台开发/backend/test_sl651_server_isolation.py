@@ -25,6 +25,7 @@ from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_observation_time, encode_bcd_time, encode_station_code, parse_frame
 from hj212_parser import build_hj212_9011_response, hj212_crc, parse_hj212_frame
 import sl651_server as ingest_server
+import station_ingest_retention as retention
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, _listener_healthcheck, credential_hmac
 
 
@@ -569,12 +570,17 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             non_data_errors = connection.execute(
                 "SELECT COUNT(*) FROM ingest_errors WHERE error_type='hj212_non_data_command'"
             ).fetchone()[0]
+            non_data_summary = connection.execute(
+                """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
+                    WHERE error_type='hj212_non_data_command'"""
+            ).fetchone()[0]
         self.assertEqual(batches, [(2061,), (2061,), (2011,)])
         self.assertEqual(business_rows, [
             (2061, 7.1, "station-monitoring-business-v3"),
             (2011, 9.1, "station-monitoring-business-v3"),
         ])
-        self.assertEqual(non_data_errors, 1)
+        self.assertEqual(non_data_errors, 0)
+        self.assertEqual(non_data_summary, 1)
         self.assertFalse(self.server._normalizer.done())
 
         _, token = self._create_l1_web_credentials()
@@ -781,6 +787,170 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         await _listener_healthcheck("127.0.0.1", self.server.bound_port)
         self.assertNotIn("integrity_check", inspect.getsource(IngestionStorage.healthcheck))
 
+    async def test_governance_capacity_cli_starts_healthchecks_and_persists_results_on_10gib(self):
+        await self.server.close()
+        raw_root = self.root / "raw-archive"
+        raw_root.mkdir()
+        gib = 1024 ** 3
+        cli_arguments = ingest_server._parser().parse_args([
+            "--database", str(self.database),
+            "--raw-storage-dir", str(raw_root),
+            "--storage-mode", "governance",
+            "--archive-minimum-total-bytes", str(8 * gib),
+            "--archive-minimum-free-bytes", str(1 * gib),
+            "--hot-minimum-total-bytes", str(10 * gib),
+            "--hot-minimum-free-bytes", str(2 * gib),
+        ])
+        policy = ingest_server._storage_policy_from_arguments(cli_arguments)
+        self.assertEqual(policy.mode, "governance")
+        with self.assertRaisesRegex(StorageError, "requires explicit archive and hot"):
+            ingest_server._storage_policy_from_arguments(
+                ingest_server._parser().parse_args([
+                    "--database", str(self.database),
+                    "--raw-storage-dir", str(raw_root),
+                    "--storage-mode", "governance",
+                ])
+            )
+        with self.assertRaisesRegex(StorageError, "require --storage-mode governance"):
+            ingest_server._storage_policy_from_arguments(
+                ingest_server._parser().parse_args([
+                    "--database", str(self.database),
+                    "--raw-storage-dir", str(raw_root),
+                    "--storage-mode", "long_term",
+                    "--archive-minimum-total-bytes", str(8 * gib),
+                ])
+            )
+
+        environment = {
+            "SL651_RAW_STORAGE_DIR": str(raw_root),
+            "SL651_STORAGE_MODE": "governance",
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES": str(8 * gib),
+            "SL651_ARCHIVE_MINIMUM_FREE_BYTES": str(1 * gib),
+            "SL651_HOT_MINIMUM_TOTAL_BYTES": str(10 * gib),
+            "SL651_HOT_MINIMUM_FREE_BYTES": str(2 * gib),
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            health_arguments = ingest_server._parser().parse_args([
+                "--database", str(self.database), "--healthcheck",
+            ])
+        self.assertEqual(ingest_server._storage_policy_from_arguments(health_arguments), policy)
+
+        station = "GOVERNANCE01"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('GOV-01','Governance','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01001',14400,900,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',900,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        class Usage:
+            def __init__(self, total: int, free: int):
+                self.total = total
+                self.free = free
+                self.used = total - free
+
+        def available_usage(path):
+            resolved = Path(path).resolve()
+            if resolved == raw_root.resolve():
+                return Usage(10 * gib, 3 * gib)
+            if resolved == self.database.parent.resolve():
+                return Usage(10 * gib, 4 * gib)
+            raise AssertionError(f"unexpected capacity path: {resolved}")
+
+        self.storage = IngestionStorage(self.database, self.pepper, storage_policy=policy)
+        self.server = StationIngestServer(
+            self.storage, host="127.0.0.1", port=0, max_connections=8,
+        )
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=available_usage):
+            self.storage.healthcheck()
+            await self.server.start()
+            reader, writer = await self.connect()
+            writer.write(make_hj212(
+                station=station, password=password, qn="20261028120000001",
+                cp="DataTime=20261028120000;w01001-Rtd=7.25;w01001-Flag=N",
+            ))
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            del reader
+            for _ in range(100):
+                with closing(sqlite3.connect(self.database)) as connection:
+                    row = connection.execute(
+                        """SELECT business.standard_value
+                             FROM monitoring_business_observations business
+                             JOIN observation_batches batch
+                               ON batch.id=business.observation_batch_id
+                            WHERE batch.endpoint_id=?""",
+                        (endpoint_id,),
+                    ).fetchone()
+                if row is not None:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(row, (7.25,))
+            self.storage.healthcheck()
+            await self.server.close()
+
+        def low_archive_usage(path):
+            if Path(path).resolve() == raw_root.resolve():
+                return Usage(10 * gib, gib - 1)
+            return Usage(10 * gib, 4 * gib)
+
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=low_archive_usage):
+            with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+                self.storage.healthcheck()
+
+        def low_hot_usage(path):
+            if Path(path).resolve() == raw_root.resolve():
+                return Usage(10 * gib, 3 * gib)
+            return Usage(10 * gib, 2 * gib - 1)
+
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=low_hot_usage):
+            with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+                self.storage.healthcheck()
+
+        long_term = ingest_server._storage_policy_from_arguments(
+            ingest_server._parser().parse_args([
+                "--database", str(self.database), "--raw-storage-dir", str(raw_root),
+                "--storage-mode", "long_term",
+            ])
+        )
+        validation = ingest_server._storage_policy_from_arguments(
+            ingest_server._parser().parse_args([
+                "--database", str(self.database), "--raw-storage-dir", str(raw_root),
+                "--storage-mode", "validation",
+            ])
+        )
+        self.assertEqual((long_term.minimum_total_bytes, long_term.minimum_free_bytes), (100 * gib, 10 * gib))
+        self.assertEqual((validation.minimum_total_bytes, validation.minimum_free_bytes), (20 * gib, 5 * gib))
+
     async def test_full_integrity_check_allows_unrelated_legacy_foreign_key_violation(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("CREATE TABLE legacy_parents (id INTEGER PRIMARY KEY)")
@@ -886,7 +1056,11 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         environment.update({
             "SL651_RAW_STORAGE_HOST_PATH": "/tmp/codex-station-raw-placeholder",
             "SL651_BIND_PORT": "15505",
-            "SL651_STORAGE_MODE": "validation",
+            "SL651_STORAGE_MODE": "governance",
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES": "8589934592",
+            "SL651_ARCHIVE_MINIMUM_FREE_BYTES": "1073741824",
+            "SL651_HOT_MINIMUM_TOTAL_BYTES": "10737418240",
+            "SL651_HOT_MINIMUM_FREE_BYTES": "2147483648",
             "SL651_CREDENTIAL_PEPPER": "test-only-placeholder",
             "MINIPROGRAM_STATE": "formal",
             "WX_APPSECRET": "test-only-placeholder",
@@ -899,6 +1073,16 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
         self.assertNotIn("directory is not set", rendered.stderr.lower())
         rendered_services = json.loads(rendered.stdout)["services"]
+        rendered_receiver_environment = rendered_services["station-ingest"]["environment"]
+        self.assertEqual(rendered_receiver_environment["SL651_STORAGE_MODE"], "governance")
+        self.assertEqual(
+            rendered_receiver_environment["SL651_ARCHIVE_MINIMUM_TOTAL_BYTES"],
+            "8589934592",
+        )
+        self.assertEqual(
+            rendered_receiver_environment["SL651_HOT_MINIMUM_FREE_BYTES"],
+            "2147483648",
+        )
         rendered_command = rendered_services["station-ingest-permissions"]["command"][2]
         self.assertEqual(rendered_command.count('"$$directory"'), 4)
         # Compose's config output preserves the escape; the command delivered to
@@ -930,6 +1114,11 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--storage-mode ${SL651_STORAGE_MODE:-long_term}", receiver["command"][2])
         self.assertEqual(receiver["environment"]["SL651_RAW_STORAGE_DIR"], "/var/lib/station-ingest/raw")
         self.assertEqual(receiver["environment"]["SL651_STORAGE_MODE"], "${SL651_STORAGE_MODE:-long_term}")
+        for name in (
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES", "SL651_ARCHIVE_MINIMUM_FREE_BYTES",
+            "SL651_HOT_MINIMUM_TOTAL_BYTES", "SL651_HOT_MINIMUM_FREE_BYTES",
+        ):
+            self.assertEqual(receiver["environment"][name], "${" + name + ":-}")
         self.assertIn("${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw", receiver["volumes"])
         self.assertIn("umask 0007", receiver["healthcheck"]["test"][1])
         self.assertEqual(

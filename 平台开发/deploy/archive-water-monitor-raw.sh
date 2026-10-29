@@ -22,6 +22,7 @@ done
 receiver="${STATION_RECEIVER_CONTAINER:-water-monitor-station-ingest}"
 day="${ARCHIVE_DAY:-$(date -u -d yesterday +%F)}"
 [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "ARCHIVE_DAY must use YYYY-MM-DD" >&2; exit 1; }
+echo "ARCHIVE_WRAPPER_CONTRACT=action-result-v2"
 
 test "$(docker inspect "$receiver" --format '{{.State.Running}}')" = true
 test "$(docker inspect "$receiver" --format '{{.State.Health.Status}}')" = healthy

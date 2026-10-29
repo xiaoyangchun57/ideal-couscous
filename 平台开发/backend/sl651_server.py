@@ -26,7 +26,10 @@ try:  # Support both package tests and direct container execution.
     )
     from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from .ingestion_framing import extract_ingestion_frames
-    from .station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
+    from .station_ingest_retention import (
+        RetentionError, StoragePolicy, check_storage_policy,
+        storage_policy_for_governance, storage_policy_for_mode,
+    )
     from .station_ingest_slots import hj212_realtime_summary_identity
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
     from sl651_parser import (
@@ -34,7 +37,10 @@ except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry 
     )
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from ingestion_framing import extract_ingestion_frames
-    from station_ingest_retention import RetentionError, StoragePolicy, check_storage_policy, storage_policy_for_mode
+    from station_ingest_retention import (
+        RetentionError, StoragePolicy, check_storage_policy,
+        storage_policy_for_governance, storage_policy_for_mode,
+    )
     from station_ingest_slots import hj212_realtime_summary_identity
 try:
     from .station_monitoring import normalize_raw_frame
@@ -65,6 +71,12 @@ DEFAULT_ERROR_QUEUE_MAX = 256
 DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE = 64
 DEFAULT_NORMALIZATION_SCAN_SECONDS = 0.1
 DEFAULT_MAPPING_PATH = Path(__file__).with_name("sl651_mapping.json")
+AGGREGATE_ONLY_ERROR_TYPES = frozenset({
+    "source_cooling",
+    "source_connection_limit",
+    "source_connection_burst",
+    "hj212_non_data_command",
+})
 
 
 class StorageError(RuntimeError):
@@ -240,10 +252,11 @@ class IngestionStorage:
             endpoint_id = raw["endpoint_id"] if raw else None
             station_code = raw["station_code"] if raw else None
             occurred_at = str(raw["received_at"]) if raw else _utc_now()
-        connection.execute(
-            "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
-            (raw_id, error_type),
-        )
+        if error_type not in AGGREGATE_ONLY_ERROR_TYPES:
+            connection.execute(
+                "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
+                (raw_id, error_type),
+            )
         source_key = _source_key(endpoint_id, station_code)
         bucket_hour = datetime.fromisoformat(occurred_at).astimezone(timezone.utc).replace(
             minute=0, second=0, microsecond=0).isoformat()
@@ -1121,7 +1134,17 @@ async def _listener_healthcheck(host: str, port: int) -> None:
     await writer.wait_closed()
 
 
-def main() -> int:
+def _optional_environment_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be an integer byte count") from exc
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--host", default=os.environ.get("SL651_BIND_HOST", DEFAULT_HOST))
@@ -1129,11 +1152,68 @@ def main() -> int:
     parser.add_argument("--max-connections", default=DEFAULT_MAX_CONNECTIONS, type=int)
     parser.add_argument("--mapping", default=DEFAULT_MAPPING_PATH, type=Path)
     parser.add_argument("--raw-storage-dir", default=os.environ.get("SL651_RAW_STORAGE_DIR"), type=Path)
-    parser.add_argument("--storage-mode", choices=("long_term", "validation"), default=os.environ.get("SL651_STORAGE_MODE", "long_term"))
+    parser.add_argument(
+        "--storage-mode", choices=("long_term", "validation", "governance"),
+        default=os.environ.get("SL651_STORAGE_MODE", "long_term"),
+    )
+    parser.add_argument(
+        "--archive-minimum-total-bytes", type=int,
+        default=_optional_environment_int("SL651_ARCHIVE_MINIMUM_TOTAL_BYTES"),
+    )
+    parser.add_argument(
+        "--archive-minimum-free-bytes", type=int,
+        default=_optional_environment_int("SL651_ARCHIVE_MINIMUM_FREE_BYTES"),
+    )
+    parser.add_argument(
+        "--hot-minimum-total-bytes", type=int,
+        default=_optional_environment_int("SL651_HOT_MINIMUM_TOTAL_BYTES"),
+    )
+    parser.add_argument(
+        "--hot-minimum-free-bytes", type=int,
+        default=_optional_environment_int("SL651_HOT_MINIMUM_FREE_BYTES"),
+    )
     parser.add_argument("--healthcheck", action="store_true")
-    arguments = parser.parse_args()
+    return parser
+
+
+def _storage_policy_from_arguments(arguments: argparse.Namespace) -> StoragePolicy | None:
+    budgets = (
+        arguments.archive_minimum_total_bytes,
+        arguments.archive_minimum_free_bytes,
+        arguments.hot_minimum_total_bytes,
+        arguments.hot_minimum_free_bytes,
+    )
+    if arguments.raw_storage_dir is None:
+        if arguments.storage_mode == "governance" or any(value is not None for value in budgets):
+            raise StorageError("governance storage requires --raw-storage-dir")
+        return None
+    try:
+        if arguments.storage_mode == "governance":
+            if any(value is None for value in budgets):
+                raise StorageError(
+                    "governance mode requires explicit archive and hot storage capacity budgets")
+            return storage_policy_for_governance(
+                arguments.raw_storage_dir,
+                archive_minimum_total_bytes=arguments.archive_minimum_total_bytes,
+                archive_minimum_free_bytes=arguments.archive_minimum_free_bytes,
+                hot_minimum_total_bytes=arguments.hot_minimum_total_bytes,
+                hot_minimum_free_bytes=arguments.hot_minimum_free_bytes,
+            )
+        if any(value is not None for value in budgets):
+            raise StorageError("explicit storage budgets require --storage-mode governance")
+        return storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode)
+    except RetentionError as exc:
+        raise StorageError(str(exc)) from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    arguments = parser.parse_args(argv)
     pepper = os.environ.get("SL651_CREDENTIAL_PEPPER", "")
-    storage_policy = storage_policy_for_mode(arguments.raw_storage_dir, arguments.storage_mode) if arguments.raw_storage_dir else None
+    try:
+        storage_policy = _storage_policy_from_arguments(arguments)
+    except StorageError as exc:
+        parser.error(str(exc))
     storage = IngestionStorage(arguments.database, pepper, storage_policy=storage_policy)
     if arguments.healthcheck:
         storage.healthcheck()

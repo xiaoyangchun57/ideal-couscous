@@ -26,9 +26,45 @@ for name in "${required[@]:1}"; do
 done
 
 cd "$APP_DIR"
-compose=(docker compose --project-directory "$APP_DIR"
-  -f "$APP_DIR/docker-compose.yml" -f "$APP_DIR/docker-compose.production.yml"
-  -f "$APP_DIR/docker-compose.release-mounts.yml")
+base_compose="$APP_DIR/docker-compose.yml"
+production_compose="$APP_DIR/docker-compose.production.yml"
+release_mounts_compose="$APP_DIR/docker-compose.release-mounts.yml"
+stable_cutover_compose="$APP_DIR/docker-compose.offline-cutover-current.yml"
+stable_cutover_env="$APP_DIR/.env.offline-cutover-current"
+default_compose_file="$base_compose:$production_compose:$release_mounts_compose"
+IFS=: read -r -a compose_files <<< "${COMPOSE_FILE:-$default_compose_file}"
+[[ ${#compose_files[@]} -gt 0 ]] || { echo "COMPOSE_FILE did not select any files" >&2; exit 1; }
+
+stable_cutover_selected=0
+for compose_file in "${compose_files[@]}"; do
+  case "$compose_file" in
+    "$base_compose"|"$production_compose"|"$release_mounts_compose") ;;
+    "$stable_cutover_compose") stable_cutover_selected=$((stable_cutover_selected + 1)) ;;
+    *) echo "Unsupported retention compose file: $compose_file" >&2; exit 1 ;;
+  esac
+  [[ -f "$compose_file" ]] || { echo "Retention compose file is missing: $compose_file" >&2; exit 1; }
+done
+for required_compose in "$base_compose" "$production_compose" "$release_mounts_compose"; do
+  [[ ":${COMPOSE_FILE:-$default_compose_file}:" == *":$required_compose:"* ]] || {
+    echo "Required retention compose file is not selected: $required_compose" >&2
+    exit 1
+  }
+done
+[[ $stable_cutover_selected -le 1 ]] || { echo "Stable cutover compose file is selected more than once" >&2; exit 1; }
+
+compose=(docker compose)
+if [[ $stable_cutover_selected -eq 1 || -n "${COMPOSE_ENV_FILE:-}" ]]; then
+  [[ $stable_cutover_selected -eq 1 && "${COMPOSE_ENV_FILE:-}" == "$stable_cutover_env" ]] || {
+    echo "Stable retention mode requires both $stable_cutover_compose and $stable_cutover_env" >&2
+    exit 1
+  }
+  [[ -r "$stable_cutover_env" ]] || { echo "Stable cutover environment is not readable: $stable_cutover_env" >&2; exit 1; }
+  compose+=(--env-file "$stable_cutover_env")
+fi
+compose+=(--project-directory "$APP_DIR")
+for compose_file in "${compose_files[@]}"; do
+  compose+=(-f "$compose_file")
+done
 database_source="$("${compose[@]}" --profile station-ingest --profile station-ingest-maintenance config --format json | python3 -c '
 import json, sys
 config = json.load(sys.stdin)
@@ -39,8 +75,10 @@ def source(service):
         raise SystemExit("Missing unique business database bind mount: " + service)
     return mounts[0]["source"]
 web, receiver = source("water-monitor"), source("station-ingest")
-if web != receiver or web != "/opt/water-monitor-persistent/backend-data":
-    raise SystemExit("Business database mounts do not match the approved persistent database")
+if web != receiver:
+    raise SystemExit("Business database mounts do not match")
+if not isinstance(web, str) or not web.startswith("/"):
+    raise SystemExit("Business database bind source must be an absolute host path")
 print(web)
 ')"
 result="$("${compose[@]}" --profile station-ingest-maintenance run --rm --no-deps -T \

@@ -5,13 +5,18 @@ if [[ $EUID -ne 0 ]]; then
   echo "Run this installer as root" >&2
   exit 1
 fi
-if [[ $# -ne 7 ]]; then
-  echo "Usage: $0 /opt/water-monitor-<release> batch-limit time-budget-seconds archive-total-bytes archive-free-bytes hot-total-bytes hot-free-bytes" >&2
+if [[ $# -ne 7 && $# -ne 8 ]]; then
+  echo "Usage: $0 /opt/water-monitor-<release> batch-limit time-budget-seconds archive-total-bytes archive-free-bytes hot-total-bytes hot-free-bytes [--offline-cutover-current]" >&2
   exit 1
 fi
 
 APP_DIR="$1"
 shift
+use_stable_cutover=0
+if [[ $# -eq 7 ]]; then
+  [[ "${7}" == "--offline-cutover-current" ]] || { echo "Unknown retention install mode: ${7}" >&2; exit 1; }
+  use_stable_cutover=1
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ "$APP_DIR" =~ ^/opt/water-monitor-[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
   echo "Invalid immutable release directory: $APP_DIR" >&2
@@ -21,14 +26,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for overlay in docker-compose.production.yml docker-compose.release-mounts.yml; do
   [[ -f "$APP_DIR/$overlay" ]] || { echo "Release compose overlay is missing: $overlay" >&2; exit 1; }
 done
-for value in "$@"; do
+for value in "${@:1:6}"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || { echo "All governance budgets must be positive integers" >&2; exit 1; }
 done
 
+compose_file="$APP_DIR/docker-compose.yml:$APP_DIR/docker-compose.production.yml:$APP_DIR/docker-compose.release-mounts.yml"
+if [[ $use_stable_cutover -eq 1 ]]; then
+  stable_overlay="$APP_DIR/docker-compose.offline-cutover-current.yml"
+  stable_env="$APP_DIR/.env.offline-cutover-current"
+  [[ -f "$stable_overlay" ]] || { echo "Stable cutover compose file is missing: $stable_overlay" >&2; exit 1; }
+  [[ -r "$stable_env" ]] || { echo "Stable cutover environment is not readable: $stable_env" >&2; exit 1; }
+  compose_file="$compose_file:$stable_overlay"
+fi
+
 install -d -m 0750 /etc/water-monitor
-cat > /etc/water-monitor/station-ingest-retention.env <<EOF
+{
+cat <<EOF
 APP_DIR=$APP_DIR
-COMPOSE_FILE=$APP_DIR/docker-compose.yml:$APP_DIR/docker-compose.production.yml:$APP_DIR/docker-compose.release-mounts.yml
+COMPOSE_FILE=$compose_file
+EOF
+if [[ $use_stable_cutover -eq 1 ]]; then
+  echo "COMPOSE_ENV_FILE=$stable_env"
+fi
+cat <<EOF
 STATION_RETENTION_BATCH_LIMIT=$1
 STATION_RETENTION_TIME_BUDGET_SECONDS=$2
 STATION_ARCHIVE_MINIMUM_TOTAL_BYTES=$3
@@ -36,6 +56,7 @@ STATION_ARCHIVE_MINIMUM_FREE_BYTES=$4
 STATION_HOT_MINIMUM_TOTAL_BYTES=$5
 STATION_HOT_MINIMUM_FREE_BYTES=$6
 EOF
+} > /etc/water-monitor/station-ingest-retention.env
 chmod 0640 /etc/water-monitor/station-ingest-retention.env
 install -m 0755 "$SCRIPT_DIR/run-station-ingest-retention.sh" \
   /usr/local/sbin/run-station-ingest-retention

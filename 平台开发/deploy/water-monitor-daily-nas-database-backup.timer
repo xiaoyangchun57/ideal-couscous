@@ -1,0 +1,10 @@
+[Unit]
+Description=Run verified SQLite NAS backup daily at 02:30
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Shanghai
+Persistent=true
+Unit=water-monitor-daily-nas-database-backup.service
+
+[Install]
+WantedBy=timers.target

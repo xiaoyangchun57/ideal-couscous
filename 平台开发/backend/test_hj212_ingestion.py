@@ -1018,7 +1018,13 @@ class HJ212IngestionContractTest(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_values").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_frame_protocols WHERE protocol_family='hj212'").fetchone()[0], 6)
             errors = {row[0] for row in connection.execute("SELECT error_type FROM ingest_errors")}
-        self.assertTrue({"credential_failed", "unknown_endpoint", "hj212_non_data_command", "hj212_crc_mismatch"} <= errors)
+            non_data_count = connection.execute(
+                """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
+                    WHERE error_type='hj212_non_data_command'"""
+            ).fetchone()[0]
+        self.assertTrue({"credential_failed", "unknown_endpoint", "hj212_crc_mismatch"} <= errors)
+        self.assertNotIn("hj212_non_data_command", errors)
+        self.assertEqual(non_data_count, 3)
 
 
 if __name__ == "__main__":
