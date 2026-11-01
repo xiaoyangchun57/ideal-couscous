@@ -1,9 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { App, Alert, Button, Modal, Form, Input, InputNumber, Space, Popconfirm, Typography, Empty } from 'antd';
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
-import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
@@ -13,9 +12,13 @@ import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
 
-export default function ReagentMasterPage() {
+export default function ReagentMasterPage({
+  embedded = false,
+  onBack,
+  searchParamKey = 'q',
+  pageParamKey = 'page',
+}) {
   const { message } = App.useApp();
-  const { tokens } = useTheme();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const canWrite = (user?.roles || [user?.role]).includes('admin');
@@ -26,17 +29,19 @@ export default function ReagentMasterPage() {
   const [editing, setEditing] = useState(null); // null=新增，对象=编辑
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
-  const urlSearch = searchParams.get('q') || '';
+  const urlSearch = searchParams.get(searchParamKey) || '';
+  const currentPage = Math.max(1, Number(searchParams.get(pageParamKey)) || 1);
 
   const updateSearch = useCallback((value) => {
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
       const q = value.trim();
-      if (q) next.set('q', q);
-      else next.delete('q');
+      if (q) next.set(searchParamKey, q);
+      else next.delete(searchParamKey);
+      next.delete(pageParamKey);
       return next;
     }, { replace: true });
-  }, [setSearchParams]);
+  }, [pageParamKey, searchParamKey, setSearchParams]);
   const { draft: search, inputProps: searchInputProps } = useUrlSyncedSearch(urlSearch, updateSearch);
 
   const filteredData = useMemo(() => {
@@ -116,6 +121,45 @@ export default function ReagentMasterPage() {
     }
   };
 
+  const closeEditor = useCallback(() => {
+    if (submitting) return;
+    const baseline = editing ? {
+      name: editing.name || '', manufacturer: editing.manufacturer || '', spec: editing.spec || '',
+      unit: editing.unit || '瓶', shelf_life_days: editing.shelf_life_days ?? 365,
+    } : { name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 };
+    const dirty = Object.keys(baseline).some((key) => String(form[key] ?? '') !== String(baseline[key] ?? ''));
+    if (!dirty) {
+      setModalOpen(false);
+      return;
+    }
+    Modal.confirm({
+      title: '放弃未保存的试剂信息？',
+      content: '关闭后，本次输入不会保留。',
+      okText: '放弃并关闭',
+      cancelText: '继续编辑',
+      okButtonProps: { danger: true },
+      onOk: () => setModalOpen(false),
+    });
+  }, [editing, form, submitting]);
+
+  const requestBack = useCallback(() => {
+    if (!modalOpen) {
+      onBack?.();
+      return;
+    }
+    Modal.confirm({
+      title: '先处理正在编辑的试剂',
+      content: '返回站点前需要保存，或明确放弃当前输入。',
+      okText: '放弃并返回',
+      cancelText: '继续编辑',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        setModalOpen(false);
+        onBack?.();
+      },
+    });
+  }, [modalOpen, onBack]);
+
   const columns = [
     {
       title: '试剂名称', dataIndex: 'name', key: 'name', width: 180,
@@ -164,6 +208,7 @@ export default function ReagentMasterPage() {
     <ManagementPage
       pageTitle="试剂主数据"
       pageSub="维护试剂目录；站点库存新增试剂时从此处选取。"
+      headerExtra={embedded && <Button icon={<ArrowLeftOutlined />} onClick={requestBack}>返回站点</Button>}
       tableMode="content"
       filterSlot={<Space direction="vertical" size={8} style={{ width: '100%' }}>
         {loadError && (
@@ -197,7 +242,18 @@ export default function ReagentMasterPage() {
           loading={loading}
           dataSource={filteredData}
           columns={columns}
-          pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+          pagination={{
+            current: currentPage,
+            pageSize: 20,
+            showSizeChanger: false,
+            hideOnSinglePage: true,
+            onChange: (page) => setSearchParams((previous) => {
+              const next = new URLSearchParams(previous);
+              if (page > 1) next.set(pageParamKey, String(page));
+              else next.delete(pageParamKey);
+              return next;
+            }, { replace: true }),
+          }}
           locale={{ emptyText: <Empty description={search ? '没有符合筛选条件的试剂' : '暂无试剂主数据'} /> }}
         />}
     >
@@ -206,7 +262,7 @@ export default function ReagentMasterPage() {
         open={modalOpen}
         onOk={submit}
         confirmLoading={submitting}
-        onCancel={() => setModalOpen(false)}
+        onCancel={closeEditor}
         okText="保存"
         cancelText="取消"
         destroyOnHidden

@@ -14,6 +14,7 @@ import WorkspacePage, {
   FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
 } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { useReportEvidenceHistory } from './reportEvidencePreviewHistory';
 
 const { Text } = Typography;
 
@@ -30,14 +31,20 @@ function reportPhotos(record) {
   try { return JSON.parse(record?.photo_urls || '[]').filter(Boolean); } catch { return []; }
 }
 
-export default function ReportsPage() {
+export default function ReportsPage({
+  embedded = false,
+  statusParamKey = 'status',
+  typeParamKey = 'type',
+}) {
   const { user } = useAuth();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
   const [allReports, setAllReports] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [evidenceRecord, setEvidenceRecord] = useState(null);
+  const {
+    evidenceRecord, openEvidence, closeEvidence, preview: evidencePreview,
+  } = useReportEvidenceHistory();
   const [verifyTarget, setVerifyTarget] = useState(null);
   const [verifySaving, setVerifySaving] = useState(false);
   const [dismissTarget, setDismissTarget] = useState(null);
@@ -47,8 +54,9 @@ export default function ReportsPage() {
   const [dismissForm] = Form.useForm();
   const roles = user?.roles?.length ? user.roles : [user?.role];
   const canManage = roles.includes('admin');
-  const filterStatus = searchParams.get('status') || '';
-  const filterType = searchParams.get('type') || '';
+  const filterStatus = searchParams.get(statusParamKey) || '';
+  const filterType = searchParams.get(typeParamKey) || '';
+  const targetReportId = searchParams.get('report');
 
   const updateQuery = useCallback((patch) => {
     const next = new URLSearchParams(searchParams);
@@ -73,6 +81,12 @@ export default function ReportsPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!targetReportId || !allReports.length) return;
+    const target = allReports.find((record) => String(record.id) === String(targetReportId));
+    if (target) openEvidence(target);
+  }, [allReports, openEvidence, targetReportId]);
 
   const list = useMemo(() => allReports.filter((record) => (
     (!filterStatus || record.status === filterStatus)
@@ -154,7 +168,7 @@ export default function ReportsPage() {
       title: '现场证据', key: 'evidence', width: 108, render: (_, record) => {
         const photos = reportPhotos(record);
         return photos.length
-          ? <Button aria-label={`查看${record.site_name || '异常上报'}异常上报#${record.id}的${photos.length}张现场照片`} size="small" icon={<HoverGifIcon name="eye" size={14} />} onClick={() => setEvidenceRecord(record)}>照片 {photos.length}</Button>
+          ? <Button aria-label={`查看${record.site_name || '异常上报'}异常上报#${record.id}的${photos.length}张现场照片`} size="small" icon={<HoverGifIcon name="eye" size={14} />} onClick={() => openEvidence(record)}>照片 {photos.length}</Button>
           : <Text type="secondary">缺失</Text>;
       },
     },
@@ -167,7 +181,7 @@ export default function ReportsPage() {
     },
     {
       title: '关联工单', dataIndex: 'order_no', width: 150, render: (value, record) => value
-        ? <Link aria-label={`查看${record.site_name || '异常上报'}的关联工单${value}`} to={`/workorders?search=${encodeURIComponent(value)}`}>{value}</Link>
+        ? <Link aria-label={`查看${record.site_name || '异常上报'}的关联工单${value}`} to={`/workorders?order=${encodeURIComponent(value)}`}>{value}</Link>
         : <Text type="secondary">未生成</Text>,
     },
     {
@@ -192,22 +206,22 @@ export default function ReportsPage() {
         {!['dispatched', 'verified', 'resolved'].includes(record.status) && <Text type="secondary">—</Text>}
       </Space>,
     }] : []),
-  ], [archive, archiveSavingId, canManage, openDismiss, openVerify]);
+  ], [archive, archiveSavingId, canManage, openDismiss, openEvidence, openVerify]);
 
   const hasFilters = Boolean(filterStatus || filterType);
 
   return (
     <WorkspacePage
-      title="异常闭环"
+      title={embedded ? '异常来源' : '异常闭环'}
       subtitle="核实现场异常证据，跟踪派生工单直至归档"
       statusItems={statusSummary.map((item) => ({ key: item.status, label: item.label, value: item.count }))}
       toolbar={<WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
         <FilterField label="状态">
-          <Select aria-label="按异常闭环状态筛选" value={filterStatus || undefined} onChange={(value) => updateQuery({ status: listFilterValue(value) || '' })} placeholder="全部状态" allowClear style={{ width: filterSelectWidth }}
+          <Select aria-label="按异常闭环状态筛选" value={filterStatus || undefined} onChange={(value) => updateQuery({ [statusParamKey]: listFilterValue(value) || '' })} placeholder="全部状态" allowClear style={{ width: filterSelectWidth }}
             options={listFilterOptions('全部状态', Object.entries(reportStatusMap).map(([key, value]) => ({ value: key, label: value.label })))} />
         </FilterField>
         <FilterField label="异常类型">
-          <Select aria-label="按异常类型筛选" value={filterType || undefined} onChange={(value) => updateQuery({ type: listFilterValue(value) || '' })} placeholder="全部类型" allowClear style={{ width: filterSelectWidth }}
+          <Select aria-label="按异常类型筛选" value={filterType || undefined} onChange={(value) => updateQuery({ [typeParamKey]: listFilterValue(value) || '' })} placeholder="全部类型" allowClear style={{ width: filterSelectWidth }}
             options={listFilterOptions('全部类型', Object.entries(REPORT_TYPE).map(([key, value]) => ({ value: key, label: value })))} />
         </FilterField>
         {hasFilters && <ToolbarMeta label="当前结果">已筛选 {list.length} 条</ToolbarMeta>}
@@ -292,11 +306,11 @@ export default function ReportsPage() {
         open={!!evidenceRecord}
         title={evidenceRecord ? `现场证据 · ${evidenceRecord.site_name || '异常上报'}` : '现场证据'}
         footer={null}
-        onCancel={() => setEvidenceRecord(null)}
+        onCancel={closeEvidence}
         width={760}
         destroyOnHidden
       >
-        <Image.PreviewGroup>
+        <Image.PreviewGroup preview={evidencePreview}>
           <Space wrap size={12}>
             {evidenceRecord && reportPhotos(evidenceRecord).map((url, index) => (
               <Image key={url} width={180} height={135} style={{ objectFit: 'cover', borderRadius: 6 }} src={url} alt={`${evidenceRecord.site_name || '异常上报'}现场照片 ${index + 1}`} />

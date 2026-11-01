@@ -194,7 +194,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 VALUES (100,10,1,'浊度仪表读数','设备检查',NULL,NULL,NULL,NULL,NULL);
                 CREATE TABLE inspection_checkins (
                     id INTEGER PRIMARY KEY, site_id INTEGER, user_id INTEGER,
-                    check_time TEXT, plan_id INTEGER
+                    check_time TEXT, plan_id INTEGER, lat REAL, lng REAL
                 );
                 CREATE TABLE photo_requirements (
                     id INTEGER PRIMARY KEY, item_name TEXT, review_required INTEGER,
@@ -256,7 +256,9 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     issued_at TEXT, expires_at TEXT, used_at TEXT, attachment_id INTEGER,
                     gps_lat REAL, gps_lng REAL, distance_m REAL,
                     rework_required_at TEXT, capture_source TEXT DEFAULT '',
-                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT ''
+                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT '',
+                    location_source TEXT DEFAULT '', location_fact_id INTEGER,
+                    checkin_time TEXT
                 );
                 CREATE TABLE notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
@@ -265,7 +267,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 );
                 CREATE TABLE work_orders (id INTEGER PRIMARY KEY, order_no TEXT, site_id INTEGER);
             ''')
-            db.execute('INSERT INTO inspection_checkins VALUES (1,1,2,?,10)',
+            db.execute('INSERT INTO inspection_checkins VALUES (1,1,2,?,10,28.071303,115.539684)',
                        (now.strftime('%Y-%m-%d %H:%M:%S'),))
         self.client = app_module.app.test_client()
 
@@ -1762,7 +1764,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(
             server_watermark['anti_counterfeit_code'], capture['anti_counterfeit_code'])
         self.assertEqual(server_watermark['labels'],
-                         ['站点', '检查项', '拍摄时间', '位置坐标', '防伪码'])
+                         ['站点', '检查项', '拍摄时间', '签到位置', '防伪码'])
         self.assertEqual(server_watermark['font_name'], 'Noto Sans CJK SC')
         self.assertEqual(len(server_watermark['layout_box']), 4)
         self.assertEqual(extra['watermark_fields']['site_name'], '测试站')
@@ -1964,7 +1966,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         token = response.json['capture_session']
         with app_module.get_db() as db:
             row = db.execute(
-                'SELECT plan_id,item_id,work_order_id,gps_lat,gps_lng '
+                'SELECT plan_id,item_id,work_order_id,gps_lat,gps_lng,location_source,checkin_time '
                 'FROM photo_capture_sessions WHERE token_hash=?',
                 (app_module._hash_token(token),),
             ).fetchone()
@@ -1972,6 +1974,8 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                          (None, None, None))
         self.assertAlmostEqual(row['gps_lat'], 28.071303)
         self.assertAlmostEqual(row['gps_lng'], 115.539684)
+        self.assertEqual(row['location_source'], 'device_location')
+        self.assertIsNone(row['checkin_time'])
 
     def test_manual_report_trusted_camera_upload_stays_pending_site_photo(self):
         session = self.create_manual_report_capture_session()
@@ -2113,7 +2117,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual((row['used_at'], row['attachment_id']), (None, None))
 
-    def test_capture_session_rejects_non_finite_and_out_of_range_coordinates(self):
+    def test_checkin_backed_capture_session_ignores_client_coordinates(self):
         invalid_coordinates = (
             ('nan', 115.539684), ('inf', 115.539684), ('not-a-number', 115.539684),
             (91, 115.539684), (-91, 115.539684),
@@ -2122,52 +2126,100 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         for index, (lat, lng) in enumerate(invalid_coordinates):
             with self.subTest(lat=lat, lng=lng):
                 response = self.create_capture_session(gps_lat=lat, gps_lng=lng)
-                self.assertEqual(response.status_code, 400, response.json)
-                self.assertEqual(response.json['code'], 'CAPTURE_LOCATION_INVALID')
+                self.assertEqual(response.status_code, 200, response.json)
+                self.assertTrue(response.json['location_verified'])
+                self.assertEqual(response.json['location_source'], 'inspection_checkin')
+                self.assertAlmostEqual(response.json['gps_lat'], 28.071303)
+                self.assertAlmostEqual(response.json['gps_lng'], 115.539684)
                 with app_module.get_db() as db:
-                    self.assertEqual(db.execute(
-                        'SELECT COUNT(*) FROM photo_capture_sessions').fetchone()[0], 0)
+                    row = db.execute('''SELECT gps_lat,gps_lng,location_source,location_fact_id
+                        FROM photo_capture_sessions ORDER BY id DESC LIMIT 1''').fetchone()
+                    self.assertAlmostEqual(row['gps_lat'], 28.071303)
+                    self.assertAlmostEqual(row['gps_lng'], 115.539684)
+                    self.assertEqual((row['location_source'], row['location_fact_id']),
+                                     ('inspection_checkin', 1))
 
         self.assertEqual(app_module._parse_gps_pair(-90, -180), (-90.0, -180.0))
         self.assertEqual(app_module._parse_gps_pair(90, 180), (90.0, 180.0))
         self.assertGreater(app_module._haversine(-90, -180, 90, 180), 0)
         self.assertIsNone(app_module._haversine('nan', 0, 0, 0))
 
-    def test_prepared_capture_session_binds_location_once_without_blocking_preview(self):
+    def test_prepared_capture_session_reuses_checkin_and_manual_report_still_binds_location(self):
         prepared = self.client.post(
             '/api/mobile/photo-capture-session', headers=self.headers(), json={
                 'site_id': 1, 'plan_id': 10, 'item_id': 100,
                 'capture_source': 'camera', 'prepare_only': True,
             })
         self.assertEqual(prepared.status_code, 200, prepared.json)
-        self.assertFalse(prepared.json['location_verified'])
+        self.assertTrue(prepared.json['location_verified'])
+        self.assertEqual(prepared.json['location_source'], 'inspection_checkin')
+        self.assertAlmostEqual(prepared.json['gps_lat'], 28.071303)
+        self.assertAlmostEqual(prepared.json['gps_lng'], 115.539684)
         token = prepared.json['capture_session']
         with app_module.get_db() as db:
-            row = db.execute('SELECT gps_lat,gps_lng FROM photo_capture_sessions WHERE token_hash=?',
+            row = db.execute('''SELECT gps_lat,gps_lng,location_source,location_fact_id,checkin_time
+                FROM photo_capture_sessions WHERE token_hash=?''',
                              (app_module._hash_token(token),)).fetchone()
-            self.assertEqual(tuple(row), (None, None))
+            self.assertAlmostEqual(row['gps_lat'], 28.071303)
+            self.assertAlmostEqual(row['gps_lng'], 115.539684)
+            self.assertEqual((row['location_source'], row['location_fact_id']),
+                             ('inspection_checkin', 1))
+            self.assertTrue(row['checkin_time'])
 
-        payload = {'capture_session': token, 'gps_lat': 28.071303, 'gps_lng': 115.539684}
+        payload = {'capture_session': token, 'gps_lat': 30.0, 'gps_lng': 116.0}
         bound = self.client.post('/api/mobile/photo-capture-session/location',
                                  headers=self.headers(), json=payload)
         replay = self.client.post('/api/mobile/photo-capture-session/location',
                                   headers=self.headers(), json=payload)
-        changed = self.client.post('/api/mobile/photo-capture-session/location',
-                                   headers=self.headers(), json={
-                                       'capture_session': token,
-                                       'gps_lat': 28.071304, 'gps_lng': 115.539684,
-                                   })
         self.assertEqual(bound.status_code, 200, bound.json)
         self.assertTrue(bound.json['location_verified'])
         self.assertEqual(replay.status_code, 200, replay.json)
-        self.assertEqual(changed.status_code, 409, changed.json)
-        self.assertEqual(changed.json['code'], 'CAPTURE_LOCATION_ALREADY_BOUND')
+        self.assertEqual(bound.json['location_source'], 'inspection_checkin')
+        self.assertAlmostEqual(bound.json['gps_lat'], 28.071303)
+        self.assertAlmostEqual(bound.json['gps_lng'], 115.539684)
         with app_module.get_db() as db:
             row = db.execute('SELECT gps_lat,gps_lng,distance_m FROM photo_capture_sessions WHERE token_hash=?',
                              (app_module._hash_token(token),)).fetchone()
             self.assertAlmostEqual(row['gps_lat'], 28.071303)
             self.assertAlmostEqual(row['gps_lng'], 115.539684)
-            self.assertLessEqual(row['distance_m'], 1)
+            self.assertIsNone(row['distance_m'])
+
+        manual = self.create_manual_report_capture_session(prepare_only=True)
+        self.assertEqual(manual.status_code, 200, manual.json)
+        self.assertFalse(manual.json['location_verified'])
+        self.assertIsNone(manual.json['checkin_time'])
+        manual_bound = self.client.post('/api/mobile/photo-capture-session/location',
+            headers=self.headers(), json={
+                'capture_session': manual.json['capture_session'],
+                'gps_lat': 28.071303, 'gps_lng': 115.539684,
+            })
+        self.assertEqual(manual_bound.status_code, 200, manual_bound.json)
+        self.assertEqual(manual_bound.json['location_source'], 'device_location')
+        with app_module.get_db() as db:
+            manual_row = db.execute('''SELECT location_source,checkin_time
+                FROM photo_capture_sessions WHERE token_hash=?''',
+                (app_module._hash_token(manual.json['capture_session']),)).fetchone()
+        self.assertEqual(manual_row['location_source'], 'device_location')
+        self.assertIsNone(manual_row['checkin_time'])
+
+    def test_capture_session_rejects_missing_or_cross_context_checkin_location(self):
+        with app_module.get_db() as db:
+            db.execute('UPDATE inspection_checkins SET lat=NULL,lng=NULL WHERE id=1')
+        missing = self.create_capture_session()
+        self.assertEqual((missing.status_code, missing.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_LOCATION_REQUIRED'))
+
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM inspection_checkins')
+            db.execute('''INSERT INTO inspection_checkins
+                (id,site_id,user_id,check_time,plan_id,lat,lng)
+                VALUES (2,1,4,datetime('now','localtime'),10,28.071303,115.539684)''')
+            db.execute('''INSERT INTO inspection_checkins
+                (id,site_id,user_id,check_time,plan_id,lat,lng)
+                VALUES (3,1,2,datetime('now','localtime'),999,28.071303,115.539684)''')
+        cross_context = self.create_capture_session()
+        self.assertEqual((cross_context.status_code, cross_context.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_REQUIRED'))
 
     def test_replacement_submitted_rejects_camera_session_without_side_effects(self):
         required_at, _ = self.set_retake_required()

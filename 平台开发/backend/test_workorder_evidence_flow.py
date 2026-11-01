@@ -65,7 +65,8 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER, title TEXT,
                     description TEXT, source TEXT DEFAULT 'manual', event_type TEXT, level TEXT, status TEXT, images TEXT,
                     assignee TEXT, created_at TEXT, related_alert_id INTEGER, used_parts TEXT,
-                    resolved_at TEXT, check_in_time TEXT, remark TEXT, review_submitted_at TEXT,
+                    resolved_at TEXT, check_in_time TEXT, check_in_lat REAL, check_in_lng REAL,
+                    check_in_user TEXT, check_in_user_id INTEGER, remark TEXT, review_submitted_at TEXT,
                     service_mode TEXT DEFAULT 'onsite', remote_contact TEXT DEFAULT '',
                     remote_process TEXT DEFAULT '', remote_result TEXT DEFAULT '',
                     remote_started_at TEXT, remote_submitted_at TEXT
@@ -105,7 +106,8 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 );
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
                 CREATE TABLE inspection_checkins (
-                    site_id INTEGER, user_id INTEGER, check_time TEXT
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, user_id INTEGER,
+                    check_time TEXT, plan_id INTEGER, lat REAL, lng REAL
                 );
                 CREATE TABLE insp_plans (
                     id INTEGER PRIMARY KEY, plan_name TEXT, assignee_id INTEGER,
@@ -212,7 +214,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     user_id INTEGER, site_id INTEGER, plan_id INTEGER, item_id INTEGER,
                     work_order_id INTEGER, issued_at TEXT, expires_at TEXT, used_at TEXT,
                     attachment_id INTEGER, capture_source TEXT, rework_required_at TEXT,
-                    gps_lat REAL, gps_lng REAL, nonce TEXT, anti_counterfeit_code TEXT
+                    gps_lat REAL, gps_lng REAL, distance_m REAL,
+                    nonce TEXT, anti_counterfeit_code TEXT,
+                    location_source TEXT DEFAULT '', location_fact_id INTEGER,
+                    checkin_time TEXT
                 );
                 CREATE TABLE IF NOT EXISTS mobile_idempotency (
                     idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT
@@ -516,7 +521,9 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
 
     def test_site_checkin_satisfies_workorder_gate_and_replay_is_idempotent(self):
         with app_module.get_db() as db:
-            db.execute("INSERT INTO inspection_checkins VALUES (1,2,datetime('now','localtime'))")
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,lat,lng)
+                VALUES (1,2,datetime('now','localtime'),28.68,115.73)""")
             db.execute("""INSERT INTO operation_attachments
                 (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
                  taken_at,review_status,evidence_qualification,evidence_basis)
@@ -1052,6 +1059,175 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         with app_module.get_db() as db:
             self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'in_progress')
             self.assertEqual(db.execute("SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 0)
+
+    def test_workorder_camera_reuses_server_checkin_for_session_watermark_and_evidence(self):
+        self.seed_trusted_workorder_session('table-bootstrap')
+        checked_in = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'order_no': 'WO-TEST-001', 'lat': 28.68, 'lng': 115.73,
+                '_idempotency_key': 'workorder-camera-checkin',
+            })
+        self.assertEqual(checked_in.status_code, 200, checked_in.json)
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM photo_capture_sessions')
+            db.execute("""UPDATE work_orders
+                SET check_in_time=datetime('now','localtime','-5 minutes')
+                WHERE id=1""")
+            checkin = db.execute('''SELECT check_in_user,check_in_user_id
+                FROM work_orders WHERE id=1''').fetchone()
+        self.assertEqual((checkin['check_in_user'], checkin['check_in_user_id']),
+                         ('现场运维', 2))
+        session = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001', 'capture_source': 'camera',
+                'prepare_only': True, 'gps_lat': 0, 'gps_lng': 0,
+            })
+        self.assertEqual(session.status_code, 200, session.json)
+        self.assertTrue(session.json['location_verified'])
+        self.assertEqual(session.json['location_source'], 'workorder_checkin')
+        self.assertAlmostEqual(session.json['gps_lat'], 28.68)
+        self.assertAlmostEqual(session.json['gps_lng'], 115.73)
+
+        rebound = self.client.post('/api/mobile/photo-capture-session/location',
+            headers=self.headers('operator-token'), json={
+                'capture_session': session.json['capture_session'],
+                'gps_lat': 30.0, 'gps_lng': 116.0,
+            })
+        self.assertEqual(rebound.status_code, 200, rebound.json)
+        self.assertEqual(rebound.json['location_source'], 'workorder_checkin')
+        self.assertAlmostEqual(rebound.json['gps_lat'], 28.68)
+        self.assertAlmostEqual(rebound.json['gps_lng'], 115.73)
+
+        payload = self.trusted_workorder_payload(
+            self.jpeg_bytes(), 'checkin-location-workorder-photo',
+            session.json['capture_session'])
+        payload['gps_lat'] = 0
+        payload['gps_lng'] = 0
+        uploaded = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT gps_lat,gps_lng,taken_at,extra_json,
+                evidence_evaluation_id FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1""").fetchone()
+            evaluation = db.execute('''SELECT facts_json FROM attachment_evidence_evaluations
+                WHERE id=?''', (attachment['evidence_evaluation_id'],)).fetchone()
+        self.assertAlmostEqual(attachment['gps_lat'], 28.68)
+        self.assertAlmostEqual(attachment['gps_lng'], 115.73)
+        self.assertTrue(attachment['taken_at'])
+        extra = json.loads(attachment['extra_json'])
+        self.assertEqual(extra['watermark_fields']['location_label'], '签到位置')
+        self.assertEqual(extra['display_copy']['server_watermark']['location_label'], '签到位置')
+        facts = json.loads(evaluation['facts_json'])
+        self.assertEqual(facts['location_source'], 'workorder_checkin')
+        self.assertEqual(facts['location_fact_id'], 1)
+        self.assertTrue(facts['checkin_time'])
+        self.assertNotEqual(facts['checkin_time'], attachment['taken_at'],
+                            'the actual capture time remains independent from check-in time')
+
+    def test_workorder_camera_never_treats_ambiguous_legacy_name_as_current_user(self):
+        self.seed_trusted_workorder_session('ambiguous-legacy-bootstrap')
+        cases = (
+            ('same-real-name', "UPDATE users SET real_name='现场运维',username='otherop' WHERE id=4"),
+            ('name-matches-other-username',
+             "UPDATE users SET real_name='其他运维',username='现场运维' WHERE id=4"),
+        )
+        for suffix, identity_update in cases:
+            with self.subTest(case=suffix), app_module.get_db() as db:
+                db.execute(identity_update)
+                db.execute("""UPDATE work_orders
+                    SET assignee='现场运维',check_in_time=datetime('now','localtime','-5 minutes'),
+                        check_in_lat=28.68,check_in_lng=115.73,
+                        check_in_user='现场运维',check_in_user_id=NULL WHERE id=1""")
+            response = self.client.post('/api/mobile/photo-capture-session',
+                headers=self.headers('operator-token'), json={
+                    'site_id': 1, 'order_no': 'WO-TEST-001',
+                    'capture_source': 'camera', 'prepare_only': True,
+                })
+            self.assertEqual((response.status_code, response.json['code']),
+                             (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+            with app_module.get_db() as db:
+                db.execute("UPDATE users SET real_name='其他运维',username='other' WHERE id=4")
+
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                SET check_in_user='operator',check_in_user_id=NULL WHERE id=1""")
+        compatible = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual(compatible.status_code, 200, compatible.json)
+        self.assertEqual(compatible.json['location_source'], 'workorder_checkin')
+
+    def test_workorder_camera_stable_checkin_user_id_survives_same_name_reassignment(self):
+        self.seed_trusted_workorder_session('stable-checkin-identity-bootstrap')
+        checked_in = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'order_no': 'WO-TEST-001', 'lat': 28.68, 'lng': 115.73,
+                '_idempotency_key': 'stable-checkin-identity',
+            })
+        self.assertEqual(checked_in.status_code, 200, checked_in.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET real_name='现场运维',username='otherop' WHERE id=4")
+            db.execute("UPDATE work_orders SET assignee='otherop' WHERE id=1")
+            stored = db.execute('''SELECT check_in_user,check_in_user_id
+                FROM work_orders WHERE id=1''').fetchone()
+        self.assertEqual((stored['check_in_user'], stored['check_in_user_id']),
+                         ('现场运维', 2))
+        app_module._tokens['other-operator-token'] = {
+            'id': 4, 'role': 'operator', 'real_name': '现场运维', 'username': 'otherop',
+        }
+        response = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('other-operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual((response.status_code, response.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+
+    def test_workorder_camera_ignores_other_users_direct_checkin_and_reuses_current_inspection(self):
+        self.seed_trusted_workorder_session('inspection-fallback-bootstrap')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                SET check_in_time=datetime('now','localtime','-10 minutes'),
+                    check_in_lat=28.68,check_in_lng=115.73,
+                    check_in_user='其他运维',check_in_user_id=4 WHERE id=1""")
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id,lat,lng)
+                VALUES (1,2,datetime('now','localtime','-2 minutes'),NULL,28.681,115.731)""")
+            inspection = db.execute('''SELECT id,check_time FROM inspection_checkins
+                WHERE user_id=2 ORDER BY id DESC LIMIT 1''').fetchone()
+        session = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual(session.status_code, 200, session.json)
+        self.assertEqual(session.json['location_source'], 'inspection_checkin_for_workorder')
+        self.assertAlmostEqual(session.json['gps_lat'], 28.681)
+        self.assertAlmostEqual(session.json['gps_lng'], 115.731)
+
+        uploaded = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=self.trusted_workorder_payload(
+                self.jpeg_bytes(), 'inspection-fallback-workorder-photo',
+                session.json['capture_session']))
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        with app_module.get_db() as db:
+            attachment = db.execute('''SELECT gps_lat,gps_lng,extra_json,evidence_evaluation_id
+                FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1
+                ORDER BY id DESC LIMIT 1''').fetchone()
+            evaluation = db.execute('''SELECT facts_json FROM attachment_evidence_evaluations
+                WHERE id=?''', (attachment['evidence_evaluation_id'],)).fetchone()
+        self.assertAlmostEqual(attachment['gps_lat'], 28.681)
+        self.assertAlmostEqual(attachment['gps_lng'], 115.731)
+        self.assertEqual(json.loads(attachment['extra_json'])['watermark_fields']['location_label'],
+                         '签到位置')
+        facts = json.loads(evaluation['facts_json'])
+        self.assertEqual(facts['location_source'], 'inspection_checkin_for_workorder')
+        self.assertEqual(facts['location_fact_id'], inspection['id'])
+        self.assertEqual(facts['checkin_time'], inspection['check_time'])
 
     def test_remote_assistance_runs_without_checkin_or_photo_and_is_idempotent(self):
         with app_module.get_db() as db:

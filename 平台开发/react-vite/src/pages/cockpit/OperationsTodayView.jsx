@@ -9,6 +9,7 @@ import {
   Tag,
   Timeline,
   Typography,
+  Space,
 } from 'antd';
 import {
   CalendarOutlined,
@@ -20,10 +21,13 @@ import {
   ReloadOutlined,
   TeamOutlined,
   ToolOutlined,
+  AuditOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
+import { useAuth } from '../../hooks/useAuth';
 import './OperationsTodayView.css';
 
 const { Text } = Typography;
@@ -64,6 +68,10 @@ function workLabel(person) {
 export default function OperationsTodayView() {
   const navigate = useNavigate();
   const { tokens } = useTheme();
+  const { user } = useAuth();
+  const roles = user?.roles?.length ? user.roles : [user?.role];
+  const canReview = roles.some((role) => ['admin', 'reviewer'].includes(role));
+  const isAdmin = roles.includes('admin');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -212,6 +220,10 @@ export default function OperationsTodayView() {
         </div>
         <div className="operations-refresh">
           <Text type="secondary">{formatStamp(data?.refreshed_at)} 更新</Text>
+          {canReview && <Space size={6}>
+            <Button icon={<WarningOutlined />} onClick={() => navigate(isAdmin ? '/workorders?view=reports' : '/reports')}>异常来源</Button>
+            <Button type="primary" icon={<AuditOutlined />} onClick={() => navigate('/audit')}>审核待办</Button>
+          </Space>}
           <Button icon={<ReloadOutlined spin={refreshing} />} loading={refreshing} onClick={() => load(true)}>刷新</Button>
         </div>
       </div>

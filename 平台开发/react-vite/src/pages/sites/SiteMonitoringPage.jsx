@@ -9,9 +9,10 @@ import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import EChart from '../../components/EChart';
 import {
-  communicationStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
+  communicationStatusView, cycleStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
   monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption,
   monitoringTrendFactors, monitoringTrendView, monitoringLatestResults,
+  stationServicePolicyView,
 } from './stationMonitoring';
 import './SiteMonitoringPage.css';
 
@@ -36,13 +37,19 @@ function trendRequestOptions(rangeKey, customRange, cursor) {
 
 function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onSelectMetric }) {
   const results = monitoringLatestResults(factors, latestValues, latestCycle);
+  const cycleView = cycleStatusView(latestCycle);
+  const cycleTag = latestCycle?.status
+    ? <Tag color={cycleView.color}>{cycleView.label}</Tag> : null;
 
   if (!latestValues.length) {
     return (
       <section className="station-monitoring-section" aria-labelledby="latest-results-title">
         <div className="station-monitoring-section__heading">
           <Title id="latest-results-title" level={4}>最新结果</Title>
-          <Text className="station-monitoring-fact">结果时间：暂无结果</Text>
+          <Space wrap>
+            {cycleTag}
+            <Text className="station-monitoring-fact">结果时间：暂无结果</Text>
+          </Space>
         </div>
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前站点暂无可展示的有效结果" />
       </section>
@@ -53,7 +60,12 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
     <section className="station-monitoring-section" aria-labelledby="latest-results-title">
       <div className="station-monitoring-section__heading">
         <Title id="latest-results-title" level={4}>最新结果</Title>
-        {results.commonTime ? <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(results.commonTime)}</Text> : null}
+        <Space wrap>
+          {cycleTag}
+          {latestCycle?.status === 'complete' && cycleView.description
+            ? <Text type="secondary">{cycleView.description}</Text> : null}
+          {results.commonTime ? <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(results.commonTime)}</Text> : null}
+        </Space>
       </div>
       <div className="station-monitoring-metrics">
         {results.items.map((factor) => {
@@ -73,7 +85,11 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
               </span>
               <span className="station-monitoring-metric__unit">{value?.standard_unit || factor.standard_unit || ' '}</span>
               {value.hasValue && value.statusLabel ? <span className="station-monitoring-metric__unit">{value.statusLabel}</span> : null}
-              {value.observed_at ? <span className="station-monitoring-metric__unit">{formatMonitoringTime(value.observed_at)}</span> : null}
+              {value.statusReason ? <span className="station-monitoring-metric__unit">{value.statusReason}</span> : null}
+              {value.statusObservedAt ? <span className="station-monitoring-metric__unit">异常观测：{formatMonitoringTime(value.statusObservedAt)}</span> : null}
+              {value.observed_at ? <span className="station-monitoring-metric__unit">
+                {value.statusObservedAt ? '历史值：' : ''}{formatMonitoringTime(value.observed_at)}
+              </span> : null}
             </button>
           );
         })}
@@ -169,11 +185,15 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
   useEffect(() => {
     if (!open || !siteId) return undefined;
     setData(null);
+    setExpectedConfig(null);
+    setExpectedDraft([]);
+    setSelectedMetric('');
     setMode('monitoring');
     setRangeKey('7d');
     setCustomRange([dayjs().subtract(7, 'day'), dayjs()]);
     setTrendData(null);
     setTrendError('');
+    setTrendExpanded(false);
     loadOverview();
     loadExpectedFactors();
     return () => {
@@ -186,18 +206,22 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
     };
   }, [loadExpectedFactors, loadOverview, open, siteId]);
 
+  const currentData = data && String(data.site?.id) === String(siteId) ? data : null;
+  const currentExpectedConfig = expectedConfig
+    && String(expectedConfig.site_id) === String(siteId) ? expectedConfig : null;
   const overviewFactors = useMemo(() => {
-    const payload = data?.factors || data?.monitoring?.factors;
+    const payload = currentData?.factors || currentData?.monitoring?.factors;
     return Array.isArray(payload) ? payload : [];
-  }, [data]);
+  }, [currentData]);
   const latestValues = useMemo(() => (
-    Array.isArray(data?.monitoring?.latest_values) ? data.monitoring.latest_values : []
-  ), [data]);
+    Array.isArray(currentData?.monitoring?.latest_values)
+      ? currentData.monitoring.latest_values : []
+  ), [currentData]);
   const trendFactors = useMemo(() => monitoringTrendFactors(
     overviewFactors,
-    expectedConfig?.selected_metrics,
-    expectedConfig?.configured === true,
-  ), [expectedConfig, overviewFactors]);
+    currentExpectedConfig?.selected_metrics,
+    currentExpectedConfig?.configured === true,
+  ), [currentExpectedConfig, overviewFactors]);
 
   useEffect(() => {
     setSelectedMetric((current) => (
@@ -208,6 +232,7 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
 
   const loadTrend = useCallback(async ({ cursor = null } = {}) => {
     if (!open || mode !== 'monitoring' || !siteId || !selectedMetric) return;
+    if (!trendFactors.some((item) => item.business_metric === selectedMetric)) return;
     if (rangeKey === 'custom' && (!customRange?.[0] || !customRange?.[1])) return;
     trendRequestRef.current.controller?.abort();
     const controller = new AbortController();
@@ -237,7 +262,7 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
     } finally {
       if (trendRequestRef.current.id === requestId) setTrendLoading(false);
     }
-  }, [customRange, mode, open, rangeKey, selectedMetric, siteId]);
+  }, [customRange, mode, open, rangeKey, selectedMetric, siteId, trendFactors]);
 
   useEffect(() => {
     setTrendData(null);
@@ -309,14 +334,16 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
     }
   }, [expectedConfig, expectedDraft, loadOverview, siteId]);
 
-  const visibleData = data && String(data.site?.id) === String(siteId) ? data : null;
+  const visibleData = currentData;
   const site = visibleData?.site || {};
   const monitoring = visibleData?.monitoring || {};
   const communication = communicationStatusView(monitoring.communication || site.communication);
   const latestCycle = monitoring.latest_cycle || site.latest_cycle || {};
+  const cycleView = cycleStatusView(latestCycle);
+  const servicePolicy = stationServicePolicyView(site.service_policy || site);
   const trend = monitoringTrendView(trendData, { loading: trendLoading, error: trendError });
-  const savedExpectedMetrics = Array.isArray(expectedConfig?.selected_metrics)
-    ? expectedConfig.selected_metrics : [];
+  const savedExpectedMetrics = Array.isArray(currentExpectedConfig?.selected_metrics)
+    ? currentExpectedConfig.selected_metrics : [];
   const expectedChanged = JSON.stringify(expectedDraft) !== JSON.stringify(savedExpectedMetrics);
   const factorOptions = trendFactors.map((factor) => ({
     value: factor.business_metric,
@@ -375,8 +402,10 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
         <Title level={3}>{site.name || '未命名站点'}</Title>
         <Space wrap size={12}>
           <Tag color={communication.color}>{communication.label}</Tag>
+          <Tag color={servicePolicy.service.color}>{servicePolicy.service.label}</Tag>
+          {servicePolicy.showReportingCondition
+            ? <Tag color={servicePolicy.reporting.color}>{servicePolicy.reporting.label}</Tag> : null}
           <Text className="station-monitoring-fact">最新接收：{formatMonitoringTime(site.last_received_at || site.last_communication_at)}</Text>
-          {site.service_policy?.service_status === 'ended' ? <Tag>服务已结束</Tag> : null}
         </Space>
       </div>
       <Space wrap>
@@ -407,6 +436,20 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
           {expectedNotice ? <Alert type="success" showIcon message={expectedNotice} /> : null}
           {error ? <Alert type="warning" showIcon message="刷新失败，当前保留上次成功结果" description={error}
             action={<Button size="small" onClick={() => loadOverview()}>重新加载</Button>} /> : null}
+          {servicePolicy.notice ? <Alert
+            type={servicePolicy.notice.type}
+            showIcon
+            message={servicePolicy.notice.message}
+            description={servicePolicy.notice.description}
+            style={{ marginBottom: 16 }}
+          /> : null}
+          {latestCycle.status === 'not_configured' && cycleView.description ? <Alert
+            type="warning"
+            showIcon
+            message={cycleView.label}
+            description={`${cycleView.description}；最近结果仍按真实采样时间展示。`}
+            style={{ marginBottom: 16 }}
+          /> : null}
           <LatestResults
             factors={trendFactors}
             latestValues={latestValues}

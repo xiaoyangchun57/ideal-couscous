@@ -11,6 +11,48 @@ export const MONITORING_STATUS_META = {
 
 export const MONITORING_STATUS_ORDER = Object.keys(MONITORING_STATUS_META);
 
+export const SERVICE_STATUS_META = {
+  active: { label: '在服务', color: 'green' },
+  ended: { label: '服务结束', color: 'default' },
+};
+
+export const REPORTING_CONDITION_META = {
+  normal: { label: '正常到报要求', color: 'blue' },
+  temporary_stop: { label: '临时停站', color: 'orange' },
+  no_upload_condition: { label: '暂无上传条件', color: 'gold' },
+};
+
+export function stationServicePolicyView(value = {}) {
+  const policy = value.service_policy || value;
+  const service = SERVICE_STATUS_META[policy.service_status] || SERVICE_STATUS_META.active;
+  const reporting = REPORTING_CONDITION_META[policy.reporting_condition]
+    || REPORTING_CONDITION_META.normal;
+  const ended = policy.service_status === 'ended';
+  const showReportingCondition = !ended && Boolean(policy.reporting_condition)
+    && policy.reporting_condition !== 'normal';
+  let notice = null;
+  if (!ended && policy.reporting_condition === 'no_upload_condition') {
+    notice = {
+      type: 'warning',
+      message: '当前暂无上传条件',
+      description: '站点仍在服务，但当前不要求上传；等待首帧或暂无接收记录不作为当前催报依据。',
+    };
+  } else if (!ended && policy.reporting_condition === 'temporary_stop') {
+    notice = {
+      type: 'warning',
+      message: '当前临时停站',
+      description: '站点仍在服务范围内，但停站期间不参与当前到报评价。',
+    };
+  }
+  return {
+    service: { ...service, label: policy.service_status_label || service.label },
+    reporting: { ...reporting, label: policy.reporting_condition_label || reporting.label },
+    ended,
+    showReportingCondition,
+    notice,
+  };
+}
+
 export function monitoringMissingCount(cycle) {
   const count = cycle?.missing_count;
   return Number.isInteger(count) && count > 0 ? count : 0;
@@ -111,7 +153,11 @@ export const CYCLE_STATUS_META = {
 
 const CYCLE_UNAVAILABLE_META = {
   expected_factors_unconfigured: { label: '应监测因子未设置', color: 'gold' },
-  time_configuration_missing: { label: '时间配置缺失', color: 'default' },
+  time_configuration_missing: {
+    label: '时间配置未完成',
+    color: 'default',
+    description: '周期完整性暂无法判定',
+  },
   no_evaluable_period: { label: '暂无可评价时段', color: 'default' },
 };
 
@@ -122,7 +168,34 @@ export const COMMUNICATION_STATUS_META = {
   not_connected: { label: '未接入', color: 'default' },
 };
 
+function completeCycleSourceView(cycle) {
+  if (cycle.status !== 'complete') return null;
+  const valueFactors = Array.isArray(cycle.factors)
+    ? cycle.factors.filter((factor) => factor?.status === 'value') : [];
+  const realtimeCount = valueFactors.filter(
+    (factor) => factor.source_type === 'realtime_observation',
+  ).length;
+  if (cycle.reason_code === 'no_evaluable_period'
+      || (valueFactors.length > 0 && realtimeCount === valueFactors.length)) {
+    return {
+      label: '实时结果齐全',
+      color: 'blue',
+      description: '正式周期尚未形成',
+    };
+  }
+  if (realtimeCount > 0) {
+    return {
+      label: '结果来源混合',
+      color: 'gold',
+      description: '当前周期含实时结果，不能视为正式周期完整',
+    };
+  }
+  return null;
+}
+
 export function cycleStatusView(cycle = {}) {
+  const sourceView = completeCycleSourceView(cycle);
+  if (sourceView) return sourceView;
   if (cycle.status === 'not_configured' && CYCLE_UNAVAILABLE_META[cycle.reason_code]) {
     return CYCLE_UNAVAILABLE_META[cycle.reason_code];
   }
@@ -306,11 +379,23 @@ export function monitoringLatestResults(factors = [], values = [], cycle = {}) {
     const diagnostic = cycleFactors.get(factor.business_metric) || {};
     const conflict = value?.status === 'review_required';
     const fault = factor.state === 'fault';
+    const reasonCode = factor.reason_code || diagnostic.reason_code;
+    const samplingTimeIssue = reasonCode === 'business_time_outside_schedule';
     const stale = diagnostic.reason_code === 'stale_observation';
     const hasValue = Boolean(value && !conflict && value.standard_value != null);
-    const statusLabel = conflict ? '待核对' : fault ? (hasValue ? '故障 · 历史值' : '故障')
+    const statusLabel = conflict ? '待核对'
+      : samplingTimeIssue ? (hasValue ? '采样时点异常 · 历史值' : '采样时点异常 · 待核对')
+        : fault ? (hasValue ? '故障 · 历史值' : '故障')
       : stale ? '历史值' : !hasValue ? (factor.state === 'pending' ? '等待结果' : '缺失') : '';
-    return { ...factor, ...value, hasValue, statusLabel };
+    return {
+      ...factor,
+      ...value,
+      hasValue,
+      statusLabel,
+      statusReason: samplingTimeIssue ? (factor.reason || diagnostic.reason || '') : '',
+      statusObservedAt: samplingTimeIssue
+        ? (factor.issue_observed_at || diagnostic.observed_at || null) : null,
+    };
   }) };
 }
 

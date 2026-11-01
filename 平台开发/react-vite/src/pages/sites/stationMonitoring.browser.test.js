@@ -11,7 +11,12 @@ const baseURL = process.env.STATION_WEB_TEST_URL;
 const playwrightModule = process.env.STATION_WEB_PLAYWRIGHT_MODULE;
 const evidenceDir = process.env.STATION_WEB_EVIDENCE_DIR;
 const require = createRequire(import.meta.url);
-const row = { id: 7, name: '隔离测试站甲', code: 'WEB-TEST-7', type: 'water_quality', status: 'maintenance', district: '测试区', manager: '测试负责人' };
+const row = {
+  id: 7, name: '隔离测试站甲', code: 'WEB-TEST-7', type: 'water_quality',
+  status: 'maintenance', district: '测试区', manager: '测试负责人',
+  service_status: 'active', service_status_label: '在服务',
+  reporting_condition: 'normal', reporting_condition_label: '正常到报要求',
+};
 
 function overview(status = 'interval_unconfigured', id = 7) {
   const hasLatest = ['normal', 'attention', 'interval_unconfigured'].includes(status);
@@ -37,6 +42,10 @@ function overview(status = 'interval_unconfigured', id = 7) {
       last_valid_observation_at: '2026-09-10T07:00:00+08:00',
       communication,
       latest_cycle: latestCycle,
+      service_policy: {
+        service_status: 'active', service_status_label: '在服务',
+        reporting_condition: 'normal', reporting_condition_label: '正常到报要求',
+      },
     },
     monitoring: {
       latest_values: hasLatest
@@ -100,6 +109,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     await context.addInitScript(() => localStorage.setItem('water_ops_token', 'isolated-web-test-token'));
     const page = await context.newPage();
     page.setDefaultTimeout(8000);
+    page.setDefaultNavigationTimeout(30000);
     const errors = [];
     const writes = [];
     page.on('pageerror', (error) => errors.push(error.message));
@@ -186,6 +196,129 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       await absent(page, '覆盖率');
       await absent(page, '接收与排障详情');
       await snapshot(page, 'detail-desktop');
+    } finally { await close(); }
+  });
+
+  await t.test('service policy and unconfigured cycle stay visible without hiding actual results', async () => {
+    const payload = overview('interval_unconfigured');
+    payload.monitoring.latest_cycle.status = 'not_configured';
+    payload.monitoring.latest_cycle.reason_code = 'time_configuration_missing';
+    payload.site.service_policy = {
+      service_status: 'active', service_status_label: '在服务',
+      reporting_condition: 'no_upload_condition', reporting_condition_label: '暂无上传条件',
+    };
+    const noUploadRow = {
+      ...row,
+      reporting_condition: 'no_upload_condition',
+      reporting_condition_label: '暂无上传条件',
+    };
+    const monitoringItem = { ...payload.site };
+    delete monitoringItem.service_policy;
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (url.pathname === '/api/sites') {
+        await route.fulfill({ json: [noUploadRow] });
+        return true;
+      }
+      if (url.pathname === '/api/station-monitoring/sites') {
+        await route.fulfill({ json: {
+          scope: 'all', available_scopes: ['all', 'mine'],
+          service_scope: 'current', available_service_scopes: ['current', 'all'],
+          items: [monitoringItem], summary: { total: 1, interval_unconfigured: 1 },
+        } });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: payload });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await visible(tableRow.getByText('在服务', { exact: true }));
+      await visible(tableRow.getByText('暂无上传条件', { exact: true }));
+      await visible(tableRow.getByText('时间配置未完成', { exact: true }));
+      await visible(tableRow.getByText('周期完整性暂无法判定', { exact: true }));
+      await tableRow.getByRole('button', { name: '监测', exact: true }).click();
+      await visible(page.getByRole('heading', { name: row.name }));
+      await visible(page.getByText('当前暂无上传条件', { exact: true }));
+      await visible(page.getByText('时间配置未完成', { exact: true }).first());
+      await visible(page.getByText(/周期完整性暂无法判定；最近结果仍按真实采样时间展示。/));
+      await visible(page.getByText('7.25', { exact: true }));
+      await visible(page.getByText(/结果时间：.*7:00:00/));
+      await snapshot(page, 'policy-and-cycle-context');
+    } finally { await close(); }
+  });
+
+  await t.test('sampling-time review stays distinct from instrument failure and keeps both times', async () => {
+    const payload = overview('attention');
+    payload.monitoring.factors[0] = {
+      ...payload.monitoring.factors[0],
+      state: 'fault',
+      reason_code: 'business_time_outside_schedule',
+      reason: '采样时间不在批准的四小时时点，需核对数据来源与采样时刻',
+      issue_observed_at: '2026-10-22T10:00:00+08:00',
+    };
+    payload.monitoring.latest_values[0] = {
+      ...payload.monitoring.latest_values[0],
+      standard_value: 6.741,
+      standard_value_display: '6.741',
+      observed_at: '2026-10-22T12:00:00+08:00',
+    };
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (!url.pathname.endsWith('/7/overview')) return false;
+      await route.fulfill({ json: payload });
+      return true;
+    });
+    try {
+      await page.goto(`${baseURL}/sites/7`);
+      await visible(page.getByText('采样时点异常 · 历史值', { exact: true }));
+      await visible(page.getByText('采样时间不在批准的四小时时点，需核对数据来源与采样时刻', { exact: true }));
+      await visible(page.getByText(/异常观测：.*10:00:00/));
+      await visible(page.getByText(/历史值：.*12:00:00/));
+      await visible(page.getByText('6.741', { exact: true }));
+      await absent(page, '故障 · 历史值');
+      await snapshot(page, 'sampling-time-review');
+    } finally { await close(); }
+  });
+
+  await t.test('realtime values stay visible without being called a formal complete cycle', async () => {
+    const payload = overview('normal');
+    payload.monitoring.latest_cycle.status = 'complete';
+    payload.monitoring.latest_cycle.reason_code = 'no_evaluable_period';
+    payload.monitoring.latest_cycle.factors[0].source_type = 'realtime_observation';
+    const monitoringItem = { ...payload.site, latest_cycle: payload.monitoring.latest_cycle };
+    const { page, close } = await session(['admin'], undefined, async (route, url) => {
+      if (url.pathname === '/api/sites') {
+        await route.fulfill({ json: [row] });
+        return true;
+      }
+      if (url.pathname === '/api/station-monitoring/sites') {
+        await route.fulfill({ json: {
+          scope: 'all', available_scopes: ['all', 'mine'],
+          service_scope: 'current', available_service_scopes: ['current', 'all'],
+          items: [monitoringItem], summary: { total: 1, normal: 1 },
+        } });
+        return true;
+      }
+      if (url.pathname.endsWith('/7/overview')) {
+        await route.fulfill({ json: payload });
+        return true;
+      }
+      return false;
+    });
+    try {
+      await page.goto(`${baseURL}/sites`);
+      const tableRow = page.getByRole('row').filter({ hasText: row.name });
+      await visible(tableRow.getByText('实时结果齐全', { exact: true }));
+      await visible(tableRow.getByText('正式周期尚未形成', { exact: true }));
+      await tableRow.getByRole('button', { name: '监测', exact: true }).click();
+      await visible(page.getByText('实时结果齐全', { exact: true }).last());
+      await visible(page.getByText('正式周期尚未形成', { exact: true }).last());
+      await visible(page.getByText('7.25', { exact: true }));
+      await absent(page, '结果完整');
+      await snapshot(page, 'realtime-results-not-formal-cycle');
     } finally { await close(); }
   });
 

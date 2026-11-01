@@ -35,19 +35,19 @@ const allowed = (requiredRoles, userRoles) => {
 
 // 导航按职责裁剪；接口权限仍由后端校验，避免把审核员带进资源调度等非本职流程。
 export const pageRoles = {
-  '/alerts': ['admin', 'reviewer'],
-  '/analysis': ['admin', 'reviewer'],
-  '/workorders': ['admin', 'operator'],
-  '/plan-schedules': ['admin', 'operator'],
+  '/alerts': ['admin', 'reviewer', 'operator'],
+  '/analysis': ['admin', 'reviewer', 'operator'],
+  '/workorders': ['admin', 'operator', 'reviewer'],
+  '/plan-schedules': ['admin', 'operator', 'reviewer'],
   '/inspection-settings': ['admin'],
-  '/reports': ['admin', 'reviewer'],
+  '/reports': ['admin', 'reviewer', 'operator'],
   '/equipment': ['admin'],
-  '/vehicles': ['admin'],
+  '/vehicles': ['admin', 'operator'],
   '/audit': ['admin', 'reviewer'],
   '/evaluation': ['admin', 'reviewer'],
   '/sites': ['admin', 'reviewer', 'operator'],
   '/sites/data-access': ['admin'],
-  '/archive': ['admin', 'reviewer'],
+  '/archive': ['admin', 'reviewer', 'operator'],
   '/users': ['admin'],
   '/reagents': ['admin'],
 };
@@ -62,7 +62,7 @@ export function getNavigation(roles, capabilities = {}) {
     {
       key: 'monitoring',
       label: '任务闭环',
-      children: ['/workorders', '/plan-schedules', '/reports', '/audit'],
+      children: ['/workorders', '/plan-schedules', '/reports'],
     },
     {
       key: 'operations',
@@ -78,7 +78,7 @@ export function getNavigation(roles, capabilities = {}) {
       key: 'system',
       label: '系统管理',
       roles: ['admin'],
-      children: ['/users', '/reagents', '/inspection-settings'],
+      children: ['/users'],
     },
   ];
 

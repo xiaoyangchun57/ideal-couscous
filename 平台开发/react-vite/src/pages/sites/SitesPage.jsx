@@ -11,6 +11,7 @@ import {
   FileTextOutlined, CloudServerOutlined, ApiOutlined, InboxOutlined,
   PlusOutlined, ExperimentOutlined, CheckCircleOutlined,
   CloseCircleOutlined, SettingOutlined,
+  BookOutlined, WarningOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
@@ -25,12 +26,16 @@ import { StationMonitoringDrawer } from './SiteMonitoringPage';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import {
-  communicationStatusView, hasAdminRole, mergeMonitoringSites, monitoringMissingCount,
+  communicationStatusView, cycleStatusView, hasAdminRole, mergeMonitoringSites,
+  monitoringMissingCount, REPORTING_CONDITION_META, SERVICE_STATUS_META,
+  stationServicePolicyView,
   formatMonitoringTime, readSiteDirectorySnapshot, siteDirectoryLoadMode,
   stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
 } from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
+import ReagentMasterPage from '../reagents/ReagentMasterPage';
+import { AlertRulesManagement } from '../alerts/AlertsPage';
 
 const { Text } = Typography;
 
@@ -64,16 +69,8 @@ const statusConfig = {
   maintenance: { color: 'orange', text: '维护中' },
 };
 
-const serviceStatusMeta = {
-  active: { label: '在服务', color: 'green' },
-  ended: { label: '服务结束', color: 'default' },
-};
-
-const reportingConditionMeta = {
-  normal: { label: '正常到报要求', color: 'blue' },
-  temporary_stop: { label: '临时停站', color: 'orange' },
-  no_upload_condition: { label: '暂无上传条件', color: 'gold' },
-};
+const serviceStatusMeta = SERVICE_STATUS_META;
+const reportingConditionMeta = REPORTING_CONDITION_META;
 
 function getStatusCfg(status) {
   return statusConfig[status] || { color: 'default', text: status || '未知' };
@@ -89,6 +86,10 @@ export default function SitesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, token } = useAuth();
   const isAdmin = hasAdminRole(user);
+  const userRoles = user?.roles?.length ? user.roles : [user?.role];
+  const canReadAlertRules = userRoles.some((role) => ['admin', 'reviewer'].includes(role));
+  const moduleView = searchParams.get('view');
+  const moduleScrollRef = useRef(0);
   const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
   const monitoringScope = monitoringPublic ? 'all' : 'mine';
   const siteServiceScope = isAdmin && searchParams.get('service_scope') === 'all' ? 'all' : 'current';
@@ -114,6 +115,20 @@ export default function SitesPage() {
   const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(siteSnapshot.scopeFacts || null);
   const [monitoringError, setMonitoringError] = useState(null);
   const directoryLoading = initialLoading || !activeSiteSnapshot?.ready;
+
+  const openModuleView = useCallback((view) => {
+    moduleScrollRef.current = document.scrollingElement?.scrollTop || window.scrollY || 0;
+    const next = new URLSearchParams(searchParams);
+    next.set('view', view);
+    setSearchParams(next);
+  }, [searchParams, setSearchParams]);
+  const closeModuleView = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('view');
+    next.delete('rule_tab');
+    setSearchParams(next);
+    requestAnimationFrame(() => window.scrollTo({ top: moduleScrollRef.current }));
+  }, [searchParams, setSearchParams]);
 
   // ---- filter state ----
   const urlSearchText = searchParams.get('q') || '';
@@ -783,10 +798,14 @@ export default function SitesPage() {
       {
         title: '服务状态',
         key: 'service_policy',
-        width: 120,
+        width: 150,
         render: (_, record) => {
-          const service = serviceStatusMeta[record.service_status] || serviceStatusMeta.active;
-          return <Tag color={service.color}>{record.service_status_label || service.label}</Tag>;
+          const policy = stationServicePolicyView(record);
+          return <Space direction="vertical" size={2}>
+            <Tag color={policy.service.color}>{policy.service.label}</Tag>
+            {policy.showReportingCondition
+              ? <Tag color={policy.reporting.color}>{policy.reporting.label}</Tag> : null}
+          </Space>;
         },
       },
       ...(monitoringPublic ? [{
@@ -806,14 +825,19 @@ export default function SitesPage() {
         title: '最新结果时间',
         dataIndex: 'latest_cycle',
         key: 'latest_cycle',
-        width: 190,
+        width: 220,
         render: (_, record) => {
           const cycle = record.latest_cycle || {};
           const missingCount = monitoringMissingCount(cycle);
+          const cycleView = cycleStatusView(cycle);
           const resultAt = record.last_valid_observation_at;
           return <Space direction="vertical" size={2}>
             <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无结果'}</Text>
-            {missingCount > 0 ? <Tag color="orange">缺 {missingCount} 项</Tag> : null}
+            {cycle.status ? <Tag color={cycleView.color}>
+              {cycle.status === 'incomplete' && missingCount > 0
+                ? `缺 ${missingCount} 项` : cycleView.label}
+            </Tag> : null}
+            {cycleView.description ? <Text type="secondary">{cycleView.description}</Text> : null}
           </Space>;
         },
       }] : []),
@@ -1424,11 +1448,20 @@ export default function SitesPage() {
   // ========================================================================
   // Render
   // ========================================================================
+  if (moduleView === 'reagents' && isAdmin) {
+    return <ReagentMasterPage embedded onBack={closeModuleView} searchParamKey="reagent_q" pageParamKey="reagent_page" />;
+  }
+  if (moduleView === 'alert-rules' && canReadAlertRules) {
+    return <AlertRulesManagement onBack={closeModuleView} />;
+  }
+
   return (
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
       primaryAction={<Space>
+        {isAdmin && <Button icon={<BookOutlined />} onClick={() => openModuleView('reagents')}>试剂主数据</Button>}
+        {canReadAlertRules && <Button icon={<WarningOutlined />} onClick={() => openModuleView('alert-rules')}>告警规则</Button>}
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
         {isAdmin && monitoringPublic && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
         <Button

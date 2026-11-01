@@ -337,4 +337,5 @@ test('image archive grid and table behavior with isolated server pagination', {
       assert.equal(new URL(page.url()).searchParams.has('scope'), false);
     } finally { release(); await close(); }
   });
+
 });

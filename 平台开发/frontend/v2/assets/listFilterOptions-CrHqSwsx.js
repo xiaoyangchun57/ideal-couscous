@@ -1,0 +1,1 @@
+function e(e,t=[]){return[{value:`__all_list_filter__`,label:e},...t]}function t(e){return e===`__all_list_filter__`?void 0:e}export{t as n,e as t};

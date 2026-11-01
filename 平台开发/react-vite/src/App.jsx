@@ -91,6 +91,13 @@ function CapabilityRoute({ capability, fallback = '/sites', children }) {
   return children;
 }
 
+function BatchReviewRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  if (!params.has('tab')) params.set('tab', 'inspection');
+  return <Navigate to={`/audit?${params.toString()}`} replace />;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -127,7 +134,7 @@ function AppRoutes() {
         <Route path="audit" element={(
           <PageRoute path="/audit"><Deferred><AuditPage /></Deferred></PageRoute>
         )} />
-        <Route path="batch-review" element={<Navigate to="/audit?tab=photo" replace />} />
+        <Route path="batch-review" element={<BatchReviewRedirect />} />
         <Route path="equipment" element={(
           <PageRoute path="/equipment"><Deferred><EquipmentPage /></Deferred></PageRoute>
         )} />

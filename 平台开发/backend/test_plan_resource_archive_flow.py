@@ -587,8 +587,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.assertTrue(owner.json['can_cancel'], owner.json)
         self.assertTrue(admin.json['can_cancel'], admin.json)
         self.assertEqual(owner.json['cancel_block_reason'], '')
-        self.assertFalse(outsider.json['can_cancel'])
-        self.assertEqual(outsider.json['cancel_block_reason'], '无权取消该计划')
+        self.assertEqual((outsider.status_code, outsider.json['code']),
+                         (403, 'PLAN_SCHEDULE_VIEW_FORBIDDEN'))
 
         started = self.client.post(
             '/api/plan-schedules/805/request-change',
@@ -600,9 +600,8 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             '/api/plan-schedules/805', headers=self.headers('other-token'))
         self.assertTrue(owner_modifying.json['can_abandon_change'])
         self.assertEqual(owner_modifying.json['abandon_change_block_reason'], '')
-        self.assertFalse(outsider_modifying.json['can_abandon_change'])
-        self.assertEqual(
-            outsider_modifying.json['abandon_change_block_reason'], '无权放弃该计划变更')
+        self.assertEqual((outsider_modifying.status_code, outsider_modifying.json['code']),
+                         (403, 'PLAN_SCHEDULE_VIEW_FORBIDDEN'))
 
         with self.db() as db:
             application_id = db.execute("""INSERT INTO vehicle_applications

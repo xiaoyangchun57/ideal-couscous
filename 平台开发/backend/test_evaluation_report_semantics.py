@@ -46,8 +46,9 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
         now = datetime.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         previous_month = month_start - timedelta(days=1)
-        closed_at = month_start + timedelta(days=1, hours=10)
-        open_created = month_start + timedelta(days=2, hours=9)
+        closed_at = now - timedelta(hours=2)
+        open_created = now - timedelta(hours=1)
+        overdue_deadline = now - timedelta(minutes=30)
         with temporary_db() as db:
             db.executescript('''
                 CREATE TABLE users (
@@ -97,12 +98,12 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
             db.execute('''INSERT INTO work_orders VALUES (2,?,?,?,?,?,?,?,?,?,?,?,?)''', (
                 'WO-OPEN', 1, '本月处理中', '设备故障', 'normal', '运维甲', 'in_progress',
                 open_created.strftime('%Y-%m-%d %H:%M:%S'), None, None,
-                (open_created + timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S'), '',
+                overdue_deadline.strftime('%Y-%m-%d %H:%M:%S'), '',
             ))
             db.execute('''INSERT INTO work_orders VALUES (3,?,?,?,?,?,?,?,?,?,?,?,?)''', (
                 'WO-OUT-OF-SCOPE', 2, '外站工单', '设备故障', 'normal', '运维乙', 'in_progress',
                 open_created.strftime('%Y-%m-%d %H:%M:%S'), None, None,
-                (open_created + timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S'), '',
+                overdue_deadline.strftime('%Y-%m-%d %H:%M:%S'), '',
             ))
         self.client = app_module.app.test_client()
 
@@ -175,30 +176,29 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
         report_book.close()
         details.close()
 
-    def test_reviewer_report_is_limited_to_assigned_sites(self):
+    def test_reviewer_report_uses_company_scope(self):
         headers = {'Authorization': 'Bearer reviewer-token'}
         personnel = self.client.get('/api/evaluation/personnel?period=month', headers=headers)
         self.assertEqual(personnel.status_code, 200, personnel.json)
-        self.assertEqual(personnel.json['scope_label'], '零样本站')
-        self.assertEqual([row['real_name'] for row in personnel.json['list']], ['运维甲'])
+        self.assertEqual(personnel.json['scope_label'], '全部在册站点')
+        self.assertCountEqual([row['real_name'] for row in personnel.json['list']], ['运维甲', '运维乙'])
 
         response = self.client.get('/api/export/ops-report?period=quarter', headers=headers)
         self.assertEqual(response.status_code, 200, response.json if response.is_json else None)
         document = Document(io.BytesIO(response.data))
         text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
-        self.assertIn('零样本站', text)
-        self.assertNotIn('越权站点', text)
+        self.assertIn('全部在册站点', text)
         response.close()
 
         details = self.client.get('/api/export/ops-report-details?period=quarter', headers=headers)
         self.assertEqual(details.status_code, 200)
         workbook = load_workbook(io.BytesIO(details.data))
-        self.assertEqual(workbook['概览']['B4'].value, '零样本站')
-        self.assertEqual(workbook['概览']['B7'].value, 1)
+        self.assertEqual(workbook['概览']['B4'].value, '全部在册站点')
+        self.assertEqual(workbook['概览']['B7'].value, 2)
         site_names = [cell.value for cell in workbook['站点健康度']['A'][7:]]
-        self.assertEqual(site_names, ['零样本站'])
+        self.assertCountEqual(site_names, ['零样本站', '越权站点'])
         workorder_numbers = [cell.value for cell in workbook['工单明细']['A'][7:]]
-        self.assertNotIn('WO-OUT-OF-SCOPE', workorder_numbers)
+        self.assertIn('WO-OUT-OF-SCOPE', workorder_numbers)
         workbook.close()
         details.close()
 

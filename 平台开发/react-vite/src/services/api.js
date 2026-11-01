@@ -163,12 +163,21 @@ function strictGetOptions(timeoutOrOptions) {
     : { timeout: timeoutOrOptions };
 }
 
-async function strictDownload(url, timeout = 60000) {
+async function strictDownload(url, timeoutOrOptions = 60000) {
+  const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
+    ? timeoutOrOptions : { timeout: timeoutOrOptions };
+  const { method = 'GET', body, timeout = 60000 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
+    const headers = authHeaders();
+    if (body && typeof body === 'object' && !(body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
     const res = await fetch(`${API_BASE}${url}`, {
-      headers: authHeaders(),
+      method,
+      headers,
+      body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
       signal: controller.signal,
     });
     const requestId = res.headers.get('x-request-id') || res.headers.get('x-correlation-id') || '';
@@ -227,6 +236,9 @@ export const api = {
     timeout: typeof data === 'number' ? data : timeout,
   }),
   downloadStrict: (url, timeout) => strictDownload(url, timeout),
+  downloadPostStrict: (url, data, timeout) => strictDownload(url, {
+    method: 'POST', body: data, timeout,
+  }),
   track: (eventName, context = {}, eventId = null) => request('/telemetry/events', {
     method: 'POST',
     body: {

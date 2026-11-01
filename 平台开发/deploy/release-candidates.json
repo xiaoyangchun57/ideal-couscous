@@ -2,9 +2,10 @@
   "schema_version": 1,
   "release_line": "cross-module-freeze",
   "candidate_tags": [
-    "release-20261029-governance-offline-r29"
+    "release-20261101-web-ops-r31"
   ],
   "historical_tags": [
+    "release-20261029-governance-offline-r29",
     "release-20261022-retention-maintenance-r29",
     "release-20261022-station-result-chain-fix1-r29",
     "release-20261021-station-data-closure-r29",

@@ -46,7 +46,8 @@ test('archive filters query immediately except for the debounced keyword', () =>
   assert.match(source, /onChange=\{value => updateImmediateFilter\(\{ business_type: listFilterValue\(value\) \}\)\}/);
   assert.match(source, /onChange=\{value => updateImmediateFilter\(\{ date_range: value \}\)\}/);
   assert.match(source, /dataIndex: 'display_url'/);
-  assert.match(source, /window\.open\(item\.display_url, '_blank'\)/);
+  assert.match(source, /onClick=\{\(\) => requestDirectDownload\(\[item\.id\]\)\}>保存<\/Button>/);
+  assert.match(source, /api\.downloadStrict\(`\/attachments\/\$\{item\.attachment_id\}\/download`, 120000\)/);
   assert.doesNotMatch(source, /window\.open\(item\.stored_path/);
   assert.match(source, /label="展示副本文件"/);
   assert.match(source, /item\.is_archive_material === 1[\s\S]*?归档材料/);

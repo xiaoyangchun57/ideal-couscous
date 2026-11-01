@@ -17,6 +17,7 @@ import {
   UserOutlined,
   LinkOutlined,
   MoreOutlined,
+  ArrowLeftOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
@@ -35,6 +36,7 @@ import {
 import ThresholdRulesTab from './components/ThresholdRulesTab';
 import { StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange';
+import { normalizeAlertTargetId, pinTargetAlert } from './alertTargetNavigation';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
@@ -621,6 +623,47 @@ function AlertRuleEngineTab({ tokens, isDark, canManage }) {
   );
 }
 
+export function AlertRulesManagement({ onBack }) {
+  const { user } = useAuth();
+  const { tokens, isDark } = useTheme();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const roles = user?.roles?.length ? user.roles : [user?.role];
+  const canRead = roles.some((role) => ['admin', 'reviewer'].includes(role));
+  const canManage = roles.includes('admin');
+  const requestedTab = searchParams.get('rule_tab');
+  const activeTab = ['rules', 'thresholds'].includes(requestedTab) ? requestedTab : 'rules';
+
+  if (!canRead) {
+    return <div style={pageRootStyle}><WorkspaceEmpty type="no-permission" description="当前账号没有查看告警规则的权限" /></div>;
+  }
+
+  return (
+    <div style={pageRootStyle}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div>
+          <Title level={4} style={{ margin: 0 }}>告警规则</Title>
+          <Text type="secondary">维护规则引擎和阈值范围；规则作用域仍由原配置决定。</Text>
+        </div>
+        <Button icon={<ArrowLeftOutlined />} onClick={onBack}>返回站点</Button>
+      </div>
+      <Tabs
+        activeKey={activeTab}
+        onChange={(key) => setSearchParams((previous) => {
+          const next = new URLSearchParams(previous);
+          if (key === 'rules') next.delete('rule_tab');
+          else next.set('rule_tab', key);
+          return next;
+        }, { replace: true })}
+        items={[
+          { key: 'rules', label: '规则引擎', children: <AlertRuleEngineTab tokens={tokens} isDark={isDark} canManage={canManage} /> },
+          { key: 'thresholds', label: '阈值规则', children: <ThresholdRulesTab tokens={tokens} isDark={isDark} /> },
+        ]}
+        animated={false}
+      />
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Primary (一级) tab config — 3 个一级 tab，各自挂载二级子 tab
 // ---------------------------------------------------------------------------
@@ -663,8 +706,18 @@ export default function AlertsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const roles = user?.roles?.length ? user.roles : [user?.role];
   const canManage = roles.includes('admin');
+  const canViewRules = roles.some((role) => role === 'admin' || role === 'reviewer');
+  const canViewAllSites = canViewRules;
+  const visibleTabs = useMemo(() => canViewRules
+    ? ALERT_TABS
+    : ALERT_TABS.filter((tab) => tab.key !== 'rules' && tab.key !== 'thresholds'),
+  [canViewRules]);
+  const rawAlertTarget = searchParams.get('alert') || '';
+  const alertTargetId = normalizeAlertTargetId(rawAlertTarget);
   const requestedTab = searchParams.get('tab') || 'alerts';
-  const activeTab = ALERT_TABS.some((tab) => tab.key === requestedTab) ? requestedTab : 'alerts';
+  const activeTab = rawAlertTarget
+    ? 'alerts'
+    : (visibleTabs.some((tab) => tab.key === requestedTab) ? requestedTab : 'alerts');
   const urlSearchText = searchParams.get('search') || '';
   const statusFilter = searchParams.get('status') || null;
   const levelFilter = searchParams.get('level') || null;
@@ -691,6 +744,9 @@ export default function AlertsPage() {
   const [counts, setCounts] = useState({ total: 0, pending: 0, acknowledged: 0, resolved: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [targetAlert, setTargetAlert] = useState(null);
+  const [targetAlertError, setTargetAlertError] = useState('');
+  const [targetAlertLoading, setTargetAlertLoading] = useState(false);
   const [alertsWrapRef, alertsH] = useTableAutoHeight({ headerOffset: 54 });
   const [reagentWrapRef, reagentH] = useTableAutoHeight({ headerOffset: 48 });
 
@@ -701,7 +757,8 @@ export default function AlertsPage() {
   const loadReagentOverview = useCallback(async () => {
     setReagentLoading(true);
     try {
-      const d = await api.getStrict('/reagent-overview');
+      const scope = canViewAllSites ? 'all' : 'mine';
+      const d = await api.getStrict(`/reagent-overview?scope=${scope}`);
       setReagentList(Array.isArray(d?.items) ? d.items : []);
       setReagentError('');
     } catch (e) {
@@ -709,7 +766,7 @@ export default function AlertsPage() {
     } finally {
       setReagentLoading(false);
     }
-  }, []);
+  }, [canViewAllSites]);
   useEffect(() => { if (activeTab === 'reagent') loadReagentOverview(); }, [activeTab, loadReagentOverview]);
 
   const resetFilters = useCallback(() => {
@@ -770,6 +827,33 @@ export default function AlertsPage() {
     fetchAlerts();
   }, [fetchAlerts]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setTargetAlert(null);
+    setTargetAlertError('');
+    setTargetAlertLoading(false);
+    if (!rawAlertTarget) return () => { cancelled = true; };
+    if (!alertTargetId) {
+      setTargetAlertError('通知中的告警标识无效，无法精确定位。');
+      return () => { cancelled = true; };
+    }
+    setTargetAlertLoading(true);
+    api.getStrict(`/alerts/${encodeURIComponent(alertTargetId)}`)
+      .then((alert) => {
+        if (cancelled) return;
+        setTargetAlert(alert);
+        setAllAlerts((alerts) => pinTargetAlert(alerts, alert));
+      })
+      .catch((targetError) => {
+        if (cancelled) return;
+        setTargetAlertError(targetError.message || '通知对应的告警不存在或当前账号无权查看。');
+      })
+      .finally(() => {
+        if (!cancelled) setTargetAlertLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [alertTargetId, rawAlertTarget]);
+
   // 兼容旧入口：人工异常应从现场执行包发起，网页端仅提供证据审阅与闭环。
   useEffect(() => {
     if (searchParams.get('source') === 'manual') {
@@ -807,8 +891,8 @@ export default function AlertsPage() {
       );
     }
 
-    return list;
-  }, [allAlerts, statusFilter, levelFilter, dateRange, searchText]);
+    return pinTargetAlert(list, targetAlert);
+  }, [allAlerts, statusFilter, levelFilter, dateRange, searchText, targetAlert]);
   const listCoverage = useMemo(
     () => alertListCoverage(allAlerts.length, counts.total),
     [allAlerts.length, counts.total],
@@ -942,7 +1026,7 @@ export default function AlertsPage() {
       fetchAlerts();
       // Navigate to work orders page filtered by the new order
       if (orderNo) {
-        setTimeout(() => navigate(`/workorders?search=${orderNo}`), 500);
+        setTimeout(() => navigate(`/workorders?order=${encodeURIComponent(orderNo)}`), 500);
       }
     } catch (error) {
       message.error(error.message || '转工单失败，请重试');
@@ -1092,7 +1176,7 @@ export default function AlertsPage() {
               size="small"
               icon={<LinkOutlined />}
               aria-label={`查看${record.site_name || '该告警'}的关联工单${record.related_order_no || ''}`}
-              onClick={() => navigate(`/workorders?search=${encodeURIComponent(record.related_order_no || '')}`)}
+              onClick={() => navigate(`/workorders?order=${encodeURIComponent(record.related_order_no || '')}`)}
             >
               {record.related_order_no || '查看关联工单'}
             </Button>
@@ -1194,6 +1278,10 @@ export default function AlertsPage() {
   // ---- Render --------------------------------------------------------------
   return (
     <div style={pageRootStyle}>
+      <style>{`
+        .alert-target-row > td { background: #e6f4ff !important; }
+        .alert-target-row:hover > td { background: #bae0ff !important; }
+      `}</style>
       {/* Page Header */}
       <div style={{ marginBottom: 4, flexShrink: 0 }}>
         <Title level={4} style={{ margin: 0, color: tokens.colorText }}>告警与事件</Title>
@@ -1202,7 +1290,7 @@ export default function AlertsPage() {
         <Tabs
           type="line"
           activeKey={activeTab}
-          items={ALERT_TABS}
+          items={visibleTabs}
           onChange={(key) => updateQuery({ tab: key === 'alerts' ? '' : key })}
           style={{ marginTop: 12 }}
         />
@@ -1215,6 +1303,20 @@ export default function AlertsPage() {
             <div style={{ flexShrink: 0 }}>
               <StatusStrip items={statCards.map((item) => ({ key: item.title, label: item.title, value: item.value, color: item.color }))} />
             </div>
+
+            {(rawAlertTarget || targetAlertLoading) && <Alert
+              type={targetAlertError ? 'warning' : 'info'}
+              showIcon
+              message={targetAlertError
+                ? '通知告警无法定位'
+                : targetAlertLoading
+                  ? '正在定位通知告警'
+                  : `已定位通知告警 #${targetAlert?.id}`}
+              description={targetAlertError || (targetAlert
+                ? `${targetAlert.site_name || '未知站点'} · ${targetAlert.message || '未记录告警内容'}。该告警固定显示在列表首行，不受当前筛选条件隐藏。`
+                : '正在读取告警详情。')}
+              style={{ marginBottom: 12, flexShrink: 0 }}
+            />}
 
             {/* Filter Bar */}
             <WorkspaceToolbar
@@ -1406,6 +1508,7 @@ export default function AlertsPage() {
                   pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
                   scroll={alertsH ? { y: alertsH } : undefined}
                   size="small"
+                  rowClassName={(record) => String(record.id) === alertTargetId ? 'alert-target-row' : ''}
                   style={{ borderRadius: 12, overflow: 'hidden' }}
                 />
                 </div>

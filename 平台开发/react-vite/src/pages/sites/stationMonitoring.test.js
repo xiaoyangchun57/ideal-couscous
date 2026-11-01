@@ -22,6 +22,7 @@ import {
   readSiteDirectorySnapshot,
   siteDirectoryLoadMode,
   stationDirectorySnapshotKey,
+  stationServicePolicyView,
   validateMonitoringDirectoryPayload,
   writeSiteDirectorySnapshot,
 } from './stationMonitoring.js';
@@ -244,7 +245,10 @@ test('communication and latest cycle remain independent while trend gaps stay nu
   }).label, '应监测因子未设置');
   assert.equal(cycleStatusView({
     status: 'not_configured', reason_code: 'time_configuration_missing',
-  }).label, '时间配置缺失');
+  }).label, '时间配置未完成');
+  assert.equal(cycleStatusView({
+    status: 'not_configured', reason_code: 'time_configuration_missing',
+  }).description, '周期完整性暂无法判定');
   assert.equal(cycleStatusView({
     status: 'not_configured', reason_code: 'no_evaluable_period',
   }).label, '暂无可评价时段');
@@ -262,6 +266,67 @@ test('communication and latest cycle remain independent while trend gaps stay nu
     ['2026-10-09T08:00:00+08:00', null],
   ]);
   assert.equal(monitoringTrendChartOption(trend).series[0].connectNulls, false);
+});
+
+test('complete cycle labels distinguish realtime, mixed and formal sources', () => {
+  const realtimeFactor = {
+    business_metric: 'ph', status: 'value', source_type: 'realtime_observation',
+  };
+  const formalFactor = {
+    business_metric: 'ammonia', status: 'value', source_type: 'hj212_2061_avg',
+  };
+  const noPeriod = cycleStatusView({
+    status: 'complete', reason_code: 'no_evaluable_period', factors: [realtimeFactor],
+  });
+  assert.equal(noPeriod.label, '实时结果齐全');
+  assert.equal(noPeriod.description, '正式周期尚未形成');
+
+  const realtimeSlot = cycleStatusView({
+    status: 'complete', scheduled_at: '2026-10-30T16:00:00+08:00',
+    factors: [realtimeFactor, { ...realtimeFactor, business_metric: 'turbidity' }],
+  });
+  assert.equal(realtimeSlot.label, '实时结果齐全');
+  assert.equal(realtimeSlot.description, '正式周期尚未形成');
+
+  const mixed = cycleStatusView({
+    status: 'complete', factors: [formalFactor, realtimeFactor],
+  });
+  assert.equal(mixed.label, '结果来源混合');
+  assert.equal(mixed.description, '当前周期含实时结果，不能视为正式周期完整');
+
+  assert.equal(cycleStatusView({
+    status: 'complete', factors: [formalFactor, {
+      ...formalFactor, business_metric: 'codmn', source_type: 'scheduled_protocol_observation',
+    }],
+  }).label, '结果完整');
+  assert.equal(cycleStatusView({ status: 'pending', factors: [realtimeFactor] }).label, '结果形成中');
+  assert.equal(cycleStatusView({ status: 'incomplete', factors: [realtimeFactor] }).label, '结果缺项');
+});
+
+test('service policy keeps service membership separate from reporting conditions', () => {
+  const noUpload = stationServicePolicyView({
+    service_status: 'active',
+    reporting_condition: 'no_upload_condition',
+  });
+  assert.equal(noUpload.service.label, '在服务');
+  assert.equal(noUpload.reporting.label, '暂无上传条件');
+  assert.equal(noUpload.showReportingCondition, true);
+  assert.match(noUpload.notice.description, /不作为当前催报依据/);
+
+  const normal = stationServicePolicyView({
+    service_status: 'active',
+    reporting_condition: 'normal',
+  });
+  assert.equal(normal.showReportingCondition, false);
+  assert.equal(normal.notice, null);
+
+  const ended = stationServicePolicyView({
+    service_status: 'ended',
+    reporting_condition: 'no_upload_condition',
+  });
+  assert.equal(ended.service.label, '服务结束');
+  assert.equal(ended.showReportingCondition, false);
+  assert.equal(ended.notice, null);
 });
 
 test('observation axis exposes the next authoritative business slot', () => {

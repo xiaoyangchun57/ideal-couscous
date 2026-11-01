@@ -9,6 +9,7 @@ import {
   CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
   StarOutlined, FolderOpenOutlined,
   ClearOutlined, PlusOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import dayjs from 'dayjs';
@@ -46,6 +47,7 @@ import {
   planPurgeAuditPresentation,
 } from './planAuditPresentation';
 import './PlanSchedulesPage.css';
+import InspectionSettingsPage from '../inspection-settings/InspectionSettingsPage';
 
 const { Text } = Typography;
 
@@ -87,9 +89,26 @@ export default function PlanSchedulesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const userRoles = user?.roles || [user?.role];
   const canApprove = userRoles.some(role => role === 'admin' || role === 'manager');
+  const canViewTeam = userRoles.some(role => role === 'admin' || role === 'manager' || role === 'reviewer');
   const isAdmin = userRoles.includes('admin');
   const canCleanup = userRoles.includes('admin');
   const canUseFavorites = userRoles.includes('operator');
+  const canUseFollowUps = userRoles.some(role => role === 'admin' || role === 'operator');
+  const moduleView = searchParams.get('view');
+  const moduleScrollRef = useRef(0);
+
+  const openInspectionSettings = () => {
+    moduleScrollRef.current = document.scrollingElement?.scrollTop || window.scrollY || 0;
+    const next = new URLSearchParams(searchParams);
+    next.set('view', 'inspection-settings');
+    setSearchParams(next);
+  };
+  const closeInspectionSettings = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('view');
+    setSearchParams(next);
+    requestAnimationFrame(() => window.scrollTo({ top: moduleScrollRef.current }));
+  };
 
   const [list, setList] = useState([]);
   const [teamOverview, setTeamOverview] = useState(null);
@@ -273,16 +292,21 @@ export default function PlanSchedulesPage() {
   }, [cleanupSelected, loadCleanupCandidates, loadList]);
 
   const loadOverview = useCallback(async () => {
-    if (!canApprove) return;
+    if (!canViewTeam) return;
     try {
       setTeamOverview(await api.getStrict('/plan-schedules/overview'));
       setTeamOverviewError('');
     } catch (error) {
       setTeamOverviewError(error?.message || '团队概览加载失败');
     }
-  }, [canApprove]);
+  }, [canViewTeam]);
 
   const loadFollowUps = useCallback(async () => {
+    if (!canUseFollowUps) {
+      setFollowUpRecommendations([]);
+      setFollowUpError('');
+      return;
+    }
     const requestId = ++followUpRequestRef.current;
     const result = await loadFollowUpRecommendations(
       api,
@@ -292,7 +316,7 @@ export default function PlanSchedulesPage() {
     if (!result) return;
     if (result.followUpRecommendations !== null) setFollowUpRecommendations(result.followUpRecommendations);
     setFollowUpError(result.error);
-  }, [followUpScope]);
+  }, [canUseFollowUps, followUpScope]);
 
   const refreshAll = useCallback(() => {
     loadList();
@@ -1052,7 +1076,7 @@ export default function PlanSchedulesPage() {
     );
   };
 
-  const hasTeamAttention = canApprove && teamOverview && [
+  const hasTeamAttention = canViewTeam && teamOverview && [
     teamOverview.summary?.overdue_executions,
     teamOverview.summary?.coverage_exceptions,
     teamOverview.summary?.resource_blocks,
@@ -1063,11 +1087,16 @@ export default function PlanSchedulesPage() {
     { key: 'resource', label: '资源阻塞', count: teamOverview?.summary?.resource_blocks || 0, danger: true },
   ].filter(item => item.count > 0);
 
+  if (moduleView === 'inspection-settings' && isAdmin) {
+    return <InspectionSettingsPage embedded onBack={closeInspectionSettings} />;
+  }
+
   return (
     <WorkspacePage
       title="巡检计划"
       subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
       primaryAction={<Space>
+        {isAdmin && <Button icon={<SettingOutlined />} onClick={openInspectionSettings}>检查项设置</Button>}
         {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
         {isAdmin && <Button icon={<FileSearchOutlined />} onClick={openPurgeAudits}>删除记录</Button>}
         {canCleanup && <Button icon={<HoverGifIcon name="trash-bin" size={14} />} danger onClick={openCleanup}>清理无效数据</Button>}
@@ -1083,13 +1112,13 @@ export default function PlanSchedulesPage() {
         { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
       ]}
     >
-      {followUpError && <Alert type="warning" showIcon message={followUpError} action={<Button size="small" onClick={loadFollowUps}>重试</Button>} />}
-      {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
+      {canUseFollowUps && followUpError && <Alert type="warning" showIcon message={followUpError} action={<Button size="small" onClick={loadFollowUps}>重试</Button>} />}
+      {teamOverviewError && canViewTeam && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
       {supplementTarget && <Alert type="warning" showIcon
         message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
         description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
 
-      {(isAdmin || followUpRecommendations.length > 0) && (
+      {canUseFollowUps && (isAdmin || followUpRecommendations.length > 0) && (
         <Alert
           type={followUpRecommendations.length > 0 ? "warning" : "info"}
           showIcon

@@ -10,7 +10,7 @@ import {
 
 test('global search paths use the destination page query contract', () => {
   assert.equal(buildGlobalSearchPath({ type: 'site', identifier: 35 }), '/sites/35');
-  assert.equal(buildGlobalSearchPath({ type: 'workorder', identifier: 'WO-1' }), '/workorders?search=WO-1');
+  assert.equal(buildGlobalSearchPath({ type: 'workorder', identifier: 'WO-1' }), '/workorders?order=WO-1');
   assert.equal(buildGlobalSearchPath({ type: 'device', identifier: 'WB-003-01' }), '/equipment?q=WB-003-01');
 });
 
@@ -167,4 +167,17 @@ test('server audit locator keeps same numeric id separated by request type', () 
     assert.equal(result.status, 'found');
     assert.equal(result.item.source_type, requestType);
   }
+});
+
+test('manual report and alert notifications preserve reliable source ids', () => {
+  assert.equal(
+    getNotificationTarget({ source_type: 'manual_report', source_id: 42 }, ['reviewer']),
+    '/reports?report=42',
+  );
+  assert.equal(
+    getNotificationTarget({ source_type: 'alert', source_id: 'alarm-9' }, ['admin']),
+    '/alerts?alert=alarm-9',
+  );
+  assert.equal(getNotificationTarget({ source_type: 'manual_report' }, ['reviewer']), '/reports');
+  assert.equal(getNotificationTarget({ source_type: 'alert' }, ['reviewer']), '/alerts');
 });

@@ -93,7 +93,8 @@ class AuthSecurityTest(unittest.TestCase):
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, title TEXT, site_id INTEGER,
-                    status TEXT DEFAULT 'pending', created_at TEXT
+                    source TEXT DEFAULT 'manual', status TEXT DEFAULT 'pending',
+                    related_alert_id INTEGER, created_at TEXT
                 );
                 CREATE TABLE reagents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, manufacturer TEXT, spec TEXT,
@@ -200,16 +201,22 @@ class AuthSecurityTest(unittest.TestCase):
         reviewer = self.login('reviewer', 'ReviewerPass123')
         with self.temporary_db() as db:
             db.execute(
-                "INSERT INTO work_orders (id,order_no,title,site_id,created_at) VALUES (1,'WO-1','站点一维修',1,'2026-08-06 08:00:00')"
+                """INSERT INTO work_orders
+                    (id,order_no,title,site_id,source,status,related_alert_id,created_at)
+                    VALUES (1,'WO-1','站点一维修',1,'manual','pending',NULL,'2026-08-06 08:00:00')"""
             )
 
         reviewer_workorders = self.client.get('/api/workorders', headers=self.headers(reviewer))
-        self.assertEqual(reviewer_workorders.status_code, 403, reviewer_workorders.json)
+        self.assertEqual(reviewer_workorders.status_code, 200, reviewer_workorders.json)
+        self.assertEqual([row['order_no'] for row in reviewer_workorders.json], ['WO-1'])
 
         reviewer_sites = self.client.get('/api/global-search?q=站点一', headers=self.headers(reviewer))
-        self.assertEqual([item['type'] for item in reviewer_sites.json['results']], ['site'])
+        self.assertEqual(
+            [item['type'] for item in reviewer_sites.json['results']], ['site', 'workorder'])
         reviewer_device = self.client.get('/api/global-search?q=D1', headers=self.headers(reviewer))
         self.assertEqual(reviewer_device.json['results'], [])
+        reviewer_order = self.client.get('/api/global-search?q=WO-1', headers=self.headers(reviewer))
+        self.assertEqual([item['type'] for item in reviewer_order.json['results']], ['workorder'])
 
         operator_order = self.client.get('/api/global-search?q=WO-1', headers=self.headers(operator))
         self.assertEqual([item['type'] for item in operator_order.json['results']], ['workorder'])

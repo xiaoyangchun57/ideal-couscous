@@ -19,6 +19,17 @@ test('mixed real times remain per-factor, and historical values retain fault or 
   assert.equal(monitoringLatestResults(factors, same).commonTime, values[0].observed_at);
   assert.equal(monitoringLatestResults([{ business_metric: 'ph' }], []).items[0].hasValue, false);
   assert.equal(monitoringLatestResults(factors, [{ ...values[0], status: 'review_required' }]).items[0].statusLabel, '待核对');
+
+  const samplingTimeIssue = monitoringLatestResults([{
+    business_metric: 'ammonia',
+    state: 'fault',
+    reason_code: 'business_time_outside_schedule',
+    reason: '采样时间不在批准的四小时时点，需核对数据来源与采样时刻',
+    issue_observed_at: '2026-10-22T06:00:00+00:00',
+  }], [values[0]]).items[0];
+  assert.equal(samplingTimeIssue.statusLabel, '采样时点异常 · 历史值');
+  assert.equal(samplingTimeIssue.statusObservedAt, '2026-10-22T06:00:00+00:00');
+  assert.match(samplingTimeIssue.statusReason, /采样时间不在批准/);
 });
 
 // Complete latest_cycle objects captured from real isolated list HTTP responses.

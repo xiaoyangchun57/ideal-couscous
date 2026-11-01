@@ -170,13 +170,19 @@ class AlertManagementContractTest(unittest.TestCase):
             self.assertEqual(event['event_type'], 'simulated')
             self.assertEqual(event['operator'], '管理员')
 
-    def test_statistics_respect_reviewer_site_scope(self):
+    def test_statistics_give_reviewer_company_scope_and_keep_operator_scoped(self):
         response = self.client.get('/api/alerts/statistics', headers=self.headers('reviewer-token'))
         self.assertEqual(response.status_code, 200, response.json)
-        self.assertEqual(response.json['total'], 2)
-        self.assertEqual(response.json['by_status']['pending'], 1)
+        self.assertEqual(response.json['total'], 3)
+        self.assertEqual(response.json['by_status']['pending'], 2)
         self.assertEqual(response.json['by_status']['resolved'], 1)
-        self.assertEqual(response.json['by_level']['orange'], 0)
+        self.assertEqual(response.json['by_level']['orange'], 1)
+
+        operator = self.client.get('/api/alerts/statistics', headers=self.headers('operator-token'))
+        self.assertEqual(operator.status_code, 200, operator.json)
+        self.assertEqual(operator.json['total'], 2)
+        self.assertEqual(operator.json['by_status']['pending'], 1)
+        self.assertEqual(operator.json['by_level']['orange'], 0)
 
     def test_alert_action_projection_covers_workorder_stages_and_invalid_links(self):
         alert = {
@@ -408,9 +414,10 @@ class AlertManagementContractTest(unittest.TestCase):
 
         reviewer = self.client.get('/api/alerts', headers=self.headers('reviewer-token'))
         reviewer_rows = {row['id']: row for row in reviewer.json}
-        self.assertFalse(reviewer_rows[4]['can_view'])
-        self.assertIsNone(reviewer_rows[4]['primary_action'])
-        self.assertIsNone(reviewer_rows[4]['related_workorder_target'])
+        self.assertTrue(reviewer_rows[4]['can_view'])
+        self.assertEqual(reviewer_rows[4]['primary_action'], '查看关联工单')
+        self.assertEqual(
+            reviewer_rows[4]['related_workorder_target'], {'order_no': 'WO-LINKED'})
 
         with self.temporary_db() as db:
             states = dict(db.execute('SELECT id,status FROM alerts WHERE id IN (1,4,5)').fetchall())

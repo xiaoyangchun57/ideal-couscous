@@ -240,6 +240,24 @@ test('downloadStrict returns the blob and server filename after an authenticated
   assert.equal(await result.blob.text(), 'xlsx-data');
 });
 
+test('downloadPostStrict sends an authenticated JSON body and returns the generated archive', async () => {
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, '/api/attachments/download/zip');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.Authorization, 'Bearer test-token');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(options.body), { attachment_ids: [7, 8] });
+    return response('zip-data', {
+      contentType: 'application/zip',
+      headers: { 'content-disposition': "attachment; filename*=UTF-8''archive.zip" },
+    });
+  };
+  const result = await api.downloadPostStrict(
+    '/attachments/download/zip', { attachment_ids: [7, 8] });
+  assert.equal(result.filename, 'archive.zip');
+  assert.equal(await result.blob.text(), 'zip-data');
+});
+
 test('downloadStrict rejects an error response instead of creating a file', async () => {
   globalThis.fetch = async () => response({ error: '当前没有可导出的记录' }, { status: 409 });
   await assert.rejects(api.downloadStrict('/export/report'), (error) => {

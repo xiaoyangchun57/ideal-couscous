@@ -1,4 +1,5 @@
 ﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRef } from 'react';
 import { useSearchParams, useLocation, useNavigate } from 'react-router-dom';
 import {
   Input, Select, Button, Space, Tag, Badge, Modal, Upload, Spin,
@@ -11,6 +12,7 @@ import {
   FileTextOutlined, ClockCircleOutlined, ToolOutlined, CheckCircleOutlined,
   InboxOutlined, SwapOutlined, CheckOutlined, AuditOutlined,
   UploadOutlined, DownloadOutlined,
+  ArrowLeftOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
@@ -23,6 +25,7 @@ import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import ReportsPage from '../reports/ReportsPage';
 
 const { Text } = Typography;
 
@@ -33,11 +36,107 @@ const manualSourceOptions = [
   { value: 'hotline', label: '热线反馈' },
 ];
 
+const timelineStatusLabels = {
+  pending: '待受理',
+  accepted: '已受理',
+  dispatched: '已派发',
+  in_progress: '处置中',
+  reviewing: '待审核',
+  acceptance: '验收中',
+  resolved: '已办结',
+  closed: '已办结',
+};
+
+export function buildWorkorderTimelineFacts(workorder) {
+  const order = workorder || {};
+  const rawEvents = Array.isArray(order.flow_events) ? order.flow_events : [];
+  const facts = rawEvents.map((event, index) => {
+    const type = event?.type || `event-${index}`;
+    const reason = event?.remark || (type === 'ended_without_processing' ? order.closure_reason : '');
+    return {
+      key: `${type}-${event?.time || index}`,
+      type,
+      title: event?.label || type,
+      detail: type === 'ended_without_processing' && reason ? `原因：${reason}` : (event?.remark || ''),
+      meta: [event?.operator, event?.time].filter(Boolean).join(' · '),
+      tone: event?.tone || 'completed',
+    };
+  });
+
+  if (order.closure_type === 'no_action_required'
+      && !facts.some((fact) => fact.type === 'ended_without_processing')) {
+    facts.push({
+      key: `ended-without-processing-${order.closure_time || facts.length}`,
+      type: 'ended_without_processing',
+      title: '无需处理，提前结束',
+      detail: order.closure_reason ? `原因：${order.closure_reason}` : '原因未记录',
+      meta: order.closure_time || '',
+      tone: 'completed',
+    });
+  }
+  if (facts.length > 0) return facts;
+
+  const fallback = [{
+    key: 'created-fallback',
+    type: 'created',
+    title: '工单创建',
+    detail: '完整流程记录暂不可用',
+    meta: order.created_at || '',
+    tone: 'completed',
+  }];
+  const status = order.status || 'pending';
+  fallback.push({
+    key: `status-${status}`,
+    type: 'status',
+    title: order.closure_type === 'no_action_required'
+      ? '无需处理，提前结束'
+      : (timelineStatusLabels[status] || status),
+    detail: order.closure_type === 'no_action_required'
+      ? (order.closure_reason ? `原因：${order.closure_reason}` : '原因未记录')
+      : '仅显示当前状态，未推断受理、处置或审核节点',
+    meta: order.closure_time || order.resolved_at || '',
+    tone: ['closed', 'resolved'].includes(status) ? 'completed' : 'current',
+  });
+  return fallback;
+}
+
+export async function executeNoActionClose({
+  order, reason, submit, onCommitted, loadDetail, refreshOrders,
+}) {
+  const response = await submit();
+  const closureTime = response?.closure_time || order?.closure_time || order?.resolved_at || '';
+  const committedOrder = {
+    ...(order || {}),
+    status: 'closed',
+    conclusion: 'no_action_required',
+    closure_type: 'no_action_required',
+    closure_reason: response?.closure_reason || reason,
+    closure_time: closureTime,
+    resolved_at: closureTime || order?.resolved_at || '',
+    can_end_without_processing: false,
+    actions: { ...(order?.actions || {}), can_end_without_processing: false },
+  };
+  onCommitted?.(committedOrder, response);
+
+  const [detailResult, listResult] = await Promise.allSettled([
+    loadDetail ? loadDetail() : Promise.resolve(null),
+    refreshOrders ? refreshOrders() : Promise.resolve(null),
+  ]);
+  const detail = detailResult.status === 'fulfilled' && detailResult.value
+    ? { ...committedOrder, ...detailResult.value, can_end_without_processing: false }
+    : committedOrder;
+  const refreshFailures = [];
+  if (detailResult.status === 'rejected') refreshFailures.push('详情');
+  if (listResult.status === 'rejected') refreshFailures.push('列表');
+  return { response, committedOrder, detail, refreshFailures };
+}
+
 export default function WorkOrdersPage() {
   const { tokens, isDark } = useTheme();
   const { user } = useAuth();
   const userRoles = user?.roles?.length ? user.roles : [user?.role];
   const isAdmin = userRoles.includes('admin');
+  const canCreateWorkorder = userRoles.some((role) => role === 'admin' || role === 'operator');
   const canReview = userRoles.some((role) => role === 'admin' || role === 'reviewer');
   const { modal, message } = App.useApp();  // 使用实例方法，避免Tracking Prevention阻断
   // 语义状态色统一走 statusColors（禁硬编码 hex），半透明背景用 alpha 后缀派生
@@ -46,6 +145,7 @@ export default function WorkOrdersPage() {
   const [form] = Form.useForm();
   const selectedCreateSiteId = Form.useWatch('site_id', form);
   const [searchParams, setSearchParams] = useSearchParams();
+  const sourceView = searchParams.get('view') === 'reports';
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -71,6 +171,7 @@ export default function WorkOrdersPage() {
   // Data state
   const [allOrders, setAllOrders] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [ordersLoaded, setOrdersLoaded] = useState(false);
   const [loadError, setLoadError] = useState('');
 
   // Filter state - initialize from URL params
@@ -90,6 +191,11 @@ export default function WorkOrdersPage() {
   const [viewError, setViewError] = useState('');
   const [relatedData, setRelatedData] = useState({ parts: [], recycles: [] });
   const [operationPhotos, setOperationPhotos] = useState([]);
+  const [noActionOpen, setNoActionOpen] = useState(false);
+  const [noActionReason, setNoActionReason] = useState('');
+  const [noActionLoading, setNoActionLoading] = useState(false);
+  const [noActionRefreshOrderNo, setNoActionRefreshOrderNo] = useState('');
+  const focusedOrderRef = useRef('');
 
   // Spare part request from work order
   const [partReqOpen, setPartReqOpen] = useState(false);
@@ -106,7 +212,8 @@ export default function WorkOrdersPage() {
   const canOperateOrder = useCallback((order) => order?.can_operate === true, []);
 
   // 拉取工单列表
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = useCallback(async (options = {}) => {
+    const throwOnError = options?.throwOnError === true;
     setLoading(true);
     setLoadError('');
     try {
@@ -127,8 +234,10 @@ export default function WorkOrdersPage() {
       setCounts(computedCounts);
     } catch (error) {
       setLoadError(error.message || '工单列表加载失败');
+      if (throwOnError) throw error;
     } finally {
       setLoading(false);
+      setOrdersLoaded(true);
     }
   }, []);
 
@@ -327,6 +436,85 @@ export default function WorkOrdersPage() {
     setModalOpen(true);
   };
 
+  const openNoAction = (record) => {
+    setViewingOrder(record);
+    setNoActionReason('');
+    setNoActionOpen(true);
+  };
+
+  const retryNoActionRefresh = async () => {
+    const orderNo = noActionRefreshOrderNo || viewingOrder?.order_no;
+    if (!orderNo) return;
+    setViewLoading(true);
+    const [detailResult, listResult] = await Promise.allSettled([
+      api.getStrict(`/workorders/${orderNo}`),
+      fetchOrders({ throwOnError: true }),
+    ]);
+    if (detailResult.status === 'fulfilled') setViewingOrder(detailResult.value);
+    const failures = [];
+    if (detailResult.status === 'rejected') failures.push('详情');
+    if (listResult.status === 'rejected') failures.push('列表');
+    if (failures.length > 0) {
+      setViewError(`工单已提前结束，但${failures.join('、')}更新失败，请重新加载。`);
+      message.warning('工单已提前结束，部分页面信息仍未更新');
+    } else {
+      setViewError('');
+      setNoActionRefreshOrderNo('');
+      message.success('工单详情和列表已更新');
+    }
+    setViewLoading(false);
+  };
+
+  const submitNoAction = async () => {
+    const reason = noActionReason.trim();
+    if (!viewingOrder?.order_no || !reason) {
+      message.error('请填写无需处理的原因');
+      return;
+    }
+    setNoActionLoading(true);
+    try {
+      const order = viewingOrder;
+      const result = await executeNoActionClose({
+        order,
+        reason,
+        submit: () => api.postStrict(`/workorders/${order.order_no}/end-without-processing`, { reason }),
+        onCommitted: (committedOrder) => {
+          setViewingOrder(committedOrder);
+          setAllOrders((items) => items.map((item) => (
+            item.order_no === committedOrder.order_no ? { ...item, ...committedOrder } : item
+          )));
+          setCounts((current) => {
+            const priorStatus = order.status;
+            if (!priorStatus || priorStatus === 'closed' || current[priorStatus] === undefined) return current;
+            return {
+              ...current,
+              [priorStatus]: Math.max(0, current[priorStatus] - 1),
+              closed: current.closed + 1,
+            };
+          });
+          setNoActionOpen(false);
+          setNoActionReason('');
+          setNoActionRefreshOrderNo(order.order_no);
+          setViewError('');
+        },
+        loadDetail: () => api.getStrict(`/workorders/${order.order_no}`),
+        refreshOrders: () => fetchOrders({ throwOnError: true }),
+      });
+      setViewingOrder(result.detail);
+      if (result.refreshFailures.length > 0) {
+        setViewError(`工单已提前结束，但${result.refreshFailures.join('、')}更新失败，请重新加载。`);
+        message.warning('工单已提前结束，详情或列表更新失败');
+      } else {
+        setNoActionRefreshOrderNo('');
+        message.success('工单已提前结束');
+      }
+    } catch (error) {
+      message.error(error?.message || '提前结束失败，请稍后重试');
+    } finally {
+      setNoActionLoading(false);
+    }
+  };
+
   const handleView = async (record) => {
     setViewOpen(true);
     setViewingOrder(record);
@@ -379,31 +567,37 @@ export default function WorkOrdersPage() {
     setViewLoading(false);
   };
 
-  // 构建动态Timeline（基于实际timeline_events + 状态回退）
+  useEffect(() => {
+    const orderNo = searchParams.get('order') || '';
+    if (!orderNo) {
+      focusedOrderRef.current = '';
+      return;
+    }
+    if (sourceView || loading || !ordersLoaded || focusedOrderRef.current === orderNo) return;
+    const target = allOrders.find((order) => String(order.order_no) === String(orderNo));
+    focusedOrderRef.current = orderNo;
+    if (target) handleView(target);
+    else message.info(`工单 ${orderNo} 不存在、无权查看或已不在当前范围`);
+  }, [allOrders, loading, message, ordersLoaded, searchParams, sourceView]);
+
+  // 服务端事件是流程事实；缺失时只显示有限状态，不推断未发生的节点。
   const buildTimelineItems = useCallback((wo, recycles) => {
-    const s = wo?.status || 'pending';
-    // 状态流转顺序：受理 → 处置 → 待审核 → 办结（派发环节已取消，人员与站点强关联）
-    const STATUS_FLOW = ['pending', 'accepted', 'in_progress', 'reviewing', 'closed'];
-    // 找到当前状态在流程中的位置
-    const currentIdx = STATUS_FLOW.indexOf(s);
-    // 辅助函数：判断步骤颜色——当前步骤蓝色(进行中)，已完成步骤绿色
-    const stepColor = (stepIdx) => {
-      if (s === 'closed') return 'green';
-      return stepIdx === currentIdx ? 'blue' : 'green';
-    };
-    const items = [
-      { color: 'green', children: <div><Text strong>工单创建</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{(wo && wo.created_at) || '—'}</div></div> },
-    ];
-    // 只添加实际经过的状态节点，当前步骤显示"进行中"
-    if (currentIdx >= 1) items.push({ color: stepColor(1), children: <div><Text strong>受理</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{currentIdx === 1 ? '处理中...' : '已受理'}</div></div> });
-    if (currentIdx >= 2) items.push({ color: stepColor(2), children: <div><Text strong>处置</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{currentIdx === 2 ? '处置中...' : '已处置'}</div></div> });
-    // 设备更换
+    const facts = buildWorkorderTimelineFacts(wo);
+    const items = facts.map((fact) => ({
+      color: fact.type === 'rejected' ? 'red' : (fact.tone === 'current' ? 'blue' : 'green'),
+      children: (
+        <div key={fact.key}>
+          <Text strong>{fact.title}</Text>
+          {fact.detail && <div style={{ fontSize: 12, color: tokens.colorTextSecondary }}>{fact.detail}</div>}
+          {fact.meta && <div style={{ fontSize: 11, color: tokens.colorTextTertiary }}>{fact.meta}</div>}
+        </div>
+      ),
+    }));
     if (recycles && recycles.length > 0) {
-      recycles.forEach((r) => {
-        items.push({
+      const recycleItems = recycles.map((r, index) => ({
           color: 'blue',
           children: (
-            <div key={`recycle-${r.id || Math.random()}`}>
+            <div key={`recycle-${r.id || index}`}>
               <Text strong>设备更换</Text>
               <div style={{ fontSize: 12, color: tokens.colorTextSecondary }}>
                 {r.device_name} ({r.device_code}) → {r.destination === 'scrap' ? '报废' : r.destination === 'repair' ? '维修' : r.destination === 'replace' ? '更换' : '回收'}
@@ -411,12 +605,12 @@ export default function WorkOrdersPage() {
               <div style={{ fontSize: 11, color: tokens.colorTextTertiary }}>{r.recycle_date || r.created_at || ''}</div>
             </div>
           ),
-        });
-      });
+        }));
+      const terminalIndex = facts.findIndex((fact) => (
+        ['approved', 'closed', 'ended_without_processing'].includes(fact.type)
+      ));
+      items.splice(terminalIndex >= 0 ? terminalIndex : items.length, 0, ...recycleItems);
     }
-    if (currentIdx >= 2) items.push({ color: stepColor(2), children: <div><Text strong>处置完成</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{currentIdx === 2 ? '处置中...' : '已提交'}</div></div> });
-    if (currentIdx >= 3) items.push({ color: stepColor(3), children: <div><Text strong>待审核</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{currentIdx === 3 ? '等待审核中...' : '审核通过'}</div></div> });
-    if (s === 'closed') items.push({ color: 'green', children: <div><Text strong>办结</Text><div style={{ fontSize: 12, color: tokens.colorTextTertiary }}>{(wo && wo.resolved_at) || '已完成'}</div></div> });
     return items;
   }, [tokens]);
 
@@ -562,8 +756,9 @@ export default function WorkOrdersPage() {
       dataIndex: 'status',
       key: 'status',
       width: 80,
-      render: (val) => {
-        const label = orderStatusMap[val] || val || '-';
+      render: (val, record) => {
+        const label = record.closure_type === 'no_action_required'
+          ? '已提前结束' : (orderStatusMap[val] || val || '-');
         const badge = orderStatusBadge[val] || 'default';
         return val ? <Badge status={badge} text={label} /> : '-';
       },
@@ -586,6 +781,11 @@ export default function WorkOrdersPage() {
         const hours = { normal: 72, urgent: 24, critical: 2 };
         if (record.status === 'closed') {
           const completedAt = record.resolved_at || record.closed_at;
+          if (record.closure_type === 'no_action_required') {
+            return <Tooltip title={`无需处理，提前结束：${record.closure_reason || '未记录原因'}`}>
+              <Text type="secondary">已提前结束</Text>
+            </Tooltip>;
+          }
           if (!completedAt) {
             return <Text type="secondary">已完成 · 完成时间未记录</Text>;
           }
@@ -699,12 +899,32 @@ export default function WorkOrdersPage() {
   const createAssigneeOptions = assignees
     .filter(item => (item.site_ids || []).some(siteId => String(siteId) === String(selectedCreateSiteId || '')))
     .map(item => ({ value: item.id, label: item.name }));
+  if (sourceView && isAdmin) {
+    return <div>
+      <div style={{ padding: '16px 24px 0' }}>
+        <Button icon={<ArrowLeftOutlined />} onClick={() => {
+          const next = new URLSearchParams(searchParams);
+          next.delete('view');
+          setSearchParams(next);
+        }}>返回工单</Button>
+      </div>
+      <ReportsPage embedded statusParamKey="report_status" typeParamKey="report_type" />
+    </div>;
+  }
+
   return (
     <WorkspacePage
       title="工单"
       subtitle="查看并推进当前运维事项；待审核工单统一进入审核工作台核验。"
       secondaryAction={<Button icon={<DownloadOutlined />} onClick={() => downloadExport('/api/export/work-orders?period=month', '工单明细_本月.xlsx')}>导出</Button>}
-      primaryAction={<Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新建工单</Button>}
+      primaryAction={<Space>
+        {isAdmin && <Button icon={<FileTextOutlined />} onClick={() => {
+          const next = new URLSearchParams(searchParams);
+          next.set('view', 'reports');
+          setSearchParams(next);
+        }}>异常来源</Button>}
+        {canCreateWorkorder && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新建工单</Button>}
+      </Space>}
       statusItems={[
         { label: '待受理', value: counts.pending, color: tokens.colorWarning },
         { label: '已受理', value: counts.accepted, color: tokens.colorPrimary },
@@ -814,13 +1034,21 @@ export default function WorkOrdersPage() {
           </Space>
         }
         open={viewOpen}
-        onClose={() => { setViewOpen(false); setViewingOrder(null); }}
+        onClose={() => { setViewOpen(false); setViewingOrder(null); setNoActionRefreshOrderNo(''); }}
         width={520}
       >
         {viewingOrder && (
           <Spin spinning={viewLoading} tip="正在加载最新工单信息">
           <div>
-            {viewError && <Alert type="warning" showIcon message={viewError} style={{ marginBottom: 12 }} />}
+            {viewError && <Alert
+              type="warning"
+              showIcon
+              message={viewError}
+              action={noActionRefreshOrderNo ? (
+                <Button size="small" icon={<ReloadOutlined />} onClick={retryNoActionRefresh}>重新加载</Button>
+              ) : undefined}
+              style={{ marginBottom: 12 }}
+            />}
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="工单号">
                 <Text strong style={{ color: tokens.colorPrimary }}>{viewingOrder.order_no || `#${viewingOrder.id}`}</Text>
@@ -832,11 +1060,18 @@ export default function WorkOrdersPage() {
                 {viewingOrder.level ? <Tag color={orderLevelBadge[viewingOrder.level] || 'default'} style={{ borderRadius: 4, fontSize: 11 }}>{orderLevelMap[viewingOrder.level] || viewingOrder.level}</Tag> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="状态">
-                {viewingOrder.status ? <Badge status={orderStatusBadge[viewingOrder.status] || 'default'} text={orderStatusMap[viewingOrder.status] || viewingOrder.status} /> : '-'}
+                {viewingOrder.status ? <Badge status={orderStatusBadge[viewingOrder.status] || 'default'} text={viewingOrder.closure_type === 'no_action_required' ? '已提前结束' : (orderStatusMap[viewingOrder.status] || viewingOrder.status)} /> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="负责人">{viewingOrder.assignee || '-'}</Descriptions.Item>
-              <Descriptions.Item label={viewingOrder.status === 'closed' ? 'SLA结果' : 'SLA截止'}>
-                {viewingOrder.sla_deadline ? viewingOrder.status === 'closed' ? (() => {
+              {viewingOrder.closure_type === 'no_action_required' && <>
+                <Descriptions.Item label="结束方式">无需处理，提前结束</Descriptions.Item>
+                <Descriptions.Item label="结束原因">{viewingOrder.closure_reason || '-'}</Descriptions.Item>
+                <Descriptions.Item label="结束时间">{viewingOrder.closure_time || viewingOrder.resolved_at || '-'}</Descriptions.Item>
+              </>}
+              <Descriptions.Item label={viewingOrder.closure_type === 'no_action_required' ? 'SLA记录' : (viewingOrder.status === 'closed' ? 'SLA结果' : 'SLA截止')}>
+                {viewingOrder.closure_type === 'no_action_required'
+                  ? <Text type="secondary">工单已提前结束，不记为维修完成</Text>
+                  : viewingOrder.sla_deadline ? viewingOrder.status === 'closed' ? (() => {
                   const completedAt = viewingOrder.resolved_at || viewingOrder.closed_at;
                   if (!completedAt) return <Text type="secondary">已完成 · 完成时间未记录</Text>;
                   const completedLate = new Date(completedAt) > new Date(viewingOrder.sla_deadline);
@@ -926,6 +1161,14 @@ export default function WorkOrdersPage() {
                 </Descriptions.Item>
               )}
             </Descriptions>
+
+            {viewingOrder.can_end_without_processing && (
+              <div style={{ marginTop: 16 }}>
+                <Button danger icon={<ExclamationCircleOutlined />} onClick={() => openNoAction(viewingOrder)}>
+                  无需处理，提前结束
+                </Button>
+              </div>
+            )}
 
             <div style={{ marginTop: 24 }}>
               <Text strong style={{ fontSize: 14, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 16 }}>
@@ -1056,6 +1299,34 @@ export default function WorkOrdersPage() {
           </Spin>
         )}
       </Drawer>
+
+      <Modal
+        title="无需处理，提前结束"
+        open={noActionOpen}
+        onOk={submitNoAction}
+        onCancel={() => { if (!noActionLoading) { setNoActionOpen(false); setNoActionReason(''); } }}
+        confirmLoading={noActionLoading}
+        okText="确认提前结束"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        maskClosable={!noActionLoading}
+      >
+        <Descriptions column={1} size="small" bordered style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="工单">{viewingOrder?.order_no || '-'}</Descriptions.Item>
+          <Descriptions.Item label="当前状态">
+            {viewingOrder ? (orderStatusMap[viewingOrder.status] || viewingOrder.status || '-') : '-'}
+          </Descriptions.Item>
+        </Descriptions>
+        <Input.TextArea
+          value={noActionReason}
+          onChange={(event) => setNoActionReason(event.target.value)}
+          autoSize={{ minRows: 4, maxRows: 8 }}
+          maxLength={500}
+          showCount
+          placeholder="请说明为何无需继续处理"
+        />
+        <Alert type="info" showIcon message="结束后工单、签到、照片、处置和审核记录都会保留。" style={{ marginTop: 12 }} />
+      </Modal>
 
       {/* ===== Spare Part Request Modal (from work order) ===== */}
       <Modal

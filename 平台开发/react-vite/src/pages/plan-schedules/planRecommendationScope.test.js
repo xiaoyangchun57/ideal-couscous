@@ -52,7 +52,7 @@ test('mine to team follow-up reload uses one request and ignores the older respo
 test('page only loads systemic follow-up while edit item callback stays scope-independent', async () => {
   const source = await readFile(new URL('./PlanSchedulesPage.jsx', import.meta.url), 'utf8');
   const helper = await readFile(new URL('./planRecommendationScope.js', import.meta.url), 'utf8');
-  assert.match(source, /const loadFollowUps = useCallback\([\s\S]*?\n {2}}, \[followUpScope\]\);/);
+  assert.match(source, /const loadFollowUps = useCallback\([\s\S]*?\r?\n {2}}, \[canUseFollowUps, followUpScope\]\);/);
   assert.match(source, /const updateEditSiteItems = useCallback\([\s\S]*?\n {2}}, \[\]\);/);
   assert.doesNotMatch(source, /draftRecommendations|draft-recommendations|生成待确认草稿|到期巡检建议/);
   assert.doesNotMatch(helper, /draft-recommendations|draftRecommendations|recommendationSiteSummary/);

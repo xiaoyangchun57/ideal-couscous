@@ -50,6 +50,9 @@ test('monitoring pages cancel superseded requests and ignore stale responses', (
     source('./SiteMonitoringPage.jsx'),
     /String\(data\.site\?\.id\) === String\(siteId\)/,
   );
+  const detail = source('./SiteMonitoringPage.jsx');
+  assert.match(detail, /String\(expectedConfig\.site_id\) === String\(siteId\)/);
+  assert.match(detail, /trendFactors\.some\(\(item\) => item\.business_metric === selectedMetric\)/);
 });
 
 test('site directory reuses an identity-scoped snapshot and keeps refresh non-blocking', () => {
@@ -175,9 +178,15 @@ test('monitoring drawer keeps the first layer light and omits diagnostics from n
   assert.match(detail, /mode === 'monitoring'/);
   assert.match(detail, /mode === 'settings'/);
   assert.doesNotMatch(detail, /api\.stationMonitoringDiagnostics\(siteId/);
-  assert.doesNotMatch(detail, /接收与排障详情|排障详情加载失败|周期未配置|结果形成中/);
+  assert.doesNotMatch(detail, /接收与排障详情|排障详情加载失败/);
   assert.doesNotMatch(detail, /cycleByMetric/);
+  assert.match(detail, /stationServicePolicyView\(site\.service_policy \|\| site\)/);
+  assert.match(detail, /latestCycle\.status === 'not_configured' && cycleView\.description/);
+  assert.match(detail, /周期完整性暂无法判定|cycleView\.description/);
+  assert.match(detail, /latestCycle\?\.status === 'complete' && cycleView\.description/);
   assert.match(detail, /const missing = !value\.hasValue/);
+  assert.match(detail, /异常观测：\{formatMonitoringTime\(value\.statusObservedAt\)\}/);
+  assert.match(detail, /value\.statusReason/);
   assert.match(detail, /formatMonitoringTime\(value\.observed_at\)/);
   assert.doesNotMatch(detail, /latestValues\[0\]\?\.observed_at/);
   assert.match(sites, /const resultAt = record\.last_valid_observation_at;/);
@@ -185,6 +194,8 @@ test('monitoring drawer keeps the first layer light and omits diagnostics from n
   assert.doesNotMatch(sites, /const resultMatchesCycle/);
   assert.match(sites, /missingCount > 0/);
   assert.doesNotMatch(sites, /resultAt && missingCount > 0/);
+  assert.match(sites, /stationServicePolicyView\(record\)/);
+  assert.match(sites, /cycleStatusView\(cycle\)/);
 });
 
 test('access observation does not consume sensitive endpoint identity fields', () => {
