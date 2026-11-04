@@ -80,13 +80,23 @@ async function settle() {
 
 test('resource sheets are the only foreground while the workorder context stays mounted', () => {
   const view = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.wxml'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../pages/workorder/workorder.js'), 'utf8');
   assert.match(view,
-    /class="om-sheet-mask" wx:if="\{\{sheet\.open\}\}" hidden="\{\{vehicleApply\.open \|\| partsApply\.open\}\}"/);
+    /class="om-sheet-mask" wx:if="\{\{sheet\.open\}\}" hidden="\{\{vehicleApply\.open \|\| partsApply\.open \|\| noActionSheet\.open\}\}"/);
   assert.match(view,
-    /class="om-sheet workorder-detail-sheet" wx:if="\{\{sheet\.open\}\}" hidden="\{\{vehicleApply\.open \|\| partsApply\.open\}\}"/);
+    /class="om-sheet workorder-detail-sheet" wx:if="\{\{sheet\.open\}\}" hidden="\{\{vehicleApply\.open \|\| partsApply\.open \|\| noActionSheet\.open\}\}"/);
   assert.match(view, /checked="\{\{vehicleApply\.requiresVehicle\}\}" bindchange="onVehicleRequirementChange"/);
   assert.match(view, /wx:if="\{\{vehicleApply\.requiresVehicle\}\}" mode="selector"/);
   assert.match(view, /class="wo-detail-field" wx:if="\{\{vehicleApply\.requiresVehicle\}\}"/);
+  assert.match(source, /\{ key: 'closed', label: '已结束' \}/);
+  assert.match(source, /closed: \['closed', 'resolved'\]/,
+    'the renamed label keeps the original closed and resolved status set');
+  assert.match(view,
+    /<view class="wos-group">[\s\S]*?<view class="wos-group-title">关联资源<\/view>[\s\S]*?class="wos-resource-actions"[\s\S]*?bindtap="onApplyVehicle"[\s\S]*?bindtap="onApplyParts"[\s\S]*?<\/view>/);
+  assert.equal((view.match(/bindtap="onApplyVehicle"/g) || []).length, 1,
+    'vehicle application appears once inside related resources');
+  assert.equal((view.match(/bindtap="onApplyParts"/g) || []).length, 1,
+    'parts application appears once inside related resources');
 
   const page = loadPage();
   const item = page.data.sheet.item;

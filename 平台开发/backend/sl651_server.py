@@ -28,7 +28,7 @@ try:  # Support both package tests and direct container execution.
     from .ingestion_framing import extract_ingestion_frames
     from .station_ingest_retention import (
         RetentionError, StoragePolicy, check_storage_policy,
-        storage_policy_for_governance, storage_policy_for_mode,
+        prune_ingest_error_samples, storage_policy_for_governance, storage_policy_for_mode,
     )
     from .station_ingest_slots import hj212_realtime_summary_identity
 except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry point
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry 
     from ingestion_framing import extract_ingestion_frames
     from station_ingest_retention import (
         RetentionError, StoragePolicy, check_storage_policy,
-        storage_policy_for_governance, storage_policy_for_mode,
+        prune_ingest_error_samples, storage_policy_for_governance, storage_policy_for_mode,
     )
     from station_ingest_slots import hj212_realtime_summary_identity
 try:
@@ -279,6 +279,7 @@ class IngestionStorage:
             connection, raw_id, endpoint_id, station_code, occurred_at, None,
             error_type=error_type, record_received=raw_id is not None,
         )
+        prune_ingest_error_samples(connection)
 
     def _update_current_state(
         self, connection: sqlite3.Connection, raw_id: int | None, endpoint_id: int | None,
@@ -928,7 +929,8 @@ class StationIngestServer:
                 # write transaction compete with an acknowledged raw-receipt backlog.
                 while self._queued_frames:
                     await asyncio.sleep(0.01)
-                await asyncio.to_thread(normalize_raw_frame, self.storage.database, raw_id)
+                await asyncio.to_thread(
+                    normalize_raw_frame, self.storage.database, raw_id, retire_source=True)
             except Exception as exc:
                 LOGGER.warning("station monitoring normalization deferred: %s", type(exc).__name__)
                 try:
@@ -996,10 +998,8 @@ class StationIngestServer:
         if isinstance(frame, ParsedHJ212Frame):
             auth = self.storage.authenticate(frame)
             if frame.command == "3020":
-                self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(build_hj212_9011_response(frame), True) if auth.may_acknowledge else ProcessingResult(None, False)
             if frame.command not in {"2011", "2061"}:
-                self.storage.persist_parsed(frame, auth, received_at, quarantine_error="hj212_non_data_command")
                 return ProcessingResult(None, False)
             # A bound authenticated HJ212 endpoint is the station identity. Missing
             # optional monitoring rows must not quarantine otherwise valid standard

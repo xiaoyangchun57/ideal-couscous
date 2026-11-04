@@ -225,7 +225,7 @@ class StationResultChainTest(unittest.TestCase):
             self.assertEqual(core.latest_cycle(db,self.site,at_time=AT)['formed_count'],9)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM observation_values').fetchone()[0],16)
 
-    def test_late_resend_changes_at_different_times_and_real_same_time_conflict(self):
+    def test_late_resend_changes_at_different_times_and_same_time_uses_latest_receipt(self):
         with closing(sqlite3.connect(self.database)) as db:
             self.extra(db,116021,'2026-10-22T05:00:00+00:00','ammonia',9.9,'9.9')
             self.extra(db,116022,'2026-10-22T06:10:00+00:00','ammonia',0.11,'0.110000')
@@ -235,11 +235,10 @@ class StationResultChainTest(unittest.TestCase):
             self.extra(db,116023,'2026-10-22T06:10:00+00:00','ammonia',0.12,'0.120000')
             db.commit()
             value=next(v for v in core.latest_values(db,self.site,at_time=AT) if v['business_metric']=='ammonia')
-            self.assertEqual(value['status'],'review_required')
-            self.assertIsNone(value['standard_value'])
-            self.assertEqual(core.latest_cycle(db,self.site,at_time=AT)['review_required_count'],1)
+            self.assertEqual((value['status'],value['standard_value_display']),('value','0.120000'))
+            self.assertEqual(core.latest_cycle(db,self.site,at_time=AT)['review_required_count'],0)
         trend=self.get(f'sites/{self.site}/trend?metric=ammonia&start=2026-10-22T06:00:00%2B00:00&end=2026-10-22T06:20:00%2B00:00')
-        self.assertTrue(any(p['status']=='review_required' for p in trend['points']))
+        self.assertEqual([(p['status'],p['value']) for p in trend['points']], [('value',0.12)])
 
     def test_newer_fault_and_missing_factor_are_not_hidden(self):
         with closing(sqlite3.connect(self.database)) as db:
@@ -310,9 +309,22 @@ class StationResultChainTest(unittest.TestCase):
             self.assertEqual(len(values),9)
             self.assertTrue(all(v['observed_at']<later for v in values))
             cycle=core.latest_cycle(db,self.site,at_time=later)
-            self.assertEqual(cycle['formed_count'],0)
-            self.assertTrue(all(f['reason_code']=='stale_observation' for f in cycle['factors']))
+            self.assertEqual(cycle['formed_count'],9)
+            self.assertTrue(all(f['status']=='value' for f in cycle['factors']))
             self.samples['stale_cycle']=cycle
+
+    def test_latest_keeps_older_factor_when_another_factor_has_recent_data(self):
+        later='2026-10-31T09:37:06+00:00'
+        with closing(sqlite3.connect(self.database)) as db:
+            self.extra(db,216020,'2026-10-30T08:00:00+00:00',
+                       'total_phosphorus',0.033024,'0.033024')
+            db.commit(); db.row_factory=sqlite3.Row
+            values=core.latest_values(db,self.site,at_time=later)
+            by_metric={value['business_metric']:value for value in values}
+            self.assertEqual(len(values),9)
+            self.assertEqual(by_metric['total_phosphorus']['observed_at'],
+                             '2026-10-30T08:00:00+00:00')
+            self.assertLess(by_metric['ph']['observed_at'],'2026-10-24T09:37:06+00:00')
 
     def test_historical_trend_survives_endpoint_replacement_without_cross_site_leakage(self):
         cutover='2026-10-22T09:00:00+00:00'
@@ -453,6 +465,42 @@ class StationResultChainTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM monitoring_business_observations').fetchone()[0],before)
             self.samples['historical_arrival']={'original':original,'new_site':other,
                 'cross_switch':across,'current_factors':9,'business_rows':before}
+
+    def test_batched_historical_lookup_matches_existing_per_factor_results(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.row_factory = sqlite3.Row
+            configurations = core.current_factor_configurations(db, self.site, at_time=AT)
+            legacy_queries = []
+            db.set_trace_callback(
+                lambda sql: legacy_queries.append(sql)
+                if sql.lstrip().upper().startswith('WITH') else None)
+            legacy = [
+                core._latest_historical_collection_value(db, self.site, configuration, AT)
+                for configuration in configurations
+            ]
+            db.set_trace_callback(None)
+
+            batch_queries = []
+            db.set_trace_callback(
+                lambda sql: batch_queries.append(sql)
+                if sql.lstrip().upper().startswith('WITH') else None)
+            batched = core._latest_historical_collection_values_batch(
+                db, {self.site: configurations}, at_time=AT,
+            ).get(self.site, [])
+            db.set_trace_callback(None)
+
+        fields = (
+            'endpoint_id', 'business_metric', 'instrument_asset_code',
+            'protocol_code', 'standard_value', 'standard_unit',
+            'observed_at', 'received_at', 'quality',
+        )
+        normalize = lambda rows: sorted(
+            [tuple(row.get(field) for field in fields) for row in rows if row],
+            key=lambda row: (row[1] or '', row[2] or '', row[3] or ''),
+        )
+        self.assertEqual(normalize(batched), normalize(legacy))
+        self.assertGreaterEqual(len(legacy_queries), len(configurations))
+        self.assertEqual(len(batch_queries), 1)
 
     def test_historical_health_keeps_sparse_cycle_counts_when_endpoint_is_disabled(self):
         # Shift this isolated sample back one day so the real day-based HTTP API

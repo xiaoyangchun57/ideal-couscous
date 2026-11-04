@@ -504,20 +504,31 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(submitted.status_code, 400, submitted.json)
         self.assertIn('提交审核', submitted.json['error'])
 
-    def test_review_cannot_be_submitted_or_approved_without_evidence(self):
+    def test_photo_shortage_warns_without_blocking_submission_or_approval(self):
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
                                      headers=self.headers('operator-token'), json={'client': 'web', 'resolution_note': '现场处置完成'})
-        self.assertEqual(submitted.status_code, 409, submitted.json)
-        self.assertEqual(submitted.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertFalse(submitted.json['photo_quality_warning']['blocking'])
 
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
         approved = self.client.post('/api/workorders/WO-TEST-001/approve',
                                     headers=self.headers('manager-token'), json={})
-        self.assertEqual(approved.status_code, 409, approved.json)
-        self.assertEqual(approved.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['status'], 'closed')
+
+    def test_photo_risk_is_preserved_without_blocking_workorder_approval(self):
+        self.seed_workorder_review_notifications(with_evidence=True)
+        with app_module.get_db() as db:
+            db.execute("UPDATE operation_attachments SET is_flagged=1,flag_reason='画面相似'")
+        approved = self.client.post('/api/workorders/WO-TEST-001/approve',
+            headers=self.headers('manager-token'), json={})
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['evidence_risks'][0]['flag_reason'], '画面相似')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT is_flagged FROM operation_attachments').fetchone()[0], 1)
 
     def test_site_checkin_satisfies_workorder_gate_and_replay_is_idempotent(self):
         with app_module.get_db() as db:

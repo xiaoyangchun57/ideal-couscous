@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Dropdown, Select, Space, Tabs, Tag, Typography, message } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Dropdown, Image, Modal, Select, Space, Tabs, Tag, Typography, message } from 'antd';
 import { DownloadOutlined, FileExcelOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import { evaluationRateColor } from '../../services/constants';
 import WorkspacePage, {
   FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  standardListPagination,
 } from '../../components/WorkspacePage';
 import { useTheme } from '../../hooks/useTheme';
 
@@ -45,6 +46,36 @@ export default function EvaluationPage() {
   const [loading, setLoading] = useState(true);
   const [loadErrors, setLoadErrors] = useState([]);
   const [exporting, setExporting] = useState('');
+  const [photoDetail, setPhotoDetail] = useState(null);
+  const [originDetail, setOriginDetail] = useState(null);
+  const photoRequest = useRef(0);
+  const originRequest = useRef(0);
+  useEffect(() => () => { photoRequest.current += 1; originRequest.current += 1; }, []);
+  const openOriginalInspection = useCallback(async (photo) => {
+    const requestId = ++originRequest.current;
+    setOriginDetail({ loading: true });
+    try {
+      const plan = await api.getStrict(`/inspection-v2/plans/${photo.plan_id}`);
+      if (requestId !== originRequest.current) return;
+      const item = (plan.items || []).find(row => Number(row.id) === photo.item_id);
+      setOriginDetail(item ? { plan, item } : { error: '原检查项不存在或当前账号无权查看' });
+    } catch (error) {
+      if (requestId === originRequest.current) setOriginDetail({ error: error.message || '原巡检加载失败' });
+    }
+  }, []);
+  const openPhotoDetail = useCallback(async (person) => {
+    const requestId = ++photoRequest.current;
+    originRequest.current += 1;
+    setOriginDetail(null);
+    setPhotoDetail({ person, loading: true, photos: [], error: '' });
+    try {
+      const detail = await api.getStrict(`/evaluation/personnel/${person.id}/photo-quality?period=${period}`);
+      if (requestId !== photoRequest.current) return;
+      setPhotoDetail({ person, loading: false, photos: detail.photos || [], deduction: detail.deduction, error: '' });
+    } catch (error) {
+      if (requestId === photoRequest.current) setPhotoDetail({ person, loading: false, photos: [], error: error.message || '明细加载失败' });
+    }
+  }, [period]);
 
   const updateQuery = useCallback((patch) => {
     const next = new URLSearchParams(searchParams);
@@ -112,8 +143,8 @@ export default function EvaluationPage() {
       </Space>,
     },
     { title: '响应与处置', key: 'duration', width: 170, render: (_, row) => <><Text>{row.response_hours == null ? '无到站签到样本' : `平均响应 ${row.response_hours}h`}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{row.wo_avg_days == null ? '无已关单处置样本' : `平均处置 ${row.wo_avg_days} 天`}</Text></> },
-    { title: '巡检', key: 'inspection', width: 130, render: (_, row) => <><Text>执行 {row.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {row.insp_reviewed || 0} 项</Text></> },
-  ], []);
+    { title: '巡检', key: 'inspection', width: 130, render: (_, row) => <><Text>执行 {row.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {row.insp_reviewed || 0} 项</Text><Button type="link" size="small" onClick={() => openPhotoDetail(row)}>照片质量扣分 {row.photo_quality_deduction || 0}</Button></> },
+  ], [openPhotoDetail]);
 
   const managerCols = useMemo(() => [
     { title: '负责人', dataIndex: 'manager', key: 'manager', render: (value) => <Text strong>{value || '未分配'}</Text> },
@@ -186,15 +217,15 @@ export default function EvaluationPage() {
   const tabs = [
     {
       key: 'people', label: `人员绩效 ${personnel.list.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.id} loading={loading} columns={personCols} dataSource={personnel.list} emptyType="sample" onRefresh={load} scroll={{ x: 820, y: 'calc(100vh - 410px)' }} />,
+      children: <WorkspaceTable rowKey={(row) => row.id} loading={loading} columns={personCols} dataSource={personnel.list} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 820 }} />,
     },
     {
       key: 'managers', label: `负责人数据质量 ${byManager.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.manager || 'unassigned'} loading={loading} columns={managerCols} dataSource={byManager} emptyType="sample" onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 410px)' }} />,
+      children: <WorkspaceTable rowKey={(row) => row.manager || 'unassigned'} loading={loading} columns={managerCols} dataSource={byManager} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 900 }} />,
     },
     {
       key: 'sites', label: `站点数据质量 ${bySite.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.site_id || row.site_name} loading={loading} columns={siteCols} dataSource={bySite} emptyType="sample" onRefresh={load} pagination={bySite.length > 20 ? { pageSize: 20, size: 'small', showSizeChanger: false } : false} scroll={{ x: 920, y: 'calc(100vh - 450px)' }} />,
+      children: <WorkspaceTable rowKey={(row) => row.site_id || row.site_name} loading={loading} columns={siteCols} dataSource={bySite} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 920 }} />,
     },
   ];
 
@@ -208,6 +239,28 @@ export default function EvaluationPage() {
     {activeView === 'people' && !hasPersonnelActivity && <Alert type="info" showIcon message="本周期没有人员执行样本" description="在岗人员仍保留在名单中；无工单或巡检记录不等同于绩效为 0 分。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
     {activeView !== 'people' && unconfiguredSites > 0 && <Alert type="info" showIcon message={`${unconfiguredSites} 个站点没有可用的应报参数配置`} description="未启用监测或没有历史参数依据的站点不计算应报、缺失和完整性，不使用全局阈值参数代替站点配置。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
     {activeView !== 'people' && unconfiguredSites === 0 && !hasMonitoringSamples && <Alert type="info" showIcon message="本周期未接收到监测样本" description="已配置站点按应报量计算缺失；有效性和及时性在无实到样本时保持“无样本”。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
+    <Modal title={`${photoDetail?.person?.real_name || ''} · 照片质量扣分明细`} open={Boolean(photoDetail)} footer={null}
+      onCancel={() => { photoRequest.current += 1; originRequest.current += 1; setPhotoDetail(null); setOriginDetail(null); }}>
+      <Text type="secondary">按实际检查月份归属；点击照片查看大图。</Text>
+      {photoDetail?.loading && <p>正在加载照片明细…</p>}
+      {photoDetail?.error && <Alert type="error" message={photoDetail.error} action={<Button onClick={() => openPhotoDetail(photoDetail.person)}>重试</Button>} />}
+      {!photoDetail?.loading && !photoDetail?.error && <p>本周期扣分：{photoDetail?.deduction || 0}</p>}
+      <Image.PreviewGroup>{photoDetail?.photos.map(photo => <div key={photo.attachment_id} style={{ marginBottom: 16 }}>
+        <Image src={photo.display_url} width={120} alt={photo.item_name || '不合格照片'} />
+        <p>{photo.score_month} · {photo.item_name} · 扣{photo.deduction}分</p>
+        <p>{photo.reason}</p>
+        <Button type="link" onClick={() => openOriginalInspection(photo)}>查看原巡检</Button>
+      </div>)}</Image.PreviewGroup>
+      {originDetail?.loading && <p>正在加载原巡检…</p>}
+      {originDetail?.error && <Alert type="error" message={originDetail.error} />}
+      {originDetail?.item && <section aria-label="原巡检记录">
+        <Typography.Title level={5}>{originDetail.plan.plan_name || `巡检 #${originDetail.plan.id}`}</Typography.Title>
+        <p>检查项：{originDetail.item.item_name}（#{originDetail.item.id}）</p>
+        <p>实际结果：{originDetail.item.result === 'normal' ? '正常' : originDetail.item.result === 'abnormal' ? '异常' : '未填写'}</p>
+        <p>实际检查时间：{originDetail.item.completed_at || originDetail.item.check_time || '未记录'}</p>
+        <p>原说明：{originDetail.item.remark || '无'}</p>
+      </section>}
+    </Modal>
     <Tabs className="workspace-tabs" activeKey={activeView} onChange={(value) => updateQuery({ view: value })} items={tabs} />
   </WorkspacePage>;
 }

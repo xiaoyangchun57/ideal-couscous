@@ -48,6 +48,7 @@ function vehicleListQuery(options) {
 }
 
 const api = {
+  photoQualityMonthly: (month) => request('/api/mobile/photo-quality-monthly?month=' + encodeURIComponent(month), 'GET'),
   // 登录（工号密码复用网页端）
   login: (username, password) =>
     request('/api/auth/login', 'POST', { username, password }, { retry: 1, queue: false }),
@@ -231,6 +232,9 @@ const api = {
     request('/api/workorders' + (status ? '?status=' + status : ''), 'GET'),
   workorderDetail: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo), 'GET', {}, { queue: false }),
   workorderRelated: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo) + '/related', 'GET', {}, { queue: false }),
+  endWorkorderWithoutProcessing: (orderNo, reason) =>
+    request('/api/workorders/' + encodeURIComponent(orderNo) + '/end-without-processing',
+      'POST', { reason: reason || '' }, { queue: false }),
 
   // 工单状态流转；closed 仅管理员；extra 透传（移动端强制携带 client:'mobile' 触发流程门禁）
   updateWorkorderStatus: (orderNo, status, extra) =>

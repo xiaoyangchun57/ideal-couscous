@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange.js';
 
-test('alert ranges retain shortcuts and provide a loaded-history route', () => {
+test('alert ranges retain shortcuts and provide a full-history route', () => {
   assert.deepEqual(ALERT_DATE_RANGE_OPTIONS.map((item) => item.value), ['today', 'week', 'month', 'all']);
   const oldAlert = '2024-01-01T08:00:00+08:00';
   const now = new Date('2026-09-16T12:00:00+08:00');
@@ -18,7 +18,7 @@ test('alert list coverage exposes the 500-row truncation without claiming all hi
     { loaded: 500, total: 836, missing: 336, truncated: true },
   );
   assert.match(coverage.truncationText, /另有 336 条暂不可在 Web 打开/);
-  assert.doesNotMatch(ALERT_DATE_RANGE_OPTIONS.at(-1).label, /全部/);
+  assert.equal(ALERT_DATE_RANGE_OPTIONS.at(-1).label, '全部历史');
 });
 
 test('alert list coverage does not warn when every reported row is loaded', () => {

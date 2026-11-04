@@ -12,6 +12,7 @@ import { reportStatusMap } from '../../services/constants';
 import { filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, {
   FilterField, TableLongText, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  standardListPagination,
 } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useReportEvidenceHistory } from './reportEvidencePreviewHistory';
@@ -244,9 +245,9 @@ export default function ReportsPage({
           dataSource={list}
           loading={loading}
           onRefresh={load}
-          pagination={list.length > 10 ? { pageSize: 10, size: 'small', showSizeChanger: false } : false}
+          pagination={standardListPagination()}
           emptyType={hasFilters ? 'filtered' : 'empty'}
-          scroll={{ x: canManage ? 1050 : 900, y: 'calc(100vh - 390px)', scrollToFirstRowOnChange: true }}
+          scroll={{ x: canManage ? 1050 : 900, scrollToFirstRowOnChange: true }}
         />
       )}
 

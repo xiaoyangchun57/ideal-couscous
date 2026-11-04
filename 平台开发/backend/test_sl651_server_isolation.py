@@ -180,7 +180,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'"
-            ).fetchone()[0], 2)
+            ).fetchone()[0], 1)
             self.assertEqual(connection.execute(
                 "SELECT receipt_count FROM station_ingest_slot_summaries"
             ).fetchone()[0], 2)
@@ -460,9 +460,9 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             connection.commit()
         original = ingest_server.normalize_raw_frame
 
-        def slow_normalize(database, raw_id):
+        def slow_normalize(database, raw_id, **kwargs):
             time.sleep(0.04)
-            return original(database, raw_id)
+            return original(database, raw_id, **kwargs)
 
         payload = b'\xf1\xf1' + encode_station_code('0012345678') + b'\x51\xf0\xf0' + encode_bcd_observation_time(datetime(2020, 6, 12, 2, 0)) + bytes.fromhex('03110304')
         with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=slow_normalize):
@@ -475,11 +475,13 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                         "SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')"
                     ).fetchone()[0]
                     batches = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
-                if pending == 0 and batches == 7:
+                    hourly = connection.execute("SELECT COUNT(*) FROM monitoring_hourly_last_values").fetchone()[0]
+                    raw_count = connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0]
+                if pending == 0 and batches == 0 and hourly == 1 and raw_count == 0:
                     break
                 await asyncio.sleep(0.05)
         self.assertEqual(pending, 0)
-        self.assertEqual(batches, 7)
+        self.assertEqual((batches, hourly, raw_count), (0, 1, 0))
         self.assertFalse(self.server._normalization_scanner.done())
 
     async def test_hj212_tcp_auto_normalization_reaches_v3_public_api(self):
@@ -552,10 +554,10 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                        WHERE persistence_state IN ('pending_parse','pending_reparse')"""
                 ).fetchone()[0]
                 batch_count = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
-            if raw_count == 4 and pending_count == 0 and batch_count == 3:
+            if raw_count == 2 and pending_count == 0 and batch_count == 2:
                 break
             await asyncio.sleep(0.05)
-        self.assertEqual((raw_count, pending_count, batch_count), (4, 0, 3))
+        self.assertEqual((raw_count, pending_count, batch_count), (2, 0, 2))
 
         with closing(sqlite3.connect(self.database)) as connection:
             batches = connection.execute(
@@ -574,13 +576,13 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                 """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
                     WHERE error_type='hj212_non_data_command'"""
             ).fetchone()[0]
-        self.assertEqual(batches, [(2061,), (2061,), (2011,)])
+        self.assertEqual(batches, [(2061,), (2011,)])
         self.assertEqual(business_rows, [
             (2061, 7.1, "station-monitoring-business-v3"),
             (2011, 9.1, "station-monitoring-business-v3"),
         ])
         self.assertEqual(non_data_errors, 0)
-        self.assertEqual(non_data_summary, 1)
+        self.assertIsNone(non_data_summary)
         self.assertFalse(self.server._normalizer.done())
 
         _, token = self._create_l1_web_credentials()
@@ -604,7 +606,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(trend.status_code, 200, trend.get_json())
             self.assertEqual(
                 [point["value"] for point in trend.get_json()["points"] if point["status"] == "value"],
-                [7.1, 8.8, 9.1],
+                [7.1, 9.1],
             )
             self.assertEqual(
                 trend.get_json()["points"][-1]["observed_at"],

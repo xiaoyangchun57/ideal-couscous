@@ -213,6 +213,23 @@ function preparedResponse() {
     assert.equal(entered.data.currentPackage.plan_id, 7);
     assert.equal(todayCalls, 1, 'entry validation opens departure preparation without refetching the package');
 
+    const resumed = createPage();
+    const resumedResponse = response(8, 80, 1);
+    resumedResponse.packages[0].sites[0].checked_in = true;
+    api.todayExecution = () => Promise.resolve(resumedResponse);
+    api.executionSiteTasks = () => Promise.resolve({
+      site: { site_id: 80, checked_in: true, checked_out: false },
+      categories: [{ items: [{ item_id: 81 }] }],
+      arrival_gate: { allowed: true, code: null, message: null },
+    });
+    resumed._entryTarget = { executionPlanId: 8, siteId: 80, source: 'home' };
+    resumed.loadExecution();
+    await flush();
+    await flush();
+    assert.equal(resumed.data.viewPhase, 'inspection',
+      'a checked-in task resumes the field page without repeating departure preparation');
+    assert.equal(resumed.data.selSiteId, 80);
+
     const homeRework = createPage();
     app.globalData.executionTarget = {
       scheduleId: 136, executionPlanId: 136, siteId: 362, itemId: 7090, reworkOnly: true,
@@ -312,6 +329,37 @@ function preparedResponse() {
     assert.equal(prepared.data.selSiteId, 362);
     assert.equal(businessWrites, 0,
       'skipping the completed preparation view never confirms resources, checks out, or checks in');
+
+    const planDirect = createPage();
+    app.globalData.executionTarget = { scheduleId: 46, source: 'plan_detail_execution' };
+    planDirect._entryTarget = undefined;
+    const planWithOngoingSite = response(46, 362, 1);
+    Object.assign(planWithOngoingSite.packages[0].sites[0], { checked_in: true, checked_out: false });
+    planWithOngoingSite.packages[0].sites.push({ site_id: 363, name: '下一站', total: 1, completed: 0 });
+    planWithOngoingSite.packages[0].site_order.push(363);
+    api.todayExecution = () => Promise.resolve(planWithOngoingSite);
+    api.executionSiteTasks = () => Promise.resolve({
+      site: { site_id: 362, checked_in: true, checked_out: false },
+      categories: [{ items: [{ item_id: 7001 }] }],
+      arrival_gate: { allowed: true },
+    });
+    planDirect.loadExecution();
+    await flush(); await flush();
+    assert.equal(planDirect.data.viewPhase, 'inspection');
+    assert.equal(planDirect.data.selSiteId, 362, 'selected plan resumes its single checked-in site');
+    assert.equal(businessWrites, 0, 'resuming a plan never creates another check-in');
+
+    const planBeforeCheckin = createPage();
+    app.globalData.executionTarget = { scheduleId: 48, executionPlanId: 48, siteId: 364, source: 'plan_detail_execution' };
+    planBeforeCheckin._entryTarget = undefined;
+    api.todayExecution = () => Promise.resolve(response(48, 364, 1));
+    api.executionSiteTasks = () => Promise.resolve({ site: { site_id: 364, checked_in: false },
+      categories: [{ items: [{ item_id: 7002 }] }], arrival_gate: { allowed: true } });
+    planBeforeCheckin.loadExecution();
+    await flush(); await flush();
+    assert.equal(planBeforeCheckin.data.viewPhase, 'inspection');
+    assert.equal(planBeforeCheckin.hasSiteCheckIn(364), false, 'direct entry does not invent arrival');
+    assert.equal(businessWrites, 0);
 
     const unavailablePreparation = createPage();
     app.globalData.executionTarget = {
@@ -496,7 +544,7 @@ function preparedResponse() {
     assert.equal(resultPage.data.viewMode, 'readonly');
     assert.equal(resultPage.data.viewPhase, 'inspection');
     assert.equal(resultPage.data.completed, 1);
-    assert.equal(resultPage.data.categories[0].items[0].review_status_cn, '已通过');
+    assert.equal(resultPage.data.categories[0].items[0].review_status_cn, '已审核');
     assert.equal(reagentCalls, 0, 'read-only history must not load execution-only reagent actions');
     resultPage.onOpenItem({ currentTarget: { dataset: { id: 7095 } } });
     await flush();

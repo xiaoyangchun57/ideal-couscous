@@ -9,10 +9,10 @@ import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import EChart from '../../components/EChart';
 import {
-  communicationStatusView, cycleStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
+  communicationStatusView, formatMonitoringTime, mergeMonitoringTrendPages,
   monitoringDefaultTrendMetric, monitoringFactorName, monitoringTrendChartOption,
   monitoringTrendFactors, monitoringTrendView, monitoringLatestResults,
-  stationServicePolicyView,
+  monitoringResultSummary, stationServicePolicyView,
 } from './stationMonitoring';
 import './SiteMonitoringPage.css';
 
@@ -35,23 +35,19 @@ function trendRequestOptions(rangeKey, customRange, cursor) {
   return options;
 }
 
-function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onSelectMetric }) {
-  const results = monitoringLatestResults(factors, latestValues, latestCycle);
-  const cycleView = cycleStatusView(latestCycle);
-  const cycleTag = latestCycle?.status
-    ? <Tag color={cycleView.color}>{cycleView.label}</Tag> : null;
+function LatestResults({
+  factors, latestValues, resultSummary, selectedMetric, onSelectMetric,
+}) {
+  const results = monitoringLatestResults(factors, latestValues);
 
   if (!latestValues.length) {
     return (
       <section className="station-monitoring-section" aria-labelledby="latest-results-title">
         <div className="station-monitoring-section__heading">
           <Title id="latest-results-title" level={4}>最新结果</Title>
-          <Space wrap>
-            {cycleTag}
-            <Text className="station-monitoring-fact">结果时间：暂无结果</Text>
-          </Space>
+          <Text className="station-monitoring-fact">测量时间：暂无结果</Text>
         </div>
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前站点暂无可展示的有效结果" />
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={resultSummary.emptyDescription} />
       </section>
     );
   }
@@ -60,12 +56,7 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
     <section className="station-monitoring-section" aria-labelledby="latest-results-title">
       <div className="station-monitoring-section__heading">
         <Title id="latest-results-title" level={4}>最新结果</Title>
-        <Space wrap>
-          {cycleTag}
-          {latestCycle?.status === 'complete' && cycleView.description
-            ? <Text type="secondary">{cycleView.description}</Text> : null}
-          {results.commonTime ? <Text className="station-monitoring-fact">结果时间：{formatMonitoringTime(results.commonTime)}</Text> : null}
-        </Space>
+        {results.commonTime ? <Text className="station-monitoring-fact">测量时间：{formatMonitoringTime(results.commonTime)}</Text> : null}
       </div>
       <div className="station-monitoring-metrics">
         {results.items.map((factor) => {
@@ -88,7 +79,10 @@ function LatestResults({ factors, latestValues, latestCycle, selectedMetric, onS
               {value.statusReason ? <span className="station-monitoring-metric__unit">{value.statusReason}</span> : null}
               {value.statusObservedAt ? <span className="station-monitoring-metric__unit">异常观测：{formatMonitoringTime(value.statusObservedAt)}</span> : null}
               {value.observed_at ? <span className="station-monitoring-metric__unit">
-                {value.statusObservedAt ? '历史值：' : ''}{formatMonitoringTime(value.observed_at)}
+                测量：{formatMonitoringTime(value.observed_at)}
+              </span> : null}
+              {value.received_at ? <span className="station-monitoring-metric__unit">
+                接收：{formatMonitoringTime(value.received_at)}
               </span> : null}
             </button>
           );
@@ -339,8 +333,13 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
   const monitoring = visibleData?.monitoring || {};
   const communication = communicationStatusView(monitoring.communication || site.communication);
   const latestCycle = monitoring.latest_cycle || site.latest_cycle || {};
-  const cycleView = cycleStatusView(latestCycle);
   const servicePolicy = stationServicePolicyView(site.service_policy || site);
+  const resultSummary = monitoringResultSummary({
+    latestValues,
+    latestCycle,
+    reportingCondition: (site.service_policy || site).reporting_condition,
+    lastReceivedAt: site.last_received_at || site.last_communication_at,
+  });
   const trend = monitoringTrendView(trendData, { loading: trendLoading, error: trendError });
   const savedExpectedMetrics = Array.isArray(currentExpectedConfig?.selected_metrics)
     ? currentExpectedConfig.selected_metrics : [];
@@ -443,17 +442,17 @@ export function StationMonitoringDrawer({ siteId, open, onClose, onOpenArchive }
             description={servicePolicy.notice.description}
             style={{ marginBottom: 16 }}
           /> : null}
-          {latestCycle.status === 'not_configured' && cycleView.description ? <Alert
-            type="warning"
+          {resultSummary.notice ? <Alert
+            type={resultSummary.notice.type}
             showIcon
-            message={cycleView.label}
-            description={`${cycleView.description}；最近结果仍按真实采样时间展示。`}
+            message={resultSummary.notice.message}
+            description={resultSummary.notice.description}
             style={{ marginBottom: 16 }}
           /> : null}
           <LatestResults
             factors={trendFactors}
             latestValues={latestValues}
-            latestCycle={latestCycle}
+            resultSummary={resultSummary}
             selectedMetric={selectedMetric}
             onSelectMetric={setSelectedMetric}
           />

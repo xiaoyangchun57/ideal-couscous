@@ -253,23 +253,19 @@ function isCurrentInspectionPhotoContext(page, item) {
 }
 
 function inspectionItemStatus(item, syncPending) {
-  if (item.evidence_status === 'supplement_required') return { label: '需补拍', code: 'supplement' };
-  if (item.evidence_status === 'replacement_submitted') return { label: '待审核', code: 'supplement_review' };
   if (syncPending) return { label: '待同步', code: 'sync' };
   const reviewStatus = Number(item.review_status || 0);
-  if (reviewStatus === 3) return { label: '待整改', code: 'rework' };
+  if (reviewStatus === 3) return { label: '有审核意见', code: 'review' };
   if (item.result && reviewStatus === 1) return { label: '待审核', code: 'review' };
-  if (item.result && reviewStatus === 2) return { label: '已通过', code: 'approved' };
+  if (item.result && reviewStatus === 2) return { label: '已审核', code: 'approved' };
   return { label: RESULT[item.result] || '待检', code: item.result || 'pending' };
 }
 
 function inspectionReviewStatus(item) {
-  if (item.evidence_status === 'supplement_required') return '已驳回，需补拍';
-  if (item.evidence_status === 'replacement_submitted') return '补拍已提交，待审核';
   const reviewStatus = Number(item.review_status || 0);
   if (reviewStatus === 1) return '待审核';
-  if (reviewStatus === 2) return '已通过';
-  if (reviewStatus === 3) return '已驳回，待整改';
+  if (reviewStatus === 2) return '已审核';
+  if (reviewStatus === 3) return '有审核意见';
   return item.result ? '未进入审核' : '未提交';
 }
 
@@ -472,7 +468,16 @@ Page({
       const packages = (res.packages || []).map(decoratePackageResources);
       this._rawExecutionPackages = packages;
       const entryPackages = packages.map(executionTarget.buildPackageOption);
-      const resolved = executionTarget.resolveExecutionTarget(entryPackages, this._entryTarget);
+      let resolved = executionTarget.resolveExecutionTarget(entryPackages, this._entryTarget);
+      if (this._entryTarget && !this._entryTarget.siteId
+          && (this._entryTarget.scheduleId || this._entryTarget.executionPlanId)) {
+        const ongoing = executionTarget.uniqueActiveFieldTarget(
+          resolved.packages, this._entryTarget.source);
+        if (ongoing) {
+          this._entryTarget = ongoing;
+          resolved = executionTarget.resolveExecutionTarget(entryPackages, ongoing);
+        }
+      }
       this._allEntryPackages = entryPackages;
       // Entry selection contains only currently executable candidates. Closed
       // results remain available from the dedicated read-only branch.
@@ -1101,8 +1106,14 @@ Page({
         });
         return;
       }
+      const verifiedSite = res && res.site ? res.site : null;
+      const verifiedSites = (rawPkg.sites || []).map(site =>
+        Number(site.site_id) === Number(siteId) && verifiedSite
+          ? Object.assign({}, site, verifiedSite, { site_id: site.site_id }) : site
+      );
       const verifiedPkg = Object.assign({}, rawPkg, {
         arrival_gate: (res && res.arrival_gate) || rawPkg.arrival_gate,
+        sites: verifiedSites,
       });
       // 构建出发准备 ViewModel 并切换阶段
       const target = executionTarget.normalizeExecutionTarget({
@@ -1136,7 +1147,15 @@ Page({
       this._departureEpoch = (this._departureEpoch || 0) + 1;
       this._departureOpenRequestId = (this._departureOpenRequestId || 0) + 1;
       this._departureActionIds = {};
-      if (vm.preparationCompleted) {
+      const currentSite = verifiedSites.find(site => Number(site.site_id) === Number(siteId));
+      const localCheckin = localStore.getSiteCheckIn(siteId);
+      const localCheckinMatchesPlan = localCheckin
+        && Number(localCheckin.data && localCheckin.data.plan_id) === Number(pkgId);
+      const alreadyOnSite = currentSite && currentSite.checked_in && !currentSite.checked_out
+        && !currentSite.rework_checkin_required;
+      const selectedPlanReady = String(target.source || '').startsWith('plan_detail')
+        && verifiedPkg.arrival_gate && verifiedPkg.arrival_gate.allowed === true;
+      if (alreadyOnSite || localCheckinMatchesPlan || vm.preparationCompleted || selectedPlanReady) {
         wx.setNavigationBarTitle({ title: '现场作业' });
         this.setData({
           viewPhase: 'inspection',
@@ -2833,10 +2852,6 @@ Page({
     const site = this.data.site;
     const planId = this.data.selectedPlanId;
     if (!site || !planId || this.data.checkingOut) return;
-    if (this.data.completed < this.data.total) {
-      wx.showToast({ title: '请先完成本站全部检查项', icon: 'none' });
-      return;
-    }
     if (this.data.stationSyncPending) {
       wx.showToast({ title: '本站仍有待同步记录，请先完成同步', icon: 'none' });
       return;
@@ -3014,7 +3029,7 @@ Page({
       });
       return;
     }
-    const supplementRequired = target.evidence_status === 'supplement_required';
+    const supplementRequired = false;
     const submittedReadOnly = !readOnly && submitted && (!supplementRequired || !checkedIn);
     if (target.sync_pending || localStore.getPendingSubmit(target.item_id, target.plan_id)) {
       wx.showToast({ title: '该检查项已本地保存，等待同步完成', icon: 'none' });
@@ -3042,12 +3057,6 @@ Page({
     const photos = photoState.photos;
     const requiredPhotos = target.required_photos || 0;
     const photoInfo = inspectionItemPhotoRequirement(target, retryLocalPhotos.length);
-    if (target.evidence_status === 'replacement_submitted'
-        && target.replacement_submission_allowed === false) {
-      photoInfo.blocked = true;
-      photoInfo.ready = false;
-      photoInfo.blockReason = target.replacement_block_reason || '补拍照片已提交业务审核，审核完成前不能重复编辑';
-    }
     const currentUser = getUser() || {};
     const rejectedEvidence = rejectedInspectionEvidence(
       target.evidence_attachments, currentUser.id, resolveUploadUrl);
@@ -3170,13 +3179,7 @@ Page({
 
   _showInspectionPhotoEditBlocked(sheet) {
     const current = sheet || this.data.sheet || {};
-    if (!current.photoInfo || current.photoInfo.blocked !== true) return false;
-    wx.showToast({
-      title: current.replacementBlockReason || current.photoInfo.blockReason
-        || '补拍照片已提交业务审核，审核完成前不能重复编辑',
-      icon: 'none',
-    });
-    return true;
+    return current.readOnly === true;
   },
 
   _openTrustedCamera(sheet) {
@@ -3242,10 +3245,8 @@ Page({
     const captureSource = e && e.currentTarget.dataset.source === 'camera'
       ? 'camera' : 'album';
     return runPhotoActionOnce(this, captureSource, () => {
-      let verifiedLocation = null;
       const captureTask = captureSource === 'camera'
         ? this._openTrustedCamera(sheet).then(capture => {
-            verifiedLocation = { lat: capture.gpsLat, lng: capture.gpsLng };
             return {
               paths: [capture.path],
               session: { capture_session: capture.captureSession },
@@ -3266,8 +3267,6 @@ Page({
         };
         if (captureSource === 'camera') {
           metadata.capture_session = session && session.capture_session;
-          metadata.gps_lat = verifiedLocation.lat;
-          metadata.gps_lng = verifiedLocation.lng;
           metadata.capture_client = 'trusted_camera_v1';
           metadata.capture_frame_orientation = capture.frameOrientation;
           metadata.capture_frame_ratio = capture.frameRatio;
@@ -3791,26 +3790,7 @@ Page({
       wx.showToast({ title: '请先补充新的现场照片', icon: 'none' });
       return;
     }
-    if (!hasInspectionFieldRecord({
-      remark: s.remark,
-      calibrator: s.requiresCalibration ? s.calibrator : '',
-      calibrationValues: s.requiresCalibration ? s.calValues : '',
-      photoCount: photoInfo.captured,
-    })) {
-      wx.showToast({
-        title: s.requiresCalibration ? '请填写现场说明、校准信息或拍摄照片' : '请填写现场说明或拍摄照片',
-        icon: 'none',
-      });
-      return;
-    }
-    if (s.result === 'normal' && !photoInfo.ready) {
-      wx.showToast({ title: '请按要求补齐现场照片', icon: 'none' });
-      return;
-    }
-    if (s.result === 'abnormal' && photoInfo.captured === 0) {
-      wx.showToast({ title: '异常项必须拍照', icon: 'none' });
-      return;
-    }
+    // 缺照片和未填内容在检查项中保留提示，不拦截真实提交。
     this._submittingItem = true;
     this.setData({ submitting: true });
     const photoUrls = JSON.stringify(inspectionPhotoStoragePaths(s.photos));
@@ -3884,10 +3864,6 @@ Page({
     }
     const photoInfo = inspectionSheetPhotoRequirement(
       sheet, sheet.photos, sheet.pendingPhotos, sheet.localPhotos);
-    if (!photoInfo.ready) {
-      wx.showToast({ title: photoInfo.blockReason || '照片数量不足', icon: 'none' });
-      return;
-    }
     const idempotencyKey = sheet.correctionIdempotencyKey
       || ['inspection-photo-correction', item.item_id, Date.now()].join('-');
     const photoUrls = inspectionPhotoStoragePaths(sheet.photos);

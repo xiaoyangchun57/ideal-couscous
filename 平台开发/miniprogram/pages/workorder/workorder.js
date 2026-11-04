@@ -31,9 +31,10 @@ Page({
       { key: 'pending', label: '待受理' },
       { key: 'in_progress', label: '进行中' },
       { key: 'reviewing', label: '待核验' },
-      { key: 'closed', label: '已完成' }
+      { key: 'closed', label: '已结束' }
     ],
     sheet: { open: false, item: null }, detailLoading: false, detailError: '', relatedLoading: false, isAdmin: false, acting: false,
+    noActionSheet: { open: false, reason: '', submitting: false },
     resolutionNote: '',
     workorderPhotoDraft: null,
     online: true, syncCount: 0,
@@ -212,6 +213,49 @@ Page({
   onCloseParts() {
     if (this.data.partsApply.submitting) { wx.showToast({ title: '提交中，请稍候', icon: 'none' }); return; }
     this.setData({ 'partsApply.open': false });
+  },
+  onOpenNoAction() {
+    const item = this.data.sheet && this.data.sheet.item;
+    if (!item || item.detailStale || !(item.actions && item.actions.can_end_without_processing)) {
+      wx.showToast({ title: (item && item.block_reason) || '当前工单不能提前结束，请刷新后重试', icon: 'none' });
+      return;
+    }
+    this.setData({ noActionSheet: { open: true, reason: '', submitting: false } });
+  },
+  onCloseNoAction() {
+    if (this.data.noActionSheet.submitting) {
+      wx.showToast({ title: '提交中，请稍候', icon: 'none' });
+      return;
+    }
+    this.setData({ 'noActionSheet.open': false, 'noActionSheet.reason': '' });
+  },
+  onNoActionReason(e) { this.setData({ 'noActionSheet.reason': e.detail.value }); },
+  submitNoAction() {
+    const item = this.data.sheet && this.data.sheet.item;
+    const reason = String(this.data.noActionSheet.reason || '').trim();
+    if (!item || !item.order_no || this.data.noActionSheet.submitting) return;
+    if (!reason) {
+      wx.showToast({ title: '请填写无需处理的原因', icon: 'none' });
+      return;
+    }
+    this.setData({ 'noActionSheet.submitting': true });
+    return api.endWorkorderWithoutProcessing(item.order_no, reason)
+      .then(() => {
+        this.setData({ noActionSheet: { open: false, reason: '', submitting: false } });
+        invalidateUnreadCount();
+        this.load();
+        return this._refreshOpenWorkorderDetail(item.order_no, '已提前结束').catch(error => {
+          this.setData({
+            detailError: (error && error.error) || '工单已提前结束，详情刷新失败，请手动刷新',
+            'sheet.item.detailStale': true,
+          });
+          return null;
+        });
+      })
+      .catch(error => {
+        this.setData({ 'noActionSheet.submitting': false });
+        wx.showToast({ title: (error && error.error) || '提前结束失败，请稍后重试', icon: 'none' });
+      });
   },
   onResolutionNote(e) { this.setData({ resolutionNote: e.detail.value }); },
 
@@ -451,8 +495,6 @@ Page({
       metadata: {
         capture_source: 'camera',
         capture_session: capture.captureSession,
-        gps_lat: capture.gpsLat,
-        gps_lng: capture.gpsLng,
         taken_at: nowStr(),
         capture_client: 'trusted_camera_v1',
         capture_frame_orientation: capture.frameOrientation,

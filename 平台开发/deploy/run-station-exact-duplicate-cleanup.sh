@@ -30,7 +30,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 maintenance_module="$(cd "$SCRIPT_DIR/../backend" && pwd)/station_ingest_retention.py"
-EXPECTED_MAINTENANCE_MODULE_SHA256="2aca5123cb8d52aa30bed9b7fc67649464613660e2f913ce31cc3bdea214bf4f"
+EXPECTED_MAINTENANCE_MODULE_SHA256="1602bb159453186a4d521b6f0a2c207a0f0eebfd979fd97562b0271b52c88b11"
 [[ -r "$maintenance_module" ]] || { echo "Reviewed maintenance module is not readable" >&2; exit 1; }
 module_sha256="$(sha256sum "$maintenance_module" | awk '{print $1}')"
 [[ "$module_sha256" == "$EXPECTED_MAINTENANCE_MODULE_SHA256" ]] || {

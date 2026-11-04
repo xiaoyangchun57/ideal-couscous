@@ -228,12 +228,12 @@ function decorateItem(item) {
   }[item.source_type] || '通过';
   const rejectLabel = {
     plan_schedule: '退回计划',
-    inspection_batch: '退回并整改',
+    inspection_batch: '记录质量意见',
     parts_request: '驳回备件',
     spare_part_request: '驳回备件',
     vehicle_application: '驳回用车',
     workorder_review: '退回工单',
-    photo_review: '驳回影像',
+    photo_review: '记录照片不合格',
     data_review: '驳回数据'
   }[item.source_type] || '驳回';
   const reviewPhotos = details.map((detail, index) => {

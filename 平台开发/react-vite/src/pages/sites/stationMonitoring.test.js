@@ -17,6 +17,7 @@ import {
   monitoringTrendChartOption,
   monitoringTrendView,
   monitoringFactorName,
+  monitoringResultSummary,
   formatMonitoringTime,
   clearSiteDirectorySnapshots,
   readSiteDirectorySnapshot,
@@ -143,12 +144,13 @@ test('scope removal never restores previous rows on refresh failure', () => {
   assert.deepEqual(mergeMonitoringSites([{ id: 7 }], null, previous).map((item) => item.id), [7]);
 });
 
-test('trend view preserves the server window, unit, coverage and zero values', () => {
+test('trend view preserves the server window, hourly sampling metadata and zero values', () => {
   assert.equal(monitoringTrendView(null).available, false);
   const available = monitoringTrendView({
     factor_name_cn: '酸碱度', standard_unit: 'pH',
     points: [{ scheduled_at: '2026-09-18T00:00:00+00:00', observed_at: '2026-09-18T00:00:00+00:00', value: 0 }],
     coverage: {
+      aggregation_source: 'hourly_sample',
       window_start: '2026-09-18T00:00:00+00:00', window_end: '2026-09-18T01:00:00+00:00',
       coverage_rate: 1, valid_points: 6, displayed_points: 6, expected_points: 6, gap_count: 0, missing_points: 0,
       late_points: 1, suspect_points: 4, duplicate_records: 2, conflict_slots: 3,
@@ -177,7 +179,8 @@ test('trend view preserves the server window, unit, coverage and zero values', (
       suspect_points: 1,
     },
   });
-  assert.equal(monitoringCoverageLabel(suspectOnly), '0.0% (0/6)');
+  assert.equal(monitoringCoverageLabel(available), '小时取样值');
+  assert.equal(monitoringCoverageLabel(suspectOnly), '按测量时间展示');
   assert.equal(suspectOnly.suspectPoints, 1);
 });
 
@@ -237,9 +240,9 @@ test('site directory snapshot survives page re-entry but is isolated by session 
   clearSiteDirectorySnapshots();
 });
 
-test('communication and latest cycle remain independent while trend gaps stay null', () => {
+test('communication remains independent while hourly trend gaps stay null', () => {
   assert.equal(communicationStatusView({ status: 'normal' }).label, '接收正常');
-  assert.equal(cycleStatusView({ status: 'incomplete' }).label, '结果缺项');
+  assert.equal(cycleStatusView({ status: 'incomplete' }).label, '按因子展示');
   assert.equal(cycleStatusView({
     status: 'not_configured', reason_code: 'expected_factors_unconfigured',
   }).label, '应监测因子未设置');
@@ -248,27 +251,26 @@ test('communication and latest cycle remain independent while trend gaps stay nu
   }).label, '时间配置未完成');
   assert.equal(cycleStatusView({
     status: 'not_configured', reason_code: 'time_configuration_missing',
-  }).description, '周期完整性暂无法判定');
+  }).description, '不影响已有有效测量值展示');
   assert.equal(cycleStatusView({
     status: 'not_configured', reason_code: 'no_evaluable_period',
   }).label, '暂无可评价时段');
   const trend = monitoringTrendView({
     points: [
-      { scheduled_at: '2026-10-09T00:00:00+08:00', status: 'value', value: 7.1 },
-      { scheduled_at: '2026-10-09T04:00:00+08:00', status: 'missing', value: null },
-      { scheduled_at: '2026-10-09T08:00:00+08:00', status: 'review_required', value: null },
+      { sample_hour: '2026-10-09T00:00:00+08:00', observed_at: '2026-10-09T00:15:00+08:00', status: 'value', value: 7.1 },
+      { sample_hour: '2026-10-09T02:00:00+08:00', observed_at: '2026-10-09T02:20:00+08:00', status: 'value', value: 7.2 },
     ],
     coverage: {},
   });
   assert.deepEqual(monitoringTrendChartOption(trend).series[0].data, [
-    ['2026-10-09T00:00:00+08:00', 7.1],
-    ['2026-10-09T04:00:00+08:00', null],
-    ['2026-10-09T08:00:00+08:00', null],
+    ['2026-10-09T00:15:00+08:00', 7.1],
+    ['2026-10-08T17:00:00.000Z', null],
+    ['2026-10-09T02:20:00+08:00', 7.2],
   ]);
   assert.equal(monitoringTrendChartOption(trend).series[0].connectNulls, false);
 });
 
-test('complete cycle labels distinguish realtime, mixed and formal sources', () => {
+test('cycle compatibility metadata no longer exposes completeness or source priority', () => {
   const realtimeFactor = {
     business_metric: 'ph', status: 'value', source_type: 'realtime_observation',
   };
@@ -278,29 +280,29 @@ test('complete cycle labels distinguish realtime, mixed and formal sources', () 
   const noPeriod = cycleStatusView({
     status: 'complete', reason_code: 'no_evaluable_period', factors: [realtimeFactor],
   });
-  assert.equal(noPeriod.label, '实时结果齐全');
-  assert.equal(noPeriod.description, '正式周期尚未形成');
+  assert.equal(noPeriod.label, '按因子展示');
+  assert.equal(noPeriod.description, undefined);
 
   const realtimeSlot = cycleStatusView({
     status: 'complete', scheduled_at: '2026-10-30T16:00:00+08:00',
     factors: [realtimeFactor, { ...realtimeFactor, business_metric: 'turbidity' }],
   });
-  assert.equal(realtimeSlot.label, '实时结果齐全');
-  assert.equal(realtimeSlot.description, '正式周期尚未形成');
+  assert.equal(realtimeSlot.label, '按因子展示');
+  assert.equal(realtimeSlot.description, undefined);
 
   const mixed = cycleStatusView({
     status: 'complete', factors: [formalFactor, realtimeFactor],
   });
-  assert.equal(mixed.label, '结果来源混合');
-  assert.equal(mixed.description, '当前周期含实时结果，不能视为正式周期完整');
+  assert.equal(mixed.label, '按因子展示');
+  assert.equal(mixed.description, undefined);
 
   assert.equal(cycleStatusView({
     status: 'complete', factors: [formalFactor, {
       ...formalFactor, business_metric: 'codmn', source_type: 'scheduled_protocol_observation',
     }],
-  }).label, '结果完整');
-  assert.equal(cycleStatusView({ status: 'pending', factors: [realtimeFactor] }).label, '结果形成中');
-  assert.equal(cycleStatusView({ status: 'incomplete', factors: [realtimeFactor] }).label, '结果缺项');
+  }).label, '按因子展示');
+  assert.equal(cycleStatusView({ status: 'pending', factors: [realtimeFactor] }).label, '按因子展示');
+  assert.equal(cycleStatusView({ status: 'incomplete', factors: [realtimeFactor] }).label, '按因子展示');
 });
 
 test('service policy keeps service membership separate from reporting conditions', () => {
@@ -327,6 +329,51 @@ test('service policy keeps service membership separate from reporting conditions
   assert.equal(ended.service.label, '服务结束');
   assert.equal(ended.showReportingCondition, false);
   assert.equal(ended.notice, null);
+});
+
+test('result summary separates new reception, historical values, and no-upload policy', () => {
+  const historical = monitoringResultSummary({
+    latestValues: [{
+      business_metric: 'ph', standard_value: 7.1,
+      observed_at: '2026-10-30T08:00:00+08:00', received_at: '2026-10-30T08:01:00+08:00',
+    }],
+    latestCycle: { status: 'pending' },
+    lastReceivedAt: '2026-11-02T08:01:00+08:00',
+  });
+  assert.equal(historical.cycleLabel, '当前显示历史值');
+  assert.match(historical.notice.message, /新报文/);
+  assert.match(historical.notice.description, /当前有效值对应的接收时间/);
+
+  const noValue = monitoringResultSummary({
+    latestValues: [], latestCycle: { status: 'pending' },
+    lastReceivedAt: '2026-11-02T08:01:00+08:00',
+  });
+  assert.equal(noValue.cycleLabel, '尚无有效测量值');
+  assert.match(noValue.emptyDescription, /尚无/);
+
+  const noUpload = monitoringResultSummary({
+    latestValues: [], latestCycle: { status: 'pending' },
+    reportingCondition: 'no_upload_condition',
+    lastReceivedAt: null,
+  });
+  assert.equal(noUpload.cycleLabel, '');
+  assert.equal(noUpload.notice, null);
+  assert.match(noUpload.emptyDescription, /不要求上传/);
+});
+
+test('trend tooltip preserves both measurement and reception time', () => {
+  const option = monitoringTrendChartOption({
+    unit: 'mg/L', factorName: '氨氮', items: [{
+      observed_at: '2026-11-02T08:00:00+08:00',
+      received_at: '2026-11-02T08:01:00+08:00', value: 0.3, status: 'value',
+    }],
+  });
+  assert.deepEqual(option.series[0].data[0], [
+    '2026-11-02T08:00:00+08:00', 0.3, '2026-11-02T08:01:00+08:00',
+  ]);
+  const tooltip = option.tooltip.formatter([{ data: option.series[0].data[0] }]);
+  assert.match(tooltip, /测量时间/);
+  assert.match(tooltip, /接收时间/);
 });
 
 test('observation axis exposes the next authoritative business slot', () => {

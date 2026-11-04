@@ -6,11 +6,13 @@ import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
-import WorkspacePage, { TableLongText, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, { TableLongText, WorkspaceTable, WorkspaceToolbar, standardListPagination } from '../../components/WorkspacePage';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { filterInputWidth } from '../../services/pageStyles';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 import { formatVehicleCorrectionLog, runVehicleEditSubmission } from './vehicleCorrectionContract';
+import { runIndependentLoads } from '../../services/independentLoads';
+import { vehicleSummary } from './vehicleSummary';
 
 const { Text } = Typography;
 
@@ -53,6 +55,7 @@ export default function VehiclesPage() {
   const [inspections, setInspections] = useState([]);
   const [inspectionTemplate, setInspectionTemplate] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [auxiliaryLoading, setAuxiliaryLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [vehicleForm] = Form.useForm();
   const [maintForm] = Form.useForm();
@@ -91,31 +94,45 @@ export default function VehiclesPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setAuxiliaryLoading(true);
     setLoadError('');
     const sources = [
-      ['车辆台账', '/vehicles', setVehicles],
-      ['使用记录', '/vehicle/use-records', setUseRecords],
-      ['保养记录', '/vehicle/maintenance', setMaintRecords],
-      ['能源补给', '/vehicle/refueling', setRefuelRecords],
-      ['车辆证照', '/vehicle/documents', setDocuments],
-      ['车况检查', '/vehicle/inspections', setInspections],
-      ['检查模板', '/vehicle/inspection-template', setInspectionTemplate],
+      ['vehicles', '车辆台账', '/vehicles', setVehicles, true],
+      ['use', '使用记录', '/vehicle/use-records', setUseRecords],
+      ['maintenance', '保养记录', '/vehicle/maintenance', setMaintRecords],
+      ['refueling', '能源补给', '/vehicle/refueling', setRefuelRecords],
+      ['documents', '车辆证照', '/vehicle/documents', setDocuments],
+      ['inspections', '车况检查', '/vehicle/inspections', setInspections],
+      ['template', '检查模板', '/vehicle/inspection-template', setInspectionTemplate],
     ];
-    const results = await Promise.allSettled(sources.map(([, url]) => api.getStrict(url)));
-    const failures = [];
-    results.forEach((result, index) => {
-      const [label, , setter] = sources[index];
-      if (result.status === 'fulfilled' && Array.isArray(result.value)) {
-        setter(result.value);
-        if (index === 0) {
-          setActiveVehicle(previous => previous
-            ? (result.value.find(item => item.id === previous.id) || previous) : previous);
+    const failures = new Map();
+    const recordFailure = (key, label, error) => {
+      failures.set(key, `${label}：${error?.message || '返回格式异常'}`);
+      setLoadError([...failures.values()].join('；'));
+    };
+    await runIndependentLoads(sources.map(([key, label, url, setter, primary]) => ({
+      key,
+      load: () => api.getStrict(url),
+      onSuccess: (value) => {
+        if (!Array.isArray(value)) {
+          recordFailure(key, label, new Error('返回格式异常'));
+          if (primary) setLoading(false);
+          return;
         }
-      }
-      else failures.push(`${label}：${result.reason?.message || '返回格式异常'}`);
-    });
-    if (failures.length) setLoadError(failures.join('；'));
+        setter(value);
+        if (primary) {
+          setActiveVehicle(previous => previous
+            ? (value.find(item => item.id === previous.id) || previous) : previous);
+          setLoading(false);
+        }
+      },
+      onError: (error) => {
+        recordFailure(key, label, error);
+        if (primary) setLoading(false);
+      },
+    })));
     setLoading(false);
+    setAuxiliaryLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -452,13 +469,15 @@ export default function VehiclesPage() {
   const isThisMonth = (d) => { const dt = new Date(d); return dt.getFullYear() === thisYear && dt.getMonth() === thisMonth; };
 
   const stats = useMemo(() => {
+    const stateSummary = vehicleSummary(vehicles);
     const mileage = useRecords
       .filter(r => r.returned_at && isThisMonth(r.returned_at) && r.end_mileage != null && r.start_mileage != null)
       .reduce((s, r) => s + (r.end_mileage - r.start_mileage), 0);
     return {
       total: vehicles.length,
-      inUse: vehicles.filter(v => v.status === 'in_use').length,
-      unavailable: vehicles.filter(v => !v.dispatchable).length,
+      inUse: stateSummary.inUse,
+      restrictedOrMaintenance: stateSummary.restrictedOrMaintenance,
+      maintenanceReminder: stateSummary.maintenanceReminder,
       documentDue: vehicles.filter(v => (v.document_state?.expired?.length || v.document_state?.due_soon?.length)).length,
       returnPending: useRecords.filter(r => !r.returned_at).length,
       maintThisMonth: maintRecords.filter(r => isThisMonth(r.maint_at)).length,
@@ -659,7 +678,8 @@ export default function VehiclesPage() {
         { label: '待处理', value: decisionCount, color: tokens.colorWarning },
         { label: '出车中', value: stats.inUse, color: statusColors.info[isDark ? 'dark' : 'light'] },
         { label: '待归还', value: stats.returnPending, color: tokens.colorWarning },
-        { label: '受限或维修', value: stats.unavailable, color: tokens.colorError },
+        { label: '维修 / 限制', value: stats.restrictedOrMaintenance, color: tokens.colorError },
+        { label: '保养提醒', value: stats.maintenanceReminder, color: tokens.colorWarning },
         { label: '证照需关注', value: stats.documentDue, color: tokens.colorWarning },
       ]}
     >
@@ -681,6 +701,7 @@ export default function VehiclesPage() {
                 allowClear {...searchInputProps} style={{ width: filterInputWidth }} />
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={filteredVehicles} loading={loading} columns={ledgerColumns}
+              pagination={standardListPagination()}
               emptyType={searchText ? 'filtered' : 'empty'} onRefresh={load} />
           </div>,
         },
@@ -689,18 +710,20 @@ export default function VehiclesPage() {
             <Segmented value={historyView} onChange={(value) => updateQuery({ history: value === 'use' ? '' : value })} options={[
               { value: 'use', label: '使用' }, { value: 'maint', label: '保养' }, { value: 'refuel', label: '补给' },
             ]} />
-            <WorkspaceToolbar actions={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>{historyAction}</Space>}>
+            <WorkspaceToolbar actions={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading || auxiliaryLoading}>刷新</Button>{historyAction}</Space>}>
               <Text type="secondary">{historyView === 'use' ? '来自巡检计划和工单的出车、还车记录。' : historyView === 'maint' ? '车辆保养历史与下次保养里程。' : '车辆加油、充电和费用记录。'}</Text>
             </WorkspaceToolbar>
-            <WorkspaceTable rowKey="id" dataSource={historyData} loading={loading} columns={historyColumns} emptyType="empty" onRefresh={load} />
+            <WorkspaceTable rowKey="id" dataSource={historyData} loading={auxiliaryLoading} columns={historyColumns}
+              pagination={standardListPagination()} emptyType="empty" onRefresh={load} />
           </div>,
         },
         {
           key: 'decision', label: decisionCount ? `待办 ${decisionCount}` : '待办', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
+            <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading || auxiliaryLoading}>刷新</Button>}>
               <Text type="secondary">仅列出需要处理的证照、车况、维修和归还事项。</Text>
             </WorkspaceToolbar>
-            <WorkspaceTable rowKey="id" dataSource={decisionRows.filter(row => row.issues.length)} loading={loading} emptyType="empty" onRefresh={load}
+            <WorkspaceTable rowKey="id" dataSource={decisionRows.filter(row => row.issues.length)} loading={auxiliaryLoading} emptyType="empty" onRefresh={load}
+              pagination={standardListPagination()}
               columns={[
                 { title: '车辆', width: 140, render: (_, r) => <span>{r.plate_no}<br /><Text type="secondary" style={{ fontSize: 12 }}>{r.model || '-'}</Text></span> },
                 { title: '待处理事项', width: 220, render: (_, r) => <Space size={[4, 4]} wrap>{r.issues.map(issue => <Tag color={issue === '证照临期' ? 'orange' : 'red'} key={issue}>{issue}</Tag>)}</Space> },

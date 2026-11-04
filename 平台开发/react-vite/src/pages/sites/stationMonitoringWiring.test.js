@@ -181,9 +181,7 @@ test('monitoring drawer keeps the first layer light and omits diagnostics from n
   assert.doesNotMatch(detail, /接收与排障详情|排障详情加载失败/);
   assert.doesNotMatch(detail, /cycleByMetric/);
   assert.match(detail, /stationServicePolicyView\(site\.service_policy \|\| site\)/);
-  assert.match(detail, /latestCycle\.status === 'not_configured' && cycleView\.description/);
-  assert.match(detail, /周期完整性暂无法判定|cycleView\.description/);
-  assert.match(detail, /latestCycle\?\.status === 'complete' && cycleView\.description/);
+  assert.doesNotMatch(detail, /cycleView\.description|周期完整性|结果缺项|结果待核对/);
   assert.match(detail, /const missing = !value\.hasValue/);
   assert.match(detail, /异常观测：\{formatMonitoringTime\(value\.statusObservedAt\)\}/);
   assert.match(detail, /value\.statusReason/);
@@ -192,10 +190,9 @@ test('monitoring drawer keeps the first layer light and omits diagnostics from n
   assert.match(sites, /const resultAt = record\.last_valid_observation_at;/);
   assert.doesNotMatch(sites, /record\.last_valid_observation_at \|\| cycle\.scheduled_at/);
   assert.doesNotMatch(sites, /const resultMatchesCycle/);
-  assert.match(sites, /missingCount > 0/);
-  assert.doesNotMatch(sites, /resultAt && missingCount > 0/);
+  assert.doesNotMatch(sites, /missingCount|结果缺项|结果待核对/);
   assert.match(sites, /stationServicePolicyView\(record\)/);
-  assert.match(sites, /cycleStatusView\(cycle\)/);
+  assert.doesNotMatch(sites, /cycleStatusView\(cycle\)/);
 });
 
 test('access observation does not consume sensitive endpoint identity fields', () => {

@@ -11,7 +11,7 @@ import {
   FileTextOutlined, CloudServerOutlined, ApiOutlined, InboxOutlined,
   PlusOutlined, ExperimentOutlined, CheckCircleOutlined,
   CloseCircleOutlined, SettingOutlined,
-  BookOutlined, WarningOutlined,
+  BookOutlined,
 } from '@ant-design/icons';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
@@ -26,8 +26,8 @@ import { StationMonitoringDrawer } from './SiteMonitoringPage';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
 import {
-  communicationStatusView, cycleStatusView, hasAdminRole, mergeMonitoringSites,
-  monitoringMissingCount, REPORTING_CONDITION_META, SERVICE_STATUS_META,
+  communicationStatusView, hasAdminRole, mergeMonitoringSites,
+  REPORTING_CONDITION_META, SERVICE_STATUS_META,
   stationServicePolicyView,
   formatMonitoringTime, readSiteDirectorySnapshot, siteDirectoryLoadMode,
   stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
@@ -35,7 +35,6 @@ import {
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 import ReagentMasterPage from '../reagents/ReagentMasterPage';
-import { AlertRulesManagement } from '../alerts/AlertsPage';
 
 const { Text } = Typography;
 
@@ -86,8 +85,6 @@ export default function SitesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, token } = useAuth();
   const isAdmin = hasAdminRole(user);
-  const userRoles = user?.roles?.length ? user.roles : [user?.role];
-  const canReadAlertRules = userRoles.some((role) => ['admin', 'reviewer'].includes(role));
   const moduleView = searchParams.get('view');
   const moduleScrollRef = useRef(0);
   const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
@@ -827,18 +824,8 @@ export default function SitesPage() {
         key: 'latest_cycle',
         width: 220,
         render: (_, record) => {
-          const cycle = record.latest_cycle || {};
-          const missingCount = monitoringMissingCount(cycle);
-          const cycleView = cycleStatusView(cycle);
           const resultAt = record.last_valid_observation_at;
-          return <Space direction="vertical" size={2}>
-            <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无结果'}</Text>
-            {cycle.status ? <Tag color={cycleView.color}>
-              {cycle.status === 'incomplete' && missingCount > 0
-                ? `缺 ${missingCount} 项` : cycleView.label}
-            </Tag> : null}
-            {cycleView.description ? <Text type="secondary">{cycleView.description}</Text> : null}
-          </Space>;
+          return <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无数据'}</Text>;
         },
       }] : []),
       {
@@ -1449,19 +1436,14 @@ export default function SitesPage() {
   // Render
   // ========================================================================
   if (moduleView === 'reagents' && isAdmin) {
-    return <ReagentMasterPage embedded onBack={closeModuleView} searchParamKey="reagent_q" pageParamKey="reagent_page" />;
+    return <ReagentMasterPage embedded onBack={closeModuleView} searchParamKey="reagent_q" pageParamKey="reagent_page" pageSizeParamKey="reagent_page_size" />;
   }
-  if (moduleView === 'alert-rules' && canReadAlertRules) {
-    return <AlertRulesManagement onBack={closeModuleView} />;
-  }
-
   return (
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
       primaryAction={<Space>
         {isAdmin && <Button icon={<BookOutlined />} onClick={() => openModuleView('reagents')}>试剂主数据</Button>}
-        {canReadAlertRules && <Button icon={<WarningOutlined />} onClick={() => openModuleView('alert-rules')}>告警规则</Button>}
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
         {isAdmin && monitoringPublic && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
         <Button
@@ -1623,7 +1605,7 @@ export default function SitesPage() {
           }}
           rowClassName={(record) => String(record.id) === String(monitoringSiteId)
             ? 'station-monitoring-selected-row' : ''}
-          scroll={{ x: 960, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: false }} />
+          scroll={{ x: 960, scrollToFirstRowOnChange: false }} />
       )}
 
       {monitoringPublic ? <StationMonitoringDrawer

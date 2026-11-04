@@ -23,6 +23,7 @@ import station_ingest_retention as retention
 from station_ingest_retention import (
     RetentionError,
     StoragePolicy,
+    archive_oldest_raw_day,
     archive_raw_day,
     backfill_archive_evidence_refs,
     bootstrap_retention_state,
@@ -2353,6 +2354,100 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
             self.database, self.policy, now=self.now, batch_limit=1)
         self.assertEqual(second["deleted_recent_receipts"], 1)
         self.assertEqual(third["status"], "completed")
+
+    def test_periodic_runner_drains_multiple_batches_inside_one_locked_window(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            for raw_id in (911, 912, 913):
+                connection.execute(
+                    """INSERT INTO station_ingest_recent_receipts(
+                           raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                           authentication_status)
+                       VALUES (?,?,?,?,?,'authenticated')""",
+                    (raw_id, f"endpoint:{self.endpoint_id}", self.endpoint_id,
+                     "RETENTION-MN", "2026-10-01T10:00:00+00:00"),
+                )
+            connection.commit()
+
+        result = run_periodic_maintenance(
+            self.database, self.policy, lock_file=self.root / "multi-batch.lock",
+            now=self.now, batch_limit=1, time_budget_seconds=10,
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse(result["retry_required"])
+        self.assertGreaterEqual(result["maintenance_batches"], 4)
+        self.assertEqual(result["totals"]["deleted_recent_receipts"], 3)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts").fetchone()[0], 0)
+            statuses = [row[0] for row in connection.execute(
+                "SELECT status FROM station_ingest_retention_runs ORDER BY id")]
+        self.assertIn("partial", statuses)
+        self.assertEqual(statuses[-1], "completed")
+
+    def test_periodic_runner_stops_when_partial_work_makes_no_progress(self):
+        stalled = {
+            "status": "partial", "retry_required": True,
+            "partial_reasons": ["backlog_count_limit"],
+            "raw_prune_checkpoint": None,
+        }
+        with mock.patch.object(retention, "maintain_retention", return_value=stalled) as maintain:
+            result = run_periodic_maintenance(
+                self.database, self.policy, lock_file=self.root / "no-progress.lock",
+                now=self.now, batch_limit=1, time_budget_seconds=10,
+            )
+        self.assertEqual(maintain.call_count, 1)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["stop_reason"], "no_progress")
+        self.assertIn("no_progress", result["partial_reasons"])
+
+    def test_oldest_archive_day_advances_across_historical_backlog(self):
+        oldest = self._insert_raw("2026-09-20T08:00:00+00:00", b"oldest")
+        newer = self._insert_raw("2026-10-01T08:00:00+00:00", b"newer")
+
+        first = archive_oldest_raw_day(
+            self.database, "2026-10-16", self.policy, batch_limit=10)
+        second = archive_oldest_raw_day(
+            self.database, "2026-10-16", self.policy, batch_limit=10)
+        completed = archive_oldest_raw_day(
+            self.database, "2026-10-16", self.policy, batch_limit=10)
+
+        self.assertEqual(first, {
+            "day": "2026-09-20", "processed": 1, "retry_required": False})
+        self.assertEqual(second, {
+            "day": "2026-10-01", "processed": 1, "retry_required": False})
+        self.assertEqual(completed, {
+            "day": None, "processed": 0, "retry_required": False})
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(read_raw_evidence(connection, oldest), b"oldest")
+            self.assertEqual(read_raw_evidence(connection, newer), b"newer")
+
+    def test_archive_can_release_hot_bytes_when_only_hot_volume_is_below_threshold(self):
+        raw_id = self._insert_raw("2026-10-01T08:00:00+00:00", b"hot-volume-low")
+        archive_root = self.root / "separate-archive"
+        archive_root.mkdir()
+        policy = StoragePolicy(
+            archive_root, 1000, 100, "governance",
+            hot_minimum_total_bytes=1000, hot_minimum_free_bytes=500,
+        )
+        archive_usage = shutil._ntuple_diskusage(total=2000, used=500, free=1500)
+        hot_usage = shutil._ntuple_diskusage(total=2000, used=1800, free=200)
+
+        def usage(path):
+            return archive_usage if Path(path).resolve() == archive_root.resolve() else hot_usage
+
+        with mock.patch.object(shutil, "disk_usage", side_effect=usage):
+            processed = archive_raw_day(self.database, "2026-10-01", policy)
+            with self.assertRaisesRegex(
+                    RetentionError, "SQLite hot storage is below the free-space"):
+                retention.check_storage_policy(self.database, policy)
+
+        self.assertEqual(processed, 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT length(raw_frame) FROM ingest_raw_frames WHERE id=?", (raw_id,)
+            ).fetchone()[0], 0)
+            self.assertEqual(read_raw_evidence(connection, raw_id), b"hot-volume-low")
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM station_ingest_recent_receipts").fetchone()[0], 0)
@@ -2385,6 +2480,90 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
         resumed = maintain_retention(
             self.database, self.policy, now=self.now, batch_limit=10)
         self.assertEqual(resumed["deleted_recent_receipts"], 1)
+
+    def test_short_budget_cleans_independent_rows_without_entering_slow_archive(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status)
+                   VALUES (904,?,?,?,?, 'authenticated')""",
+                (f"endpoint:{self.endpoint_id}", self.endpoint_id, "RETENTION-MN",
+                 "2026-10-01T10:00:00+00:00"),
+            )
+            connection.commit()
+        with mock.patch.object(
+            retention, "_archive_detail_batch",
+            side_effect=AssertionError("short run must not enter detail archive"),
+        ):
+            result = maintain_retention(
+                self.database, self.policy, now=self.now,
+                batch_limit=10, time_budget_seconds=1)
+        self.assertEqual(result["deleted_recent_receipts"], 1)
+        self.assertIn(
+            "time_budget_reserved_for_cleanup", result["partial_reasons"])
+
+    def test_maintenance_prunes_expired_failure_body_without_waiting_for_new_error(self):
+        raw_id = self._insert_raw(
+            '2026-10-14T08:00:00+00:00', b'broken-diagnostic-body',
+            disposition='quarantined')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO ingest_parse_attempts(
+                       raw_frame_id,parser_version,parse_status,error_code,created_at)
+                   VALUES (?,'test','failed_header','malformed','2026-10-14T08:00:00+00:00')""",
+                (raw_id,),
+            )
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,created_at)
+                   VALUES (?,'malformed','', '2026-10-14T08:00:00+00:00')""",
+                (raw_id,),
+            )
+            connection.execute(
+                """INSERT INTO station_ingest_error_hourly(
+                       source_key,endpoint_id,station_code,error_type,bucket_hour,
+                       occurrence_count,first_seen_at,last_seen_at,last_raw_frame_id)
+                   VALUES (?,?,?,'malformed','2026-10-14T08:00:00+00:00',1,
+                           '2026-10-14T08:00:00+00:00','2026-10-14T08:00:00+00:00',?)""",
+                (f'endpoint:{self.endpoint_id}', self.endpoint_id, 'RETENTION-MN', raw_id),
+            )
+            connection.commit()
+        result = maintain_retention(
+            self.database, self.policy, now=self.now,
+            batch_limit=10, time_budget_seconds=5)
+        self.assertEqual(result['deleted_diagnostic_samples'], 1)
+        self.assertEqual(result['deleted_diagnostic_summaries'], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(
+                f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in (
+                    'ingest_errors', 'ingest_parse_attempts', 'ingest_raw_frames',
+                    'station_ingest_error_hourly'))
+        self.assertEqual(counts, (0, 0, 0, 0))
+
+    def test_receipt_cleanup_lock_wait_obeys_short_deadline(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_recent_receipts(
+                       raw_frame_id,source_key,endpoint_id,station_code,received_at,
+                       authentication_status)
+                   VALUES (905,?,?,?,?, 'authenticated')""",
+                (f'endpoint:{self.endpoint_id}', self.endpoint_id, 'RETENTION-MN',
+                 '2026-10-01T10:00:00+00:00'),
+            )
+            connection.commit()
+        blocker = sqlite3.connect(self.database, timeout=1, isolation_level=None)
+        blocker.execute('BEGIN IMMEDIATE')
+        started = time.monotonic()
+        try:
+            with self.assertRaises(retention._StatementDeadlineExceeded):
+                retention._delete_rowid_batch(
+                    self.database, 'station_ingest_recent_receipts', 'received_at',
+                    '2026-10-02T00:00:00+00:00', batch_limit=10,
+                    deadline=time.monotonic() + 0.2)
+        finally:
+            blocker.rollback()
+            blocker.close()
+        self.assertLess(time.monotonic() - started, 1.0)
 
     def test_raw_prune_sparse_matches_use_fixed_scan_windows(self):
         raw_ids = []
@@ -2715,6 +2894,45 @@ class StationIngestRetentionWindowsTest(unittest.TestCase):
         self.assertEqual(payload["action"], "maintain-once")
         self.assertEqual(payload["result"]["historical_maintenance_called"], 1)
         self.assertEqual(payload["result"]["status"], "completed")
+
+    def test_periodic_runner_reports_diagnostic_cleanup_counts(self):
+        raw_id = self._insert_raw(
+            '2026-10-14T08:00:00+00:00', b'expired-diagnostic-body',
+            disposition='quarantined')
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO ingest_parse_attempts(
+                       raw_frame_id,parser_version,parse_status,error_code,created_at)
+                   VALUES (?,'test','failed_header','malformed','2026-10-14T08:00:00+00:00')""",
+                (raw_id,),
+            )
+            connection.execute(
+                """INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,created_at)
+                   VALUES (?,'malformed','', '2026-10-14T08:00:00+00:00')""",
+                (raw_id,),
+            )
+            connection.execute(
+                """INSERT INTO station_ingest_error_hourly(
+                       source_key,endpoint_id,station_code,error_type,bucket_hour,
+                       occurrence_count,first_seen_at,last_seen_at,last_raw_frame_id)
+                   VALUES (?,?,?,'malformed','2026-10-14T08:00:00+00:00',1,
+                           '2026-10-14T08:00:00+00:00','2026-10-14T08:00:00+00:00',?)""",
+                (f'endpoint:{self.endpoint_id}', self.endpoint_id, 'RETENTION-MN', raw_id),
+            )
+            connection.commit()
+
+        result = run_periodic_maintenance(
+            self.database, self.policy, lock_file=self.root / 'diagnostic.lock',
+            now=self.now, time_budget_seconds=10)
+
+        self.assertEqual(result['totals']['deleted_diagnostic_samples'], 1)
+        self.assertEqual(result['totals']['deleted_diagnostic_summaries'], 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(
+                f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in (
+                    'ingest_errors', 'ingest_parse_attempts', 'ingest_raw_frames',
+                    'station_ingest_error_hourly'))
+        self.assertEqual(counts, (0, 0, 0, 0))
 
 
 if __name__ == "__main__":

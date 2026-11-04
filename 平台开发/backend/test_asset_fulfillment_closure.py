@@ -251,6 +251,68 @@ class AssetFulfillmentClosureTest(unittest.TestCase):
         self.assertTrue(any(event['event_type'] == 'fulfilled' for event in ledger['events']))
         self.assertEqual(ledger['inventory_movements'][0]['type'], 'in')
 
+    def test_operation_log_pagination_merges_before_dedup_total_and_slice(self):
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM operation_logs')
+            db.execute('DELETE FROM device_recycle')
+            db.execute('DELETE FROM inventory_logs')
+            db.executemany(
+                """INSERT INTO operation_logs
+                   (module,action,target_type,target_id,operator,operator_id,details,created_at)
+                   VALUES ('device',?,?,?,?,?,?,?)""",
+                [
+                    (
+                        'recycle' if index == 1 else 'update',
+                        'device', index, '管理员', 1, f'设备操作 {index}',
+                        f'2026-11-03 10:{index:02d}:00',
+                    )
+                    for index in range(1, 26)
+                ],
+            )
+            db.executemany(
+                """INSERT INTO device_recycle
+                   (device_id,device_code,device_name,site_id,site_name,recycle_date,
+                    reason,destination,operator,status,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,'recycled',?)""",
+                [
+                    (1, 'DEV-001', '重复回收', 1, '测试站', '2026-11-03', '重复', 'repair', '管理员', '2026-11-03 10:01:00'),
+                    (99, 'DEV-099', '历史回收', 1, '测试站', '2026-11-03', '历史', 'scrap', '管理员', '2026-11-03 09:59:00'),
+                ],
+            )
+            db.executemany(
+                """INSERT INTO inventory_logs
+                   (part_id,type,quantity,ref_type,operator,operator_id,remark,created_at)
+                   VALUES (1,?,?,?,?,?,?,?)""",
+                [
+                    ('in' if index % 2 else 'out', index, 'adjust', '管理员', 1, '分页库存',
+                     f'2026-11-03 09:{index:02d}:00')
+                    for index in range(1, 8)
+                ],
+            )
+
+        legacy = self.client.get('/api/operation-logs?module=device&limit=5', headers=self.headers())
+        self.assertEqual(legacy.status_code, 200, legacy.json)
+        self.assertIsInstance(legacy.json, list)
+        self.assertEqual(len(legacy.json), 5)
+
+        first = self.client.get(
+            '/api/operation-logs?module=device&include_inventory=1&paginated=1&page=1&page_size=20',
+            headers=self.headers(),
+        )
+        last = self.client.get(
+            '/api/operation-logs?module=device&include_inventory=1&paginated=1&page=2&page_size=20',
+            headers=self.headers(),
+        )
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(last.status_code, 200, last.json)
+        self.assertEqual(first.json['total'], 33)
+        self.assertEqual(len(first.json['items']), 20)
+        self.assertEqual(len(last.json['items']), 13)
+        combined = first.json['items'] + last.json['items']
+        self.assertEqual(len({str(row['id']) for row in combined}), 33)
+        self.assertEqual(sum(row['action'] == 'recycle' and row['target_id'] == 1 for row in combined), 1)
+        self.assertEqual(sum(row['action'] in ('入库', '出库') for row in combined), 7)
+
 
 if __name__ == '__main__':
     unittest.main()

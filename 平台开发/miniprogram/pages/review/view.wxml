@@ -413,7 +413,7 @@
             <view class="rv-actions" wx:if="{{it.detailOpen && it.canReview}}">
               <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
                 <button class="rv-btn rv-btn-primary" data-id="{{it.id}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id || loading || loadState === 'stale'}}" bindtap="onSubmitPhotoReview">
-                  {{it.selectedRejectCount ? '驳回' + it.selectedRejectCount + '张，其余通过' : '全部通过'}}
+                  {{it.selectedRejectCount ? '记录' + it.selectedRejectCount + '张不合格，其余合格' : '全部通过'}}
                 </button>
               </block>
               <block wx:else>

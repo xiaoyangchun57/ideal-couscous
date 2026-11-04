@@ -10,20 +10,20 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons';
 import { api } from '../../../services/api';
-import { metricMap } from '../../../services/constants';
 import EChart from '../../../components/EChart';
 import { StatusStrip, WorkspaceTable, WorkspaceToolbar } from '../../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../../utils/listFilterOptions';
 import { nextQueueItem } from '../../audit/auditQueueNavigation';
+import { dataReviewMetric, dataReviewValue, formatReviewTime } from './dataReviewPresentation';
 
 const { Text } = Typography;
 
 // 状态映射
 const STATUS_MAP = {
-  pending: { label: 'L1 待审', color: 'default' },
-  auto_reviewed: { label: 'L2 待审', color: 'blue' },
-  smart_reviewed: { label: 'L3 待审', color: 'purple' },
-  manual_reviewed: { label: '已复核', color: 'orange' },
+  pending: { label: '等待自动检查', color: 'default' },
+  auto_reviewed: { label: '自动检查后待智能复核', color: 'blue' },
+  smart_reviewed: { label: '疑似异常，待人工复核', color: 'purple' },
+  manual_reviewed: { label: '人工已复核', color: 'orange' },
   archived: { label: '已归档', color: 'green' },
 };
 
@@ -75,9 +75,9 @@ const REJECT_CONCLUSIONS = [
 // 默认审核级别筛选（与后端 level 参数一致）
 const LEVEL_OPTIONS = [
   { value: '', label: '全部' },
-  { value: '1', label: 'L1 待审/已审' },
-  { value: '2', label: 'L1→L2' },
-  { value: '3', label: 'L2→L3 人工复核' },
+  { value: '1', label: '自动检查阶段' },
+  { value: '2', label: '智能复核阶段' },
+  { value: '3', label: '人工复核阶段' },
 ];
 
 export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }) {
@@ -336,29 +336,29 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
     { title: '站点', width: 130, render: (_, r) => (
       <Text strong style={{ fontSize: 12 }}>{r.site_name}</Text>
     )},
-    { title: '指标', dataIndex: 'metric', width: 80, render: (v) => <Tag style={{ fontSize: 11 }}>{metricMap[v] || v}</Tag> },
-    { title: '值', dataIndex: 'value', width: 55, render: (v) => v == null ? <Text type="secondary">-</Text> : Number(v)?.toFixed?.(3) ?? v },
-    { title: '时间', dataIndex: 'recorded_at', width: 120, render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text> },
+    { title: '指标', dataIndex: 'metric', width: 120, render: (v) => <Tag style={{ fontSize: 11 }}>{dataReviewMetric(v).name}</Tag> },
+    { title: '测量值', dataIndex: 'value', width: 100, render: (_, row) => <Text>{dataReviewValue(row)}</Text> },
+    { title: '测量时间', dataIndex: 'recorded_at', width: 180, render: (v) => <Text style={{ fontSize: 11 }}>{formatReviewTime(v)}</Text> },
     { title: '状态', dataIndex: 'status', width: 80, render: (v) => {
       const s = STATUS_MAP[v] || { label: v, color: 'default' };
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: 'L1', dataIndex: 'auto_result', width: 60, render: (v) => {
+    { title: <Tooltip title="仪器规则自动检查结果">自动检查</Tooltip>, dataIndex: 'auto_result', width: 88, render: (v) => {
       if (!v) return <Text type="secondary" style={{ fontSize: 11 }}>-</Text>;
       const s = AUTO_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: 'Z值', dataIndex: 'smart_score', width: 50, render: (v) => {
+    { title: <Tooltip title="与近期同类测量值的偏离程度，仅作为智能复核线索">偏离程度</Tooltip>, dataIndex: 'smart_score', width: 86, render: (v) => {
       if (v == null) return <Text style={{ fontSize: 11 }}>-</Text>;
       const color = v > 3 ? 'red' : v > 2 ? 'orange' : 'green';
       return <Tag color={color} style={{ borderRadius: 4, fontSize: 11 }}>{v}</Tag>;
     }},
-    { title: 'L2', dataIndex: 'smart_result', width: 60, render: (v) => {
+    { title: <Tooltip title="平台结合近期趋势给出的智能复核结果">智能复核</Tooltip>, dataIndex: 'smart_result', width: 88, render: (v) => {
       if (!v) return <Text style={{ fontSize: 11 }}>-</Text>;
       const s = SMART_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: 'L3', dataIndex: 'manual_result', width: 60, render: (v) => {
+    { title: <Tooltip title="审核人员最终确认结果">人工复核</Tooltip>, dataIndex: 'manual_result', width: 88, render: (v) => {
       if (!v) return <Text style={{ fontSize: 11 }}>-</Text>;
       const s = MANUAL_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
@@ -390,7 +390,7 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
     <div className="workspace-embedded-page">
       <StatusStrip items={[
         { label: '待复核', value: stats.total || 0, color: tokens.colorPrimary },
-        { label: 'L3 人工复核', value: (stats.by_status?.smart_reviewed || 0) + (stats.by_status?.manual_reviewed || 0), color: tokens.colorWarning },
+        { label: '待人工复核', value: (stats.by_status?.smart_reviewed || 0) + (stats.by_status?.manual_reviewed || 0), color: tokens.colorWarning },
       ]} />
       <WorkspaceToolbar actions={<>
           <Popconfirm
@@ -496,9 +496,9 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
           {reviewModal.mode === 'single' && reviewModal.items[0] ? (
             <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
               <Descriptions.Item label="站点">{reviewModal.items[0].site_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="指标">{metricMap[reviewModal.items[0].metric] || reviewModal.items[0].metric || '-'}</Descriptions.Item>
-              <Descriptions.Item label="数值">{reviewModal.items[0].value ?? '-'}</Descriptions.Item>
-              <Descriptions.Item label="采集时间">{reviewModal.items[0].recorded_at || '-'}</Descriptions.Item>
+              <Descriptions.Item label="指标">{dataReviewMetric(reviewModal.items[0].metric).name}</Descriptions.Item>
+              <Descriptions.Item label="测量值">{dataReviewValue(reviewModal.items[0])}</Descriptions.Item>
+              <Descriptions.Item label="测量时间">{formatReviewTime(reviewModal.items[0].recorded_at)}</Descriptions.Item>
               <Descriptions.Item label="自动判定">{reviewModal.items[0].auto_reason || reviewModal.items[0].auto_result || '-'}</Descriptions.Item>
               <Descriptions.Item label="智能判定">{reviewModal.items[0].smart_result || '-'}</Descriptions.Item>
             </Descriptions>
@@ -561,9 +561,9 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
             <Card size="small" title="原始数据" style={{ marginBottom: 12 }}>
               <Descriptions size="small" column={2}>
                 <Descriptions.Item label="站点">{traceDrawer.chain.review.site_name || '-'}</Descriptions.Item>
-                <Descriptions.Item label="指标">{metricMap[traceDrawer.chain.review.metric] || traceDrawer.chain.review.metric}</Descriptions.Item>
-                <Descriptions.Item label="值">{traceDrawer.chain.review.value}</Descriptions.Item>
-                <Descriptions.Item label="时间">{traceDrawer.chain.review.recorded_at}</Descriptions.Item>
+                <Descriptions.Item label="指标">{dataReviewMetric(traceDrawer.chain.review.metric).name}</Descriptions.Item>
+                <Descriptions.Item label="测量值">{dataReviewValue(traceDrawer.chain.review)}</Descriptions.Item>
+                <Descriptions.Item label="测量时间">{formatReviewTime(traceDrawer.chain.review.recorded_at)}</Descriptions.Item>
                 <Descriptions.Item label="状态">{STATUS_MAP[traceDrawer.chain.review.status]?.label || traceDrawer.chain.review.status}</Descriptions.Item>
                 <Descriptions.Item label="L1结果">
                   {traceDrawer.chain.review.auto_reason ? <Text code style={{ fontSize: 11 }}>{traceDrawer.chain.review.auto_reason}</Text> : '-'}
@@ -628,7 +628,7 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
 
       {/* 趋势预测 Drawer */}
       <Drawer open={trendDrawer.open} onClose={() => setTrendDrawer({ open: false, data: null, loading: false })}
-        title={`趋势预测：${metricMap[trendDrawer.metric] || trendDrawer.metric}（${trendDrawer.site_name || `站点${trendDrawer.site_id}`}）`} width="min(100vw, 760px)" loading={trendDrawer.loading}>
+        title={`趋势预测：${dataReviewMetric(trendDrawer.metric).name}（${trendDrawer.site_name || `站点${trendDrawer.site_id}`}）`} width="min(100vw, 760px)" loading={trendDrawer.loading}>
         <Space wrap style={{ marginBottom: 12 }}>
           <span>站点：</span>
           <Select
@@ -644,7 +644,7 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
             onChange={v => onTrendChange({ metric: v })}
             style={{ width: 160 }}
             showSearch optionFilterProp="label" placeholder="选择指标"
-            options={(stats.by_metric || []).map(m => ({ value: m.metric, label: metricMap[m.metric] || m.metric }))}
+            options={(stats.by_metric || []).map(m => ({ value: m.metric, label: dataReviewMetric(m.metric).name }))}
           />
         </Space>
         {trendDrawer.data && (

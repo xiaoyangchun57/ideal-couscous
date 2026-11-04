@@ -15,6 +15,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import { formatTablePaginationTotal, standardListPagination } from '../../components/WorkspacePage';
 import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
@@ -566,7 +567,7 @@ export default function UsersPage() {
           dataSource={visibleUsers}
           rowKey={(r) => r.id || r.username}
           loading={loading}
-          pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+          pagination={standardListPagination({ showTotal: formatTablePaginationTotal })}
           locale={{ emptyText: <Empty description="暂无用户数据" /> }}
           scrollX={1090}
         />}

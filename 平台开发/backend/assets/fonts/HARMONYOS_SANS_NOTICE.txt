@@ -1,0 +1,7 @@
+This software uses unmodified HarmonyOS Sans SC Regular and Bold fonts for
+Simplified Chinese server-rendered site-photo watermarks.
+
+Copyright 2021 Huawei Device Co., Ltd.
+Licensed under the HarmonyOS Sans Fonts License Agreement included in
+LICENSE-update.txt. The font files must not be redistributed or sold on a
+stand-alone basis.

@@ -176,6 +176,45 @@ class WorkorderEndWithoutProcessingTest(unittest.TestCase):
         self.assertEqual(self.end().status_code, 403)
         self.assertEqual(self.end('remote-reviewer-token').status_code, 200)
 
+    def test_admin_active_state_keeps_existing_scope_and_receives_exact_reason(self):
+        self.add_order(status='pending')
+        detail = self.client.get(
+            '/api/workorders/WO-1', headers=self.headers('admin-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertFalse(detail.json['can_end_without_processing'])
+        self.assertEqual(
+            detail.json['end_without_processing_block_reason'],
+            '当前阶段只能由已指派且仍有该站点权限的运维负责人提前结束',
+        )
+        denied = self.end('admin-token')
+        self.assertEqual(
+            (denied.status_code, denied.json['code'], denied.json['error']),
+            (403, 'WORKORDER_NO_ACTION_FORBIDDEN',
+             '当前阶段只能由已指派且仍有该站点权限的运维负责人提前结束'),
+        )
+
+    def test_exact_detail_reads_order_outside_recent_fifty(self):
+        self.add_order(status='pending')
+        with sqlite3.connect(self.db_path) as db:
+            for index in range(2, 57):
+                db.execute(
+                    """INSERT INTO work_orders
+                       (id,order_no,site_id,source,title,description,assignee,status,
+                        created_at,creator)
+                       VALUES (?,?,10,'manual','较新工单','','负责人','pending',?,
+                               '创建人')""",
+                    (index, f'WO-NEW-{index}', f'2026-11-02 10:00:{index:02d}'),
+                )
+        recent = self.client.get(
+            '/api/workorders', headers=self.headers('operator-token'))
+        self.assertEqual(recent.status_code, 200, recent.json)
+        self.assertEqual(len(recent.json), 50)
+        self.assertNotIn('WO-1', {row['order_no'] for row in recent.json})
+        detail = self.client.get(
+            '/api/workorders/WO-1', headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(detail.json['order_no'], 'WO-1')
+
     def test_reason_validation_and_normal_close_conflict_do_not_write(self):
         self.add_order(status='pending')
         self.assertEqual(self.end(reason='   ').status_code, 400)
@@ -261,6 +300,54 @@ class WorkorderEndWithoutProcessingTest(unittest.TestCase):
         event_types = [item['type'] for item in detail.json['flow_events']]
         self.assertIn('ended_without_processing', event_types)
         self.assertNotIn('closed', event_types)
+
+    def test_list_batches_timeline_closure_alert_and_shared_checkin_reads(self):
+        self.add_order(status='pending', source='auto', related_alert_id=9)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO alerts VALUES (9,10,'device_status','pending','WO-1',NULL,NULL)")
+            db.execute("""INSERT INTO timeline_events
+                (source_type,source_id,event_type,operator,remark,created_at)
+                VALUES ('workorder',1,'ended_without_processing','负责人','无需继续处理','2026-11-02 09:00:00')""")
+            for index in range(2, 26):
+                db.execute("""INSERT INTO work_orders
+                    (id,order_no,site_id,source,title,description,assignee,status,
+                     created_at,creator)
+                    VALUES (?,?,10,'manual','批量工单','','负责人','pending',?,'创建人')""",
+                    (index, f'WO-BATCH-{index}', f'2026-11-02 10:{index:02d}:00'))
+
+        statements = []
+        db_path = self.db_path
+
+        @contextmanager
+        def traced_db():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            db.set_trace_callback(statements.append)
+            try:
+                yield db
+            finally:
+                db.close()
+
+        original_get_db = app_module.get_db
+        app_module.get_db = traced_db
+        try:
+            response = self.client.get('/api/workorders?limit=50', headers=self.headers('operator-token'))
+        finally:
+            app_module.get_db = original_get_db
+
+        self.assertEqual(response.status_code, 200, response.json)
+        by_order = {row['order_no']: row for row in response.json}
+        self.assertEqual(by_order['WO-1']['closure_type'], 'no_action_required')
+        self.assertIn('ended_without_processing', {
+            event['type'] for event in by_order['WO-1']['flow_events']})
+        timeline_selects = [sql for sql in statements
+                            if sql.lstrip().upper().startswith('SELECT')
+                            and 'FROM timeline_events' in sql]
+        alert_selects = [sql for sql in statements
+                         if sql.lstrip().upper().startswith('SELECT')
+                         and 'FROM alerts WHERE id IN' in sql]
+        self.assertEqual(len(timeline_selects), 1)
+        self.assertEqual(len(alert_selects), 1)
 
 
 if __name__ == '__main__':

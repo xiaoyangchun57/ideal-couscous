@@ -13,6 +13,8 @@ import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { pageRootStyle } from '../../services/pageStyles';
 import WorkspacePage, { WorkspaceEmpty } from '../../components/WorkspacePage';
+import { runIndependentLoads } from '../../services/independentLoads';
+import { analysisMetricPresentation } from './analysisPresentation';
 
 const { Title, Text } = Typography;
 const ANALYSIS_CHART_HEIGHT = 'clamp(260px, calc(100vh - 520px), 560px)';
@@ -174,29 +176,33 @@ export default function AnalysisPage() {
   const [woStats, setWoStats] = useState(null);
   const [arrivalSummary, setArrivalSummary] = useState(null);
   const [trends, setTrends] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [pendingSources, setPendingSources] = useState(0);
   const [loadErrors, setLoadErrors] = useState([]);
+  const loading = pendingSources > 0;
 
   // ---------- Data fetching ----------
 
   const loadAnalysis = useCallback(async () => {
-    setLoading(true);
+    setPendingSources(5);
+    setLoadErrors([]);
     const requests = [
-      ['运营概览', api.getStrict('/dashboard/summary'), setDashboard],
-      ['巡检统计', api.getStrict('/inspections/statistics'), setInspStats],
-      ['工单统计', api.getStrict('/workorders/statistics'), setWoStats],
-      ['到报汇总', api.getStrict('/data/arrival/summary'), setArrivalSummary],
-      ['趋势数据', api.getStrict('/analysis/trends'), setTrends],
+      ['dashboard', '运营概览', '/dashboard/summary', setDashboard],
+      ['inspection', '巡检统计', '/inspections/statistics', setInspStats],
+      ['workorders', '工单统计', '/workorders/statistics', setWoStats],
+      ['arrival', '到报汇总', '/data/arrival/summary', setArrivalSummary],
+      ['trends', '趋势数据', '/analysis/trends', setTrends],
     ];
-    const results = await Promise.allSettled(requests.map(([, promise]) => promise));
-    const errors = [];
-    results.forEach((result, index) => {
-      const [label, , setter] = requests[index];
-      if (result.status === 'fulfilled') setter(result.value || {});
-      else errors.push(`${label}：${result.reason?.message || '加载失败'}`);
-    });
-    setLoadErrors(errors);
-    setLoading(false);
+    const failures = new Map();
+    await runIndependentLoads(requests.map(([key, label, url, setter]) => ({
+      key,
+      load: () => api.getStrict(url),
+      onSuccess: (value) => setter(value || {}),
+      onError: (error) => {
+        failures.set(key, `${label}：${error?.message || '加载失败'}`);
+        setLoadErrors([...failures.values()]);
+      },
+      onSettled: () => setPendingSources((count) => Math.max(0, count - 1)),
+    })));
   }, []);
 
   useEffect(() => {
@@ -228,13 +234,17 @@ export default function AnalysisPage() {
 
   // ---------- Benchmark table ----------
 
-  const benchmark = (arrivalSummary?.by_metric || []).map((m, idx) => ({
-    id: m.metric || idx,
-    name: m.metric || '-',
-    site_count: m.site_count || 0,
-    throughput_rate: m.avg_rate ?? null,
-    below_threshold: m.below_threshold ?? 0,
-  }));
+  const benchmark = (arrivalSummary?.by_metric || []).map((m, idx) => {
+    const metric = analysisMetricPresentation(m.metric);
+    return {
+      id: m.metric || idx,
+      name: metric.name,
+      unit: metric.unit,
+      site_count: m.site_count || 0,
+      throughput_rate: m.avg_rate ?? null,
+      below_threshold: m.below_threshold ?? 0,
+    };
+  });
 
   const benchmarkColumns = [
     {
@@ -243,7 +253,7 @@ export default function AnalysisPage() {
       key: 'name',
       width: 140,
       ellipsis: true,
-      render: (text) => <Text strong>{text || '-'}</Text>,
+      render: (text, row) => <Text strong>{text || '-'}{row.unit ? `（${row.unit}）` : ''}</Text>,
     },
     {
       title: '站点数',
@@ -320,7 +330,7 @@ export default function AnalysisPage() {
       {!hasArrivalSample && <Alert type="info" showIcon message="监测到报数据尚无样本" description="本页仍展示已有的工单、巡检和设备事实；到报率及参数对比不据此给出 0 分或推测结论。" style={{ marginBottom: 12, padding: '8px 12px' }} />}
 
       {/* KPI Cards */}
-      <Spin spinning={loading}>
+      <Spin spinning={loading && !hasAnySample}>
         <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
           <Col xs={24} sm={12} lg={6} flex="1">
             <KpiCard
@@ -382,7 +392,7 @@ export default function AnalysisPage() {
               columns={benchmarkColumns}
               dataSource={benchmark}
               rowKey={(r) => r.id || r.name}
-              loading={loading}
+              loading={loading && benchmark.length === 0}
               pagination={false}
               locale={{ emptyText: <WorkspaceEmpty type="sample" description="今日没有可比较的参数到报样本" /> }}
               size="middle"

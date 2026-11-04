@@ -238,20 +238,18 @@ test('station monitoring real Web behavior with isolated API fixtures', {
       const tableRow = page.getByRole('row').filter({ hasText: row.name });
       await visible(tableRow.getByText('在服务', { exact: true }));
       await visible(tableRow.getByText('暂无上传条件', { exact: true }));
-      await visible(tableRow.getByText('时间配置未完成', { exact: true }));
-      await visible(tableRow.getByText('周期完整性暂无法判定', { exact: true }));
+      await visible(tableRow.getByText('2026-09-10 07:00', { exact: true }));
       await tableRow.getByRole('button', { name: '监测', exact: true }).click();
       await visible(page.getByRole('heading', { name: row.name }));
       await visible(page.getByText('当前暂无上传条件', { exact: true }));
-      await visible(page.getByText('时间配置未完成', { exact: true }).first());
-      await visible(page.getByText(/周期完整性暂无法判定；最近结果仍按真实采样时间展示。/));
+      await absent(page, '周期完整性暂无法判定');
       await visible(page.getByText('7.25', { exact: true }));
-      await visible(page.getByText(/结果时间：.*7:00:00/));
+      await visible(page.getByText(/测量：.*7:00:00/));
       await snapshot(page, 'policy-and-cycle-context');
     } finally { await close(); }
   });
 
-  await t.test('sampling-time review stays distinct from instrument failure and keeps both times', async () => {
+  await t.test('legacy sampling-time review does not hide a valid measurement', async () => {
     const payload = overview('attention');
     payload.monitoring.factors[0] = {
       ...payload.monitoring.factors[0],
@@ -273,12 +271,11 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     });
     try {
       await page.goto(`${baseURL}/sites/7`);
-      await visible(page.getByText('采样时点异常 · 历史值', { exact: true }));
-      await visible(page.getByText('采样时间不在批准的四小时时点，需核对数据来源与采样时刻', { exact: true }));
-      await visible(page.getByText(/异常观测：.*10:00:00/));
-      await visible(page.getByText(/历史值：.*12:00:00/));
+      await absent(page, '采样时点异常 · 历史值');
+      await absent(page, '采样时间不在批准的四小时时点，需核对数据来源与采样时刻');
+      await visible(page.getByText(/测量：.*12:00:00/));
       await visible(page.getByText('6.741', { exact: true }));
-      await absent(page, '故障 · 历史值');
+      await absent(page, '存在故障值 · 最近有效值');
       await snapshot(page, 'sampling-time-review');
     } finally { await close(); }
   });
@@ -311,11 +308,11 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     try {
       await page.goto(`${baseURL}/sites`);
       const tableRow = page.getByRole('row').filter({ hasText: row.name });
-      await visible(tableRow.getByText('实时结果齐全', { exact: true }));
-      await visible(tableRow.getByText('正式周期尚未形成', { exact: true }));
+      await absent(tableRow, '实时结果齐全');
+      await absent(tableRow, '正式周期尚未形成');
       await tableRow.getByRole('button', { name: '监测', exact: true }).click();
-      await visible(page.getByText('实时结果齐全', { exact: true }).last());
-      await visible(page.getByText('正式周期尚未形成', { exact: true }).last());
+      await absent(page, '实时结果齐全');
+      await absent(page, '正式周期尚未形成');
       await visible(page.getByText('7.25', { exact: true }));
       await absent(page, '结果完整');
       await snapshot(page, 'realtime-results-not-formal-cycle');
@@ -336,7 +333,7 @@ test('station monitoring real Web behavior with isolated API fixtures', {
     try {
       await page.goto(`${baseURL}/sites/7`);
       await visible(page.getByText('7.2300', { exact: true }));
-      const resultTime = await page.getByText(/结果时间：/).textContent();
+      const resultTime = await page.getByText(/测量：/).textContent();
       assert.match(resultTime, /7:00:00/);
       assert.doesNotMatch(resultTime, /12:00:00/);
     } finally { await close(); }

@@ -71,6 +71,29 @@
 
   <!-- 功能组2：退出 -->
   <view class="list-group">
+    <view class="list-row" bindtap="togglePhotoQuality" hover-class="list-row-active">
+      <text class="list-row-text">个人月度回顾 · 照片质量</text>
+      <text class="row-chevron">{{qualityOpen ? '⌃' : '›'}}</text>
+    </view>
+    <view wx:if="{{qualityOpen}}">
+      <picker mode="date" fields="month" value="{{qualityMonth}}" bindchange="changeQualityMonth">
+        <view class="list-row"><text>检查月份</text><text>{{qualityMonth}} ›</text></view>
+      </picker>
+      <view class="list-row" wx:if="{{qualityLoading}}"><text>正在加载…</text></view>
+      <view class="list-row" wx:elif="{{qualityError}}" bindtap="loadPhotoQuality"><text>{{qualityError}} · 点击重试</text></view>
+      <block wx:else>
+        <view class="list-row"><text>本月照片质量扣分：{{qualityDeduction}}</text></view>
+        <view wx:for="{{qualityPhotos}}" wx:key="attachment_id">
+          <view class="list-row">
+            <image src="{{item.display_url}}" mode="aspectFit" data-url="{{item.display_url}}" bindtap="previewQualityPhoto" style="width:160rpx;height:160rpx" />
+            <text>{{item.item_name}} · 扣{{item.deduction}}分\n{{item.reason}}</text>
+          </view>
+          <view class="list-row" data-id="{{item.attachment_id}}" bindtap="openQualityInspection"><text>查看原巡检</text><text class="row-chevron">›</text></view>
+        </view>
+      </block>
+    </view>
+  </view>
+  <view class="list-group">
     <view class="list-row" bindtap="onLogout" hover-class="list-row-active">
       <view class="list-row-left">
         <view class="row-icon icon-red">

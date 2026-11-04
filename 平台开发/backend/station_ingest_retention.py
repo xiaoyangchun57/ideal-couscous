@@ -39,7 +39,10 @@ HOT_RELATION_RETENTION = timedelta(hours=168)
 RECENT_RECEIPT_RETENTION = timedelta(hours=72)
 DEDUP_DIRECTORY_RETENTION = timedelta(days=90)
 CLOUD_ARCHIVE_RETENTION = timedelta(days=90)
-ERROR_SUMMARY_RETENTION = timedelta(days=30)
+ERROR_SUMMARY_RETENTION = timedelta(hours=24)
+INGEST_ERROR_SAMPLE_RETENTION = timedelta(hours=24)
+INGEST_ERROR_SAMPLE_MAX_ROWS = 512
+INGEST_ERROR_SAMPLE_MAX_BYTES = 1024 * 1024
 RECEIPT_SUMMARY_RETENTION = timedelta(days=30)
 SLOT_SUMMARY_RETENTION = timedelta(days=90)
 BOOTSTRAP_CONSUMER_WINDOW = timedelta(hours=8)
@@ -59,6 +62,7 @@ CLEANUP_INDEXES = {
 }
 RAW_PRUNE_SCAN_LIMIT = 256
 EXACT_DUPLICATE_BATCH_TIME_BUDGET_SECONDS = 30.0
+MAINTENANCE_ARCHIVE_MINIMUM_BUDGET_SECONDS = 2.0
 EXACT_DUPLICATE_CHECKPOINT_VERSION = "station-ingest-exact-duplicate-checkpoint-v1"
 
 
@@ -169,6 +173,154 @@ def _now() -> str:
 def _batches(items: list[Any], size: int = 500):
     for start in range(0, len(items), size):
         yield items[start:start + size]
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def retire_raw_frame_if_unreferenced(
+    connection: sqlite3.Connection, raw_id: int,
+) -> bool:
+    """Remove a completed receipt once no business or recovery evidence needs it."""
+    blockers = (
+        ("observation_batches", "raw_frame_id"),
+        ("ingest_errors", "raw_frame_id"),
+        ("monitoring_quality_issues", "raw_frame_id"),
+        ("monitoring_normalization_retries", "raw_frame_id"),
+        ("monitoring_raw_archive_frames", "raw_frame_id"),
+        ("monitoring_raw_archive_part_frames", "raw_frame_id"),
+        ("monitoring_archive_evidence_refs", "source_raw_frame_id"),
+    )
+    for table, column in blockers:
+        if (_table_exists(connection, table)
+                and connection.execute(
+                    f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (raw_id,)
+                ).fetchone() is not None):
+            return False
+    if not _table_exists(connection, "ingest_raw_frames"):
+        return False
+    if connection.execute(
+        "SELECT 1 FROM ingest_raw_frames WHERE id=?", (raw_id,)
+    ).fetchone() is None:
+        return False
+
+    if _table_exists(connection, "station_ingest_recent_receipts"):
+        connection.execute(
+            "DELETE FROM station_ingest_recent_receipts WHERE raw_frame_id=?", (raw_id,))
+    if _table_exists(connection, "station_ingest_receipt_hourly"):
+        connection.execute(
+            "UPDATE station_ingest_receipt_hourly SET last_complete_raw_frame_id=NULL "
+            "WHERE last_complete_raw_frame_id=?", (raw_id,))
+    if _table_exists(connection, "station_ingest_error_hourly"):
+        connection.execute(
+            "UPDATE station_ingest_error_hourly SET last_raw_frame_id=NULL "
+            "WHERE last_raw_frame_id=?", (raw_id,))
+    if _table_exists(connection, "station_ingest_current_state"):
+        connection.execute(
+            """UPDATE station_ingest_current_state SET
+                   latest_raw_frame_id=CASE WHEN latest_raw_frame_id=? THEN NULL ELSE latest_raw_frame_id END,
+                   latest_authenticated_raw_frame_id=CASE WHEN latest_authenticated_raw_frame_id=? THEN NULL ELSE latest_authenticated_raw_frame_id END,
+                   latest_credential_failed_raw_frame_id=CASE WHEN latest_credential_failed_raw_frame_id=? THEN NULL ELSE latest_credential_failed_raw_frame_id END
+               WHERE latest_raw_frame_id=? OR latest_authenticated_raw_frame_id=?
+                  OR latest_credential_failed_raw_frame_id=?""",
+            (raw_id, raw_id, raw_id, raw_id, raw_id, raw_id),
+        )
+    if _table_exists(connection, "station_ingest_slot_summaries"):
+        connection.execute(
+            "DELETE FROM station_ingest_slot_summaries WHERE canonical_raw_frame_id=?", (raw_id,))
+    if _table_exists(connection, "station_ingest_dedup_keys"):
+        connection.execute(
+            "DELETE FROM station_ingest_dedup_keys WHERE canonical_raw_frame_id=?", (raw_id,))
+    if _table_exists(connection, "station_ingest_duplicate_links"):
+        connection.execute(
+            "DELETE FROM station_ingest_duplicate_links "
+            "WHERE raw_frame_id=? OR canonical_raw_frame_id=?", (raw_id, raw_id))
+    connection.execute(
+        "UPDATE ingest_raw_frames SET duplicate_of_raw_frame_id=NULL "
+        "WHERE duplicate_of_raw_frame_id=?", (raw_id,))
+    for table in ("ingest_frame_protocols", "ingest_parse_attempts"):
+        if _table_exists(connection, table):
+            connection.execute(f"DELETE FROM {table} WHERE raw_frame_id=?", (raw_id,))
+    connection.execute("DELETE FROM ingest_raw_frames WHERE id=?", (raw_id,))
+    return True
+
+
+def prune_ingest_error_samples(
+    connection: sqlite3.Connection, *, now: datetime | None = None,
+    batch_limit: int = 1024, deadline: float | None = None,
+) -> dict[str, int | bool]:
+    """Bound diagnostic samples by age, row count and retained raw bytes."""
+    now = now or datetime.now(timezone.utc)
+    now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    cutoff = (now - INGEST_ERROR_SAMPLE_RETENTION).replace(microsecond=0).isoformat()
+    cutoff_at = datetime.fromisoformat(cutoff)
+    with _statement_deadline(connection, deadline, "diagnostic_sample_inventory"):
+        rows = connection.execute(
+            """SELECT error.id,error.raw_frame_id,error.created_at,
+                      length(error.error_type)+length(error.error_detail)
+                        +COALESCE(length(raw.raw_frame),0) AS retained_bytes
+               FROM ingest_errors error
+               LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id
+               ORDER BY error.created_at DESC,error.id DESC"""
+        ).fetchall()
+    delete_ids: list[int] = []
+    retained_bytes = 0
+    kept_rows = 0
+    for row in rows:
+        row_id = int(row[0])
+        created_at = datetime.fromisoformat(str(row[2]).replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        row_bytes = int(row[3] or 0)
+        keep = (
+            created_at >= cutoff_at
+            and kept_rows < INGEST_ERROR_SAMPLE_MAX_ROWS
+            and retained_bytes + row_bytes <= INGEST_ERROR_SAMPLE_MAX_BYTES
+        )
+        if keep:
+            kept_rows += 1
+            retained_bytes += row_bytes
+        elif len(delete_ids) < batch_limit:
+            delete_ids.append(row_id)
+    raw_ids: list[int] = []
+    if delete_ids:
+        marks = ",".join("?" * len(delete_ids))
+        with _statement_deadline(connection, deadline, "diagnostic_sample_delete"):
+            raw_ids = [int(row[0]) for row in connection.execute(
+                f"SELECT DISTINCT raw_frame_id FROM ingest_errors "
+                f"WHERE id IN ({marks}) AND raw_frame_id IS NOT NULL", delete_ids
+            )]
+            connection.execute(f"DELETE FROM ingest_errors WHERE id IN ({marks})", delete_ids)
+            for raw_id in raw_ids:
+                retire_raw_frame_if_unreferenced(connection, raw_id)
+    summary_deleted = 0
+    if _table_exists(connection, "station_ingest_error_hourly"):
+        with _statement_deadline(connection, deadline, "diagnostic_summary_delete"):
+            summary_ids = [tuple(row) for row in connection.execute(
+                """SELECT source_key,error_type,bucket_hour
+                   FROM station_ingest_error_hourly WHERE bucket_hour<?
+                   ORDER BY bucket_hour,source_key,error_type LIMIT ?""",
+                (cutoff, batch_limit),
+            )]
+            for source_key, error_type, bucket_hour in summary_ids:
+                connection.execute(
+                    "DELETE FROM station_ingest_error_hourly "
+                    "WHERE source_key=? AND error_type=? AND bucket_hour=?",
+                    (source_key, error_type, bucket_hour),
+                )
+            summary_deleted = len(summary_ids)
+    return {
+        "samples_deleted": len(delete_ids),
+        "summaries_deleted": summary_deleted,
+        "retained_rows": kept_rows,
+        "retained_bytes": retained_bytes,
+        "partial": len(delete_ids) >= batch_limit or summary_deleted >= batch_limit,
+    }
 
 
 def _deadline_expired(deadline: float | None) -> bool:
@@ -403,10 +555,14 @@ def _archive_item(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _archive_records(rows: list[sqlite3.Row]) -> tuple[list[bytes], str]:
+def _archive_records(
+    rows: list[sqlite3.Row], *, deadline: float | None = None,
+) -> tuple[list[bytes], str]:
     lines = []
     digest = hashlib.sha256()
     for row in rows:
+        if _deadline_expired(deadline):
+            raise _StatementDeadlineExceeded("raw_archive_encode")
         item = _archive_item(row)
         line = (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
         lines.append(line)
@@ -414,13 +570,18 @@ def _archive_records(rows: list[sqlite3.Row]) -> tuple[list[bytes], str]:
     return lines, digest.hexdigest()
 
 
-def _write_and_verify_archive(path: Path, lines: list[bytes], expected_digest: str, rows: list[sqlite3.Row]) -> None:
+def _write_and_verify_archive(
+    path: Path, lines: list[bytes], expected_digest: str, rows: list[sqlite3.Row], *,
+    deadline: float | None = None,
+) -> None:
     """Verify decompressed IDs, hashes, payload bytes, and the content-lines digest."""
     if not path.exists():
         temporary = path.with_suffix(path.suffix + ".tmp")
         try:
             with gzip.open(temporary, "wb") as stream:
                 for line in lines:
+                    if _deadline_expired(deadline):
+                        raise _StatementDeadlineExceeded("raw_archive_write")
                     stream.write(line)
             temporary.replace(path)
         finally:
@@ -430,9 +591,13 @@ def _write_and_verify_archive(path: Path, lines: list[bytes], expected_digest: s
     try:
         with gzip.open(path, "rb") as stream:
             for line in stream:
+                if _deadline_expired(deadline):
+                    raise _StatementDeadlineExceeded("raw_archive_verify")
                 digest.update(line)
                 item = json.loads(line.decode("ascii"))
                 actual.append((int(item["id"]), str(item["sha256"]), base64.b64decode(item["frame_b64"], validate=True)))
+    except _StatementDeadlineExceeded:
+        raise
     except (OSError, ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RetentionError("raw archive file cannot be verified") from exc
     expected = [(int(row["id"]), str(row["frame_sha256"]), bytes(row["raw_frame"])) for row in rows]
@@ -442,6 +607,7 @@ def _write_and_verify_archive(path: Path, lines: list[bytes], expected_digest: s
 
 def archive_raw_day(
     database: Path, day: str, policy: StoragePolicy, *, batch_limit: int | None = None,
+    deadline: float | None = None,
 ) -> int:
     """Append immutable archive parts, preserving late receipts and retry safety."""
     try:
@@ -452,7 +618,9 @@ def archive_raw_day(
     if batch_limit is not None and batch_limit <= 0:
         raise RetentionError("archive batch limit must be positive")
     try:
-        root = _require_storage(policy, database)
+        # Archiving releases hot-database bytes; a low hot-volume threshold must not
+        # prevent writing verified evidence to a healthy archive volume.
+        root = _require_storage(policy)
         with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
             connection.row_factory = sqlite3.Row
             query = """SELECT raw.*,protocol.protocol_family,protocol.parser_version
@@ -468,17 +636,20 @@ def archive_raw_day(
             if batch_limit is not None:
                 query += " LIMIT ?"
                 parameters.append(batch_limit)
-            rows = connection.execute(query, parameters).fetchall()
+            with _statement_deadline(connection, deadline, "raw_archive_select"):
+                rows = connection.execute(query, parameters).fetchall()
         if not rows:
             return 0
-        lines, content_digest = _archive_records(rows)
+        lines, content_digest = _archive_records(rows, deadline=deadline)
         archive_dir = root / "raw-archives"
         archive_dir.mkdir(parents=True, exist_ok=True)
         archive_path = archive_dir / f"{day}-{rows[0]['id']}-{rows[-1]['id']}-{content_digest[:16]}.jsonl.gz"
-        _write_and_verify_archive(archive_path, lines, content_digest, rows)
+        _write_and_verify_archive(
+            archive_path, lines, content_digest, rows, deadline=deadline)
         with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("BEGIN IMMEDIATE")
+            with _statement_deadline(connection, deadline, "raw_archive_lock"):
+                connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO monitoring_raw_archive_parts
                    (archive_date,archive_path,content_sha256,frame_count,created_at) VALUES (?,?,?,?,?)""",
@@ -570,9 +741,39 @@ def archive_raw_day(
             connection.execute("BEGIN IMMEDIATE")
             _record_health(connection, "degraded", "archive unavailable")
             connection.commit()
-        if isinstance(exc, RetentionError):
+        if isinstance(exc, (RetentionError, _StatementDeadlineExceeded)):
             raise
         raise RetentionError("raw archive could not be completed") from exc
+
+
+def archive_oldest_raw_day(
+    database: Path, before_day: str, policy: StoragePolicy, *, batch_limit: int | None = None,
+) -> dict[str, Any]:
+    """Archive the oldest unarchived raw day before the exclusive UTC boundary."""
+    try:
+        boundary = date.fromisoformat(before_day)
+    except ValueError as exc:
+        raise RetentionError("archive boundary must use YYYY-MM-DD") from exc
+    with closing(sqlite3.connect(str(database))) as connection:
+        row = connection.execute(
+            """SELECT substr(raw.received_at,1,10)
+               FROM ingest_raw_frames raw
+               LEFT JOIN monitoring_archive_evidence_refs evidence
+                 ON evidence.source_raw_frame_id=raw.id
+               WHERE raw.received_at<? AND raw.persistence_state='persisted'
+                 AND length(raw.raw_frame)>0 AND evidence.source_raw_frame_id IS NULL
+               ORDER BY raw.received_at,raw.id LIMIT 1""",
+            (f"{boundary.isoformat()}T00:00:00+00:00",),
+        ).fetchone()
+    if row is None:
+        return {"day": None, "processed": 0, "retry_required": False}
+    day = str(row[0])
+    processed = archive_raw_day(database, day, policy, batch_limit=batch_limit)
+    return {
+        "day": day,
+        "processed": processed,
+        "retry_required": batch_limit is not None and processed >= batch_limit,
+    }
 
 
 def read_raw_evidence(connection: sqlite3.Connection, raw_id: int) -> bytes:
@@ -1153,11 +1354,16 @@ def bootstrap_retention_state(database: Path, *, now: datetime | None = None) ->
     return result
 
 
-def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) -> tuple[Path, str]:
-    lines = [
-        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-        for record in records
-    ]
+def _write_detail_archive(
+    root: Path, kind: str, records: list[dict[str, Any]], *,
+    deadline: float | None = None,
+) -> tuple[Path, str]:
+    lines = []
+    for record in records:
+        if _deadline_expired(deadline):
+            raise _StatementDeadlineExceeded(f"detail_archive_write:{kind}")
+        lines.append(
+            (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     digest = hashlib.sha256(b"".join(lines)).hexdigest()
     directory = root / "detail-archives"
     directory.mkdir(parents=True, exist_ok=True)
@@ -1166,7 +1372,10 @@ def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) 
         temporary = path.with_suffix(path.suffix + ".tmp")
         try:
             with gzip.open(temporary, "wb") as stream:
-                stream.writelines(lines)
+                for line in lines:
+                    if _deadline_expired(deadline):
+                        raise _StatementDeadlineExceeded(f"detail_archive_write:{kind}")
+                    stream.write(line)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -1175,8 +1384,12 @@ def _write_detail_archive(root: Path, kind: str, records: list[dict[str, Any]]) 
     try:
         with gzip.open(path, "rb") as stream:
             for line in stream:
+                if _deadline_expired(deadline):
+                    raise _StatementDeadlineExceeded(f"detail_archive_verify:{kind}")
                 verified.update(line)
                 actual.append(json.loads(line.decode("utf-8")))
+    except _StatementDeadlineExceeded:
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RetentionError("detail archive file cannot be verified") from exc
     if verified.hexdigest() != digest or actual != records:
@@ -1591,6 +1804,7 @@ def _register_detail_archive_part(
 
 def _archive_detail_batch(
     database: Path, root: Path, kind: str, cutoff: str, *, batch_limit: int,
+    deadline: float | None = None,
 ) -> int:
     table = {
         "parse_attempt": "ingest_parse_attempts",
@@ -1599,8 +1813,9 @@ def _archive_detail_batch(
     }[kind]
     with closing(sqlite3.connect(str(database))) as connection:
         connection.row_factory = sqlite3.Row
-        if kind == "parse_attempt":
-            rows = connection.execute(
+        with _statement_deadline(connection, deadline, f"detail_archive_select:{kind}"):
+            if kind == "parse_attempt":
+                rows = connection.execute(
                 """SELECT attempt.*,evidence.id AS evidence_ref_id
                    FROM ingest_parse_attempts attempt
                    JOIN ingest_raw_frames raw ON raw.id=attempt.raw_frame_id
@@ -1610,9 +1825,9 @@ def _archive_detail_batch(
                      AND raw.persistence_state='persisted'
                    ORDER BY attempt.id LIMIT ?""",
                 (cutoff, batch_limit),
-            ).fetchall()
-        elif kind == "ingest_error":
-            rows = connection.execute(
+                ).fetchall()
+            elif kind == "ingest_error":
+                rows = connection.execute(
                 """SELECT error.*,raw.endpoint_id,raw.station_code,
                           evidence.id AS evidence_ref_id
                    FROM ingest_errors error
@@ -1640,40 +1855,44 @@ def _archive_detail_batch(
                            AND newer.id>error.id))
                    ORDER BY error.id LIMIT ?""",
                 (cutoff, batch_limit),
-            ).fetchall()
-        else:
-            rows = connection.execute(
+                ).fetchall()
+            else:
+                rows = connection.execute(
                 """SELECT rowid AS id,* FROM station_ingest_error_hourly
                    WHERE julianday(bucket_hour)<julianday(?)
                    ORDER BY bucket_hour,source_key,error_type LIMIT ?""",
                 (cutoff, batch_limit),
-            ).fetchall()
+                ).fetchall()
     if not rows:
         return 0
+    if _deadline_expired(deadline):
+        raise _StatementDeadlineExceeded(f"detail_archive_write:{kind}")
     records = [dict(row) for row in rows]
-    path, digest = _write_detail_archive(root, kind, records)
+    path, digest = _write_detail_archive(root, kind, records, deadline=deadline)
     ids = [int(row["id"]) for row in rows]
     with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("BEGIN IMMEDIATE")
+        with _statement_deadline(connection, deadline, f"detail_archive_lock:{kind}"):
+            connection.execute("BEGIN IMMEDIATE")
         placeholders = ",".join("?" * len(ids))
-        if kind == "error_summary":
-            current = connection.execute(
+        with _statement_deadline(connection, deadline, f"detail_archive_commit:{kind}"):
+            if kind == "error_summary":
+                current = connection.execute(
                 f"SELECT COUNT(*) FROM station_ingest_error_hourly WHERE rowid IN ({placeholders})", ids
-            ).fetchone()[0]
-        else:
-            current = connection.execute(
+                ).fetchone()[0]
+            else:
+                current = connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE id IN ({placeholders})", ids
-            ).fetchone()[0]
-        if current != len(ids):
-            raise RetentionError("detail rows changed while archive was being written")
-        _register_detail_archive_part(connection, kind, records, path, digest)
-        if kind == "error_summary":
-            connection.execute(
+                ).fetchone()[0]
+            if current != len(ids):
+                raise RetentionError("detail rows changed while archive was being written")
+            _register_detail_archive_part(connection, kind, records, path, digest)
+            if kind == "error_summary":
+                connection.execute(
                 f"DELETE FROM station_ingest_error_hourly WHERE rowid IN ({placeholders})", ids)
-        else:
-            connection.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
-        connection.commit()
+            else:
+                connection.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
+            connection.commit()
     return len(ids)
 
 
@@ -3060,6 +3279,7 @@ def _delete_unprotected_raw_batch(
 
 def _delete_rowid_batch(
     database: Path, table: str, cutoff_column: str, cutoff: str, *, batch_limit: int,
+    deadline: float | None = None,
 ) -> int:
     allowed = {
         ("station_ingest_recent_receipts", "received_at"),
@@ -3069,15 +3289,22 @@ def _delete_rowid_batch(
     if (table, cutoff_column) not in allowed:
         raise RetentionError("retention batch target is not allowed")
     with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        rowids = [int(row[0]) for row in connection.execute(
-            f"SELECT rowid FROM {table} WHERE {cutoff_column}<? ORDER BY rowid LIMIT ?",
-            (cutoff, batch_limit),
-        )]
-        if rowids:
-            marks = ",".join("?" * len(rowids))
-            connection.execute(f"DELETE FROM {table} WHERE rowid IN ({marks})", rowids)
-        connection.commit()
+        _begin_immediate_with_deadline(connection, deadline, f"{table}_lock")
+        try:
+            with _statement_deadline(connection, deadline, f"{table}_delete"):
+                rowids = [int(row[0]) for row in connection.execute(
+                    f"SELECT rowid FROM {table} WHERE {cutoff_column}<? ORDER BY rowid LIMIT ?",
+                    (cutoff, batch_limit),
+                )]
+                if rowids:
+                    marks = ",".join("?" * len(rowids))
+                    connection.execute(f"DELETE FROM {table} WHERE rowid IN ({marks})", rowids)
+            with _statement_deadline(connection, deadline, f"{table}_commit"):
+                connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
     return len(rowids)
 
 
@@ -3211,7 +3438,9 @@ def maintain_retention(
     now = now or datetime.now(timezone.utc)
     now = (now.replace(tzinfo=timezone.utc) if now.tzinfo is None
            else now.astimezone(timezone.utc))
-    root = _require_storage(policy, database)
+    # Maintenance must remain able to archive and delete while the hot volume is low.
+    # Receiver admission still checks both archive and hot-volume budgets separately.
+    root = _require_storage(policy)
     raw_cutoff = _cutoff(now, HOT_RELATION_RETENTION)
     detail_cutoff = _cutoff(now, DETAIL_RETENTION)
     partial_reasons: list[str] = []
@@ -3231,15 +3460,16 @@ def maintain_retention(
     recent_receipts_deleted = 0
     receipt_summaries_deleted = 0
     slot_summaries_deleted = 0
+    diagnostic_samples_deleted = 0
+    diagnostic_summaries_deleted = 0
     deleted_raw = 0
     retained_raw = 0
     raw_prune_checkpoint = None
     raw_checkpoint_run_id = 0
 
-    # Legacy whole-part backfill is not bounded by this run's row/time budget.
-    # Missing evidence references already exclude those raw identities from deletion.
-    # Keep their archive dependencies and let independent cleanup proceed.
-    if can_continue():
+    # The legacy whole-raw archive is retained as an explicit offline tool. A bounded
+    # periodic run must not enter that uninterruptible path before useful cleanup.
+    if can_continue() and deadline is None:
         with closing(sqlite3.connect(str(database))) as connection:
             row = connection.execute(
                 """SELECT substr(received_at,1,10) FROM ingest_raw_frames
@@ -3253,39 +3483,82 @@ def maintain_retention(
             if archived_raw >= batch_limit:
                 partial_reasons.append("raw_archive_batch_limit")
     if can_continue():
-        parse_count = _archive_detail_batch(
-            database, root, "parse_attempt", detail_cutoff, batch_limit=batch_limit)
-        if parse_count >= batch_limit:
-            partial_reasons.append("parse_archive_batch_limit")
-    if can_continue():
-        error_count = _archive_detail_batch(
-            database, root, "ingest_error", detail_cutoff, batch_limit=batch_limit)
-        if error_count >= batch_limit:
-            partial_reasons.append("error_archive_batch_limit")
-    if can_continue():
-        summary_count = _archive_detail_batch(
-            database, root, "error_summary", _cutoff(now, ERROR_SUMMARY_RETENTION),
-            batch_limit=batch_limit)
-        if summary_count >= batch_limit:
-            partial_reasons.append("error_summary_batch_limit")
-    if can_continue():
-        recent_receipts_deleted = _delete_rowid_batch(
-            database, "station_ingest_recent_receipts", "received_at",
-            _cutoff(now, RECENT_RECEIPT_RETENTION), batch_limit=batch_limit)
-        if recent_receipts_deleted >= batch_limit:
-            partial_reasons.append("recent_receipt_batch_limit")
-    if can_continue():
-        receipt_summaries_deleted = _delete_rowid_batch(
-            database, "station_ingest_receipt_hourly", "last_received_at",
-            _cutoff(now, RECEIPT_SUMMARY_RETENTION), batch_limit=batch_limit)
-        if receipt_summaries_deleted >= batch_limit:
-            partial_reasons.append("receipt_summary_batch_limit")
-    if can_continue():
-        slot_summaries_deleted = _delete_rowid_batch(
-            database, "station_ingest_slot_summaries", "last_received_at",
-            _cutoff(now, SLOT_SUMMARY_RETENTION), batch_limit=batch_limit)
-        if slot_summaries_deleted >= batch_limit:
-            partial_reasons.append("slot_summary_batch_limit")
+        try:
+            with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
+                connection.row_factory = sqlite3.Row
+                _begin_immediate_with_deadline(connection, deadline, "diagnostic_cleanup_lock")
+                cleanup = prune_ingest_error_samples(
+                    connection, now=now, batch_limit=batch_limit, deadline=deadline)
+                with _statement_deadline(connection, deadline, "diagnostic_cleanup_commit"):
+                    connection.commit()
+            diagnostic_samples_deleted = int(cleanup["samples_deleted"])
+            diagnostic_summaries_deleted = int(cleanup["summaries_deleted"])
+            if cleanup["partial"]:
+                partial_reasons.append("diagnostic_cleanup_batch_limit")
+        except _StatementDeadlineExceeded as exc:
+            partial_reasons.append(str(exc))
+    for table, column, cutoff, reason, target in (
+        ("station_ingest_recent_receipts", "received_at",
+         _cutoff(now, RECENT_RECEIPT_RETENTION), "recent_receipt_batch_limit", "recent"),
+        ("station_ingest_receipt_hourly", "last_received_at",
+         _cutoff(now, RECEIPT_SUMMARY_RETENTION), "receipt_summary_batch_limit", "receipt"),
+        ("station_ingest_slot_summaries", "last_received_at",
+         _cutoff(now, SLOT_SUMMARY_RETENTION), "slot_summary_batch_limit", "slot"),
+    ):
+        if not can_continue():
+            break
+        try:
+            deleted = _delete_rowid_batch(
+                database, table, column, cutoff, batch_limit=batch_limit, deadline=deadline)
+        except _StatementDeadlineExceeded as exc:
+            partial_reasons.append(str(exc))
+            break
+        if target == "recent":
+            recent_receipts_deleted = deleted
+        elif target == "receipt":
+            receipt_summaries_deleted = deleted
+        else:
+            slot_summaries_deleted = deleted
+        if deleted >= batch_limit:
+            partial_reasons.append(reason)
+    if can_continue() and deadline is not None:
+        try:
+            with closing(sqlite3.connect(str(database))) as connection:
+                with _statement_deadline(
+                    connection, deadline, "raw_archive_oldest_day"
+                ):
+                    row = connection.execute(
+                        """SELECT substr(received_at,1,10) FROM ingest_raw_frames
+                           WHERE received_at<? AND persistence_state='persisted'
+                             AND length(raw_frame)>0
+                           ORDER BY received_at,id LIMIT 1""",
+                        (detail_cutoff,),
+                    ).fetchone()
+            if row is not None:
+                archived_raw = archive_raw_day(
+                    database, str(row[0]), policy, batch_limit=batch_limit,
+                    deadline=deadline)
+                if archived_raw >= batch_limit:
+                    partial_reasons.append("raw_archive_batch_limit")
+        except _StatementDeadlineExceeded as exc:
+            partial_reasons.append(str(exc))
+    if deadline is None:
+        for kind, cutoff, reason in (
+            ("parse_attempt", detail_cutoff, "parse_archive_batch_limit"),
+            ("ingest_error", detail_cutoff, "error_archive_batch_limit"),
+            ("error_summary", _cutoff(now, ERROR_SUMMARY_RETENTION),
+             "error_summary_batch_limit"),
+        ):
+            count = _archive_detail_batch(
+                database, root, kind, cutoff, batch_limit=batch_limit)
+            if kind == "parse_attempt":
+                parse_count = count
+            elif kind == "ingest_error":
+                error_count = count
+            else:
+                summary_count = count
+            if count >= batch_limit:
+                partial_reasons.append(reason)
     if can_continue():
         try:
             (deleted_raw, retained_raw, raw_prune_checkpoint,
@@ -3298,6 +3571,34 @@ def maintain_retention(
         except _StatementDeadlineExceeded as exc:
             raw_prune_checkpoint = exc.checkpoint
             partial_reasons.append(str(exc))
+    for kind, cutoff, reason in (() if deadline is None else (
+        ("parse_attempt", detail_cutoff, "parse_archive_batch_limit"),
+        ("ingest_error", detail_cutoff, "error_archive_batch_limit"),
+        ("error_summary", _cutoff(now, ERROR_SUMMARY_RETENTION),
+         "error_summary_batch_limit"),
+    )):
+        if not can_continue():
+            break
+        if (deadline is not None
+                and deadline - time.monotonic()
+                < MAINTENANCE_ARCHIVE_MINIMUM_BUDGET_SECONDS):
+            partial_reasons.append("time_budget_reserved_for_cleanup")
+            break
+        try:
+            count = _archive_detail_batch(
+                database, root, kind, cutoff, batch_limit=batch_limit,
+                deadline=deadline)
+        except _StatementDeadlineExceeded as exc:
+            partial_reasons.append(str(exc))
+            break
+        if kind == "parse_attempt":
+            parse_count = count
+        elif kind == "ingest_error":
+            error_count = count
+        else:
+            summary_count = count
+        if count >= batch_limit:
+            partial_reasons.append(reason)
     archive_cutoff = _cutoff(now, CLOUD_ARCHIVE_RETENTION)
     mirror_result = {
         "retired_raw_archive_parts": 0,
@@ -3357,8 +3658,6 @@ def maintain_retention(
     retry_required = bool(
         partial_reasons or overdue_archive_parts or mirror_result["mirror_failures"])
     status = "partial" if retry_required else "completed"
-    # Migration 014 persists only completed/failed; resumable partial state lives in detail.
-    persisted_status = "completed"
     if raw_prune_checkpoint is None:
         with closing(sqlite3.connect(str(database))) as connection:
             raw_prune_checkpoint = _latest_raw_prune_checkpoint(connection)
@@ -3378,6 +3677,8 @@ def maintain_retention(
         "deleted_recent_receipts": recent_receipts_deleted,
         "deleted_receipt_summaries": receipt_summaries_deleted,
         "deleted_slot_summaries": slot_summaries_deleted,
+        "deleted_diagnostic_samples": diagnostic_samples_deleted,
+        "deleted_diagnostic_summaries": diagnostic_summaries_deleted,
         "deleted_raw_frames": deleted_raw,
         "retained_protected_frames": retained_raw,
         "raw_prune_checkpoint": raw_prune_checkpoint,
@@ -3391,7 +3692,7 @@ def maintain_retention(
             str(raw_prune_checkpoint["cutoff"]) if raw_prune_checkpoint else raw_cutoff)
         run_values = (
             persisted_cutoff, parse_count, error_count, summary_count, deleted_raw, retained_raw,
-            persisted_status, json.dumps(result, sort_keys=True), _now(),
+            status, json.dumps(result, sort_keys=True), _now(),
         )
         if raw_checkpoint_run_id:
             connection.execute(
@@ -3447,21 +3748,85 @@ def run_periodic_maintenance(
     batch_limit: int = 1000, mirror_storage_dir: Path | None = None,
     time_budget_seconds: float = 2700,
 ) -> dict[str, Any]:
-    """Run one exclusive, bounded maintenance pass and expose resumable backlog."""
+    """Use one lock and one time budget to run resumable maintenance batches."""
+    started = time.monotonic()
+    deadline = started + time_budget_seconds
+    count_keys = (
+        "backfilled_evidence_refs", "archived_raw_frames", "archived_parse_attempts",
+        "archived_errors", "archived_error_summaries", "deleted_recent_receipts",
+        "deleted_receipt_summaries", "deleted_slot_summaries",
+        "deleted_diagnostic_samples", "deleted_diagnostic_summaries",
+        "deleted_raw_frames",
+        "retained_protected_frames", "retired_raw_archive_parts",
+        "retired_detail_archive_parts", "mirror_parts_processed",
+    )
+    totals = {key: 0 for key in count_keys}
+    batches: list[dict[str, Any]] = []
+    last_checkpoint: tuple[Any, ...] | None = None
+    stop_reason = "completed"
     try:
         with MaintenanceLock(lock_file):
-            result = maintain_retention(
-                database, policy, now=now, batch_limit=batch_limit,
-                mirror_storage_dir=mirror_storage_dir,
-                time_budget_seconds=time_budget_seconds,
+            with closing(sqlite3.connect(str(database))) as connection:
+                existing_checkpoint = _latest_raw_prune_checkpoint(connection) or {}
+            last_checkpoint = (
+                existing_checkpoint.get("cutoff"), existing_checkpoint.get("cursor"),
+                existing_checkpoint.get("upper_raw_id"), existing_checkpoint.get("scanned"),
             )
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_reason = "time_budget_exhausted"
+                    break
+                result = maintain_retention(
+                    database, policy, now=now, batch_limit=batch_limit,
+                    mirror_storage_dir=mirror_storage_dir,
+                    time_budget_seconds=remaining,
+                )
+                for key in count_keys:
+                    totals[key] += int(result.get(key, 0) or 0)
+                checkpoint = result.get("raw_prune_checkpoint") or {}
+                checkpoint_token = (
+                    checkpoint.get("cutoff"), checkpoint.get("cursor"),
+                    checkpoint.get("upper_raw_id"), checkpoint.get("scanned"),
+                )
+                work_count = sum(int(result.get(key, 0) or 0) for key in count_keys)
+                checkpoint_advanced = checkpoint_token != last_checkpoint
+                batches.append({
+                    "status": result["status"],
+                    "partial_reasons": result["partial_reasons"],
+                    "work_count": work_count,
+                    "raw_prune_checkpoint": checkpoint,
+                })
+                if not result["retry_required"]:
+                    stop_reason = "completed"
+                    break
+                if work_count == 0 and not checkpoint_advanced:
+                    stop_reason = "no_progress"
+                    break
+                last_checkpoint = checkpoint_token
+            if not batches:
+                result = {
+                    "status": "partial", "retry_required": True,
+                    "partial_reasons": ["time_budget_exhausted"],
+                    "raw_prune_checkpoint": None,
+                }
     except Exception as exc:
         _record_periodic_failure(database, exc)
         raise
+    retry_required = stop_reason != "completed" or bool(result["retry_required"])
+    partial_reasons = set(result.get("partial_reasons", ()))
+    if stop_reason != "completed":
+        partial_reasons.add(stop_reason)
     return {
-        "status": result["status"],
+        "status": "partial" if retry_required else "completed",
         "historical_maintenance_called": 1,
-        "retry_required": result["retry_required"],
+        "retry_required": retry_required,
+        "maintenance_batches": len(batches),
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+        "stop_reason": stop_reason,
+        "partial_reasons": sorted(partial_reasons),
+        "totals": totals,
+        "batches": batches,
         "maintenance": result,
     }
 
@@ -3549,7 +3914,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "action",
         choices=(
-            "archive", "aggregate", "bootstrap", "maintain", "maintain-once",
+            "archive", "archive-next", "aggregate", "bootstrap", "maintain", "maintain-once",
             "reduce-indexes", "compact-copy", "compact-prepared",
             "prepare-exact-duplicate-cleanup", "purge-exact-duplicates",
             "run-exact-duplicate-cleanup", "drop-exact-duplicate-cleanup-indexes",
@@ -3588,6 +3953,16 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.raw_storage_dir is None:
                 raise RetentionError("archive requires --raw-storage-dir")
             result = archive_raw_day(
+                arguments.database, arguments.day,
+                _storage_policy_from_arguments(arguments),
+                batch_limit=arguments.batch_limit,
+            )
+        elif arguments.action == "archive-next":
+            if not arguments.day:
+                raise RetentionError("archive-next requires --day as an exclusive boundary")
+            if arguments.raw_storage_dir is None:
+                raise RetentionError("archive-next requires --raw-storage-dir")
+            result = archive_oldest_raw_day(
                 arguments.database, arguments.day,
                 _storage_policy_from_arguments(arguments),
                 batch_limit=arguments.batch_limit,

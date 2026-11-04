@@ -10,7 +10,7 @@ import {
 import dayjs from 'dayjs';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import WorkspacePage, {
-  FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar, formatTablePaginationTotal,
 } from '../../components/WorkspacePage';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
@@ -18,7 +18,7 @@ import {
   archiveHistoryStatus, archivePrimaryTitle, archivePurgeEligibility, hasAdminRole,
   normalizeDeleteReason,
 } from './attachmentDeletion';
-import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
+import { ARCHIVE_PAGE_SIZE, ARCHIVE_PAGE_SIZES, archiveLastPage, archiveNavigationState } from './archivePagination';
 import {
   archiveCaptureLabel, archiveMaterialNature, archiveSourceLabel, hasArchiveFilters,
 } from './archivePresentation';
@@ -103,7 +103,7 @@ export default function ArchivePage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { page, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
+  const { page, pageSize, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
   const applied = useMemo(() => filtersFromParams(new URLSearchParams(filterQuery)), [filterQuery]);
   const hasAppliedFilters = useMemo(() => hasArchiveFilters(applied), [applied]);
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
@@ -169,7 +169,7 @@ export default function ArchivePage() {
 
   useEffect(() => {
     setSelectedIds([]);
-  }, [archiveMode, filterQuery, page, view]);
+  }, [archiveMode, filterQuery, page, pageSize, view]);
 
   useEffect(() => {
     const nextScope = archiveDownloadScopeKey(archiveMode, filterQuery);
@@ -184,7 +184,7 @@ export default function ArchivePage() {
     });
   }, [archiveMode, filterQuery, message]);
 
-  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1) => {
+  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1, nextPageSize = pageSize) => {
     const params = new URLSearchParams();
     if (nextFilters.keyword) params.set('keyword', nextFilters.keyword);
     if (nextFilters.site_id) params.set('site_id', nextFilters.site_id);
@@ -196,8 +196,9 @@ export default function ArchivePage() {
     if (nextView === 'grid') params.set('view', 'grid');
     if (nextMode === 'history') params.set('scope', 'history');
     if (nextPage > 1) params.set('page', String(nextPage));
+    if (nextPageSize !== ARCHIVE_PAGE_SIZE) params.set('page_size', String(nextPageSize));
     setSearchParams(params, { replace: true });
-  }, [archiveMode, setSearchParams, view]);
+  }, [archiveMode, pageSize, setSearchParams, view]);
 
   const load = useCallback(async () => {
     requestRef.current.controller?.abort();
@@ -213,7 +214,7 @@ export default function ArchivePage() {
         throw new Error('影像档案分页数据格式异常，请重试');
       }
       const requestedPage = Number(new URLSearchParams(requestQuery).get('page'));
-      const lastPage = archiveLastPage(data.total);
+      const lastPage = archiveLastPage(data.total, pageSize);
       if (requestedPage > lastPage) {
         correctingPage = true;
         searchParamsWriterRef.current((current) => {
@@ -235,7 +236,7 @@ export default function ArchivePage() {
     } finally {
       if (mountedRef.current && requestId === requestRef.current.id && !correctingPage) setLoading(false);
     }
-  }, [requestQuery]);
+  }, [pageSize, requestQuery]);
 
   useEffect(() => {
     load();
@@ -633,13 +634,13 @@ export default function ArchivePage() {
             : '当前没有驳回、作废、替换、待审或补充材料记录。'}
           onRefresh={load}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
           loading={loading} fillHeight emptyType={hasAppliedFilters ? 'filtered' : 'empty'}
-          onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
+          onRefresh={load} scroll={{ x: 900 }}
           rowSelection={archiveMode === 'history' && hasAdminRole(user) ? {
             selectedRowKeys: selectedIds,
             onChange: setSelectedIds,
           } : undefined}
-          pagination={total > ARCHIVE_PAGE_SIZE ? { current: page, pageSize: ARCHIVE_PAGE_SIZE, total, showSizeChanger: false, disabled: loading,
-            showTotal: value => `共 ${value} 条`, onChange: (next) => writeUrl(applied, view, archiveMode, next) } : false} /> :
+          pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: ARCHIVE_PAGE_SIZES, disabled: loading,
+            onChange: (next, nextPageSize) => writeUrl(applied, view, archiveMode, nextPageSize !== pageSize ? 1 : next, nextPageSize) }} /> :
           <div className="archive-grid-view">
           <div className="archive-grid-scroll" ref={gridRef} role="region" aria-label="影像档案网格" tabIndex={0}>
           <div className="archive-grid-items">{items.map(item =>
@@ -670,10 +671,10 @@ export default function ArchivePage() {
             </Card>
           )}</div></div>
           <div className="archive-grid-footer">
-            <Text type="secondary">共 {total} 条</Text>
-            {total > ARCHIVE_PAGE_SIZE && <Pagination current={page} pageSize={ARCHIVE_PAGE_SIZE} total={total}
-              showSizeChanger={false} showLessItems responsive size="small" disabled={loading}
-              onChange={(next) => writeUrl(applied, view, archiveMode, next)} />}
+            <Text type="secondary">{formatTablePaginationTotal(total, [items.length ? ((page - 1) * pageSize) + 1 : 0, items.length ? ((page - 1) * pageSize) + items.length : 0])}</Text>
+            <Pagination current={page} pageSize={pageSize} total={total}
+              showSizeChanger pageSizeOptions={ARCHIVE_PAGE_SIZES} showLessItems responsive size="small" disabled={loading}
+              onChange={(next, nextPageSize) => writeUrl(applied, view, archiveMode, nextPageSize !== pageSize ? 1 : next, nextPageSize)} />
           </div></div>}
       </Spin></div>}
 

@@ -8,26 +8,9 @@ page {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #05070a;
   color: #fff;
-  overflow: hidden;
-}
-
-.camera-context {
-  padding: 22rpx 30rpx 16rpx;
-  display: flex;
-  flex-direction: column;
-  gap: 6rpx;
-}
-
-.camera-site {
-  font-size: 30rpx;
-  font-weight: 650;
-}
-
-.camera-item {
-  color: rgba(255, 255, 255, 0.68);
-  font-size: 24rpx;
 }
 
 .camera-stage {
@@ -36,102 +19,102 @@ page {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 24rpx;
+  overflow: hidden;
+  padding: 12rpx 24rpx 0;
 }
 
 .camera-frame {
   position: relative;
+  flex: none;
   overflow: hidden;
   background: #11151a;
-  border-radius: 18rpx;
-  box-shadow: 0 0 0 1rpx rgba(255, 255, 255, 0.24);
 }
 
-.camera-preview,
-.frame-border {
+.camera-preview {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
 }
 
-.frame-border {
+.camera-watermark-preview {
+  position: absolute;
   z-index: 2;
+  right: 0;
+  bottom: 0;
+  left: 0;
   box-sizing: border-box;
-  border: 4rpx solid rgba(255, 255, 255, 0.88);
-  border-radius: 18rpx;
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  background: rgba(255, 255, 255, 0.3);
+  color: #000;
+  font-family: "HarmonyOS Sans SC Regular", "HarmonyOS Sans SC", "PingFang SC", sans-serif;
+  line-height: 1;
   pointer-events: none;
 }
 
-.frame-label {
-  position: absolute;
-  z-index: 3;
-  top: 16rpx;
-  left: 16rpx;
-  padding: 8rpx 14rpx;
-  border-radius: 999rpx;
-  background: rgba(0, 0, 0, 0.58);
-  font-size: 22rpx;
-  line-height: 1.2;
+.watermark-left {
+  width: 43%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: center;
+}
+
+.watermark-site,
+.watermark-time {
+  width: 100%;
+  max-width: 100%;
+  font-family: "HarmonyOS Sans SC Bold", "HarmonyOS Sans SC", "PingFang SC", sans-serif;
+  font-weight: 700;
+  text-align: center;
+}
+
+.watermark-time {
+  white-space: nowrap;
+}
+
+.watermark-right {
+  width: 57%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  font-weight: 400;
+  text-align: right;
+}
+
+.watermark-detail {
+  width: 100%;
+  max-width: 100%;
+}
+
+.watermark-line {
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .camera-controls {
-  padding: 18rpx 26rpx calc(24rpx + env(safe-area-inset-bottom));
-}
-
-/* 水印开关：辅助控件，视觉权重低于快门；整行 88rpx 触控热区 */
-.camera-watermark {
-  min-height: 88rpx;
-  margin-bottom: 8rpx;
-  padding: 10rpx 24rpx;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20rpx;
-  border-radius: 18rpx;
-  background: rgba(255, 255, 255, 0.08);
-  box-sizing: border-box;
-}
-
-.camera-watermark-text {
-  display: flex;
-  flex-direction: column;
-  gap: 4rpx;
-  min-width: 0;
-}
-
-.camera-watermark-title {
-  font-size: 26rpx;
-  line-height: 1.3;
-  color: #fff;
-}
-
-.camera-watermark-hint {
-  font-size: 20rpx;
-  line-height: 1.35;
-  color: rgba(255, 255, 255, 0.55);
-}
-
-.camera-watermark-switch {
+  position: relative;
   flex-shrink: 0;
-  margin: 0;
-  transform: scale(0.92);
-  transform-origin: right center;
-}
-
-/* 拍摄中禁用：整行变暗表达不可用，但不遮挡状态与快门 */
-.camera-watermark.is-disabled {
-  opacity: 0.4;
+  padding: 10rpx 32rpx calc(24rpx + env(safe-area-inset-bottom));
+  background: #05070a;
 }
 
 .camera-status {
-  min-height: 64rpx;
+  min-height: 42rpx;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14rpx;
-  color: rgba(255, 255, 255, 0.82);
-  font-size: 24rpx;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 23rpx;
+  line-height: 1.4;
   text-align: center;
 }
 
@@ -139,126 +122,144 @@ page {
   color: #ffb3ad;
 }
 
-.preview-ready {
-  padding: 4rpx 10rpx;
-  border-radius: 999rpx;
-  background: rgba(50, 215, 75, 0.16);
-  color: #7ef18f;
-  font-size: 20rpx;
-}
-
-.camera-actions {
-  height: 112rpx;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.camera-actions button {
-  margin: 0;
-}
-
-.camera-cancel,
-.camera-retry,
-.camera-action-placeholder {
-  width: 148rpx;
-}
-
-.camera-cancel,
-.camera-retry {
-  padding: 0;
-  background: transparent;
+.camera-recovery {
+  min-width: 144rpx;
+  height: 64rpx;
+  margin: 4rpx auto 8rpx;
+  padding: 0 28rpx;
+  border-radius: 8rpx;
+  background: #252a32;
   color: #fff;
-  font-size: 26rpx;
-  line-height: 72rpx;
+  font-size: 24rpx;
+  line-height: 64rpx;
 }
 
-.camera-cancel::after,
-.camera-retry::after,
+.camera-recovery::after,
+.camera-tool::after,
 .camera-shutter::after {
   border: 0;
 }
 
-.camera-retry {
-  color: #76b9ff;
+.camera-toolbar {
+  min-height: 112rpx;
+  display: flex;
+  align-items: center;
+  gap: 28rpx;
+}
+
+.camera-tool-slot {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-shutter-slot {
+  width: 112rpx;
+  min-width: 112rpx;
+  max-width: 112rpx;
+  height: 112rpx;
+  min-height: 112rpx;
+  max-height: 112rpx;
+  flex: 0 0 112rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-picker {
+  width: 100%;
+  min-width: 0;
+}
+
+.camera-tool {
+  width: 100%;
+  min-width: 0;
+  min-height: 88rpx;
+  margin: 0;
+  padding: 4rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6rpx;
+  background: transparent;
+  color: #fff;
+  font-size: 22rpx;
+  line-height: 1.2;
+}
+
+.camera-tool.is-disabled,
+.camera-tool[disabled] {
+  opacity: 0.42;
+}
+
+.camera-tool-icon {
+  position: relative;
+  width: 36rpx;
+  height: 36rpx;
+  box-sizing: border-box;
+}
+
+.flash-icon::before {
+  content: "";
+  position: absolute;
+  top: 1rpx;
+  left: 10rpx;
+  width: 13rpx;
+  height: 29rpx;
+  border: 3rpx solid #fff;
+  border-top-color: transparent;
+  border-left-color: transparent;
+  transform: skew(-15deg) rotate(34deg);
+}
+
+.watermark-icon {
+  border: 3rpx solid #fff;
+  border-radius: 4rpx;
+}
+
+.watermark-icon view {
+  width: 20rpx;
+  height: 2rpx;
+  margin: 6rpx auto 0;
+  background: #fff;
 }
 
 .camera-shutter {
   width: 104rpx;
+  min-width: 104rpx;
+  max-width: 104rpx;
   height: 104rpx;
+  min-height: 104rpx;
+  max-height: 104rpx;
+  box-sizing: border-box;
+  flex: 0 0 104rpx;
+  margin: 0;
   padding: 8rpx;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 4rpx solid #fff;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.26);
+  background: transparent;
+  line-height: 1;
+  overflow: hidden;
 }
 
 .camera-shutter[disabled] {
   opacity: 0.5;
 }
 
-.camera-shutter.is-ready {
-  background: #fff;
-}
-
 .shutter-core {
-  width: 78rpx;
-  height: 78rpx;
+  width: 76rpx;
+  height: 76rpx;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: inset 0 0 0 4rpx #05070a;
+  background: rgba(255, 255, 255, 0.55);
 }
 
 .camera-shutter.is-ready .shutter-core {
-  background: #f5f7fa;
-}
-
-.camera-page.landscape {
-  flex-direction: row;
-}
-
-.camera-page.landscape .camera-context {
-  width: 160rpx;
-  justify-content: center;
-}
-
-.camera-page.landscape .camera-stage {
-  padding: 12rpx 0;
-}
-
-.camera-page.landscape .camera-controls {
-  width: 180rpx;
-  padding: 20rpx;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.camera-page.landscape .camera-actions {
-  height: auto;
-  flex-direction: column-reverse;
-  gap: 28rpx;
-}
-
-/* 横拍：控制栏仅 180rpx 宽，水印行改纵向居中并隐藏副文案 */
-.camera-page.landscape .camera-watermark {
-  flex-direction: column;
-  align-items: center;
-  gap: 8rpx;
-  padding: 12rpx;
-}
-
-.camera-page.landscape .camera-watermark-text {
-  align-items: center;
-  text-align: center;
-}
-
-.camera-page.landscape .camera-watermark-hint {
-  display: none;
-}
-
-.camera-page.landscape .camera-watermark-switch {
-  transform: scale(0.85);
-  transform-origin: center;
+  background: #fff;
 }

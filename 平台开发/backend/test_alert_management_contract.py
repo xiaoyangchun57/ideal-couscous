@@ -438,6 +438,50 @@ class AlertManagementContractTest(unittest.TestCase):
         missing = self.client.get('/api/alerts/4041', headers=self.headers('operator-token'))
         self.assertEqual((missing.status_code, missing.json['code']), (404, 'ALERT_NOT_FOUND'))
 
+    def test_alert_pagination_filters_complete_authorized_history_and_keeps_legacy_array(self):
+        with self.temporary_db() as db:
+            db.executemany(
+                """INSERT INTO alerts
+                   (site_id,metric,value,level,message,status,flow_type,flow_status,created_at)
+                   VALUES (1,'ph',7.5,'yellow',?,'pending','manual','pending_review',?)""",
+                [(f'分页告警 {index:02d}', f'2026-10-{index:02d} 08:00:00') for index in range(1, 29)],
+            )
+            db.execute(
+                """INSERT INTO alerts
+                   (site_id,metric,value,level,message,status,flow_type,flow_status,created_at)
+                   VALUES (2,'ph',7.5,'red','无权分页告警','pending','manual','pending_review','2026-10-30 08:00:00')"""
+            )
+
+        legacy = self.client.get('/api/alerts?limit=5', headers=self.headers('operator-token'))
+        self.assertEqual(legacy.status_code, 200, legacy.json)
+        self.assertIsInstance(legacy.json, list)
+        self.assertEqual(len(legacy.json), 5)
+
+        first = self.client.get(
+            '/api/alerts?paginated=1&page=1&page_size=20&date_range=all',
+            headers=self.headers('operator-token'),
+        )
+        last = self.client.get(
+            '/api/alerts?paginated=1&page=2&page_size=20&date_range=all',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(last.status_code, 200, last.json)
+        self.assertEqual(first.json['total'], 30)
+        self.assertEqual(len(first.json['items']), 20)
+        self.assertEqual(len(last.json['items']), 10)
+        ids = [row['id'] for row in first.json['items'] + last.json['items']]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertFalse(any(row['site_id'] == 2 for row in first.json['items'] + last.json['items']))
+
+        searched = self.client.get(
+            '/api/alerts?paginated=1&page=1&page_size=20&date_range=all&search=分页告警%2001',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(searched.status_code, 200, searched.json)
+        self.assertEqual(searched.json['total'], 1)
+        self.assertEqual(searched.json['items'][0]['message'], '分页告警 01')
+
 
 if __name__ == '__main__':
     unittest.main()

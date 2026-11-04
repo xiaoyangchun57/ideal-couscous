@@ -1456,7 +1456,8 @@
    工单详情走 .om-sheet.workorder-detail-sheet 高特异性规则，不受影响。
    模型：短内容随内容收束（无底部真空），长内容到 75vh 上限后收缩滚动，底栏常驻。 */
 .wo-vehicle-apply-sheet .sheet-scroll,
-.parts-apply-sheet .sheet-scroll {
+.parts-apply-sheet .sheet-scroll,
+.no-action-sheet .sheet-scroll {
   flex: 0 1 auto;
   height: auto;
   min-height: 0;
@@ -2001,6 +2002,31 @@
   line-height: 1.4;
 }
 
+.workorder-detail-sheet .wos-resource-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 18rpx;
+}
+
+.workorder-detail-sheet .wos-resource-btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 72rpx;
+  margin: 0;
+  padding: 0 16rpx;
+  border: 1.5rpx solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-primary);
+  font-size: 26rpx;
+  font-weight: 500;
+  line-height: 72rpx;
+}
+
+.workorder-detail-sheet .wos-resource-btn::after {
+  border: 0;
+}
+
 /* 问题描述 */
 .workorder-detail-sheet .wos-desc {
   font-size: 28rpx;
@@ -2311,6 +2337,32 @@
 
 .workorder-detail-sheet .wos-btn-gap {
   margin-top: 12rpx;
+}
+
+.workorder-detail-sheet .wos-no-action-btn {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.no-action-retention {
+  margin: 0 40rpx 20rpx;
+  padding: 20rpx 24rpx;
+  border-radius: var(--radius-md);
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  font-size: 26rpx;
+  line-height: 1.5;
+}
+
+.no-action-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.no-action-actions .btn-ghost,
+.no-action-actions .btn-primary {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ============================================================

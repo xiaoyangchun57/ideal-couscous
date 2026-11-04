@@ -7,7 +7,10 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const vite = await createServer({ root, server: { middlewareMode: true }, appType: 'custom', logLevel: 'silent' });
 const {
   buildWorkorderTimelineFacts,
+  createWorkorderDetailRequestGuard,
   executeNoActionClose,
+  loadWorkorderDetailBundle,
+  shouldShowEndWithoutProcessingBlock,
 } = await vite.ssrLoadModule('/src/pages/workorders/WorkOrdersPage.jsx');
 
 test.after(async () => {
@@ -100,4 +103,95 @@ test('failed write does not commit or start refreshes', async () => {
     refreshOrders: async () => calls.push('list'),
   }), /write failed/);
   assert.deepEqual(calls, ['submit']);
+});
+
+test('detail bundle reads the exact order instead of searching the recent list', async () => {
+  const calls = [];
+  const result = await loadWorkorderDetailBundle({
+    orderNo: 'WO-OLD-1',
+    fallbackOrder: { order_no: 'WO-OLD-1' },
+    loadDetail: async (orderNo) => {
+      calls.push(`detail:${orderNo}`);
+      return { order_no: orderNo, status: 'pending', display_title: '旧工单' };
+    },
+    loadRelated: async (orderNo) => {
+      calls.push(`related:${orderNo}`);
+      return { parts: [], recycles: [] };
+    },
+    loadPhotos: async (orderNo) => {
+      calls.push(`photos:${orderNo}`);
+      return { item_progress: [] };
+    },
+  });
+  assert.equal(result.detail.display_title, '旧工单');
+  assert.deepEqual(result.errors, []);
+  const auxiliary = await result.auxiliaryPromise;
+  assert.deepEqual(auxiliary.errors, []);
+  assert.deepEqual(auxiliary.related, { parts: [], recycles: [] });
+  assert.deepEqual(calls.sort(), [
+    'detail:WO-OLD-1', 'photos:WO-OLD-1', 'related:WO-OLD-1',
+  ]);
+});
+
+test('detail bundle exposes an exact-detail 404 so the UI does not render a fake fallback order', async () => {
+  const notFound = Object.assign(new Error('工单不存在'), {
+    status: 404,
+    code: 'WORKORDER_NOT_FOUND',
+  });
+  const result = await loadWorkorderDetailBundle({
+    orderNo: 'WO-NOT-EXIST',
+    fallbackOrder: { order_no: 'WO-NOT-EXIST' },
+    loadDetail: async () => { throw notFound; },
+    loadRelated: async () => { throw notFound; },
+    loadPhotos: async () => { throw notFound; },
+  });
+  assert.equal(result.detail.order_no, 'WO-NOT-EXIST');
+  assert.equal(result.detailError, notFound);
+  assert.equal(result.detailError.status, 404);
+  assert.deepEqual(result.errors, ['最新工单信息']);
+  const auxiliary = await result.auxiliaryPromise;
+  assert.deepEqual(auxiliary.errors, ['关联业务', '处置影像']);
+});
+
+test('primary detail resolves before delayed related data and photos', async () => {
+  let releaseRelated;
+  let releasePhotos;
+  const result = await loadWorkorderDetailBundle({
+    orderNo: 'WO-FAST-DETAIL',
+    fallbackOrder: { order_no: 'WO-FAST-DETAIL' },
+    loadDetail: async () => ({ order_no: 'WO-FAST-DETAIL', title: '主详情已到' }),
+    loadRelated: () => new Promise((resolve) => { releaseRelated = resolve; }),
+    loadPhotos: () => new Promise((resolve) => { releasePhotos = resolve; }),
+  });
+  assert.equal(result.detail.title, '主详情已到');
+
+  releaseRelated({ parts: [{ id: 1 }], recycles: [] });
+  releasePhotos({ item_progress: [] });
+  const auxiliary = await result.auxiliaryPromise;
+  assert.equal(auxiliary.related.parts[0].id, 1);
+  assert.deepEqual(auxiliary.errors, []);
+});
+
+test('request guard rejects stale detail responses after a quick order switch', () => {
+  const guard = createWorkorderDetailRequestGuard();
+  const first = guard.begin();
+  const second = guard.begin();
+  assert.equal(guard.isCurrent(first), false);
+  assert.equal(guard.isCurrent(second), true);
+  guard.invalidate();
+  assert.equal(guard.isCurrent(second), false);
+});
+
+test('closed early-end orders hide the redundant denial alert', () => {
+  assert.equal(shouldShowEndWithoutProcessingBlock({
+    status: 'closed',
+    closure_type: 'no_action_required',
+    can_end_without_processing: false,
+    end_without_processing_block_reason: '工单已经办结，不能改为提前结束',
+  }), false);
+  assert.equal(shouldShowEndWithoutProcessingBlock({
+    status: 'in_progress',
+    can_end_without_processing: false,
+    end_without_processing_block_reason: '当前阶段只能由负责人提前结束',
+  }), true);
 });

@@ -86,11 +86,14 @@ class StationIngestGovernanceScriptsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
-    def _run_raw(self, payload):
+    def _run_raw(self, payload, archive_day="2026-10-21"):
         env = os.environ.copy()
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
         env["STATION_RETENTION_ENV_FILE"] = self._bash_path(self.env_file)
-        env["ARCHIVE_DAY"] = "2026-10-21"
+        if archive_day is not None:
+            env["ARCHIVE_DAY"] = archive_day
+        else:
+            env.pop("ARCHIVE_DAY", None)
         env["DOCKER_EXEC_RESULT"] = payload
         return subprocess.run(
             [self.bash, RAW_WRAPPER.as_posix()], cwd=DEPLOY_DIR, env=env,
@@ -116,6 +119,15 @@ class StationIngestGovernanceScriptsTest(unittest.TestCase):
         result = self._run_raw('{"action":"archive","result":25}')
         self.assertEqual(result.returncode, 75)
         self.assertIn('"retry_required":true', result.stdout)
+
+    def test_raw_wrapper_defaults_to_oldest_unarchived_day(self):
+        result = self._run_raw(
+            '{"action":"archive-next","result":{"day":"2026-09-20","processed":3,"retry_required":false}}',
+            archive_day=None,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"day":"2026-09-20"', result.stdout)
+        self.assertIn('"processed":3', result.stdout)
 
     def test_runner_uses_release_overlays_and_business_database_mount(self):
         real_docker = shutil.which('docker')
@@ -158,7 +170,7 @@ if [[ "$*" == *"config --format json"* ]]; then
   exec "$REAL_DOCKER" "${args[@]}" --no-path-resolution
 fi
 printf '%s\\n' "$@" > "$CAPTURE"
-printf '%s\\n' '{"action":"maintain-once","result":{"historical_maintenance_called":1,"status":"completed","retry_required":false}}'
+printf '%s\\n' "$DOCKER_EXEC_RESULT"
 ''', encoding='utf-8')
         env = os.environ.copy()
         env.update(PATH=str(self.bin_dir)+os.pathsep+env.get('PATH',''),
@@ -166,6 +178,7 @@ printf '%s\\n' '{"action":"maintain-once","result":{"historical_maintenance_call
                    REAL_DOCKER=self._bash_path(real_docker), CAPTURE=self._bash_path(capture),
                    CONFIG_CAPTURE=self._bash_path(config_capture),
                    FIXTURE_APP=self._bash_path(app_dir),
+                   DOCKER_EXEC_RESULT='{"action":"maintain-once","result":{"historical_maintenance_called":1,"status":"completed","retry_required":false}}',
                    MSYS_NO_PATHCONV='1')
         for database_source in (
                 '/opt/water-monitor-persistent/backend-data',
@@ -191,6 +204,13 @@ printf '%s\\n' '{"action":"maintain-once","result":{"historical_maintenance_call
                 self.assertNotIn('up',args)
                 capture.unlink()
                 config_capture.unlink()
+        env['DOCKER_EXEC_RESULT'] = '{"action":"maintain-once","result":{"historical_maintenance_called":1,"status":"partial","retry_required":true}}'
+        partial = subprocess.run([self.bash,runner.as_posix()],env=env,
+                                 capture_output=True,text=True,encoding='utf-8')
+        self.assertEqual(partial.returncode,75,partial.stderr)
+        env['DOCKER_EXEC_RESULT'] = '{"action":"maintain-once","result":{"historical_maintenance_called":1,"status":"completed","retry_required":false}}'
+        capture.unlink(missing_ok=True)
+        config_capture.unlink(missing_ok=True)
         mounts.write_text('''services:
   water-monitor:
     volumes: ["/data/water-monitor/current/backend-data:/app/backend/data"]

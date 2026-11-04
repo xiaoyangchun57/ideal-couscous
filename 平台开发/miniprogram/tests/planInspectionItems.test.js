@@ -225,7 +225,7 @@ test('site-specific inspection failures preserve successful sites, selections an
   await page.loadInspectionItems();
   assert.equal(page.data.inspectionSiteStates[1].state,'ready');
   assert.equal(page.data.inspectionSiteStates[2].state,'unavailable');
-  assert.deepEqual(page.data.days[0].inspection_items[1],[10]);
+  assert.deepEqual(page.data.days[0].inspection_items[1],[10,11]);
   assert.equal(page.data.days[0].inspection_items[2],undefined);
   page.onSaveDraft();page.onSubmit();assert.equal(writes,0);
   page.data.days[0].inspection_items[1]=[11];
@@ -292,17 +292,22 @@ test('vehicle and server field errors use inline anchors while system failures p
   assert.equal(page.data.draftSaveError,'');
 });
 
-test('weekly plans default weekly items only and expose collapsed optional groups without invented due dates', () => {
+test('weekly plans default monthly items too and preserve explicit cancellation regardless of due status', () => {
   global.getApp = () => ({ globalData: {} });
   global.Page = () => {};
   delete require.cache[pagePath];
   const { initializeInspectionItemSelections, inspectionGroupsForDays } = require(pagePath);
   const options = { 10: [{ id: 1, frequency: 'weekly', due_status: 'overdue' }, { id: 2, frequency: 'monthly', due_status: 'due_soon', due_label: '临近计划日期 2026-09-20' }, { id: 3, frequency: 'quarterly' }] };
   const days = initializeInspectionItemSelections([{ sites: [10] }], options, 'weekly');
-  assert.deepEqual(days[0].inspection_items['10'], [1]);
+  assert.deepEqual(days[0].inspection_items['10'], [1, 2]);
+  for (const due_status of ['due_soon', 'overdue']) {
+    const refreshed = {10: options[10].map(item => ({...item, due_status}))};
+    assert.deepEqual(initializeInspectionItemSelections([{sites:[10],inspection_items:{'10':[]}}],refreshed,'weekly')[0].inspection_items['10'], []);
+    assert.deepEqual(initializeInspectionItemSelections([{sites:[10],inspection_items:{'10':[1]}}],refreshed,'weekly')[0].inspection_items['10'], [1]);
+  }
   const groups = inspectionGroupsForDays(days, options, 'weekly')[0].inspectionGroups[10];
   assert.deepEqual(groups.map(group => group.expanded), [true, false, false]);
-  assert.deepEqual(groups.map(group => group.selectedCount), [1, 0, 0]);
+  assert.deepEqual(groups.map(group => group.selectedCount), [1, 1, 0]);
   assert.equal(groups[0].dueLabels, '');
   assert.equal(groups[1].dueLabels, '1项临近周期');
   assert.equal(options[10][1].due_label, '临近计划日期 2026-09-20');

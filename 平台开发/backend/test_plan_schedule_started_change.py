@@ -62,6 +62,38 @@ class StartedPlanChangeTest(unittest.TestCase):
         self.db.close()
         os.unlink(self.db_path)
 
+    def test_same_site_monthly_cancellation_preserves_records_and_does_not_revive(self):
+        self.db.execute("UPDATE inspection_templates SET frequency='monthly'")
+        self.db.execute("UPDATE insp_plan_items SET template_id=3,item_name='仪表读数'")
+        self.db.execute("""INSERT INTO inspection_template_items VALUES
+            (2,3,'电表照片','设备',1,1,1,2)""")
+        self.db.execute("""INSERT INTO insp_plan_items
+            (plan_id,site_id,template_id,item_name,frequency,result)
+            VALUES (10,1,3,'电表照片','monthly','normal')""")
+        before = {'2026-07-28': {'sites': [1], 'inspection_items': {'1': [1, 2]}}}
+        after = {'2026-07-28': {'sites': [1], 'inspection_items': {'1': [1]}}}
+        self.db.execute("""UPDATE plan_schedules SET schedule_type='monthly',
+            previous_plan_data=?,plan_data=? WHERE id=5""", (json.dumps(before), json.dumps(after)))
+        schedule = self.db.execute('SELECT * FROM plan_schedules WHERE id=5').fetchone()
+        for _ in range(2):
+            app_module._ps_rebuild_tasks_on_change(self.db, schedule)
+        rows = self.db.execute('SELECT item_name,result,execution_status FROM insp_plan_items ORDER BY id').fetchall()
+        self.assertEqual([tuple(row) for row in rows], [
+            ('仪表读数', 'normal', 'active'), ('电表照片', 'normal', 'cancelled')])
+
+    def test_explicit_empty_selection_does_not_restore_monthly_items(self):
+        self.db.execute("UPDATE inspection_templates SET frequency='monthly'")
+        self.db.execute("UPDATE insp_plan_items SET template_id=3,item_name='仪表读数'")
+        before = {'2026-07-28': {'sites': [1], 'inspection_items': {'1': [1]}}}
+        after = {'2026-07-28': {'sites': [1], 'inspection_items': {'1': []}}}
+        self.db.execute("""UPDATE plan_schedules SET schedule_type='monthly',
+            previous_plan_data=?,plan_data=? WHERE id=5""", (json.dumps(before), json.dumps(after)))
+        schedule = self.db.execute('SELECT * FROM plan_schedules WHERE id=5').fetchone()
+        for _ in range(2):
+            app_module._ps_rebuild_tasks_on_change(self.db, schedule)
+        self.assertEqual([tuple(row) for row in self.db.execute('SELECT result,execution_status FROM insp_plan_items')],
+                         [('normal', 'cancelled')])
+
     def test_change_adds_new_site_to_started_execution_package(self):
         schedule = self.db.execute('SELECT * FROM plan_schedules WHERE id=5').fetchone()
         result = app_module._ps_rebuild_tasks_on_change(self.db, schedule)

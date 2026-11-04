@@ -144,11 +144,11 @@ const MONITORING_FIELDS = [
 ];
 
 export const CYCLE_STATUS_META = {
-  pending: { label: '结果形成中', color: 'blue' },
-  complete: { label: '结果完整', color: 'green' },
-  incomplete: { label: '结果缺项', color: 'orange' },
-  review_required: { label: '结果待核对', color: 'red' },
-  not_configured: { label: '结果条件未配置', color: 'default' },
+  pending: { label: '按因子展示', color: 'default' },
+  complete: { label: '按因子展示', color: 'default' },
+  incomplete: { label: '按因子展示', color: 'default' },
+  review_required: { label: '按因子展示', color: 'default' },
+  not_configured: { label: '监测因子未配置', color: 'default' },
 };
 
 const CYCLE_UNAVAILABLE_META = {
@@ -156,7 +156,7 @@ const CYCLE_UNAVAILABLE_META = {
   time_configuration_missing: {
     label: '时间配置未完成',
     color: 'default',
-    description: '周期完整性暂无法判定',
+    description: '不影响已有有效测量值展示',
   },
   no_evaluable_period: { label: '暂无可评价时段', color: 'default' },
 };
@@ -168,38 +168,11 @@ export const COMMUNICATION_STATUS_META = {
   not_connected: { label: '未接入', color: 'default' },
 };
 
-function completeCycleSourceView(cycle) {
-  if (cycle.status !== 'complete') return null;
-  const valueFactors = Array.isArray(cycle.factors)
-    ? cycle.factors.filter((factor) => factor?.status === 'value') : [];
-  const realtimeCount = valueFactors.filter(
-    (factor) => factor.source_type === 'realtime_observation',
-  ).length;
-  if (cycle.reason_code === 'no_evaluable_period'
-      || (valueFactors.length > 0 && realtimeCount === valueFactors.length)) {
-    return {
-      label: '实时结果齐全',
-      color: 'blue',
-      description: '正式周期尚未形成',
-    };
-  }
-  if (realtimeCount > 0) {
-    return {
-      label: '结果来源混合',
-      color: 'gold',
-      description: '当前周期含实时结果，不能视为正式周期完整',
-    };
-  }
-  return null;
-}
-
 export function cycleStatusView(cycle = {}) {
-  const sourceView = completeCycleSourceView(cycle);
-  if (sourceView) return sourceView;
   if (cycle.status === 'not_configured' && CYCLE_UNAVAILABLE_META[cycle.reason_code]) {
     return CYCLE_UNAVAILABLE_META[cycle.reason_code];
   }
-  return CYCLE_STATUS_META[cycle.status] || { label: '周期状态待确认', color: 'default' };
+  return CYCLE_STATUS_META[cycle.status] || { label: '按因子展示', color: 'default' };
 }
 
 export function communicationStatusView(communication = {}) {
@@ -369,34 +342,88 @@ export function formatMonitoringTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
 }
 
-export function monitoringLatestResults(factors = [], values = [], cycle = {}) {
+export function monitoringLatestResults(factors = [], values = []) {
   const byMetric = new Map(values.map(item => [item.business_metric, item]));
-  const cycleFactors = new Map((cycle?.factors || []).map(item => [item.business_metric, item]));
   const times = values.map(item => item.observed_at);
   const commonTime = times.length && times.every(time => time && time === times[0]) ? times[0] : null;
   return { commonTime, items: factors.map(factor => {
     const value = byMetric.get(factor.business_metric);
-    const diagnostic = cycleFactors.get(factor.business_metric) || {};
-    const conflict = value?.status === 'review_required';
-    const fault = factor.state === 'fault';
-    const reasonCode = factor.reason_code || diagnostic.reason_code;
-    const samplingTimeIssue = reasonCode === 'business_time_outside_schedule';
-    const stale = diagnostic.reason_code === 'stale_observation';
-    const hasValue = Boolean(value && !conflict && value.standard_value != null);
-    const statusLabel = conflict ? '待核对'
-      : samplingTimeIssue ? (hasValue ? '采样时点异常 · 历史值' : '采样时点异常 · 待核对')
-        : fault ? (hasValue ? '故障 · 历史值' : '故障')
-      : stale ? '历史值' : !hasValue ? (factor.state === 'pending' ? '等待结果' : '缺失') : '';
+    const fault = factor.state === 'fault'
+      && factor.reason_code !== 'business_time_outside_schedule';
+    const hasValue = Boolean(value && value.standard_value != null);
+    const statusLabel = fault
+      ? (hasValue ? '存在故障值 · 最近有效值' : '存在故障值')
+      : !hasValue ? '暂无有效观测' : '';
     return {
       ...factor,
       ...value,
       hasValue,
       statusLabel,
-      statusReason: samplingTimeIssue ? (factor.reason || diagnostic.reason || '') : '',
-      statusObservedAt: samplingTimeIssue
-        ? (factor.issue_observed_at || diagnostic.observed_at || null) : null,
+      statusReason: fault ? (factor.reason || '') : '',
+      statusObservedAt: fault ? (factor.issue_observed_at || null) : null,
     };
   }) };
+}
+
+function latestTimestamp(values, field) {
+  const timestamps = values
+    .map((item) => ({ raw: item?.[field], time: new Date(item?.[field]).getTime() }))
+    .filter((item) => item.raw && Number.isFinite(item.time));
+  return timestamps.sort((left, right) => right.time - left.time)[0] || null;
+}
+
+export function monitoringResultSummary({
+  latestValues = [], latestCycle = {}, reportingCondition = 'normal', lastReceivedAt = null,
+} = {}) {
+  const hasValues = latestValues.some((item) => item?.standard_value != null);
+  if (reportingCondition === 'no_upload_condition') {
+    return {
+      cycleLabel: hasValues ? '历史结果' : '',
+      cycleColor: 'default',
+      notice: null,
+      emptyDescription: hasValues ? '' : '当前不要求上传，且暂无历史有效测量结果',
+      showingHistoricalValues: hasValues,
+    };
+  }
+  const latestValueReceipt = latestTimestamp(latestValues, 'received_at');
+  const latestCommunication = lastReceivedAt
+    ? { raw: lastReceivedAt, time: new Date(lastReceivedAt).getTime() } : null;
+  const newerFramePending = hasValues && latestValueReceipt && latestCommunication
+    && Number.isFinite(latestCommunication.time)
+    && latestCommunication.time > latestValueReceipt.time;
+  if (newerFramePending) {
+    return {
+      cycleLabel: '当前显示历史值',
+      cycleColor: 'gold',
+      notice: {
+        type: 'info',
+        message: '已收到新报文，当前显示历史测量结果',
+        description: `最新报文接收于 ${formatMonitoringTime(lastReceivedAt)}；当前有效值对应的接收时间为 ${formatMonitoringTime(latestValueReceipt.raw)}。`,
+      },
+      emptyDescription: '',
+      showingHistoricalValues: true,
+    };
+  }
+  if (!hasValues && lastReceivedAt && latestCycle.status !== 'not_configured') {
+    return {
+      cycleLabel: '尚无有效测量值',
+      cycleColor: 'blue',
+      notice: {
+        type: 'info',
+        message: '已收到报文，尚无有效测量值',
+        description: `最新报文接收于 ${formatMonitoringTime(lastReceivedAt)}；当前没有可作为测量结果展示的有效值。`,
+      },
+      emptyDescription: '已收到报文，但尚无可展示的有效测量结果',
+      showingHistoricalValues: false,
+    };
+  }
+  return {
+    cycleLabel: '',
+    cycleColor: 'default',
+    notice: null,
+    emptyDescription: '当前站点暂无可展示的有效测量结果',
+    showingHistoricalValues: false,
+  };
 }
 
 export function capabilityLabel(enabled) {
@@ -446,6 +473,7 @@ export function monitoringTrendView(payload, { loading = false, error = '' } = {
     error,
     unit: payload?.standard_unit || items.find((item) => item.unit)?.unit || '',
     factorName: payload?.factor_name_cn || '',
+    aggregationSource: coverage.aggregation_source || '',
     windowStart: coverage.window_start || null,
     windowEnd: coverage.window_end || null,
     coverageRate: Number.isFinite(coverage.coverage_rate) ? coverage.coverage_rate : null,
@@ -460,15 +488,35 @@ export function monitoringTrendView(payload, { loading = false, error = '' } = {
     conflictSlots: Number.isFinite(coverage.conflict_slots) ? coverage.conflict_slots : 0,
     hasMore: pagination.has_more === true,
     nextCursor: pagination.next_cursor || null,
-    emptyReason: '当前因子在所选时间内暂无结果',
+    emptyReason: '当前因子在所选时间内暂无小时取样值',
   };
 }
 
 export function monitoringCoverageLabel(trend) {
-  if (trend.coverageRate == null || trend.validPoints == null || trend.expectedPoints == null) {
-    return '周期未配置';
-  }
-  return `${(trend.coverageRate * 100).toFixed(1)}% (${trend.validPoints}/${trend.expectedPoints})`;
+  return trend?.aggregationSource === 'hourly_sample' ? '小时取样值' : '按测量时间展示';
+}
+
+export function monitoringHourlySeriesData(items = []) {
+  const ordered = [...items].sort((left, right) => (
+    new Date(left.observed_at || left.scheduled_at).getTime()
+    - new Date(right.observed_at || right.scheduled_at).getTime()
+  ));
+  const result = [];
+  let previousHour = null;
+  ordered.forEach((item) => {
+    const hour = new Date(item.sample_hour || item.hour_start || item.scheduled_at).getTime();
+    if (Number.isFinite(previousHour) && Number.isFinite(hour) && hour - previousHour > 60 * 60 * 1000) {
+      result.push([new Date(previousHour + 60 * 60 * 1000).toISOString(), null]);
+    }
+    const point = [
+      item.observed_at || item.scheduled_at,
+      !item.status || item.status === 'value' ? item.value : null,
+    ];
+    if (item.received_at) point.push(item.received_at);
+    result.push(point);
+    previousHour = Number.isFinite(hour) ? hour : previousHour;
+  });
+  return result;
 }
 
 export function monitoringTrendChartOption(trend) {
@@ -482,20 +530,18 @@ export function monitoringTrendChartOption(trend) {
         if (!point?.data) return '';
         const time = formatMonitoringTime(point.data[0]);
         const value = point.data[1] == null ? '缺失' : `${point.data[1]}${trend.unit ? ` ${trend.unit}` : ''}`;
-        return `${time}<br/>${trend.factorName || '监测结果'}：${value}`;
+        const received = point.data[2] ? `<br/>接收时间：${formatMonitoringTime(point.data[2])}` : '';
+        return `测量时间：${time}${received}<br/>${trend.factorName || '监测结果'}小时取样值：${value}`;
       },
     },
     xAxis: {
-      type: 'time', name: '结果时间', nameLocation: 'middle', nameGap: 32,
+      type: 'time', name: '测量时间', nameLocation: 'middle', nameGap: 32,
       axisLabel: { hideOverlap: true, formatter: '{MM}-{dd} {HH}:{mm}' },
     },
     yAxis: { type: 'value', name: trend.unit || '数值', scale: false },
     series: [{
-      type: 'line', name: trend.factorName || '有效观测', showSymbol: trend.items.length < 80,
-      connectNulls: false, data: trend.items.map((item) => [
-        item.observed_at || item.scheduled_at,
-        !item.status || item.status === 'value' ? item.value : null,
-      ]),
+      type: 'line', name: `${trend.factorName || '监测结果'}小时取样值`, showSymbol: trend.items.length < 80,
+      connectNulls: false, data: monitoringHourlySeriesData(trend.items),
     }],
   };
 }

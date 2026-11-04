@@ -88,7 +88,8 @@ function initializeInspectionItemSelections(days, options, scheduleType = 'weekl
       const key = String(siteId);
       if (!(key in selected) && options && Object.prototype.hasOwnProperty.call(options, siteId)) {
         selected[key] = (options && options[siteId] || [])
-          .filter(item => !item.frequency || item.frequency === scheduleType)
+          .filter(item => !item.frequency || item.frequency === scheduleType
+            || (scheduleType === 'weekly' && item.frequency === 'monthly'))
           .map(item => Number(item.id));
       }
     });

@@ -25,6 +25,7 @@ import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { listLastPage } from '../../utils/listPagination';
 import ReportsPage from '../reports/ReportsPage';
 
 const { Text } = Typography;
@@ -131,6 +132,78 @@ export async function executeNoActionClose({
   return { response, committedOrder, detail, refreshFailures };
 }
 
+export async function loadWorkorderDetailBundle({
+  orderNo, fallbackOrder, loadDetail, loadRelated, loadPhotos,
+}) {
+  const relatedPromise = Promise.resolve().then(() => loadRelated(orderNo));
+  const photoPromise = Promise.resolve().then(() => loadPhotos(orderNo));
+  const detailResult = await Promise.resolve()
+    .then(() => loadDetail(orderNo))
+    .then((value) => ({ status: 'fulfilled', value }))
+    .catch((reason) => ({ status: 'rejected', reason }));
+  const errors = [];
+  const detail = detailResult.status === 'fulfilled' && detailResult.value
+    ? detailResult.value
+    : fallbackOrder;
+  if (detailResult.status === 'rejected') errors.push('最新工单信息');
+  const auxiliaryPromise = Promise.allSettled([relatedPromise, photoPromise]).then(
+    ([relatedResult, photoResult]) => ({
+      related: relatedResult.status === 'fulfilled' ? relatedResult.value : null,
+      photos: photoResult.status === 'fulfilled' ? photoResult.value : null,
+      errors: [
+        ...(relatedResult.status === 'rejected' ? ['关联业务'] : []),
+        ...(photoResult.status === 'rejected' ? ['处置影像'] : []),
+      ],
+    }),
+  );
+  return {
+    detail,
+    detailError: detailResult.status === 'rejected' ? detailResult.reason : null,
+    errors,
+    auxiliaryPromise,
+  };
+}
+
+export function createWorkorderDetailRequestGuard() {
+  let current = 0;
+  return {
+    begin: () => {
+      current += 1;
+      return current;
+    },
+    invalidate: () => {
+      current += 1;
+    },
+    isCurrent: (requestId) => requestId === current,
+  };
+}
+
+export function shouldShowEndWithoutProcessingBlock(order) {
+  const status = String(order?.status || '').toLowerCase();
+  return Boolean(
+    order
+    && !order.can_end_without_processing
+    && order.end_without_processing_block_reason
+    && !['closed', 'resolved'].includes(status),
+  );
+}
+
+export function buildWorkorderListRequest(searchString = '') {
+  const activeParams = new URLSearchParams(searchString);
+  const page = Math.max(1, Number(activeParams.get('page') || 1));
+  const pageSize = Math.max(1, Math.min(Number(activeParams.get('page_size') || 20), 100));
+  const query = new URLSearchParams({
+    paginated: '1',
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  ['search', 'assignee', 'level', 'status'].forEach((key) => {
+    const value = activeParams.get(key);
+    if (value) query.set(key, value);
+  });
+  return { path: `/workorders?${query.toString()}`, page, pageSize };
+}
+
 export default function WorkOrdersPage() {
   const { tokens, isDark } = useTheme();
   const { user } = useAuth();
@@ -173,6 +246,9 @@ export default function WorkOrdersPage() {
   const [loading, setLoading] = useState(false);
   const [ordersLoaded, setOrdersLoaded] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [page, setPage] = useState(Math.max(1, Number(searchParams.get('page') || 1)));
+  const [pageSize, setPageSize] = useState(Math.max(1, Number(searchParams.get('page_size') || 20)));
+  const [totalOrders, setTotalOrders] = useState(0);
 
   // Filter state - initialize from URL params
   const [search, setSearch] = useState(searchParams.get('search') || '');
@@ -189,6 +265,7 @@ export default function WorkOrdersPage() {
   const [viewingOrder, setViewingOrder] = useState(null);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewError, setViewError] = useState('');
+  const [viewUnavailable, setViewUnavailable] = useState(null);
   const [relatedData, setRelatedData] = useState({ parts: [], recycles: [] });
   const [operationPhotos, setOperationPhotos] = useState([]);
   const [noActionOpen, setNoActionOpen] = useState(false);
@@ -196,6 +273,11 @@ export default function WorkOrdersPage() {
   const [noActionLoading, setNoActionLoading] = useState(false);
   const [noActionRefreshOrderNo, setNoActionRefreshOrderNo] = useState('');
   const focusedOrderRef = useRef('');
+  const orderListRequestRef = useRef(0);
+  const detailRequestGuardRef = useRef(null);
+  if (!detailRequestGuardRef.current) {
+    detailRequestGuardRef.current = createWorkorderDetailRequestGuard();
+  }
 
   // Spare part request from work order
   const [partReqOpen, setPartReqOpen] = useState(false);
@@ -213,15 +295,43 @@ export default function WorkOrdersPage() {
 
   // 拉取工单列表
   const fetchOrders = useCallback(async (options = {}) => {
+    const requestId = ++orderListRequestRef.current;
     const throwOnError = options?.throwOnError === true;
+    const request = buildWorkorderListRequest(location.search);
+    const requestedPage = request.page;
+    const requestedPageSize = request.pageSize;
+    let correctingPage = false;
     setLoading(true);
     setLoadError('');
     try {
-      const data = await api.getStrict('/workorders');
-      const list = Array.isArray(data) ? data : [];
+      const data = await api.getStrict(request.path);
+      if (requestId !== orderListRequestRef.current) return;
+      const list = Array.isArray(data) ? data : (data?.items || []);
+      const responseTotal = Array.isArray(data) ? list.length : Number(data?.total || 0);
+      const lastPage = listLastPage(responseTotal, requestedPageSize);
+      if (responseTotal > 0 && requestedPage > lastPage) {
+        correctingPage = true;
+        setSearchParams((current) => {
+          const next = new URLSearchParams(current);
+          if (lastPage > 1) next.set('page', String(lastPage));
+          else next.delete('page');
+          return next;
+        }, { replace: true });
+        return;
+      }
       setAllOrders(list);
-      const computedCounts = {
-        total: list.length,
+      const responseCounts = Array.isArray(data) ? null : (data?.counts || {});
+      const computedCounts = responseCounts ? {
+        total: responseTotal,
+        pending: Number(responseCounts.pending || 0),
+        accepted: Number(responseCounts.accepted || 0),
+        generated: Number(responseCounts.generated || 0),
+        dispatched: Number(responseCounts.dispatched || 0),
+        in_progress: Number(responseCounts.in_progress || 0),
+        reviewing: Number(responseCounts.reviewing || 0),
+        closed: Number(responseCounts.closed || 0) + Number(responseCounts.resolved || 0),
+      } : {
+        total: responseTotal,
         pending: 0,
         accepted: 0,
         generated: 0,
@@ -230,16 +340,24 @@ export default function WorkOrdersPage() {
         reviewing: 0,
         closed: 0,
       };
-      list.forEach(o => { if (computedCounts[o.status] !== undefined) computedCounts[o.status]++; });
+      if (!responseCounts) {
+        list.forEach(o => { if (computedCounts[o.status] !== undefined) computedCounts[o.status]++; });
+      }
       setCounts(computedCounts);
+      setTotalOrders(responseTotal);
+      setPage(Array.isArray(data) ? requestedPage : Number(data?.page || requestedPage));
+      setPageSize(Array.isArray(data) ? requestedPageSize : Number(data?.page_size || requestedPageSize));
     } catch (error) {
+      if (requestId !== orderListRequestRef.current) return;
       setLoadError(error.message || '工单列表加载失败');
       if (throwOnError) throw error;
     } finally {
-      setLoading(false);
-      setOrdersLoaded(true);
+      if (requestId === orderListRequestRef.current && !correctingPage) {
+        setLoading(false);
+        setOrdersLoaded(true);
+      }
     }
-  }, []);
+  }, [location.search, setSearchParams]);
 
   // Counts state
   const [counts, setCounts] = useState({
@@ -367,34 +485,28 @@ export default function WorkOrdersPage() {
     fetchOrders();
   }, [location.search, fetchOrders]);
 
-  // Client-side filtering
-  const filteredOrders = useMemo(() => {
-    let list = allOrders;
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter((o) =>
-        (o.order_no && o.order_no.toLowerCase().includes(q)) ||
-        (o.title && o.title.toLowerCase().includes(q)) ||
-        (o.site_name && o.site_name.toLowerCase().includes(q))
-      );
-    }
-    if (levelFilter) {
-      list = list.filter((o) => o.level === levelFilter);
-    }
-    if (assigneeFilter) {
-      list = list.filter((o) => o.assignee === assigneeFilter);
-    }
-    if (statusFilter) {
-      list = list.filter((o) => o.status === statusFilter);
-    }
-    return list;
-  }, [allOrders, search, levelFilter, statusFilter, assigneeFilter]);
+  const hasActiveFilters = Boolean(search || assigneeFilter || levelFilter || statusFilter);
+  const tablePagination = useMemo(() => ({
+    current: page,
+    pageSize,
+    total: totalOrders,
+    showSizeChanger: true,
+    pageSizeOptions: [20, 50, 100],
+    onChange: (nextPage, nextPageSize) => {
+      const next = new URLSearchParams(searchParams);
+      const sizeChanged = nextPageSize !== pageSize;
+      next.set('page', String(sizeChanged ? 1 : nextPage));
+      next.set('page_size', String(nextPageSize));
+      setSearchParams(next, { replace: true });
+    },
+  }), [page, pageSize, searchParams, setSearchParams, totalOrders]);
 
   const handleSearch = (value) => {
     setSearch(value);
     const next = new URLSearchParams(searchParams);
     if (value) next.set('search', value);
     else next.delete('search');
+    next.delete('page');
     setSearchParams(next, { replace: true });
   };
 
@@ -403,6 +515,7 @@ export default function WorkOrdersPage() {
     const next = new URLSearchParams(searchParams);
     if (value) next.set('level', value);
     else next.delete('level');
+    next.delete('page');
     setSearchParams(next, { replace: true });
   };
 
@@ -411,6 +524,7 @@ export default function WorkOrdersPage() {
     const next = new URLSearchParams(searchParams);
     if (value) next.set('status', value);
     else next.delete('status');
+    next.delete('page');
     setSearchParams(next, { replace: true });
   };
 
@@ -418,6 +532,7 @@ export default function WorkOrdersPage() {
     setAssigneeFilter('');
     const next = new URLSearchParams(searchParams);
     next.delete('assignee');
+    next.delete('page');
     setSearchParams(next, { replace: true });
   };
 
@@ -427,7 +542,7 @@ export default function WorkOrdersPage() {
     setLevelFilter(undefined);
     setStatusFilter(undefined);
     const next = new URLSearchParams(searchParams);
-    ['search', 'assignee', 'level', 'status'].forEach((key) => next.delete(key));
+    ['search', 'assignee', 'level', 'status', 'page'].forEach((key) => next.delete(key));
     setSearchParams(next, { replace: true });
   };
 
@@ -516,32 +631,50 @@ export default function WorkOrdersPage() {
   };
 
   const handleView = async (record) => {
+    const requestId = detailRequestGuardRef.current.begin();
     setViewOpen(true);
     setViewingOrder(record);
     setViewLoading(true);
     setViewError('');
+    setViewUnavailable(null);
     setRelatedData({ parts: [], recycles: [] });
     setOperationPhotos([]);
     const orderNo = record.order_no;
     if (orderNo) {
-      const [freshResult, relatedResult, photoResult] = await Promise.allSettled([
-        api.getStrict('/workorders'),
-        api.getStrict(`/workorders/${orderNo}/related`),
-        api.getStrict(`/workorders/${orderNo}/photos`),
-      ]);
-      const errors = [];
-      if (freshResult.status === 'fulfilled') {
-        const fresh = (Array.isArray(freshResult.value) ? freshResult.value : []).find(o => o.order_no === orderNo);
-        setViewingOrder(fresh || record);
-      } else errors.push('最新工单信息');
-      if (relatedResult.status === 'fulfilled') {
-        const relData = relatedResult.value;
-        if (relData) {
-          setRelatedData({ parts: relData.parts || [], recycles: relData.recycles || [] });
-        }
-      } else errors.push('关联业务');
-      if (photoResult.status === 'fulfilled') {
-        const photoData = photoResult.value;
+      const result = await loadWorkorderDetailBundle({
+        orderNo,
+        fallbackOrder: record,
+        loadDetail: (value) => api.getStrict(`/workorders/${value}`),
+        loadRelated: (value) => api.getStrict(`/workorders/${value}/related`),
+        loadPhotos: (value) => api.getStrict(`/workorders/${value}/photos`),
+      });
+      if (!detailRequestGuardRef.current.isCurrent(requestId)) return;
+      if (result.detailError?.status === 404 || result.detailError?.status === 403) {
+        setViewingOrder(null);
+        setViewUnavailable({
+          orderNo,
+          status: result.detailError.status,
+          message: result.detailError.message,
+        });
+        setViewLoading(false);
+        return;
+      }
+      setViewingOrder(result.detail);
+      setViewLoading(false);
+      if (result.errors.length) {
+        setViewError(`${result.errors.join('、')}加载失败，当前详情可能不完整。`);
+      }
+
+      const auxiliary = await result.auxiliaryPromise;
+      if (!detailRequestGuardRef.current.isCurrent(requestId)) return;
+      if (auxiliary.related) {
+        setRelatedData({
+          parts: auxiliary.related.parts || [],
+          recycles: auxiliary.related.recycles || [],
+        });
+      }
+      if (auxiliary.photos) {
+        const photoData = auxiliary.photos;
         if (photoData) {
           const allPhotos = [];
           if (photoData.item_progress && Array.isArray(photoData.item_progress)) {
@@ -561,10 +694,13 @@ export default function WorkOrdersPage() {
           }
           setOperationPhotos(allPhotos);
         }
-      } else errors.push('处置影像');
-      if (errors.length) setViewError(`${errors.join('、')}加载失败，当前详情可能不完整。`);
+      }
+      const allErrors = [...result.errors, ...auxiliary.errors];
+      if (allErrors.length) {
+        setViewError(`${allErrors.join('、')}加载失败，当前详情可能不完整。`);
+      }
     }
-    setViewLoading(false);
+    if (detailRequestGuardRef.current.isCurrent(requestId)) setViewLoading(false);
   };
 
   useEffect(() => {
@@ -576,8 +712,7 @@ export default function WorkOrdersPage() {
     if (sourceView || loading || !ordersLoaded || focusedOrderRef.current === orderNo) return;
     const target = allOrders.find((order) => String(order.order_no) === String(orderNo));
     focusedOrderRef.current = orderNo;
-    if (target) handleView(target);
-    else message.info(`工单 ${orderNo} 不存在、无权查看或已不在当前范围`);
+    handleView(target || { order_no: orderNo });
   }, [allOrders, loading, message, ordersLoaded, searchParams, sourceView]);
 
   // 服务端事件是流程事实；缺失时只显示有限状态，不推断未发生的节点。
@@ -941,15 +1076,17 @@ export default function WorkOrdersPage() {
           <FilterField label="级别"><Select aria-label="级别" placeholder="全部级别" allowClear value={levelFilter} onChange={(value) => handleLevelChange(listFilterValue(value))} style={{ width: filterSmallSelectWidth }} options={listFilterOptions('全部级别', levelOptions)} /></FilterField>
           <FilterField label="状态"><Select aria-label="状态" placeholder="全部状态" allowClear value={statusFilter} onChange={(value) => handleStatusChange(listFilterValue(value))} style={{ width: filterSelectWidth }} options={listFilterOptions('全部状态', statusOptions)} /></FilterField>
           {assigneeFilter && <ToolbarMeta label="负责人"><Tag closable onClose={handleAssigneeClear}>{assigneeFilter}</Tag></ToolbarMeta>}
-          {(search || assigneeFilter || levelFilter || statusFilter) && <ToolbarMeta label="当前结果">已筛选 {filteredOrders.length} 条</ToolbarMeta>}
+          <ToolbarMeta label={hasActiveFilters ? '当前筛选' : '当前范围'}>
+            共 {totalOrders} 条，第 {totalOrders ? page : 0}/{totalOrders ? Math.ceil(totalOrders / pageSize) : 0} 页
+          </ToolbarMeta>
         </WorkspaceToolbar>
       )}
     >
       {/* Table */}
       {loadError && !loading
         ? <WorkspaceEmpty type="error" description="工单列表加载失败，当前不能判断是否没有工单。" onRefresh={fetchOrders} />
-        : <WorkspaceTable columns={columns} dataSource={filteredOrders} rowKey={(r) => r.order_no || r.id}
-            loading={loading} emptyType={(search || assigneeFilter || levelFilter || statusFilter) ? 'filtered' : 'empty'} onRefresh={fetchOrders} />}
+        : <WorkspaceTable columns={columns} dataSource={allOrders} rowKey={(r) => r.order_no || r.id}
+            loading={loading} pagination={tablePagination} emptyType={hasActiveFilters ? 'filtered' : 'empty'} onRefresh={fetchOrders} />}
 
       {/* Create Modal */}
       <Modal
@@ -1034,10 +1171,25 @@ export default function WorkOrdersPage() {
           </Space>
         }
         open={viewOpen}
-        onClose={() => { setViewOpen(false); setViewingOrder(null); setNoActionRefreshOrderNo(''); }}
+        onClose={() => {
+          detailRequestGuardRef.current.invalidate();
+          setViewOpen(false);
+          setViewingOrder(null);
+          setViewUnavailable(null);
+          setNoActionRefreshOrderNo('');
+        }}
         width={520}
       >
-        {viewingOrder && (
+        {viewUnavailable ? (
+          <Alert
+            type="warning"
+            showIcon
+            message={viewUnavailable.status === 404 ? '工单不存在' : '无权查看该工单'}
+            description={viewUnavailable.status === 404
+              ? `未找到工单 ${viewUnavailable.orderNo}，该工单可能已不存在。请返回列表确认工单号，或从原通知重新进入。`
+              : (viewUnavailable.message || `当前账号无权查看工单 ${viewUnavailable.orderNo}。`)}
+          />
+        ) : viewingOrder && (
           <Spin spinning={viewLoading} tip="正在加载最新工单信息">
           <div>
             {viewError && <Alert
@@ -1168,6 +1320,16 @@ export default function WorkOrdersPage() {
                   无需处理，提前结束
                 </Button>
               </div>
+            )}
+
+            {shouldShowEndWithoutProcessingBlock(viewingOrder) && (
+              <Alert
+                style={{ marginTop: 16 }}
+                type="info"
+                showIcon
+                message="当前不能提前结束"
+                description={viewingOrder.end_without_processing_block_reason}
+              />
             )}
 
             <div style={{ marginTop: 24 }}>

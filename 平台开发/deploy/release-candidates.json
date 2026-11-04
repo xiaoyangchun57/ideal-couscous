@@ -1,11 +1,10 @@
 {
   "schema_version": 1,
-  "release_line": "cross-module-freeze",
+  "release_line": "integrated-photo-list-hourly-governance",
   "candidate_tags": [
-    "release-20261101-web-ops-r31"
+    "release-20261104-integrated-repair-r32"
   ],
   "historical_tags": [
-    "release-20261029-governance-offline-r29",
     "release-20261022-retention-maintenance-r29",
     "release-20261022-station-result-chain-fix1-r29",
     "release-20261021-station-data-closure-r29",
@@ -40,6 +39,8 @@
     "release-20261019-cross-module-freeze-v3-r26",
     "release-20261019-cross-module-freeze-v4-r26",
     "release-20261020-miniprogram-backend-compat-r27",
-    "release-20261021-station-data-closure-r28"
+    "release-20261021-station-data-closure-r28",
+    "release-20261029-governance-offline-r29",
+    "release-20261101-web-ops-r31"
   ]
 }

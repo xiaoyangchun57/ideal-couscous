@@ -151,8 +151,10 @@ async function main() {
     assert.equal(firstUpload.metadata.capture_frame_ratio, '3:4');
     assert.equal(firstUpload.metadata.capture_frame_mode, 'center_cover');
     assert.equal(firstUpload.metadata.display_watermark, false);
-    assert.equal(firstUpload.metadata.gps_lat, 28.071303);
-    assert.equal(firstUpload.metadata.gps_lng, 115.539684);
+    assert.equal(Object.hasOwn(firstUpload.metadata, 'gps_lat'), false,
+      'the client cannot restate or override the server-owned check-in latitude');
+    assert.equal(Object.hasOwn(firstUpload.metadata, 'gps_lng'), false,
+      'the client cannot restate or override the server-owned check-in longitude');
     assert.ok(firstUpload.metadata.taken_at);
     retryPage.onRetryWorkorderPhoto();
     await flush();

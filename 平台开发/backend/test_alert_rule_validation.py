@@ -3,7 +3,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import time
 from contextlib import contextmanager
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 import app as app_module
@@ -16,6 +18,8 @@ class AlertRuleValidationTest(unittest.TestCase):
         self.db_path = handle.name
         self.original_get_db = app_module.get_db
         self.original_tokens = dict(app_module._tokens)
+        self.original_rules_cache = app_module._alert_rules_cache
+        self.original_rules_cache_time = app_module._alert_rules_cache_time
 
         @contextmanager
         def temporary_db():
@@ -69,6 +73,8 @@ class AlertRuleValidationTest(unittest.TestCase):
         app_module.get_db = self.original_get_db
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
+        app_module._alert_rules_cache = self.original_rules_cache
+        app_module._alert_rules_cache_time = self.original_rules_cache_time
         os.unlink(self.db_path)
 
     @staticmethod
@@ -107,6 +113,8 @@ class AlertRuleValidationTest(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200, deleted.json)
 
     def test_disabling_alert_rule_requires_reason_and_is_audited(self):
+        app_module._alert_rules_cache = {'data_gap': {'enabled': 1}}
+        app_module._alert_rules_cache_time = time.time()
         missing = self.client.put(
             '/api/alert-rules/rule_data_gap', headers=self.headers(), json={'enabled': False},
         )
@@ -117,10 +125,32 @@ class AlertRuleValidationTest(unittest.TestCase):
         )
         self.assertEqual(saved.status_code, 200, saved.json)
         self.assertFalse(saved.json['enabled'])
+        self.assertIsNone(app_module._alert_rules_cache)
+        self.assertEqual(app_module._alert_rules_cache_time, 0)
         with app_module.get_db() as db:
             log = db.execute("SELECT * FROM operation_logs WHERE action='disable'").fetchone()
             self.assertIsNotNone(log)
             self.assertIn('现场设备停用检修', log['details'])
+
+    def test_disabled_anomaly_rules_do_not_fall_back_to_default_thresholds(self):
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        db.execute('''CREATE TABLE sensor_data (
+            site_id INTEGER, metric TEXT, value REAL, recorded_at TEXT)''')
+        rows = [
+            (1, 'custom_metric', 5.0, f'2026-11-02 10:{index:02d}:00')
+            for index in range(12)
+        ]
+        db.executemany('INSERT INTO sensor_data VALUES (?,?,?,?)', rows)
+        with mock.patch.object(app_module, '_load_alert_rules', return_value={}), \
+                mock.patch.object(app_module, 'auto_resolve_alerts'), \
+                mock.patch.object(app_module, 'create_alert_internal') as create_alert:
+            app_module.detect_site_anomalies(
+                db, 1, 'water_quality', 'custom_metric', 5.0,
+                '2026-11-02 10:11:00',
+            )
+        create_alert.assert_not_called()
+        db.close()
 
 
 if __name__ == '__main__':

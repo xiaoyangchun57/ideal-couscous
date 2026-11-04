@@ -14,6 +14,7 @@ import {
   Spin,
   Empty,
   Tooltip,
+  Alert,
 } from 'antd';
 import {
   EnvironmentOutlined,
@@ -58,6 +59,7 @@ import { relativeTimeStr, truncate } from '../../utils/helpers';
 import OperationsTodayView from './OperationsTodayView';
 import { buildMonitoringDeviceIndex, devicesForSite } from './cockpitDevices';
 import { completenessPresentation, qualityRate } from './dataQualityPresentation';
+import { runIndependentLoads } from '../../services/independentLoads';
 import './CockpitPage.css';
 
 const { Text, Title } = Typography;
@@ -521,50 +523,68 @@ function SiteMonitoringView() {
     const requestId = ++dataRequestRef.current;
     setRefreshing(true);
     setError(null);
-    try {
-      // Fetch all data sources in parallel（阈值作为色阶数据源，一并加载）
-      const [[summary, sitesData, devicesData, healthData], thresholdsData] = await Promise.all([
-        Promise.all([
-          api.getStrict('/dashboard/summary'),
-          api.getStrict('/sites'),
-          api.getStrict('/devices/monitoring-summary'),
-          api.getStrict('/data/health?period=' + healthPeriod),
-        ]),
-        getThresholds(),
-      ]);
+    const failures = new Map();
+    const recordFailure = (key, label, failure) => {
       if (requestId !== dataRequestRef.current) return;
-      setThresholds(Array.isArray(thresholdsData) ? thresholdsData : []);
-
-      // Sites: /api/sites returns a plain array of site objects
-      const sitesList = Array.isArray(sitesData) ? sitesData : [];
-      setSites(sitesList);
-
-      // Alerts: summary.latest_alerts is the array
-      if (summary) {
-        setAlerts(Array.isArray(summary.latest_alerts) ? summary.latest_alerts : []);
-        // Work orders: summary.workorders.by_status has the status counts
-        const wo = summary.workorders || {};
-        setWorkOrders(wo.by_status || wo);
-      }
-
-      // Devices: /api/devices returns a plain array
-      setDevices(Array.isArray(devicesData) ? devicesData : []);
-
-      // Data health
-      if (healthData && healthData.total) {
-        setDataHealth(healthData);
-      }
-
-      setLastRefresh(new Date());
-    } catch (err) {
-      if (requestId === dataRequestRef.current) {
-        setError(err.message || '数据加载失败');
-      }
-    } finally {
-      if (requestId === dataRequestRef.current) {
-        setLoading(false);
-        setRefreshing(false);
-      }
+      failures.set(key, `${label}：${failure?.message || '加载失败'}`);
+      setError([...failures.values()].join('；'));
+    };
+    await runIndependentLoads([
+      {
+        key: 'sites', load: () => api.getStrict('/sites'),
+        onSuccess: (value) => {
+          if (requestId !== dataRequestRef.current) return;
+          if (!Array.isArray(value)) recordFailure('sites', '站点列表', new Error('返回格式异常'));
+          else {
+            setSites(value);
+            setLastRefresh(new Date());
+          }
+          setLoading(false);
+        },
+        onError: (failure) => {
+          recordFailure('sites', '站点列表', failure);
+          if (requestId === dataRequestRef.current) setLoading(false);
+        },
+      },
+      {
+        key: 'summary', load: () => api.getStrict('/dashboard/summary'),
+        onSuccess: (summary) => {
+          if (requestId !== dataRequestRef.current) return;
+          setAlerts(Array.isArray(summary?.latest_alerts) ? summary.latest_alerts : []);
+          const workorderSummary = summary?.workorders || {};
+          setWorkOrders(workorderSummary.by_status || workorderSummary);
+        },
+        onError: (failure) => recordFailure('summary', '告警与工单摘要', failure),
+      },
+      {
+        key: 'devices', load: () => api.getStrict('/devices/monitoring-summary'),
+        onSuccess: (value) => {
+          if (requestId !== dataRequestRef.current) return;
+          if (Array.isArray(value)) setDevices(value);
+          else recordFailure('devices', '设备状态', new Error('返回格式异常'));
+        },
+        onError: (failure) => recordFailure('devices', '设备状态', failure),
+      },
+      {
+        key: 'health', load: () => api.getStrict('/data/health?period=' + healthPeriod),
+        onSuccess: (value) => {
+          if (requestId !== dataRequestRef.current) return;
+          setDataHealth(value && value.total ? value : null);
+        },
+        onError: (failure) => recordFailure('health', '数据健康度', failure),
+      },
+      {
+        key: 'thresholds', load: () => getThresholds(),
+        onSuccess: (value) => {
+          if (requestId !== dataRequestRef.current) return;
+          setThresholds(Array.isArray(value) ? value : []);
+        },
+        onError: (failure) => recordFailure('thresholds', '监测阈值', failure),
+      },
+    ]);
+    if (requestId === dataRequestRef.current) {
+      setLoading(false);
+      setRefreshing(false);
     }
   }, [healthPeriod]);
 
@@ -840,6 +860,9 @@ function SiteMonitoringView() {
       '--cockpit-popup-shadow': isDark ? '0 4px 20px rgba(0,0,0,0.4)' : '0 4px 20px rgba(0,0,0,0.12)',
       '--cockpit-popup-close-color': isDark ? '#6db8d8' : tokens.colorTextTertiary,
     }}>
+      {error && sites.length > 0 && <div style={{ position: 'absolute', top: 56, right: 12, zIndex: 1100, maxWidth: 460 }}>
+        <Alert type="warning" showIcon message="部分驾驶舱数据未更新" description={error} />
+      </div>}
       {/* ===== Full-screen Leaflet Map ===== */}
       <MapContainer
         center={DEFAULT_CENTER}

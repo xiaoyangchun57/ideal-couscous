@@ -12,15 +12,20 @@ test('web navigation exposes the confirmed read pages without opening admin-only
   assert.match(navigation, /'\/alerts': \['admin', 'reviewer', 'operator'\]/);
   assert.match(navigation, /'\/analysis': \['admin', 'reviewer', 'operator'\]/);
   assert.match(navigation, /'\/reports': \['admin', 'reviewer', 'operator'\]/);
+  assert.match(navigation, /children: \['\/workorders', '\/plan-schedules', '\/audit'\]/);
+  assert.match(navigation, /path !== '\/reports'/);
   assert.match(navigation, /'\/vehicles': \['admin', 'operator'\]/);
   assert.match(navigation, /'\/equipment': \['admin'\]/);
   assert.match(navigation, /'\/users': \['admin'\]/);
 });
 
-test('operator alert entry stays read-only and does not expose rule configuration', () => {
+test('alert and site daily pages do not expose the paused rule configuration', () => {
   const alerts = source('./pages/alerts/AlertsPage.jsx');
+  const sites = source('./pages/sites/SitesPage.jsx');
   assert.match(alerts, /const canManage = roles\.includes\('admin'\)/);
-  assert.match(alerts, /ALERT_TABS\.filter\(\(tab\) => tab\.key !== 'rules' && tab\.key !== 'thresholds'\)/);
+  assert.doesNotMatch(alerts, /label: '规则配置'/);
+  assert.doesNotMatch(sites, />告警规则<\/Button>/);
+  assert.doesNotMatch(sites, /moduleView === 'alert-rules'/);
   assert.match(alerts, /const scope = canViewAllSites \? 'all' : 'mine'/);
   assert.match(alerts, /rowSelection=\{canManage \? rowSelection : undefined\}/);
 });

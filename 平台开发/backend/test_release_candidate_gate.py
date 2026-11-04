@@ -8,7 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'deploy' / 'verify_release_candidate.py'
 MANIFEST = ROOT / 'deploy' / 'release-candidates.json'
 HISTORICAL_TAGS = (
-    'release-20261029-governance-offline-r29',
     'release-20261021-station-data-closure-r29',
     'release-20261027-governance-station-combined-r29',
     'release-20260810-cross-module-freeze',
@@ -40,7 +39,7 @@ HISTORICAL_TAGS = (
     'release-20261020-miniprogram-backend-compat-r27',
     'release-20261021-station-data-closure-r28',
 )
-CURRENT_CANDIDATE = 'release-20261101-web-ops-r31'
+CURRENT_CANDIDATE = 'release-20261029-governance-offline-r29'
 
 
 class ReleaseCandidateGateTest(unittest.TestCase):

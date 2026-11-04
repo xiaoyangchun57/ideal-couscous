@@ -176,6 +176,40 @@ class VehicleLifecycleRouteTest(unittest.TestCase):
             )
             return db.execute('SELECT last_insert_rowid()').fetchone()[0]
 
+    def test_vehicle_use_legacy_list_is_complete_and_explicit_history_stays_paged(self):
+        with app_module.get_db() as db:
+            for index in range(125):
+                db.execute(
+                    """INSERT INTO vehicle_applications
+                       (vehicle_id,applicant_id,reason,status,start_at,end_at)
+                       VALUES (1,1,?,'approved','2026-09-01 08:00:00','2026-09-01 18:00:00')""",
+                    (f'历史行程 {index + 1}',),
+                )
+                application_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                db.execute(
+                    """INSERT INTO vehicle_use_records
+                       (application_id,start_mileage,end_mileage,checked_out_at,returned_at,status)
+                       VALUES (?,?,?,'2026-09-01 08:00:00','2026-09-01 18:00:00','returned')""",
+                    (application_id, 1000 + index, 1001 + index),
+                )
+
+        complete = self.client.get('/api/vehicle/use-records', headers=self.headers('admin-token'))
+        self.assertEqual(complete.status_code, 200, complete.json)
+        self.assertEqual(len(complete.json), 125)
+
+        limited = self.client.get('/api/vehicle/use-records?limit=20', headers=self.headers('admin-token'))
+        self.assertEqual(limited.status_code, 200, limited.json)
+        self.assertEqual(len(limited.json), 20)
+
+        history = self.client.get(
+            '/api/vehicle/use-records?scope=history&page=2&limit=20',
+            headers=self.headers('admin-token'),
+        )
+        self.assertEqual(history.status_code, 200, history.json)
+        self.assertEqual(history.json['total'], 125)
+        self.assertEqual(len(history.json['items']), 20)
+        self.assertEqual(history.json['page'], 2)
+
     def test_mobile_operator_can_read_vehicle_choices_but_reviewer_cannot(self):
         operator = self.client.get('/api/vehicles', headers=self.headers('operator-token'))
         reviewer = self.client.get('/api/vehicles', headers=self.headers('reviewer-token'))

@@ -37,9 +37,7 @@ function inspectionPhotoProgress(categories) {
 
 function inspectionFieldItemCompleted(item) {
   const source = item || {};
-  return String(source.result || '').trim() !== ''
-    && Number(source.review_status || 0) !== 3
-    && source.evidence_status !== 'supplement_required';
+  return String(source.result || '').trim() !== '';
 }
 
 function projectInspectionFieldProgress(categories) {

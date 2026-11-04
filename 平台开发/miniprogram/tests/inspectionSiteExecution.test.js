@@ -466,12 +466,13 @@ const originals = {
     itemPage.data.sheet.calibrator = '历史脏数据';
     itemPage.data.sheet.calValues = '7.00';
     let normalSubmitWrites = 0;
-    api.submitItem = () => { normalSubmitWrites += 1; return Promise.resolve({ photo_urls: [] }); };
+    let normalSubmitPayload;
+    api.submitItem = payload => { normalSubmitWrites += 1; normalSubmitPayload = payload; return Promise.resolve({ photo_urls: [] }); };
     itemPage.onSubmitItem();
     await flush();
-    assert.equal(normalSubmitWrites, 0, 'hidden calibration values cannot complete a normal item');
-    assert.equal(itemPage.data.sheet.open, true, 'rejected normal submission preserves the item panel');
-    assert.equal(toasts.at(-1).title, '请填写现场说明或拍摄照片');
+    assert.equal(normalSubmitWrites, 1, 'explicit submission is allowed without a photo or remark');
+    assert.equal(normalSubmitPayload.calibrator, undefined, 'hidden calibration data is not submitted for a normal item');
+    assert.equal(normalSubmitPayload.calibration_values, undefined);
     itemPage.onCloseSheet();
     assert.deepEqual(scrollCalls.at(-1), { scrollTop: 187, duration: 0 });
 
@@ -575,8 +576,9 @@ const originals = {
     let pendingReviewWrites = 0;
     api.submitItem = () => { pendingReviewWrites += 1; return Promise.resolve({}); };
     legacyPendingReviewPage.onSubmitItem();
-    assert.equal(pendingReviewWrites, 0, 'replacement still requires a newly accepted photo');
-    assert.equal(toasts.at(-1).title, '请先补充新的现场照片');
+    assert.equal(pendingReviewWrites, 0, 'submitted records are viewed without a replacement obligation');
+    assert.equal(legacyPendingReviewPage.data.sheet.supplementOnly, false);
+    assert.equal(legacyPendingReviewPage.data.sheet.readOnly, true);
     let photoPickerCalls = 0;
     wx.chooseMedia = options => {
       photoPickerCalls += 1;
@@ -584,7 +586,7 @@ const originals = {
     };
     await legacyPendingReviewPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
     delete wx.chooseMedia;
-    assert.equal(photoPickerCalls, 1, 'legacy pending-review data permits a new photo selection');
+    assert.equal(photoPickerCalls, 0, 'viewing a quality opinion does not start replacement capture');
     assert.equal(toasts.some(item => /原照片待审核/.test(item.title || '')), false);
 
     resetStorage();
@@ -600,13 +602,14 @@ const originals = {
       requiresCalibration: false,
     }] }];
     replacementSubmittedPage.onOpenItem({ currentTarget: { dataset: { id: 307 } } });
-    assert.equal(replacementSubmittedPage.data.sheet.photoInfo.blocked, true);
+    assert.notEqual(replacementSubmittedPage.data.sheet.photoInfo.blocked, true);
+    assert.equal(replacementSubmittedPage.data.sheet.supplementOnly, false);
     let lockedPickerCalls = 0;
     wx.chooseMedia = () => { lockedPickerCalls += 1; };
     replacementSubmittedPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
     delete wx.chooseMedia;
     assert.equal(lockedPickerCalls, 0, 'submitted replacement cannot start another photo selection');
-    assert.equal(toasts.at(-1).title, '补拍照片已提交业务审核，审核完成前不能重复编辑');
+    assert.equal(replacementSubmittedPage.data.sheet.readOnly, true);
     const lockedPhotos = replacementSubmittedPage.data.sheet.photos.slice();
     replacementSubmittedPage.onDelPhoto({ currentTarget: { dataset: { idx: 0 } } });
     assert.deepEqual(replacementSubmittedPage.data.sheet.photos, lockedPhotos,
@@ -734,6 +737,7 @@ const originals = {
     seedStation(calibrationPage);
     const calibration = Object.assign({}, itemPage.data.categories[0].items[0], {
       item_id: 303, item_name: '仪器质控', requiresCalibration: true,
+      result: null, review_status: 0, sync_pending: false,
     });
     calibrationPage.data.categories = [{ items: [calibration] }];
     calibrationPage.onOpenItem({ currentTarget: { dataset: { id: 303 } } });

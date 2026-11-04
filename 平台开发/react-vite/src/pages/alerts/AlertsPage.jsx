@@ -1,4 +1,5 @@
 ﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert, Table, Card, Input, Select, Button, Space, Tag, Badge, Dropdown,
@@ -11,7 +12,6 @@ import {
   ClockCircleOutlined,
   ExclamationCircleOutlined,
   SearchOutlined,
-  SettingOutlined,
   ReloadOutlined,
   ExperimentOutlined,
   UserOutlined,
@@ -34,11 +34,12 @@ import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
-import { StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
-import { ALERT_DATE_RANGE_OPTIONS, alertListCoverage, isAlertInDateRange } from './alertDateRange';
+import { formatTablePaginationTotal, StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { ALERT_DATE_RANGE_OPTIONS } from './alertDateRange';
 import { normalizeAlertTargetId, pinTargetAlert } from './alertTargetNavigation';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
+import { listLastPage } from '../../utils/listPagination';
 
 const reagentStatusColor = { 正常: 'green', 临期: 'orange', 低余量: 'red', 已过期: 'volcano', 未设置: 'default' };
 
@@ -678,16 +679,6 @@ const PRIMARY_TABS = [
       { key: 'reagent', label: '物资预警' },
     ],
   },
-  {
-    key: 'rules',
-    icon: <SettingOutlined />,
-    label: '规则配置',
-    defaultLeaf: 'rules',
-    children: [
-      { key: 'rules', label: '规则引擎' },
-      { key: 'thresholds', label: '阈值规则' },
-    ],
-  },
 ];
 
 const ALERT_TABS = PRIMARY_TABS.flatMap((primary) => primary.children.map((child) => ({
@@ -708,10 +699,7 @@ export default function AlertsPage() {
   const canManage = roles.includes('admin');
   const canViewRules = roles.some((role) => role === 'admin' || role === 'reviewer');
   const canViewAllSites = canViewRules;
-  const visibleTabs = useMemo(() => canViewRules
-    ? ALERT_TABS
-    : ALERT_TABS.filter((tab) => tab.key !== 'rules' && tab.key !== 'thresholds'),
-  [canViewRules]);
+  const visibleTabs = ALERT_TABS;
   const rawAlertTarget = searchParams.get('alert') || '';
   const alertTargetId = normalizeAlertTargetId(rawAlertTarget);
   const requestedTab = searchParams.get('tab') || 'alerts';
@@ -723,6 +711,9 @@ export default function AlertsPage() {
   const levelFilter = searchParams.get('level') || null;
   const requestedRange = searchParams.get('range') || 'today';
   const dateRange = ALERT_DATE_RANGE_OPTIONS.some((option) => option.value === requestedRange) ? requestedRange : 'today';
+  const alertPage = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1);
+  const requestedPageSize = Number.parseInt(searchParams.get('page_size') || '20', 10) || 20;
+  const alertPageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
 
   const updateQuery = useCallback((patch) => {
     const next = new URLSearchParams(searchParams);
@@ -730,6 +721,9 @@ export default function AlertsPage() {
       if (value) next.set(key, value);
       else next.delete(key);
     });
+    if (Object.keys(patch).some((key) => ['search', 'status', 'level', 'range'].includes(key))) {
+      next.delete('page');
+    }
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   const commitSearchText = useCallback(
@@ -740,14 +734,20 @@ export default function AlertsPage() {
     urlSearchText, commitSearchText,
   );
   // ---- State ---------------------------------------------------------------
-  const [allAlerts, setAllAlerts] = useState([]);       // full list from backend
+  const [allAlerts, setAllAlerts] = useState([]);
+  const [alertTotal, setAlertTotal] = useState(0);
+  const [incidentGroups, setIncidentGroups] = useState([]);
   const [counts, setCounts] = useState({ total: 0, pending: 0, acknowledged: 0, resolved: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [targetAlert, setTargetAlert] = useState(null);
   const [targetAlertError, setTargetAlertError] = useState('');
   const [targetAlertLoading, setTargetAlertLoading] = useState(false);
-  const [alertsWrapRef, alertsH] = useTableAutoHeight({ headerOffset: 54 });
+  const alertListRequestRef = useRef(0);
+  const [alertsWrapRef, alertsH] = useTableAutoHeight({
+    headerOffset: 54,
+    deps: [allAlerts.length, alertTotal, alertPage, alertPageSize, loading],
+  });
   const [reagentWrapRef, reagentH] = useTableAutoHeight({ headerOffset: 48 });
 
   // 试剂预警（跨站剩余可用天数/低余量）
@@ -799,16 +799,46 @@ export default function AlertsPage() {
   const [batchReason, setBatchReason] = useState('');
   const [batchRemark, setBatchRemark] = useState('');
 
-  // ---- Fetching (backend returns a plain array) ----------------------------
+  useEffect(() => {
+    setSelectedRowKeys([]);
+  }, [dateRange, levelFilter, statusFilter, urlSearchText]);
+
+  // ---- Fetching -----------------------------------------------------------
   const fetchAlerts = useCallback(async () => {
+    const requestId = ++alertListRequestRef.current;
+    let correctingPage = false;
     setLoading(true);
     try {
+      const params = new URLSearchParams({
+        paginated: '1',
+        page: String(alertPage),
+        page_size: String(alertPageSize),
+        date_range: dateRange,
+      });
+      if (statusFilter) params.set('status', statusFilter);
+      if (levelFilter) params.set('level', levelFilter);
+      if (urlSearchText.trim()) params.set('search', urlSearchText.trim());
       const [data, statistics] = await Promise.all([
-        api.getStrict('/alerts?limit=500'),
+        api.getStrict(`/alerts?${params}`),
         api.getStrict('/alerts/statistics'),
       ]);
-      const list = Array.isArray(data) ? data : [];
+      if (requestId !== alertListRequestRef.current) return;
+      const list = Array.isArray(data) ? data : (data?.items || []);
+      const total = Array.isArray(data) ? list.length : Number(data?.total || 0);
+      const lastPage = listLastPage(total, alertPageSize);
+      if (total > 0 && alertPage > lastPage) {
+        correctingPage = true;
+        setSearchParams((current) => {
+          const next = new URLSearchParams(current);
+          if (lastPage > 1) next.set('page', String(lastPage));
+          else next.delete('page');
+          return next;
+        }, { replace: true });
+        return;
+      }
       setAllAlerts(list);
+      setAlertTotal(total);
+      setIncidentGroups(Array.isArray(data?.incident_groups) ? data.incident_groups : []);
       setCounts({
         total: Number(statistics?.total || 0),
         pending: Number(statistics?.by_status?.pending || 0),
@@ -817,11 +847,12 @@ export default function AlertsPage() {
       });
       setError(null);
     } catch (fetchError) {
+      if (requestId !== alertListRequestRef.current) return;
       setError(fetchError.message || '加载告警数据失败，请检查网络后重试');
     } finally {
-      setLoading(false);
+      if (requestId === alertListRequestRef.current && !correctingPage) setLoading(false);
     }
-  }, []);
+  }, [alertPage, alertPageSize, dateRange, levelFilter, statusFilter, urlSearchText, setSearchParams]);
 
   useEffect(() => {
     fetchAlerts();
@@ -842,7 +873,6 @@ export default function AlertsPage() {
       .then((alert) => {
         if (cancelled) return;
         setTargetAlert(alert);
-        setAllAlerts((alerts) => pinTargetAlert(alerts, alert));
       })
       .catch((targetError) => {
         if (cancelled) return;
@@ -861,76 +891,10 @@ export default function AlertsPage() {
     }
   }, [searchParams, navigate]);
 
-  // ---- Client-side filtering -----------------------------------------------
-  const filteredAlerts = useMemo(() => {
-    let list = allAlerts;
-
-    // Status filter
-    if (statusFilter) {
-      list = list.filter((a) => a.status === statusFilter);
-    }
-
-    // Level filter
-    if (levelFilter) {
-      list = list.filter((a) => a.level === levelFilter);
-    }
-
-    // Date range filter
-    if (dateRange) {
-      list = list.filter((a) => isAlertInDateRange(a.created_at, dateRange));
-    }
-
-    // Search text filter (site_name, site_code, message)
-    if (searchText.trim()) {
-      const q = searchText.trim().toLowerCase();
-      list = list.filter(
-        (a) =>
-          (a.site_name && a.site_name.toLowerCase().includes(q)) ||
-          (a.site_code && a.site_code.toLowerCase().includes(q)) ||
-          (a.message && a.message.toLowerCase().includes(q)),
-      );
-    }
-
-    return pinTargetAlert(list, targetAlert);
-  }, [allAlerts, statusFilter, levelFilter, dateRange, searchText, targetAlert]);
-  const listCoverage = useMemo(
-    () => alertListCoverage(allAlerts.length, counts.total),
-    [allAlerts.length, counts.total],
+  const displayedAlerts = useMemo(
+    () => pinTargetAlert(allAlerts, targetAlert),
+    [allAlerts, targetAlert],
   );
-
-  // 管理视角先看事件簇，明细表仍保留用于逐条追溯和处置。
-  const incidentGroups = useMemo(() => {
-    const groups = new Map();
-    filteredAlerts.forEach((alert) => {
-      if (alert.status === 'resolved') return;
-      const timestamp = new Date(String(alert.created_at || '').replace(' ', 'T')).getTime();
-      const bucket = Number.isFinite(timestamp) ? Math.floor(timestamp / 1800000) : alert.id;
-      const metric = alert.metric || alert.event_type || 'unknown';
-      const key = `${metric}:${bucket}`;
-      if (!groups.has(key)) {
-        groups.set(key, {
-          key,
-          metric,
-          alerts: 0,
-          sites: new Set(),
-          orders: new Set(),
-          latestAt: alert.created_at,
-          level: alert.level,
-        });
-      }
-      const group = groups.get(key);
-      group.alerts += 1;
-      if (alert.site_id || alert.site_name) group.sites.add(alert.site_id || alert.site_name);
-      if (alert.related_order_no) group.orders.add(alert.related_order_no);
-      if (alert.created_at > group.latestAt) group.latestAt = alert.created_at;
-      if (['red', 'orange', 'yellow', 'blue'].indexOf(alert.level) < ['red', 'orange', 'yellow', 'blue'].indexOf(group.level)) {
-        group.level = alert.level;
-      }
-    });
-    return Array.from(groups.values())
-      .map((group) => ({ ...group, siteCount: group.sites.size, orderCount: group.orders.size }))
-      .sort((a, b) => b.alerts - a.alerts || String(b.latestAt).localeCompare(String(a.latestAt)));
-  }, [filteredAlerts]);
 
   const incidentLabel = (metric) => ({
     device_status: '设备离线事件',
@@ -1236,6 +1200,7 @@ export default function AlertsPage() {
   // ---- Row selection -------------------------------------------------------
   const rowSelection = useMemo(() => ({
     selectedRowKeys,
+    preserveSelectedRowKeys: true,
     onChange: (keys) => setSelectedRowKeys(keys),
     getCheckboxProps: (record) => ({
       disabled: record.status === 'resolved' || Boolean(record.related_order_no),
@@ -1374,10 +1339,6 @@ export default function AlertsPage() {
                       options={ALERT_DATE_RANGE_OPTIONS}
                     />
             </WorkspaceToolbar>
-            {listCoverage.truncated && (
-              <Alert type="warning" showIcon message="告警列表未完整加载" description={listCoverage.truncationText} />
-            )}
-
             {/* Batch Operations Bar */}
             {selectedRowKeys.length > 0 && (
               <div
@@ -1490,22 +1451,38 @@ export default function AlertsPage() {
               )}
 
               {/* Table (also handles loading + empty states natively) */}
-              {(!error || allAlerts.length > 0) && !loading && filteredAlerts.length === 0 && (
+              {(!error || allAlerts.length > 0) && !loading && displayedAlerts.length === 0 && (
                 <WorkspaceEmpty
                   type={searchText || statusFilter || levelFilter || dateRange !== 'all' ? 'filtered' : 'empty'}
-                  description={dateRange !== 'all' ? '当前所选列表范围没有告警记录，可切换“已加载历史”查看当前已加载记录。' : undefined}
+                  description={dateRange !== 'all' ? '当前所选列表范围没有告警记录，可切换“全部历史”查看完整历史。' : undefined}
                   onRefresh={fetchAlerts}
                 />
               )}
-              {(!error || allAlerts.length > 0) && (loading || filteredAlerts.length > 0) && (
+              {(!error || allAlerts.length > 0) && (loading || displayedAlerts.length > 0) && (
                 <div ref={alertsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
                 <Table
                   rowKey="id"
                   columns={columns}
-                  dataSource={filteredAlerts}
+                  dataSource={displayedAlerts}
                   loading={loading}
                   rowSelection={canManage ? rowSelection : undefined}
-                  pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
+                  pagination={{
+                    current: alertPage,
+                    pageSize: alertPageSize,
+                    total: alertTotal,
+                    size: 'small',
+                    showSizeChanger: true,
+                    pageSizeOptions: [20, 50, 100],
+                    showTotal: formatTablePaginationTotal,
+                    disabled: loading,
+                    onChange: (nextPage, nextPageSize) => {
+                      const next = new URLSearchParams(searchParams);
+                      const sizeChanged = nextPageSize !== alertPageSize;
+                      next.set('page', String(sizeChanged ? 1 : nextPage));
+                      next.set('page_size', String(nextPageSize));
+                      setSearchParams(next, { replace: true });
+                    },
+                  }}
                   scroll={alertsH ? { y: alertsH } : undefined}
                   size="small"
                   rowClassName={(record) => String(record.id) === alertTargetId ? 'alert-target-row' : ''}
@@ -1515,10 +1492,6 @@ export default function AlertsPage() {
               )}
             </Card>
           </>
-        ) : activeTab === 'rules' ? (
-          <AlertRuleEngineTab tokens={tokens} isDark={isDark} canManage={canManage} />
-        ) : activeTab === 'thresholds' ? (
-          <ThresholdRulesTab tokens={tokens} isDark={isDark} />
         ) : activeTab === 'reagent' ? (
           <div className="workspace-embedded-page">
             <StatusStrip items={[

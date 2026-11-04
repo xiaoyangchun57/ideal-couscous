@@ -263,6 +263,12 @@ select {
   overflow: hidden;
 }
 
+@media (max-height: 700px) {
+  .app-content {
+    overflow-y: auto;
+  }
+}
+
 .notification-panel {
   width: 360px;
   max-width: calc(100vw - 32px);

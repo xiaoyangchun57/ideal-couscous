@@ -33,7 +33,7 @@ import {
   isAuditReviewSubmissionCurrent,
 } from './auditReviewSession';
 import { pageRootStyle, filterInputWidth, filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
-import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import { FilterField, StatusStrip, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar, standardListPagination } from '../../components/WorkspacePage';
 import DataReviewTab from '../alerts/components/DataReviewTab';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 
@@ -218,18 +218,16 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       render: (t) => t ? <><EnvironmentOutlined style={{ fontSize: 11, marginRight: 4 }} />{t}</> : '-',
     },
     {
-      title: '照片', width: 100, align: 'center',
+      title: '有效照片 / 要求', width: 150, align: 'center',
       render: (_, r) => {
         const req = r.required_photos || 0;
         const act = r.actual_photos || 0;
-        return req > 0 ? (
-          <Space size={4}>
-            <CameraOutlined style={{ color: statusColors.info[mode], fontSize: 12 }} />
-            <Text type={act >= req ? 'success' : 'warning'} style={{ fontSize: 12 }}>
-              {act}/{req}
-            </Text>
-          </Space>
-        ) : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>;
+        return <Space size={4}>
+          <CameraOutlined style={{ color: statusColors.info[mode], fontSize: 12 }} />
+          <Text type={req > 0 && act < req ? 'warning' : 'success'} style={{ fontSize: 12 }}>
+            有效 {act} 张 / {req > 0 ? `要求 ${req} 张` : '无最低要求'}
+          </Text>
+        </Space>;
       },
     },
     {
@@ -403,6 +401,7 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       {loadError && <Alert type="warning" showIcon message="待审列表刷新失败，当前显示的数量和内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => auditItemKey(record) === highlightedItemId ? 'audit-target-row' : ''}
+        pagination={standardListPagination()}
         emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -573,6 +572,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
       {loadError && <Alert type="warning" showIcon message="备件待审列表刷新失败，当前内容可能不是最新结果。" action={<Button size="small" onClick={onRefresh}>重试</Button>} />}
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => record.parent_key === highlightedItemId ? 'audit-target-row' : ''}
+        pagination={standardListPagination()}
         emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -847,7 +847,7 @@ export default function AuditPage() {
             reviewer_id: reviewerId,
           });
           successMessage = rejectIds.length
-            ? `已驳回 ${rejectIds.length} 张，其他照片和未受影响检查项已通过`
+            ? `已记录 ${rejectIds.length} 张不合格照片，不退回整改`
             : '站点巡检照片与检查项已全部通过';
         } else {
           if (action === 'reject' && !reviewComment.trim()) {
@@ -856,7 +856,7 @@ export default function AuditPage() {
           await api.postStrict('/inspection-v2/items/batch-review', action === 'approve'
             ? { approve_ids: item.item_ids || [], reject_items: [] }
             : { approve_ids: [], reject_items: (item.item_ids || []).map(id => ({ id, reason: reviewComment })) });
-          successMessage = action === 'approve' ? '站点巡检已全部通过' : '站点巡检已退回整改';
+          successMessage = action === 'approve' ? '站点巡检已全部通过' : '巡检质量意见已记录，未指定问题照片不计扣分';
         }
       } else if (item.source_type === 'inspection') {
         if (action === 'reject' && !reviewComment.trim()) {
@@ -864,7 +864,7 @@ export default function AuditPage() {
         }
         const realId = item.id.replace('insp_', '');
         await api.putStrict(`/inspection-v2/items/${realId}/review`, { action, comment: reviewComment });
-        successMessage = action === 'approve' ? '巡检审核通过' : '巡检已退回现场整改';
+        successMessage = action === 'approve' ? '巡检审核通过' : '巡检质量意见已记录，未指定问题照片不计扣分';
       } else if (item.source_type === 'plan_schedule') {
         if (action === 'reject' && !reviewComment.trim()) {
           message.error('驳回需填写计划退回原因'); return;
@@ -1048,7 +1048,7 @@ export default function AuditPage() {
               disabled={missingResolution || missingRequiredPhotos || failedApproveIds.length > 0 || rejectionReasonMissing}
               onClick={() => handleReview(item, 'approve')}
               icon={<CheckOutlined />}>{item.source_type === 'inspection_batch' && item.attachment_ids?.length
-                ? (selectedPhotoIds.length ? `驳回 ${selectedPhotoIds.length} 张，其余通过` : '全部通过')
+                ? (selectedPhotoIds.length ? `记录 ${selectedPhotoIds.length} 张不合格，其余合格` : '全部通过')
                 : '审核通过'}</Button></span>
           </Tooltip>}
         </Space>}
@@ -1152,7 +1152,7 @@ export default function AuditPage() {
         {item.source_type === 'inspection_batch' && item.attachment_details?.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>
-              现场照片（已选择驳回 {selectedPhotoIds.length} 张）
+              现场照片（已选择不合格 {selectedPhotoIds.length} 张）
             </Text>
             <Image.PreviewGroup>
               <div style={reviewPhotoGridStyle(item.attachment_details.length)}>
@@ -1229,7 +1229,7 @@ export default function AuditPage() {
           <Text strong>审核意见</Text>
           <TextArea rows={3} value={reviewComment} onChange={e => setReviewComment(e.target.value)}
         placeholder={item.source_type === 'inspection_batch' && item.attachment_ids?.length
-          ? (selectedPhotoIds.length ? '请填写所选照片的统一驳回原因（必填）' : '未选择驳回照片，将全部通过')
+          ? (selectedPhotoIds.length ? '请填写所选照片的不合格原因（必填）' : '未选择问题照片，将全部合格')
           : ['workorder_review', 'inspection', 'inspection_batch', 'plan_schedule'].includes(item.source_type)
             ? '通过可留空；退回时必须填写需补充或整改内容'
             : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />

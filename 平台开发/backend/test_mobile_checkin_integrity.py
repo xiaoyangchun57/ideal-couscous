@@ -855,21 +855,11 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertLess(session['distance_m'], 300)
         self.assertEqual(checkins, 1)
 
-    def test_site_checkout_requires_completion_and_closes_the_loop(self):
+    def test_site_checkout_preserves_missing_items_and_closes_the_loop(self):
         checked = self.client.post('/api/mobile/check-in', headers=self.headers('operator-token'), json={
             'site_id': 1, 'site_name': '测试站点一', 'lat': 28.6801, 'lng': 115.7301,
         })
         self.assertEqual(checked.status_code, 200, checked.json)
-        before_complete = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
-            headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
-        self.assertEqual(before_complete.status_code, 400, before_complete.json)
-
-        db = sqlite3.connect(self.db_path)
-        try:
-            db.execute("UPDATE insp_plan_items SET result='normal' WHERE id=30")
-            db.commit()
-        finally:
-            db.close()
         response = self.client.post('/api/mobile/execution-plans/20/sites/1/check-out',
             headers=self.headers('operator-token'), json={'lat': 28.6801, 'lng': 115.7301})
         self.assertEqual(response.status_code, 200, response.json)
@@ -880,6 +870,7 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
         self.assertTrue(replay.json['already_closed'])
         db = sqlite3.connect(self.db_path)
         try:
+            self.assertIsNone(db.execute('SELECT result FROM insp_plan_items WHERE id=30').fetchone()[0])
             self.assertIsNotNone(db.execute('SELECT check_out_time FROM insp_plan_items WHERE id=30').fetchone()[0])
         finally:
             db.close()
@@ -1003,7 +994,12 @@ class MobileCheckinIntegrityTest(unittest.TestCase):
                 VALUES (43,21,1,'active','normal','等时离站','设备','daily',?)""",
                        (latest_checkin,))
             self.assertIsNone(app_module._inspection_effective_checkin_time(db, 1, 2))
-            db.execute("UPDATE work_orders SET check_in_time=? WHERE order_no='WO-1'", (latest_checkin,))
+
+        direct_checkin = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'order_no': 'WO-1', 'lat': 28.6801, 'lng': 115.7301,
+            })
+        self.assertEqual(direct_checkin.status_code, 200, direct_checkin.json)
 
         direct_workorder = self.client.post('/api/mobile/photo-capture-session',
             headers=self.headers('operator-token'), json={

@@ -11,11 +11,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 try:
     from .sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
-    from .station_ingest_retention import RetentionError, read_raw_evidence
+    from .station_ingest_retention import (
+        RetentionError, read_raw_evidence, retire_raw_frame_if_unreferenced,
+    )
 except ImportError:  # pragma: no cover
     from sl651_parser import FrameError, PARSER_VERSION, parse_frame, parse_water_quality_report
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, parse_hj212_frame
-    from station_ingest_retention import RetentionError, read_raw_evidence
+    from station_ingest_retention import (
+        RetentionError, read_raw_evidence, retire_raw_frame_if_unreferenced,
+    )
 
 NORMALIZATION_VERSION = "station-monitoring-normalizer-v4"
 BUSINESS_PROJECTION_VERSION = "station-monitoring-business-v3"
@@ -23,6 +27,7 @@ HISTORICAL_REPROJECTION_VERSION = "station-monitoring-historical-business-v3"
 _APPROVED_HJ212_2061_RTD_PROTOCOL_CODES = frozenset({"HJ212:w01019-Rtd"})
 LATEST_COLLECTION_LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 LATEST_COLLECTION_BATCH_LIMIT = 16384
+BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def is_formal_hj212_source(protocol_code: str, function_code: int | str | None,
@@ -37,6 +42,151 @@ def is_formal_hj212_source(protocol_code: str, function_code: int | str | None,
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _beijing_hour(observed_at: str) -> str:
+    observed = datetime.fromisoformat(observed_at)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return observed.astimezone(BEIJING_TIMEZONE).replace(
+        minute=0, second=0, microsecond=0).isoformat()
+
+
+def _upsert_hourly_last_value(
+    connection, *, raw_id: int, value_id: int, endpoint_id: int, site_id: int,
+    protocol_code: str, business_metric: str, instrument_asset_code: str | None,
+    observed_at: str, received_at: str, normalized_at: str,
+    raw_value_text: str | None, raw_unit: str | None, standard_value: float,
+    standard_unit: str, quality: str, parser_version: str,
+    function_code: int | None, normalization_version: str,
+) -> tuple[bool, int | None]:
+    if quality != "valid":
+        return False, None
+    sample_hour = _beijing_hour(observed_at)
+    previous = connection.execute(
+        """SELECT source_observation_value_id
+           FROM monitoring_hourly_last_values
+           WHERE endpoint_id=? AND protocol_code=? AND business_metric=?
+             AND instrument_asset_code=? AND standard_unit=? AND sample_hour=?""",
+        (endpoint_id, protocol_code, business_metric, instrument_asset_code or "",
+         standard_unit, sample_hour),
+    ).fetchone()
+    cursor = connection.execute(
+        """INSERT INTO monitoring_hourly_last_values(
+               endpoint_id,business_site_id,protocol_code,business_metric,
+               instrument_asset_code,sample_hour,observed_at,received_at,normalized_at,
+               raw_value_text,raw_unit,standard_value,standard_unit,quality,
+               parser_version,function_code,normalization_version,
+               source_observation_value_id,source_raw_frame_id,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(endpoint_id,protocol_code,business_metric,instrument_asset_code,
+                       standard_unit,sample_hour)
+           DO UPDATE SET
+               business_site_id=excluded.business_site_id,
+               observed_at=excluded.observed_at,
+               received_at=excluded.received_at,
+               normalized_at=excluded.normalized_at,
+               raw_value_text=excluded.raw_value_text,
+               raw_unit=excluded.raw_unit,
+               standard_value=excluded.standard_value,
+               quality=excluded.quality,
+               parser_version=excluded.parser_version,
+               function_code=excluded.function_code,
+               normalization_version=excluded.normalization_version,
+               source_observation_value_id=excluded.source_observation_value_id,
+               source_raw_frame_id=excluded.source_raw_frame_id,
+               updated_at=excluded.updated_at
+           WHERE excluded.observed_at>monitoring_hourly_last_values.observed_at
+              OR (excluded.observed_at=monitoring_hourly_last_values.observed_at
+                  AND excluded.received_at>=monitoring_hourly_last_values.received_at)""",
+        (
+            endpoint_id, site_id, protocol_code, business_metric,
+            instrument_asset_code or "", sample_hour, observed_at,
+            received_at, normalized_at, raw_value_text, raw_unit, standard_value,
+            standard_unit, quality, parser_version, function_code,
+            normalization_version, value_id, raw_id, _utc_now(),
+        ),
+    )
+    return cursor.rowcount > 0, (int(previous[0]) if previous else None)
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def _business_observation_has_consumer(
+    connection: sqlite3.Connection, observation_id: int,
+) -> bool:
+    checks = (
+        ("data_reviews", "monitoring_business_observation_id"),
+        ("monitoring_alert_observation_events", "observation_id"),
+    )
+    for table, column in checks:
+        if (_table_exists(connection, table)
+                and connection.execute(
+                    f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (observation_id,)
+                ).fetchone() is not None):
+            return True
+    return False
+
+
+def _retire_empty_batch(connection: sqlite3.Connection, batch_id: int, raw_id: int) -> None:
+    if _table_exists(connection, "monitoring_status_events"):
+        connection.execute(
+            """DELETE FROM monitoring_status_events
+               WHERE observation_batch_id=? AND event_axis='communication'
+                 AND event_type='frame_received' AND source='device_reported'""",
+            (batch_id,),
+        )
+    blockers = (
+        ("observation_values", "observation_batch_id"),
+        ("monitoring_business_observations", "observation_batch_id"),
+        ("monitoring_status_events", "observation_batch_id"),
+        ("monitoring_quality_issues", "observation_batch_id"),
+        ("monitoring_hourly_values", "source_last_batch_id"),
+        ("monitoring_hourly_value_series", "source_last_batch_id"),
+    )
+    for table, column in blockers:
+        if (_table_exists(connection, table)
+                and connection.execute(
+                    f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (batch_id,)
+                ).fetchone() is not None):
+            return
+    connection.execute(
+        "UPDATE observation_batches SET replaces_batch_id=NULL WHERE replaces_batch_id=?", (batch_id,))
+    connection.execute("DELETE FROM observation_batches WHERE id=?", (batch_id,))
+    retire_raw_frame_if_unreferenced(connection, raw_id)
+
+
+def _retire_value_if_unconsumed(connection: sqlite3.Connection, value_id: int) -> bool:
+    source = connection.execute(
+        """SELECT value.observation_batch_id,batch.raw_frame_id
+           FROM observation_values value
+           JOIN observation_batches batch ON batch.id=value.observation_batch_id
+           WHERE value.id=?""",
+        (value_id,),
+    ).fetchone()
+    if source is None:
+        return False
+    business_rows = connection.execute(
+        """SELECT id,endpoint_id,business_metric,instrument_asset_code,scheduled_at
+           FROM monitoring_business_observations
+           WHERE source_observation_value_id=?""",
+        (value_id,),
+    ).fetchall()
+    if any(_business_observation_has_consumer(connection, int(row[0]))
+           for row in business_rows):
+        return False
+    for row in business_rows:
+        connection.execute(
+            "DELETE FROM monitoring_business_observations WHERE id=?", (int(row[0]),))
+        _reconcile_business_slot(
+            connection, int(row[1]), str(row[2]), row[3], str(row[4]))
+    connection.execute("DELETE FROM observation_values WHERE id=?", (value_id,))
+    _retire_empty_batch(connection, int(source[0]), int(source[1]))
+    return True
 
 
 def _as_utc(value: datetime, timezone_name: str) -> str:
@@ -389,16 +539,6 @@ def _project_missing_business_observations(database: Path) -> tuple[int, int]:
                         function_code=row["function_code"], source_value_kind=source_value_kind)
                     if was_projected:
                         projected += 1
-                    elif (is_formal_hj212_source(
-                            row["protocol_code"], row["function_code"], source_value_kind)
-                          and _business_schedule_for(
-                              connection, row["endpoint_id"], row["protocol_code"],
-                              row["observed_at"])):
-                        _record_issue(
-                            connection, row["raw_frame_id"], row["observation_batch_id"],
-                            row["business_site_id"], "business_time_outside_schedule", row["protocol_code"],
-                            retryable=False,
-                        )
                 connection.commit()
         except (sqlite3.Error, OSError):
             deferred += 1
@@ -417,7 +557,7 @@ def _mark_waiting(connection, raw_id, site_id, issue_type, summary):
 
 def normalize_raw_frame(
     database: Path, raw_id: int, *, normalization_version: str = NORMALIZATION_VERSION,
-    allow_unbound_replay: bool = False,
+    allow_unbound_replay: bool = False, retire_source: bool = False,
 ) -> str:
     """Normalize one raw receipt and leave mapping/parser waits diagnostically stable."""
     with closing(sqlite3.connect(str(database), timeout=5, isolation_level=None)) as connection:
@@ -502,6 +642,7 @@ def normalize_raw_frame(
             connection.execute("UPDATE observation_batches SET is_current=0, projection_state='superseded' WHERE id=?", (previous[0],))
             connection.execute("UPDATE observation_values SET is_current=0 WHERE observation_batch_id=?", (previous[0],))
             _deactivate_business_observations(connection, previous[0])
+        normalized_at = _utc_now()
         cursor = connection.execute(
             """INSERT INTO observation_batches(raw_frame_id, endpoint_id, business_site_id, function_code,
                serial_number, reported_at, observed_at, received_at, granularity, aggregation_source,
@@ -510,7 +651,7 @@ def normalize_raw_frame(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'device_reported', ?, ?, 'accepted', 'completed', NULL, ?, ?)""",
             (raw_id, raw["endpoint_id"], site_id, function_code, serial_number, reported_at, observed_at,
              raw["received_at"], profile["expected_granularity"] or "realtime", frame.logical_key,
-             normalization_version, previous[0] if previous else None, _utc_now()),
+             normalization_version, previous[0] if previous else None, normalized_at),
         )
         batch_id = int(cursor.lastrowid)
         if family != "hj212":
@@ -521,6 +662,7 @@ def normalize_raw_frame(
                 (batch_id, raw["endpoint_id"], site_id, raw["received_at"], raw["received_at"]),
             )
         batch_status = "accepted"
+        retire_value_ids: list[int] = []
         for factor in report_factors:
             source_value_kind = (getattr(factor, "value_kind", None)
                                  if family == "hj212" else None)
@@ -581,15 +723,16 @@ def normalize_raw_frame(
                 )
             instrument_asset_code = (
                 mapping["instrument_asset_code"] or profile["instrument_asset_code"])
-            if published and factor.quality in {"valid", "suspect"} \
-                    and _same_slot_factor_already_recorded(
-                        connection, endpoint_id=raw["endpoint_id"],
-                        protocol_code=factor.protocol_code, business_metric=metric,
-                        instrument_asset_code=instrument_asset_code,
-                        observed_at=observed_at, standard_value=factor.raw_value,
-                        standard_unit=definition["standard_unit"], quality=factor.quality,
-                        function_code=function_code):
-                continue
+            duplicate_business_value = (
+                published and factor.quality in {"valid", "suspect"}
+                and _same_slot_factor_already_recorded(
+                    connection, endpoint_id=raw["endpoint_id"],
+                    protocol_code=factor.protocol_code, business_metric=metric,
+                    instrument_asset_code=instrument_asset_code,
+                    observed_at=observed_at, standard_value=factor.raw_value,
+                    standard_unit=definition["standard_unit"], quality=factor.quality,
+                    function_code=function_code)
+            )
             value_cursor = connection.execute(
                 """INSERT INTO observation_values(
                        observation_batch_id, protocol_code, business_metric, raw_value,
@@ -602,7 +745,26 @@ def normalize_raw_frame(
                  instrument_asset_code, value_parser_version,
                  int(published and factor.quality in {"valid", "suspect"})),
             )
-            if published and factor.quality in {"valid", "suspect"}:
+            hourly_applied = False
+            previous_hourly_value_id = None
+            if published:
+                hourly_applied, previous_hourly_value_id = _upsert_hourly_last_value(
+                    connection, raw_id=raw_id, value_id=int(value_cursor.lastrowid),
+                    endpoint_id=raw["endpoint_id"],
+                    site_id=site_id, protocol_code=factor.protocol_code,
+                    business_metric=metric, instrument_asset_code=instrument_asset_code,
+                    observed_at=observed_at, received_at=raw["received_at"],
+                    normalized_at=normalized_at,
+                    raw_value_text=getattr(factor, "raw_value_text", None),
+                    raw_unit=definition["raw_unit"], standard_value=factor.raw_value,
+                    standard_unit=definition["standard_unit"], quality=factor.quality,
+                    parser_version=value_parser_version, function_code=function_code,
+                    normalization_version=normalization_version,
+                )
+            projected = False
+            if (published and factor.quality in {"valid", "suspect"}
+                    and (not retire_source or factor.quality == "suspect" or hourly_applied)
+                    and not duplicate_business_value):
                 projected = _project_business_observation(
                     connection, value_id=int(value_cursor.lastrowid), batch_id=batch_id,
                     endpoint_id=raw["endpoint_id"], site_id=site_id, protocol_code=factor.protocol_code,
@@ -613,18 +775,39 @@ def normalize_raw_frame(
                     quality=factor.quality, function_code=function_code,
                     source_value_kind=source_value_kind,
                 )
-                if (not projected and is_formal_hj212_source(
-                        factor.protocol_code, function_code, source_value_kind)
-                        and _business_schedule_for(
-                            connection, raw["endpoint_id"], factor.protocol_code, observed_at)):
-                    batch_status = "partial"
-                    _record_issue(
-                        connection, raw_id, batch_id, site_id,
-                        "business_time_outside_schedule", factor.protocol_code, retryable=False,
-                    )
+            if published and factor.quality == "valid":
+                current_value_id = int(value_cursor.lastrowid)
+                if (hourly_applied and previous_hourly_value_id is not None
+                        and previous_hourly_value_id != current_value_id):
+                    if retire_source:
+                        _retire_value_if_unconsumed(connection, previous_hourly_value_id)
+                    else:
+                        connection.execute(
+                            """DELETE FROM observation_values WHERE id=? AND NOT EXISTS (
+                                   SELECT 1 FROM monitoring_business_observations business
+                                   WHERE business.source_observation_value_id=?
+                               )""",
+                            (previous_hourly_value_id, previous_hourly_value_id),
+                        )
+                        if (not projected and connection.execute(
+                                "SELECT 1 FROM observation_values WHERE id=?",
+                                (previous_hourly_value_id,),
+                        ).fetchone() is not None):
+                            connection.execute(
+                                "DELETE FROM observation_values WHERE id=?", (current_value_id,))
+                if retire_source and (not hourly_applied or not projected):
+                    retire_value_ids.append(current_value_id)
+                elif not retire_source and not hourly_applied and not projected:
+                    connection.execute(
+                        "DELETE FROM observation_values WHERE id=?", (current_value_id,))
+        for value_id in retire_value_ids:
+            _retire_value_if_unconsumed(connection, value_id)
         connection.execute("UPDATE observation_batches SET batch_status=? WHERE id=?", (batch_status, batch_id))
         connection.execute("UPDATE ingest_raw_frames SET disposition='accepted', persistence_state='persisted' WHERE id=?", (raw_id,))
         connection.execute("DELETE FROM monitoring_normalization_retries WHERE raw_frame_id=?", (raw_id,))
+        if retire_source:
+            connection.execute("DELETE FROM ingest_parse_attempts WHERE raw_frame_id=?", (raw_id,))
+            _retire_empty_batch(connection, batch_id, raw_id)
         connection.commit()
         return batch_status
 
@@ -1402,6 +1585,78 @@ def latest_values(connection, site_id: int, *, at_time: str | None = None):
     return values_by_site.get(site_id, [])
 
 
+def _hourly_latest_values(
+    connection, site_id: int, configurations: list[dict], *, rows=None,
+) -> list[dict]:
+    if rows is None:
+        rows = connection.execute(
+            """SELECT hourly.* FROM monitoring_hourly_last_values hourly
+               WHERE hourly.business_site_id=? AND NOT EXISTS (
+                   SELECT 1 FROM observation_values value
+                   WHERE value.id=hourly.source_observation_value_id)
+               ORDER BY observed_at DESC,received_at DESC""",
+            (site_id,),
+        ).fetchall()
+    results = []
+    used = set()
+    for row in rows:
+        instrument = row["instrument_asset_code"] or None
+        configuration = next((item for item in configurations
+            if item["endpoint_id"] == row["endpoint_id"]
+            and item["business_metric"] == row["business_metric"]
+            and item.get("instrument_asset_code") == instrument
+            and row["observed_at"] >= (item.get("mapping_effective_from")
+                or item.get("profile_effective_from") or "1970-01-01T00:00:00+00:00")
+            and (not (item.get("mapping_effective_to") or item.get("profile_effective_to"))
+                 or row["observed_at"] < (item.get("mapping_effective_to")
+                     or item.get("profile_effective_to")))
+            and (not item.get("protocol_codes")
+                 or row["protocol_code"] in item["protocol_codes"])), None)
+        if configuration is None:
+            continue
+        key = (row["endpoint_id"], row["business_metric"], instrument)
+        if key in used:
+            continue
+        used.add(key)
+        precision = int(configuration.get("decimal_precision") or 0)
+        results.append({
+            "business_metric": row["business_metric"],
+            "protocol_code": row["protocol_code"],
+            "standard_value": row["standard_value"],
+            "standard_value_display": format_business_value(
+                row["standard_value"], precision,
+                source_value_text=row["raw_value_text"], raw_unit=row["raw_unit"],
+                standard_unit=row["standard_unit"]),
+            "source_value_text": row["raw_value_text"],
+            "standard_unit": row["standard_unit"],
+            "decimal_precision": precision,
+            "quality": row["quality"],
+            "instrument_asset_code": instrument,
+            "endpoint_id": row["endpoint_id"],
+            "scheduled_at": row["observed_at"],
+            "observed_at": row["observed_at"],
+            "collection_group_at": row["observed_at"],
+            "received_at": row["received_at"],
+            "normalized_at": row["normalized_at"],
+            "timeliness": None,
+            "slot_state": "hourly_sample",
+            "aggregation_source": "hourly_sample",
+            "projection_version": row["normalization_version"],
+            "normalization_version": row["normalization_version"],
+            "function_code": row["function_code"],
+            "source_type": "hourly_last_value",
+            "selection_reason": "latest_observation_in_hour",
+            "candidate_count": 1,
+            "source_candidate_count": 1,
+            "distinct_value_count": 1,
+            "reason_code": None,
+            "expected_interval_seconds": configuration.get("expected_interval_seconds"),
+            "tolerance_seconds": configuration.get("tolerance_seconds"),
+        })
+    return sorted(results, key=lambda item: (
+        item["business_metric"], item.get("instrument_asset_code") or ""))
+
+
 def _latest_values_from_rows(configurations: list[dict], rows) -> list[dict]:
     result = []
     for configuration in configurations:
@@ -1515,62 +1770,37 @@ def _current_collection_values_from_rows(
     values_by_batch = {}
     for row in value_rows:
         values_by_batch.setdefault(row["observation_batch_id"], []).append(row)
-    group_batches = {}
-    for batch in batch_rows:
-        key = (batch["endpoint_id"], batch["observed_at"], batch["function_code"])
-        group_batches.setdefault(key, []).append(batch)
-
-    candidate_groups = {}
-    for key, batches in group_batches.items():
-        candidates = []
-        for batch in batches:
-            for row in values_by_batch.get(batch["id"], []):
-                configuration = _configuration_for_observation(configurations, row)
-                if configuration is not None:
-                    candidates.append((row, configuration, batch))
-        if candidates:
-            candidate_groups[key] = candidates
-    if not candidate_groups:
-        return []
-
-    matched_rows = [item for candidates in candidate_groups.values() for item in candidates]
-
     by_factor = {}
-    for row, configuration, batch in matched_rows:
-        key = (configuration["endpoint_id"], configuration["business_metric"],
-               configuration["instrument_asset_code"])
-        by_factor.setdefault(key, []).append((row, configuration, batch))
+    for batch in batch_rows:
+        for row in values_by_batch.get(batch["id"], []):
+            configuration = _configuration_for_observation(configurations, row)
+            if configuration is None:
+                continue
+            key = (configuration["endpoint_id"], configuration["business_metric"],
+                   configuration["instrument_asset_code"])
+            by_factor.setdefault(key, []).append((row, configuration, batch))
 
     result = []
     for factor_key, candidates in by_factor.items():
-        selected_key = max(
-            ((item[2]['endpoint_id'], item[2]['observed_at'], item[2]['function_code'])
-             for item in candidates), key=lambda key: (key[1], key[2] == 2061))
-        candidates = [item for item in candidates
-                      if (item[2]['endpoint_id'], item[2]['observed_at'],
-                          item[2]['function_code']) == selected_key]
+        latest_observed_at = max(item[2]["observed_at"] for item in candidates)
+        candidates = [
+            item for item in candidates if item[2]["observed_at"] == latest_observed_at
+        ]
         distinct_values = {
             (item[0]["standard_value"], item[0]["standard_unit"])
             for item in candidates
         }
         row, configuration, batch = max(
-            candidates, key=lambda item: (item[0]["id"], item[2]["id"]))
-        source_candidate_count = sum(
-            1
-            for group_key, group_candidates in candidate_groups.items()
-            if group_key[:2] == selected_key[:2]
-            for _, candidate_configuration, _ in group_candidates
-            if (candidate_configuration["endpoint_id"],
-                candidate_configuration["business_metric"],
-                candidate_configuration["instrument_asset_code"]) == factor_key
+            candidates,
+            key=lambda item: (
+                item[2].get("received_at") or "",
+                item[2]["id"],
+                item[0]["id"],
+            ),
         )
-        conflict = len(distinct_values) > 1
-        if conflict:
-            selection_reason = "valid_value_conflict"
-        elif source_candidate_count > len(candidates) and selected_key[2] == 2061:
-            selection_reason = "preferred_2061_same_collection"
-        elif len(candidates) > 1:
-            selection_reason = "latest_valid_correction"
+        source_candidate_count = len(candidates)
+        if len(candidates) > 1:
+            selection_reason = "latest_received_correction"
         else:
             selection_reason = "only_valid_candidate"
         parser_version = str(row.get("parser_version") or "")
@@ -1585,17 +1815,17 @@ def _current_collection_values_from_rows(
             source_type = "realtime_observation"
         else:
             source_type = "normalized_observation"
-        selected_value = None if conflict else row["standard_value"]
+        selected_value = row["standard_value"]
         result.append({
             "business_metric": row["business_metric"],
             "protocol_code": row["protocol_code"],
-            "status": "review_required" if conflict else "value",
+            "status": "value",
             "standard_value": selected_value,
             "standard_value_display": format_business_value(
                 selected_value, configuration.get("decimal_precision"),
                 source_value_text=row.get("raw_value_text"),
                 raw_unit=row.get("raw_unit"), standard_unit=row.get("standard_unit")),
-            "source_value_text": None if conflict else row.get("raw_value_text"),
+            "source_value_text": row.get("raw_value_text"),
             "standard_unit": row["standard_unit"],
             "decimal_precision": int(configuration.get("decimal_precision") or 0),
             "quality": row["quality"],
@@ -1618,12 +1848,216 @@ def _current_collection_values_from_rows(
             "candidate_count": len(candidates),
             "source_candidate_count": source_candidate_count,
             "distinct_value_count": len(distinct_values),
-            "reason_code": "valid_value_conflict" if conflict else None,
+            "reason_code": None,
             "expected_interval_seconds": configuration.get("expected_interval_seconds"),
             "tolerance_seconds": configuration.get("tolerance_seconds"),
         })
     return sorted(result, key=lambda item: (
         item["business_metric"], item.get("instrument_asset_code") or ""))
+
+
+def _latest_historical_collection_value(connection, site_id: int, configuration: dict,
+                                        at_time: str) -> dict | None:
+    """Recover one factor's latest valid value when it falls outside the fast lookback."""
+    protocol_codes = configuration.get("protocol_codes") or []
+    protocol_clause = ""
+    params = [
+        site_id, configuration["endpoint_id"], configuration["business_metric"],
+        configuration.get("instrument_asset_code"),
+        configuration.get("mapping_effective_from")
+        or configuration.get("profile_effective_from")
+        or "1970-01-01T00:00:00+00:00",
+        at_time,
+    ]
+    effective_to = (configuration.get("mapping_effective_to")
+                    or configuration.get("profile_effective_to"))
+    effective_to_clause = ""
+    if effective_to:
+        effective_to_clause = " AND batch.observed_at<?"
+        params.append(effective_to)
+    if protocol_codes:
+        protocol_clause = " AND value.protocol_code IN (%s)" % ",".join(
+            "?" * len(protocol_codes))
+        params.extend(protocol_codes)
+    rows = connection.execute(
+        f"""WITH matching AS (
+                SELECT batch.id AS batch_id,batch.endpoint_id,batch.observed_at,
+                       batch.received_at,batch.normalized_at,batch.function_code,
+                       value.id,value.observation_batch_id,value.protocol_code,
+                       value.business_metric,value.raw_value_text,value.raw_unit,
+                       value.standard_value,value.standard_unit,value.quality,
+                       value.instrument_asset_code,value.parser_version
+                FROM observation_values value
+                JOIN observation_batches batch ON batch.id=value.observation_batch_id
+                WHERE batch.business_site_id=? AND batch.endpoint_id=?
+                  AND batch.is_current=1 AND batch.projection_state='completed'
+                  AND value.is_current=1 AND value.is_published=1 AND value.quality='valid'
+                  AND value.business_metric=? AND value.instrument_asset_code IS ?
+                  AND batch.observed_at>=? AND batch.observed_at<=?
+                  {effective_to_clause}{protocol_clause}
+             ), latest_group AS (
+                SELECT endpoint_id,MAX(observed_at) AS observed_at
+                FROM matching
+             )
+             SELECT matching.* FROM matching JOIN latest_group
+               ON latest_group.endpoint_id=matching.endpoint_id
+              AND latest_group.observed_at=matching.observed_at
+             ORDER BY matching.id DESC""",
+        params,
+    ).fetchall()
+    if not rows:
+        return None
+    batches = {}
+    values = []
+    for stored in rows:
+        row = dict(stored)
+        batch_id = row["batch_id"]
+        batches[batch_id] = {
+            "id": batch_id, "business_site_id": site_id,
+            "endpoint_id": row["endpoint_id"], "observed_at": row["observed_at"],
+            "received_at": row["received_at"], "normalized_at": row["normalized_at"],
+            "function_code": row["function_code"],
+        }
+        values.append({
+            key: row[key] for key in (
+                "id", "observation_batch_id", "protocol_code", "business_metric",
+                "raw_value_text", "raw_unit", "standard_value", "standard_unit",
+                "quality", "instrument_asset_code", "parser_version",
+            )
+        } | {"endpoint_id": row["endpoint_id"], "observed_at": row["observed_at"]})
+    selected = _current_collection_values_from_rows(
+        [configuration], list(batches.values()), values)
+    return selected[0] if selected else None
+
+
+def _latest_historical_collection_values_batch(
+        connection, configurations_by_site, *, at_time: str) -> dict:
+    """Recover sparse historical factors in one bounded query."""
+    targets = []
+    protocols = []
+    target_configurations = {}
+    target_site_ids = {}
+    for site_id, configurations in configurations_by_site.items():
+        for configuration in configurations:
+            target_id = len(targets)
+            targets.append((
+                target_id, site_id, configuration["endpoint_id"],
+                configuration["business_metric"],
+                configuration.get("instrument_asset_code"),
+                configuration.get("mapping_effective_from")
+                or configuration.get("profile_effective_from")
+                or "1970-01-01T00:00:00+00:00",
+                configuration.get("mapping_effective_to")
+                or configuration.get("profile_effective_to"),
+            ))
+            target_configurations[target_id] = configuration
+            target_site_ids[target_id] = site_id
+            protocols.extend(
+                (target_id, protocol_code)
+                for protocol_code in configuration.get("protocol_codes") or []
+            )
+    if not targets:
+        return {}
+
+    target_values = ",".join("(?,?,?,?,?,?,?)" for _ in targets)
+    target_params = [value for target in targets for value in target]
+    if protocols:
+        protocol_values = ",".join("(?,?)" for _ in protocols)
+        protocol_cte = f"VALUES {protocol_values}"
+        protocol_params = [value for protocol in protocols for value in protocol]
+    else:
+        protocol_cte = "SELECT NULL,NULL WHERE 0"
+        protocol_params = []
+    rows = connection.execute(
+        f"""WITH targets(
+                    target_id,business_site_id,endpoint_id,business_metric,
+                    instrument_asset_code,effective_from,effective_to
+                ) AS (VALUES {target_values}),
+                target_protocols(target_id,protocol_code) AS ({protocol_cte}),
+                matching AS (
+                    SELECT target.target_id,batch.id AS batch_id,batch.endpoint_id,
+                           batch.observed_at,batch.received_at,batch.normalized_at,
+                           batch.function_code,value.id,value.observation_batch_id,
+                           value.protocol_code,value.business_metric,value.raw_value_text,
+                           value.raw_unit,value.standard_value,value.standard_unit,
+                           value.quality,value.instrument_asset_code,value.parser_version
+                    FROM targets target
+                    JOIN observation_batches batch
+                      ON batch.business_site_id=target.business_site_id
+                     AND batch.endpoint_id=target.endpoint_id
+                    JOIN observation_values value
+                      ON value.observation_batch_id=batch.id
+                     AND value.business_metric=target.business_metric
+                     AND value.instrument_asset_code IS target.instrument_asset_code
+                    WHERE batch.is_current=1 AND batch.projection_state='completed'
+                      AND value.is_current=1 AND value.is_published=1
+                      AND value.quality='valid'
+                      AND batch.observed_at>=target.effective_from
+                      AND batch.observed_at<=?
+                      AND (target.effective_to IS NULL
+                           OR batch.observed_at<target.effective_to)
+                      AND (
+                          NOT EXISTS (
+                              SELECT 1 FROM target_protocols configured
+                              WHERE configured.target_id=target.target_id)
+                          OR EXISTS (
+                              SELECT 1 FROM target_protocols configured
+                              WHERE configured.target_id=target.target_id
+                                AND configured.protocol_code=value.protocol_code)
+                      )
+                ), selected_groups AS (
+                    SELECT candidate.target_id,candidate.endpoint_id,
+                           candidate.observed_at
+                    FROM matching candidate
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM matching newer
+                        WHERE newer.target_id=candidate.target_id
+                          AND newer.observed_at>candidate.observed_at
+                    )
+                    GROUP BY candidate.target_id,candidate.endpoint_id,
+                             candidate.observed_at
+                )
+                SELECT matching.* FROM matching
+                JOIN selected_groups selected
+                  ON selected.target_id=matching.target_id
+                 AND selected.endpoint_id=matching.endpoint_id
+                 AND selected.observed_at=matching.observed_at
+                ORDER BY matching.target_id,matching.id DESC""",
+        [*target_params, *protocol_params, at_time],
+    ).fetchall()
+
+    rows_by_target = {}
+    for stored in rows:
+        row = dict(stored)
+        rows_by_target.setdefault(row["target_id"], []).append(row)
+    result = {}
+    for target_id, matching_rows in rows_by_target.items():
+        configuration = target_configurations[target_id]
+        batches = {}
+        values = []
+        for row in matching_rows:
+            batch_id = row["batch_id"]
+            batches[batch_id] = {
+                "id": batch_id,
+                "business_site_id": target_site_ids[target_id],
+                "endpoint_id": row["endpoint_id"],
+                "observed_at": row["observed_at"],
+                "received_at": row["received_at"],
+                "normalized_at": row["normalized_at"],
+                "function_code": row["function_code"],
+            }
+            values.append({
+                key: row[key] for key in (
+                    "id", "observation_batch_id", "protocol_code", "business_metric",
+                    "raw_value_text", "raw_unit", "standard_value", "standard_unit",
+                    "quality", "instrument_asset_code", "parser_version",
+                )
+            } | {"endpoint_id": row["endpoint_id"], "observed_at": row["observed_at"]})
+        selected = _current_collection_values_from_rows(
+            [configuration], list(batches.values()), values)
+        if selected:
+            result.setdefault(target_site_ids[target_id], []).append(selected[0])
+    return result
 
 
 def format_business_value(value, decimal_precision=None, *, source_value_text=None,
@@ -1684,39 +2118,28 @@ def _cycle_with_available_results(connection, cycle, configurations, values, eva
         value = by_factor.get((config['endpoint_id'], config['business_metric'], config['instrument_asset_code']))
         fault = max((faults[code] for code in (config.get('protocol_codes') or [config.get('protocol_code')])
                      if code in faults), default=None, key=lambda row: row['observed_at'])
-        if fault and (not value or fault['observed_at'] >= value['observed_at']):
-            factor.update(status='review_required', value=None, reason_code=fault['issue_type'],
-                          reason='较新的观测有故障标记，旧有效值不代表当前正常',
-                          observed_at=fault['observed_at'], received_at=None)
-        elif value:
-            next_at = next_business_slot(connection, config, value['observed_at'])
-            deadline = datetime.fromisoformat(business_slot_deadline(config, next_at)) if next_at else None
-            if value.get('status') == 'review_required':
-                factor.update(status='review_required', value=None, reason_code='valid_value_conflict',
-                              reason='同一来源同一观测时点存在不同有效值，需核对',
-                              observed_at=value['observed_at'], received_at=value['received_at'])
-            elif deadline and evaluated_at <= deadline:
-                factor.update(status='value', value=value['standard_value'],
-                              value_display=value['standard_value_display'], source_type=value['source_type'],
-                              protocol_code=value['protocol_code'], standard_unit=value['standard_unit'],
-                              observed_at=value['observed_at'], received_at=value['received_at'],
-                              reason_code=None, reason=None)
-            else:
-                factor.update(status='missing', value=None, reason_code='stale_observation',
-                              reason='已有结果超过当前时效范围', observed_at=value['observed_at'],
-                              received_at=value['received_at'])
+        if value:
+            issue = (fault if fault and fault.get('issue_type') != 'business_time_outside_schedule'
+                     and fault['observed_at'] >= value['observed_at'] else None)
+            factor.update(status='value', value=value['standard_value'],
+                          value_display=value['standard_value_display'], source_type=value['source_type'],
+                          protocol_code=value['protocol_code'], standard_unit=value['standard_unit'],
+                          observed_at=value['observed_at'], received_at=value['received_at'],
+                          reason_code=issue['issue_type'] if issue else None,
+                          reason=('存在较新的仪器故障值；最近有效测量值继续展示'
+                                  if issue else None))
         else:
-            deadline_at = original.get('deadline_at')
-            pending = bool(deadline_at) and evaluated_at < datetime.fromisoformat(deadline_at)
-            factor.update(status='pending' if pending else 'missing', value=None,
-                          reason_code='analysis_pending' if pending else 'missing_observation',
-                          reason='当前无可用的有效已发布观测', observed_at=None, received_at=None)
+            issue = (fault if fault and fault.get('issue_type') != 'business_time_outside_schedule'
+                     else None)
+            factor.update(status='missing', value=None,
+                          reason_code=issue['issue_type'] if issue else 'missing_observation',
+                          reason=('仪器质量标记无效，故障值未发布' if issue
+                                  else '当前无可用的有效已发布观测'),
+                          observed_at=issue['observed_at'] if issue else None, received_at=None)
         factors.append(factor)
     counts = {status: sum(f['status'] == status for f in factors)
               for status in ('value', 'review_required', 'pending', 'missing')}
-    status = ('review_required' if counts['review_required'] else
-              'pending' if counts['pending'] else
-              'complete' if counts['value'] == len(factors) else 'incomplete')
+    status = 'complete' if counts['value'] == len(factors) else 'incomplete'
     return dict(cycle, factors=factors, status=status, formed_count=counts['value'],
                 arrived_count=counts['value'] + counts['review_required'],
                 review_required_count=counts['review_required'], missing_count=counts['missing'],
@@ -1908,7 +2331,7 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
 
     for site_id, batches in candidate_batches.items():
         batches.sort(key=lambda row: (
-            row["observed_at"], row["function_code"] == 2061, row["id"]), reverse=True)
+            row["observed_at"], row.get("received_at") or "", row["id"]), reverse=True)
         batch_by_id.update({row["id"]: row for row in batches})
 
     all_batch_ids = [batch['id'] for site_id in missing_sites
@@ -1942,6 +2365,7 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             [*selected_sites, collection_from, at_time]).fetchall()
         for issue in issues:
             faults_by_site.setdefault(issue['business_site_id'], {}).setdefault(issue['protocol_code'], dict(issue))
+    missing_configurations_by_site = {}
     values_by_site = {}
     for site_id, configurations in configurations_by_site.items():
         site_rows = rows_by_site.get(site_id, [])
@@ -1953,8 +2377,62 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
                 item["endpoint_id"] = batch["endpoint_id"]
                 item["observed_at"] = batch["observed_at"]
                 value_rows.append(item)
-        values_by_site[site_id] = _current_collection_values_from_rows(
+        values = _current_collection_values_from_rows(
             configurations, batch_rows, value_rows)
+        found = {
+            (value["endpoint_id"], value["business_metric"], value["instrument_asset_code"])
+            for value in values
+        }
+        if site_id not in missing_sites or site_id in latest_by_site:
+            missing_configurations_by_site[site_id] = [
+                configuration for configuration in configurations
+                if (configuration["endpoint_id"], configuration["business_metric"],
+                    configuration["instrument_asset_code"]) not in found
+            ]
+        values_by_site[site_id] = values
+
+    historical_by_site = _latest_historical_collection_values_batch(
+        connection, missing_configurations_by_site, at_time=at_time)
+    hourly_rows_by_site = {}
+    if site_ids:
+        marks = ",".join("?" * len(site_ids))
+        for row in connection.execute(
+            f"""SELECT hourly.* FROM monitoring_hourly_last_values hourly
+                WHERE hourly.business_site_id IN ({marks}) AND NOT EXISTS (
+                    SELECT 1 FROM observation_values value
+                    WHERE value.id=hourly.source_observation_value_id)
+                ORDER BY business_site_id,observed_at DESC,received_at DESC""",
+            site_ids,
+        ).fetchall():
+            hourly_rows_by_site.setdefault(row["business_site_id"], []).append(row)
+    for site_id, values in values_by_site.items():
+        values.extend(historical_by_site.get(site_id, []))
+        hourly_values = _hourly_latest_values(
+            connection, site_id, configurations_by_site.get(site_id, []),
+            rows=hourly_rows_by_site.get(site_id, []))
+        if hourly_values:
+            hourly_keys = {
+                (item["endpoint_id"], item["business_metric"],
+                 item.get("instrument_asset_code"))
+                for item in hourly_values
+            }
+            values[:] = [item for item in values if (
+                item["endpoint_id"], item["business_metric"],
+                item.get("instrument_asset_code")) not in hourly_keys]
+            values.extend(hourly_values)
+        values.sort(key=lambda item: (
+            item["business_metric"], item.get("instrument_asset_code") or ""))
+
+    for site_id, configurations in configurations_by_site.items():
+        site_rows = rows_by_site.get(site_id, [])
+        batch_rows = candidate_batches.get(site_id, [])
+        value_rows = []
+        for batch in batch_rows:
+            for stored in values_by_batch.get(batch["id"], []):
+                item = dict(stored)
+                item["endpoint_id"] = batch["endpoint_id"]
+                item["observed_at"] = batch["observed_at"]
+                value_rows.append(item)
         if cycles_by_site[site_id].get("scheduled_at"):
             cycles_by_site[site_id] = latest_cycle(
                 connection, site_id, at_time=at_time, configurations=configurations,
@@ -1968,46 +2446,15 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
 
 
 def trend(connection, site_id: int, metric: str, start: str, end: str, limit: int):
-    configurations = [
-        item for item in _historical_factor_configurations(connection, site_id, end)
-        if item['business_metric'] == metric
-    ]
-    points = []
-    for configuration in configurations:
-        protocol_codes = configuration.get('protocol_codes') or [configuration['protocol_code']]
-        marks = ','.join('?' * len(protocol_codes))
-        rows = connection.execute(
-            f"""SELECT business.business_metric,business.protocol_code,
-                      business.standard_value AS value,business.standard_unit AS unit,business.quality,
-                      business.scheduled_at,business.observed_at,business.received_at,
-                      business.timeliness,business.slot_state,business.projection_version,
-                      'business_schedule' AS aggregation_source,
-                      business.projection_version AS normalization_version,batch.function_code
-               FROM monitoring_business_observations business
-               JOIN observation_batches batch ON batch.id=business.observation_batch_id
-               WHERE business.business_site_id=? AND business.endpoint_id=?
-                 AND business.is_current=1 AND batch.is_current=1
-                 AND business.protocol_code IN ({marks}) AND business.business_metric=?
-                 AND business.instrument_asset_code IS ?
-                 AND business.scheduled_at>=? AND business.scheduled_at<?
-               ORDER BY business.scheduled_at,business.id""",
-            (site_id, configuration['endpoint_id'], *protocol_codes, configuration['business_metric'],
-             configuration['instrument_asset_code'], start, end),
-        ).fetchall()
-        by_slot = {}
-        for row in rows:
-            if _formal_source(row):
-                by_slot.setdefault(row['scheduled_at'], []).append(row)
-        for slot_rows in by_slot.values():
-            if len({(row['value'], row['unit']) for row in slot_rows}) == 1:
-                points.append(dict(slot_rows[0]))
-    return sorted(points, key=lambda item: (item['observed_at'], item['business_metric']))[:limit]
+    points, _, _ = result_trend_page(
+        connection, site_id, metric, start, end, limit=limit)
+    return points
 
 
 def result_trend_page(connection, site_id: int, metric: str, start: str, end: str,
                       *, limit: int = 1000,
                       before: tuple[str, int, str] | None = None):
-    """Return one bounded page of filtered results ordered for chart display."""
+    """Return the last valid measured value in each Beijing natural hour."""
     configurations = [
         item for item in _historical_factor_configurations(
             connection, site_id, end, _current_selection=True)
@@ -2043,13 +2490,17 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
         filters.append("(" + " AND ".join(clauses) + ")")
         filter_params.extend(params)
 
-    candidate_cursor_clause = ""
-    candidate_cursor_params = []
+    detail_candidate_cursor_clause = ""
+    detail_candidate_cursor_params = []
+    hourly_candidate_cursor_clause = ""
+    hourly_candidate_cursor_params = []
     cursor_clause = ""
     cursor_params = []
     if before is not None:
-        candidate_cursor_clause = "AND batch.observed_at<=?"
-        candidate_cursor_params = [before[0]]
+        detail_candidate_cursor_clause = "AND batch.observed_at<=?"
+        detail_candidate_cursor_params = [before[0]]
+        hourly_candidate_cursor_clause = "AND hourly.observed_at<=?"
+        hourly_candidate_cursor_params = [before[0]]
         cursor_clause = """AND (
                 observed_at<? OR (
                     observed_at=? AND (
@@ -2068,7 +2519,10 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
                        COALESCE(value.instrument_asset_code,'') AS instrument_key,
                        value.parser_version,batch.endpoint_id,batch.observed_at,
                        batch.received_at,batch.normalized_at,batch.function_code,
-                       batch.normalization_version
+                       batch.normalization_version,
+                       strftime('%Y-%m-%dT%H:00:00+08:00',
+                                batch.observed_at, '+8 hours') AS sample_hour,
+                       'detail' AS source_kind
                 FROM observation_batches batch
                      INDEXED BY idx_observation_batch_site_observed
                 JOIN observation_values value ON value.observation_batch_id=batch.id
@@ -2077,52 +2531,57 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
                   AND value.is_current=1 AND value.is_published=1
                   AND value.quality='valid' AND batch.observed_at>=?
                   AND batch.observed_at<? AND ({' OR '.join(filters)})
-                   {candidate_cursor_clause}
+                   {detail_candidate_cursor_clause}
+                UNION ALL
+                SELECT hourly.source_observation_value_id AS value_id,
+                       0 AS batch_id,hourly.business_metric,hourly.protocol_code,
+                       hourly.raw_value_text,hourly.raw_unit,hourly.standard_value,
+                       hourly.standard_unit,hourly.quality,
+                       hourly.instrument_asset_code,
+                       COALESCE(hourly.instrument_asset_code,'') AS instrument_key,
+                       hourly.parser_version,hourly.endpoint_id,hourly.observed_at,
+                       hourly.received_at,hourly.normalized_at,hourly.function_code,
+                       hourly.normalization_version,hourly.sample_hour,
+                       'hourly' AS source_kind
+                FROM monitoring_hourly_last_values hourly
+                WHERE hourly.business_site_id=? AND hourly.business_metric=?
+                  AND hourly.observed_at>=? AND hourly.observed_at<?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM observation_values value
+                      WHERE value.id=hourly.source_observation_value_id)
+                  {hourly_candidate_cursor_clause}
             ), ranked AS (
                 SELECT candidate_values.*,
                        ROW_NUMBER() OVER (
-                           PARTITION BY endpoint_id,observed_at,business_metric,
+                           PARTITION BY endpoint_id,sample_hour,business_metric,
                                          instrument_key
-                           ORDER BY CASE WHEN function_code=2061 THEN 0 ELSE 1 END,
+                           ORDER BY observed_at DESC,received_at DESC,
+                                    CASE source_kind WHEN 'hourly' THEN 1 ELSE 0 END DESC,
                                     batch_id DESC,value_id DESC
                        ) AS candidate_rank
                 FROM candidate_values
-            ), group_stats AS (
-                SELECT endpoint_id,observed_at,business_metric,function_code,
-                        instrument_key,
+            ), hour_stats AS (
+                SELECT endpoint_id,sample_hour,business_metric,instrument_key,
                        COUNT(*) AS candidate_count,
                        COUNT(DISTINCT printf('%.17g',standard_value) || char(31)
                              || COALESCE(standard_unit,'')) AS distinct_value_count
                 FROM candidate_values
-                GROUP BY endpoint_id,observed_at,business_metric,function_code,
-                          instrument_key
-            ), source_stats AS (
-                SELECT endpoint_id,observed_at,business_metric,
-                        instrument_key,
-                       COUNT(*) AS source_candidate_count
-                FROM candidate_values
-                GROUP BY endpoint_id,observed_at,business_metric,
-                          instrument_key
+                GROUP BY endpoint_id,sample_hour,business_metric,instrument_key
              ), selected_results AS (
-                 SELECT ranked.*,group_stats.candidate_count,
-                        group_stats.distinct_value_count,
-                        source_stats.source_candidate_count
+                 SELECT ranked.*,hour_stats.candidate_count,
+                        hour_stats.distinct_value_count
                  FROM ranked
-                 JOIN group_stats ON group_stats.endpoint_id=ranked.endpoint_id
-                  AND group_stats.observed_at=ranked.observed_at
-                  AND group_stats.business_metric=ranked.business_metric
-                  AND group_stats.function_code=ranked.function_code
-                  AND group_stats.instrument_key=ranked.instrument_key
-                 JOIN source_stats ON source_stats.endpoint_id=ranked.endpoint_id
-                  AND source_stats.observed_at=ranked.observed_at
-                  AND source_stats.business_metric=ranked.business_metric
-                  AND source_stats.instrument_key=ranked.instrument_key
+                 JOIN hour_stats ON hour_stats.endpoint_id=ranked.endpoint_id
+                  AND hour_stats.sample_hour=ranked.sample_hour
+                  AND hour_stats.business_metric=ranked.business_metric
+                  AND hour_stats.instrument_key=ranked.instrument_key
                  WHERE ranked.candidate_rank=1
              )
              SELECT * FROM selected_results
              WHERE 1=1 {cursor_clause}
              ORDER BY observed_at DESC,endpoint_id DESC,instrument_key DESC LIMIT ?""",
-        [site_id, start, end, *filter_params, *candidate_cursor_params,
+        [site_id, start, end, *filter_params, *detail_candidate_cursor_params,
+         site_id, metric, start, end, *hourly_candidate_cursor_params,
          *cursor_params, limit + 1],
     ).fetchall()
     has_more = len(rows) > limit
@@ -2137,37 +2596,36 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
         (int(item.get('decimal_precision') or 0) for item in configurations), default=0)
     points = []
     for row in reversed(selected_rows):
-        parser_version = str(row['parser_version'] or '')
-        source_value_kind = parser_version.rsplit(':', 1)[-1]
-        formal_hj212 = is_formal_hj212_source(
-            row['protocol_code'], row['function_code'], source_value_kind)
-        if formal_hj212:
-            source_type = ('hj212_2061_avg' if source_value_kind == 'avg'
-                           else 'hj212_2061_rtd')
-        elif str(row['protocol_code']).startswith('HJ212:'):
-            source_type = 'realtime_observation'
+        if row['source_kind'] == 'hourly':
+            source_type = 'hourly_last_value'
         else:
-            source_type = 'normalized_observation'
-        conflict = int(row['distinct_value_count']) > 1
-        if conflict:
-            selection_reason = 'valid_value_conflict'
-        elif (int(row['source_candidate_count']) > int(row['candidate_count'])
-              and row['function_code'] == 2061):
-            selection_reason = 'preferred_2061_same_collection'
-        elif int(row['candidate_count']) > 1:
-            selection_reason = 'latest_valid_correction'
+            parser_version = str(row['parser_version'] or '')
+            source_value_kind = parser_version.rsplit(':', 1)[-1]
+            formal_hj212 = is_formal_hj212_source(
+                row['protocol_code'], row['function_code'], source_value_kind)
+            if formal_hj212:
+                source_type = ('hj212_2061_avg' if source_value_kind == 'avg'
+                               else 'hj212_2061_rtd')
+            elif str(row['protocol_code']).startswith('HJ212:'):
+                source_type = 'realtime_observation'
+            else:
+                source_type = 'normalized_observation'
+        if row['source_kind'] == 'hourly' or int(row['candidate_count']) > 1:
+            selection_reason = 'latest_observation_in_hour'
         else:
             selection_reason = 'only_valid_candidate'
         points.append({
             'business_metric': row['business_metric'],
-            'scheduled_at': row['observed_at'],
-            'status': 'review_required' if conflict else 'value',
-            'value': None if conflict else row['standard_value'],
+            'scheduled_at': row['sample_hour'],
+            'sample_hour': row['sample_hour'],
+            'hour_start': row['sample_hour'],
+            'status': 'value',
+            'value': row['standard_value'],
             'value_display': format_business_value(
-                None if conflict else row['standard_value'], decimal_precision,
+                row['standard_value'], decimal_precision,
                 source_value_text=row['raw_value_text'], raw_unit=row['raw_unit'],
                 standard_unit=row['standard_unit']),
-            'source_value_text': None if conflict else row['raw_value_text'],
+            'source_value_text': row['raw_value_text'],
             'unit': row['standard_unit'],
             'decimal_precision': decimal_precision,
             'quality': row['quality'],
@@ -2176,11 +2634,12 @@ def result_trend_page(connection, site_id: int, metric: str, start: str, end: st
             'normalized_at': row['normalized_at'],
             'deadline_at': None,
             'source_type': source_type,
+            'aggregation_source': 'hourly_sample',
             'protocol_code': row['protocol_code'],
             'function_code': row['function_code'],
             'selection_reason': selection_reason,
             'candidate_count': int(row['candidate_count']),
-            'source_candidate_count': int(row['source_candidate_count']),
+            'source_candidate_count': int(row['candidate_count']),
             'distinct_value_count': int(row['distinct_value_count']),
             'normalization_version': row['normalization_version'],
         })

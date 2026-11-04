@@ -589,9 +589,9 @@
             <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onCheckIn">到站打卡，开始巡检</button>
           </block>
           <!-- 已到站 + 全部正式完成：离站 -->
-          <block wx:elif="{{stationStage.code === 'checked_in' && completed >= total && total > 0}}">
+          <block wx:elif="{{stationStage.code === 'checked_in' && total > 0}}">
             <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onCheckOut" loading="{{checkingOut}}" disabled="{{checkingOut}}">
-              {{checkingOut ? '离站中…' : '完成巡检，离站打卡'}}
+              {{checkingOut ? '离站中…' : '结束本次作业，离站打卡'}}
             </button>
           </block>
           <!-- 待同步：唯一主动作 -->
@@ -698,9 +698,11 @@
 
           <!-- 已驳回照片 -->
           <block wx:if="{{sheet.rejectedEvidence.length}}">
-            <text class="ip-fp-photo-section-title">已驳回照片</text>
+            <text class="ip-fp-photo-section-title">问题照片</text>
             <view class="ip-photo-grid">
               <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text>
+                <text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text>
                 <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
                 <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
                       bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">
@@ -851,9 +853,11 @@
           </view>
           <text class="ip-fp-photo-hint" wx:if="{{sheet.voidedEvidenceCount}}">历史中有 {{sheet.voidedEvidenceCount}} 张已作废证据</text>
           <block wx:if="{{sheet.rejectedEvidence.length}}">
-            <text class="ip-fp-photo-section-title">已驳回照片</text>
+            <text class="ip-fp-photo-section-title">问题照片</text>
             <view class="ip-photo-grid">
               <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text>
+                <text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text>
                 <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
                 <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
                       bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">

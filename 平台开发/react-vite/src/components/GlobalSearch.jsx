@@ -152,7 +152,7 @@ export default function GlobalSearch({ open, onClose }) {
         </Spin>
       </div>
       <div className="global-search-summary" style={{ color: tokens.colorTextTertiary, borderTopColor: tokens.colorBorderSecondary }}>
-        {query.trim() ? `找到 ${results.length} 个结果` : `可访问页面 ${results.length} 个`}
+        {query.trim() ? `当前显示 ${results.length} 个匹配结果，最多显示 20 个` : `当前显示 ${results.length} 个常用页面入口`}
       </div>
     </Modal>
   );

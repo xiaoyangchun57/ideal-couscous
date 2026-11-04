@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { monitoringLatestResults, formatMonitoringTime, monitoringMissingCount } from './stationMonitoring.js';
 
-test('mixed real times remain per-factor, and historical values retain fault or stale status', () => {
+test('mixed real times remain per-factor and latest valid values are never hidden', () => {
   const values = [
     { business_metric: 'ammonia', observed_at: '2026-10-22T06:07:00+00:00', standard_value: 0.105853, standard_value_display: '0.105853' },
     { business_metric: 'total_phosphorus', observed_at: '2026-10-22T08:00:00+00:00', standard_value: 0.03 },
@@ -10,15 +10,15 @@ test('mixed real times remain per-factor, and historical values retain fault or 
   const factors = [{ business_metric: 'ammonia', state: 'fault' }, { business_metric: 'total_phosphorus', state: 'valid' }];
   const result = monitoringLatestResults(factors, values, { factors: [{ business_metric: 'total_phosphorus', reason_code: 'stale_observation' }] });
   assert.equal(result.commonTime, null);
-  assert.equal(result.items[0].statusLabel, '故障 · 历史值');
+  assert.equal(result.items[0].statusLabel, '存在故障值 · 最近有效值');
   assert.equal(result.items[0].standard_value_display, '0.105853');
-  assert.equal(result.items[1].statusLabel, '历史值');
+  assert.equal(result.items[1].statusLabel, '');
   assert.match(formatMonitoringTime(result.items[0].observed_at), /14:07:00/);
   assert.match(formatMonitoringTime(result.items[1].observed_at), /16:00:00/);
   const same = values.map(item => ({ ...item, observed_at: values[0].observed_at }));
   assert.equal(monitoringLatestResults(factors, same).commonTime, values[0].observed_at);
   assert.equal(monitoringLatestResults([{ business_metric: 'ph' }], []).items[0].hasValue, false);
-  assert.equal(monitoringLatestResults(factors, [{ ...values[0], status: 'review_required' }]).items[0].statusLabel, '待核对');
+  assert.equal(monitoringLatestResults(factors, [{ ...values[0], status: 'review_required' }]).items[0].hasValue, true);
 
   const samplingTimeIssue = monitoringLatestResults([{
     business_metric: 'ammonia',
@@ -27,9 +27,9 @@ test('mixed real times remain per-factor, and historical values retain fault or 
     reason: '采样时间不在批准的四小时时点，需核对数据来源与采样时刻',
     issue_observed_at: '2026-10-22T06:00:00+00:00',
   }], [values[0]]).items[0];
-  assert.equal(samplingTimeIssue.statusLabel, '采样时点异常 · 历史值');
-  assert.equal(samplingTimeIssue.statusObservedAt, '2026-10-22T06:00:00+00:00');
-  assert.match(samplingTimeIssue.statusReason, /采样时间不在批准/);
+  assert.equal(samplingTimeIssue.statusLabel, '');
+  assert.equal(samplingTimeIssue.statusObservedAt, null);
+  assert.equal(samplingTimeIssue.statusReason, '');
 });
 
 // Complete latest_cycle objects captured from real isolated list HTTP responses.

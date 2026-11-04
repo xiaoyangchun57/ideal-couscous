@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
-  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
+  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined,
   StarOutlined, FolderOpenOutlined,
   ClearOutlined, PlusOutlined,
   SettingOutlined,
@@ -19,12 +19,10 @@ import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
+import { listLastPage } from '../../utils/listPagination';
 import {
   mergePlanEditSites, planEditSitesForDate, replaceReworkWithSchedule, resolveReworkScheduleId,
 } from './planScheduleNavigation';
-import {
-  DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
-} from './planRecommendationScope';
 import {
   canCancelPlanSchedule,
   groupExecutionPackagesByDate,
@@ -93,7 +91,6 @@ export default function PlanSchedulesPage() {
   const isAdmin = userRoles.includes('admin');
   const canCleanup = userRoles.includes('admin');
   const canUseFavorites = userRoles.includes('operator');
-  const canUseFollowUps = userRoles.some(role => role === 'admin' || role === 'operator');
   const moduleView = searchParams.get('view');
   const moduleScrollRef = useRef(0);
 
@@ -111,15 +108,17 @@ export default function PlanSchedulesPage() {
   };
 
   const [list, setList] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [teamOverview, setTeamOverview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [teamOverviewError, setTeamOverviewError] = useState('');
-  const [followUpError, setFollowUpError] = useState('');
-  const [followUpScope, setFollowUpScope] = useState(DEFAULT_FOLLOW_UP_SCOPE);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
   const [attentionFilter, setAttentionFilter] = useState(searchParams.get('attention') || undefined);
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || undefined);
+  const listPage = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1);
+  const requestedPageSize = Number.parseInt(searchParams.get('page_size') || '20', 10) || 20;
+  const listPageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
 
   // 详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -142,9 +141,6 @@ export default function PlanSchedulesPage() {
   const [purgeAudits, setPurgeAudits] = useState({ items: [], total: 0, page: 1, pageSize: 20 });
   const [purgeAuditsLoading, setPurgeAuditsLoading] = useState(false);
   const [purgeAuditsError, setPurgeAuditsError] = useState('');
-  const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
-  const [followUpLoading, setFollowUpLoading] = useState(false);
-  const [followUpExpanded, setFollowUpExpanded] = useState(false);
   const [teamOverviewExpanded, setTeamOverviewExpanded] = useState(false);
   const [closingExecution, setClosingExecution] = useState(null);
   const [overdueCloseReason, setOverdueCloseReason] = useState('');
@@ -179,7 +175,6 @@ export default function PlanSchedulesPage() {
   const detailRequestRef = useRef(0);
   const editorRequestRef = useRef(0);
   const cleanupRequestRef = useRef(0);
-  const followUpRequestRef = useRef(0);
   const cleanupActionRef = useRef(false);
   const cancelActionRef = useRef(false);
   const purgeActionRef = useRef(false);
@@ -188,25 +183,44 @@ export default function PlanSchedulesPage() {
 
   const loadList = useCallback(async () => {
     const requestId = ++listRequestRef.current;
+    let correctingPage = false;
     setLoading(true);
     setLoadError('');
     try {
-      const params = [];
-      if (statusFilter) params.push(`status=${statusFilter}`);
-      if (typeFilter) params.push(`schedule_type=${typeFilter}`);
-      if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const rows = await api.getStrict('/plan-schedules' + (params.length ? '?' + params.join('&') : ''));
+      const params = new URLSearchParams({
+        paginated: '1',
+        page: String(listPage),
+        page_size: String(listPageSize),
+      });
+      if (statusFilter) params.set('status', statusFilter);
+      if (typeFilter) params.set('schedule_type', typeFilter);
+      if (attentionFilter) params.set('attention', attentionFilter);
+      const response = await api.getStrict(`/plan-schedules?${params}`);
       if (mountedRef.current && requestId === listRequestRef.current) {
+        const rows = Array.isArray(response) ? response : response?.items;
+        const total = Array.isArray(response) ? rows.length : Number(response?.total || 0);
+        const lastPage = listLastPage(total, listPageSize);
+        if (total > 0 && listPage > lastPage) {
+          correctingPage = true;
+          setSearchParams((current) => {
+            const next = new URLSearchParams(current);
+            if (lastPage > 1) next.set('page', String(lastPage));
+            else next.delete('page');
+            return next;
+          }, { replace: true });
+          return;
+        }
         setList(Array.isArray(rows) ? rows : []);
+        setListTotal(total);
       }
     } catch (error) {
       if (mountedRef.current && requestId === listRequestRef.current) {
         setLoadError(error.message || '计划列表加载失败');
       }
     } finally {
-      if (mountedRef.current && requestId === listRequestRef.current) setLoading(false);
+      if (mountedRef.current && requestId === listRequestRef.current && !correctingPage) setLoading(false);
     }
-  }, [statusFilter, typeFilter, attentionFilter]);
+  }, [statusFilter, typeFilter, attentionFilter, listPage, listPageSize, setSearchParams]);
 
   const loadPurgeAudits = useCallback(async (page = 1) => {
     if (!isAdmin) return;
@@ -301,50 +315,11 @@ export default function PlanSchedulesPage() {
     }
   }, [canViewTeam]);
 
-  const loadFollowUps = useCallback(async () => {
-    if (!canUseFollowUps) {
-      setFollowUpRecommendations([]);
-      setFollowUpError('');
-      return;
-    }
-    const requestId = ++followUpRequestRef.current;
-    const result = await loadFollowUpRecommendations(
-      api,
-      followUpScope,
-      () => mountedRef.current && requestId === followUpRequestRef.current,
-    );
-    if (!result) return;
-    if (result.followUpRecommendations !== null) setFollowUpRecommendations(result.followUpRecommendations);
-    setFollowUpError(result.error);
-  }, [canUseFollowUps, followUpScope]);
-
   const refreshAll = useCallback(() => {
     loadList();
     loadOverview();
-    loadFollowUps();
-  }, [loadList, loadOverview, loadFollowUps]);
+  }, [loadList, loadOverview]);
 
-  const handleFollowUpRecommendation = async (item) => {
-    setFollowUpLoading(true);
-    try {
-      const created = await api.postStrict(
-        '/plan-schedules/follow-up-recommendations',
-        followUpRecommendationActionPayload(followUpScope, item),
-      );
-      if (followUpScope === 'team') {
-        message.success(created?.notified ? '已通知负责人' : '负责人已有未读通知，无需重复通知');
-      } else {
-        message.success('已生成复查草稿；仍需确认资源并提交审批');
-      }
-      refreshAll();
-      if (created?.schedule?.id) openDetail(created.schedule.id);
-    } catch (error) {
-      message.error(error?.message || (followUpScope === 'team'
-        ? '通知失败，请刷新后重试' : '生成草稿失败，请刷新后重试'));
-    } finally {
-      setFollowUpLoading(false);
-    }
-  };
 
   const openFavorites = async () => {
     setFavoritesOpen(true);
@@ -419,7 +394,7 @@ export default function PlanSchedulesPage() {
   }, []);
 
   useEffect(() => { loadList(); }, [loadList]);
-  useEffect(() => { loadOverview(); loadFollowUps(); }, [loadOverview, loadFollowUps]);
+  useEffect(() => { loadOverview(); }, [loadOverview]);
 
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
@@ -431,12 +406,14 @@ export default function PlanSchedulesPage() {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
     else next.delete(key);
+    next.delete('page');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const resetFilters = useCallback(() => {
     const next = new URLSearchParams(searchParams);
     ['status', 'type', 'attention'].forEach((key) => next.delete(key));
+    next.delete('page');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -1112,46 +1089,10 @@ export default function PlanSchedulesPage() {
         { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
       ]}
     >
-      {canUseFollowUps && followUpError && <Alert type="warning" showIcon message={followUpError} action={<Button size="small" onClick={loadFollowUps}>重试</Button>} />}
       {teamOverviewError && canViewTeam && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
       {supplementTarget && <Alert type="warning" showIcon
         message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
         description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
-
-      {canUseFollowUps && (isAdmin || followUpRecommendations.length > 0) && (
-        <Alert
-          type={followUpRecommendations.length > 0 ? "warning" : "info"}
-          showIcon
-          icon={<BulbOutlined />}
-          message={followUpScope === 'team' ? '团队系统性异常复查' : '我的系统性异常复查'}
-          action={<Space size={4} wrap>
-            {isAdmin && <Button size="small" type="link" onClick={() => {
-              setFollowUpRecommendations([]); setFollowUpError('');
-              setFollowUpScope(scope => scope === 'team' ? 'mine' : 'team');
-            }}>{followUpScope === 'team' ? '返回我的复查' : '查看团队复查'}</Button>}
-            <Button size="small" type="link" onClick={() => setFollowUpExpanded(value => !value)}>
-              {followUpExpanded ? '收起' : `查看 ${followUpRecommendations.length} 条`}
-            </Button>
-          </Space>}
-          description={followUpExpanded && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {!followUpRecommendations.length && <Text type="secondary">当前范围暂无系统性异常复查建议</Text>}
-              {followUpRecommendations.map(item => (
-                <div key={`follow-up-${item.user_id}-${item.site_id}-${item.anomaly_type}`}>
-                  <Text style={{ fontSize: 12 }}>复查建议：{item.user_name} · {item.site_name} · {item.anomaly_type}</Text>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-                    {item.window_days} 天内出现 {item.occurrence_count} 次；最近一次 {item.latest_at}；建议由负责人确认本周执行日期
-                  </Text>
-                  <Button size="small" type="link" danger loading={followUpLoading}
-                    onClick={() => handleFollowUpRecommendation(item)}>
-                    {followUpScope === 'team' ? '通知负责人' : '生成复查草稿'}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        />
-      )}
 
       {hasTeamAttention && (
         <>
@@ -1202,6 +1143,21 @@ export default function PlanSchedulesPage() {
           columns={columns}
           emptyType={statusFilter || typeFilter || attentionFilter ? 'filtered' : 'empty'}
           onRefresh={loadList}
+          pagination={{
+            current: listPage,
+            pageSize: listPageSize,
+            total: listTotal,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            disabled: loading,
+            onChange: (nextPage, nextPageSize) => {
+              const next = new URLSearchParams(searchParams);
+              const sizeChanged = nextPageSize !== listPageSize;
+              next.set('page', String(sizeChanged ? 1 : nextPage));
+              next.set('page_size', String(nextPageSize));
+              setSearchParams(next, { replace: true });
+            },
+          }}
           onRow={r => ({ onClick: () => openDetail(r.id), style: { cursor: 'pointer' } })}
         />}
       </section>

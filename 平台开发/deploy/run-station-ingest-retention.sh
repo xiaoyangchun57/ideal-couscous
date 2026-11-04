@@ -114,4 +114,6 @@ if result.get("status") not in {"completed", "partial"}:
     raise SystemExit("retention result status is invalid")
 if not isinstance(result.get("retry_required"), bool):
     raise SystemExit("retention retry flag is invalid")
+if result["retry_required"]:
+    raise SystemExit(75)
 PY

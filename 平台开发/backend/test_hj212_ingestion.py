@@ -308,7 +308,9 @@ class HJ212IngestionContractTest(unittest.TestCase):
             for item in values
         ], [("value", 7.1, "hj212_2061_avg", "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots], [("missing", None)])
-        self.assertEqual(points, [])
+        self.assertEqual([(item["status"], item["value"], item["source_type"])
+                          for item in points],
+                         [("value", 7.1, "hj212_2061_avg")])
         self.assertEqual(diagnostics, {
             "late_points": 0, "suspect_points": 0,
             "duplicate_records": 0, "conflict_slots": 0,
@@ -351,13 +353,15 @@ class HJ212IngestionContractTest(unittest.TestCase):
         ], [("value", 7.8, "realtime_observation", "realtime",
              "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots], [("missing", None)])
-        self.assertEqual(points, [])
+        self.assertEqual([(item["status"], item["value"], item["source_type"])
+                          for item in points],
+                         [("value", 7.8, "realtime_observation")])
         self.assertEqual(diagnostics, {
             "late_points": 0, "suspect_points": 0,
             "duplicate_records": 0, "conflict_slots": 0,
         })
 
-    def test_two_distinct_2061_averages_require_review_in_every_formal_read(self):
+    def test_two_distinct_2061_averages_use_latest_receipt_in_public_reads(self):
         self._keep_only_ph_configuration()
         frames = (
             make_real_shape_hj212(
@@ -374,18 +378,19 @@ class HJ212IngestionContractTest(unittest.TestCase):
             self.assertEqual(normalize_raw_frame(self.database, raw_id), "accepted")
         cycle, factor, values, slots, points, diagnostics = self._public_ph_state()
         self.assertEqual((cycle["status"], cycle["latest_complete_cycle_at"]),
-                         ("review_required", None))
+                         ("complete", "2026-09-11T04:00:00+00:00"))
         self.assertEqual((factor["status"], factor["value"], factor["formal_candidate_count"]),
-                         ("review_required", None, 2))
+                         ("value", 7.2, 2))
         self.assertEqual([
             (item["status"], item["standard_value"], item["source_value_text"],
              item["source_type"], item["reason_code"], item["observed_at"])
             for item in values
-        ], [("review_required", None, None, "hj212_2061_avg",
-             "valid_value_conflict", "2026-09-11T04:00:00+00:00")])
+        ], [("value", 7.2, "7.2", "hj212_2061_avg",
+             None, "2026-09-11T04:00:00+00:00")])
         self.assertEqual([(item["status"], item["value"]) for item in slots],
                          [("review_required", None)])
-        self.assertEqual(points, [])
+        self.assertEqual([(item["status"], item["value"]) for item in points],
+                         [("value", 7.2)])
         self.assertEqual(diagnostics["conflict_slots"], 1)
 
     def test_2011_selected_and_conflict_rows_remain_process_candidates_only(self):
@@ -744,7 +749,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
         raw = make_real_shape_hj212(
             command="2061", cp="DataTime=20260911130000;w01001-Avg=7.1;w01001-Flag=N")
         self.assertIsNone(self.server._process_raw(raw, "2026-09-11T07:02:00+00:00"))
-        self.assertEqual(normalize_raw_frame(self.database, self._raw_ids()[0]), "partial")
+        self.assertEqual(normalize_raw_frame(self.database, self._raw_ids()[0]), "accepted")
         with closing(sqlite3.connect(self.database)) as connection:
             issue = connection.execute(
                 "SELECT issue_type,object_summary,reparse_allowed FROM monitoring_quality_issues"
@@ -752,7 +757,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
             business_count = connection.execute(
                 "SELECT COUNT(*) FROM monitoring_business_observations"
             ).fetchone()[0]
-        self.assertEqual(issue, ("business_time_outside_schedule", "HJ212:w01001", 0))
+        self.assertIsNone(issue)
         self.assertEqual(business_count, 0)
 
     def test_real_cp_shape_only_projects_n_and_leaves_d_f_as_quality_evidence(self):
@@ -990,15 +995,20 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ('2026-09-11T08:00:00+00:00', 'HJ212:w01009', 'conflict'),
         ])
 
-    def test_3020_response_requires_authenticated_durable_receipt(self):
+    def test_3020_response_requires_authentication_without_persisting_non_measurement(self):
         raw = make_hj212(command="3020", factors="")
         response = self.server._process_raw(raw, "2026-09-11T08:50:00+00:00")
         self.assertEqual(response, build_hj212_9011_response(parse_hj212_frame(raw)))
         with mock.patch.object(self.storage, "persist_parsed", side_effect=sqlite3.OperationalError("locked")):
-            with self.assertRaises(sqlite3.OperationalError):
-                self.server._process_raw(raw, "2026-09-11T08:50:01+00:00")
+            self.assertEqual(
+                self.server._process_raw(raw, "2026-09-11T08:50:01+00:00"),
+                build_hj212_9011_response(parse_hj212_frame(raw)),
+            )
         self.assertIsNone(self.server._process_raw(make_hj212(command="3020", password="wrongpw", factors=""), "2026-09-11T08:50:02+00:00"))
         self.assertIsNone(self.server._process_raw(make_hj212(command="3020", station="UNKNOWN-HJ212", factors=""), "2026-09-11T08:50:03+00:00"))
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_parse_attempts").fetchone()[0], 0)
 
     def test_bad_credentials_unknown_station_crc_and_unconfirmed_commands_never_project_or_reply(self):
         cases = (
@@ -1016,7 +1026,7 @@ class HJ212IngestionContractTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM observation_values").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_frame_protocols WHERE protocol_family='hj212'").fetchone()[0], 6)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_frame_protocols WHERE protocol_family='hj212'").fetchone()[0], 3)
             errors = {row[0] for row in connection.execute("SELECT error_type FROM ingest_errors")}
             non_data_count = connection.execute(
                 """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
@@ -1024,7 +1034,34 @@ class HJ212IngestionContractTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertTrue({"credential_failed", "unknown_endpoint", "hj212_crc_mismatch"} <= errors)
         self.assertNotIn("hj212_non_data_command", errors)
-        self.assertEqual(non_data_count, 3)
+        self.assertIsNone(non_data_count)
+
+    def test_unparseable_diagnostic_cap_includes_retained_raw_body(self):
+        received_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        for index in range(520):
+            self.storage.persist_unparseable(
+                bytes((index % 251,)) + b'x' * 2047,
+                'malformed_frame', received_at,
+                protocol_family='hj212', parser_version=HJ212_PARSER_VERSION,
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            error_rows = connection.execute('SELECT COUNT(*) FROM ingest_errors').fetchone()[0]
+            raw_rows = connection.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0]
+            parse_rows = connection.execute('SELECT COUNT(*) FROM ingest_parse_attempts').fetchone()[0]
+            retained_bytes = connection.execute(
+                """SELECT COALESCE(SUM(length(error.error_type)+length(error.error_detail)
+                                        +COALESCE(length(raw.raw_frame),0)),0)
+                   FROM ingest_errors error
+                   LEFT JOIN ingest_raw_frames raw ON raw.id=error.raw_frame_id"""
+            ).fetchone()[0]
+            summary_count = connection.execute(
+                """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
+                   WHERE error_type='malformed_frame'"""
+            ).fetchone()[0]
+        self.assertLessEqual(error_rows, 512)
+        self.assertEqual((raw_rows, parse_rows), (error_rows, error_rows))
+        self.assertLessEqual(retained_bytes, 1024 * 1024)
+        self.assertEqual(summary_count, 520)
 
 
 if __name__ == "__main__":

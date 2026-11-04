@@ -193,7 +193,6 @@ export default function InspectionSettingsPage({ embedded = false, onBack }) {
 
   return <WorkspacePage title="检查项设置" subtitle="管理员维护周、月、季、年检查项模板；变更只影响后续新建计划，历史计划保留快照。"
     primaryAction={<Space>{embedded && <Button icon={<ArrowLeftOutlined />} onClick={requestBack}>返回巡检</Button>}<Button icon={<ReloadOutlined />} onClick={load}>刷新</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => openTemplate()}>新增模板</Button></Space>}>
-    <Alert type="info" showIcon message="检查项设置只影响后续新建计划，不会改写已生成的历史计划。" style={{ marginBottom: 12 }} />
     <Card title="检查项模板" size="small"><Table rowKey="id" loading={loading} pagination={false} dataSource={templates} columns={[
       { title: '模板名称', dataIndex: 'template_name' },
       { title: '频次', dataIndex: 'frequency', render: value => FREQUENCIES.find(x => x.value === (value === 'annual' ? 'yearly' : value))?.label || <Tag color="orange">需人工处理</Tag> }, { title: '检查项数', dataIndex: 'item_count' },

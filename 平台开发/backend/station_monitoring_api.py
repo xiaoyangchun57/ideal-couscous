@@ -15,19 +15,14 @@ from hj212_parser import FrameError as HJ212FrameError, parse_hj212_frame
 from station_ingest_retention import RetentionError, read_raw_evidence
 from station_monitoring import (
     BUSINESS_PROJECTION_VERSION as MONITORING_BUSINESS_PROJECTION_VERSION,
-    business_slot_deadline as monitoring_business_slot_deadline,
-    business_slot_diagnostics as monitoring_business_slot_diagnostics,
     current_expected_factor_selections_batch as monitoring_expected_factor_selections_batch,
     current_factor_configurations as monitoring_factor_configurations,
     current_factor_configurations_batch as monitoring_factor_configurations_batch,
-    expected_business_slots as monitoring_expected_business_slots,
     is_formal_hj212_source as monitoring_is_formal_hj212_source,
     latest_cycle as monitoring_latest_cycle,
     latest_values as monitoring_latest_values,
     latest_values_and_cycles_batch as monitoring_latest_values_and_cycles_batch,
-    next_business_slot as monitoring_next_business_slot,
     result_trend_page as monitoring_result_trend_page,
-    trend_slots as monitoring_trend_slots,
 )
 
 _shared = None
@@ -356,28 +351,13 @@ def _station_monitoring_projection(db, site_id, *, site=None, profile=_MONITORIN
     elif not configs:
         base.update(monitoring_status='raw_received_config_pending', monitoring_status_label='监测配置待完善', reason_code='monitoring_config_pending', monitoring_reason='应监测因子已设置，但当前端点缺少可用监测配置')
     elif not values:
-        data_axis = _station_monitoring_data_axis(
-            configs, values, db, site_id=site_id, factor_states=factor_states)
-        if data_axis['state'] == 'analysis_pending':
-            base.update(monitoring_status='waiting_first_valid', monitoring_status_label='等待分析结果',
-                        reason_code='analysis_pending', monitoring_reason='当前业务时点仍在分析结果窗口内')
-        else:
-            base.update(monitoring_status='attention', monitoring_status_label='数据需关注',
-                        reason_code='missing_observation', monitoring_reason='完整结果窗口结束后仍无有效观测')
+        base.update(monitoring_status='attention', monitoring_status_label='暂无有效观测',
+                    reason_code='missing_observation', monitoring_reason='当前配置因子尚无可展示的有效测量值')
     else:
         summary = _station_monitoring_summary_projection(
             db, site_id, profile, configs, values, last_communication,
             factor_states=factor_states)
         base.update(monitoring_status=summary['status'], monitoring_status_label=summary['status_label'], reason_code=summary['reason_code'], monitoring_reason=summary['reason'])
-    if (not values and expected_factor_selection and last_communication
-            and cycle['status'] in {'incomplete', 'review_required'}):
-        base.update(monitoring_status='attention', monitoring_status_label='数据需关注',
-                    reason_code='latest_cycle_' + cycle['status'],
-                    monitoring_reason='最近检测周期不完整或存在待核对结果')
-    elif (not values and expected_factor_selection and last_communication
-          and cycle['status'] == 'pending' and not cycle['formed_count']):
-        base.update(monitoring_status='waiting_first_valid', monitoring_status_label='等待分析结果',
-                    reason_code='analysis_pending', monitoring_reason='最近检测周期仍在结果窗口内')
     return base
 
 
@@ -393,7 +373,6 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
             (profile['endpoint_id'],),
         ).fetchone()
         last_communication = row['received_at'] if row else None
-    profile_data = dict(profile)
     communication = _monitoring_freshness(last_communication, 1800)
     if communication['state'] == 'stale':
         return {'status': 'attention', 'status_label': '数据需关注', 'reason_code': 'stale_communication', 'reason': '最后收到报文时间已超出配置周期'}
@@ -402,16 +381,11 @@ def _station_monitoring_summary_projection(db, site_id, profile, configs=None, v
     if data_axis['status'] == 'attention':
         return {'status': 'attention', 'status_label': '数据需关注',
                 'reason_code': data_axis.get('reason_code'), 'reason': data_axis.get('reason')}
-    if values and (not profile_data.get('expected_interval_seconds')
-                   or any(not item.get('expected_interval_seconds') for item in configs)):
-        return {
-            'status': 'attention', 'status_label': '已有监测结果',
-            'reason_code': 'result_freshness_unknown',
-            'reason': '已显示最新有效结果；未配置预期周期，无法判断结果是否及时',
-        }
-    if data_axis['state'] in {'fresh', 'analysis_pending'}:
-        return {'status': 'normal', 'status_label': '数据正常', 'reason_code': None, 'reason': '最近有效观测在配置周期内'}
-    return {'status': 'attention', 'status_label': '数据需关注', 'reason_code': 'stale_observation', 'reason': '最近有效观测超出配置周期或存在缺口'}
+    if values:
+        return {'status': 'normal', 'status_label': '数据正常', 'reason_code': None,
+                'reason': '已按各因子真实测量时间展示最新有效值'}
+    return {'status': 'attention', 'status_label': '暂无有效观测',
+            'reason_code': 'missing_observation', 'reason': '当前配置因子尚无可展示的有效测量值'}
 
 
 def _station_monitoring_axis(name, state, label, *, status='info', reason=None, **extra):
@@ -453,21 +427,19 @@ def _station_monitoring_factor_states(db, site_id, configs, values, *, faults=No
             (faults[code] for code in (config.get('protocol_codes') or [config.get('protocol_code')]) if code in faults),
             key=lambda item: item['observed_at'], default=None,
         )
-        if value and value.get('status') == 'review_required':
-            state, reason_code, reason = (
-                'review_required', 'valid_value_conflict',
-                '同一采集结果存在多个不同有效值，需核对')
-        elif fault and (not value or fault['observed_at'] >= value.get('observed_at', '')):
-            state, reason_code, reason = 'fault', fault['issue_type'], '仪器质量标记无效，故障值未发布'
+        if fault and fault.get('issue_type') == 'business_time_outside_schedule':
+            fault = None
+        if fault and (not value or fault['observed_at'] >= value.get('observed_at', '')):
+            state, reason_code = 'fault', fault['issue_type']
+            reason = '仪器质量标记无效，故障值未发布；最近有效测量值仍保留展示'
         elif value:
             state, reason_code, reason = 'valid', None, None
-        elif config.get('has_due_slot') or not config.get('result_delay_seconds'):
-            state, reason_code, reason = 'missing', 'missing_observation', '完整结果窗口结束后仍无有效值'
         else:
-            state, reason_code, reason = 'pending', 'analysis_pending', '当前业务时点仍在分析结果窗口内'
+            state, reason_code, reason = 'missing', 'missing_observation', '暂无有效观测'
         states.append(dict(
             config, state=state, reason_code=reason_code, reason=reason,
-            last_valid=value if state == 'valid' else None, latest_result=value,
+            last_valid=value, latest_result=value,
+            issue_observed_at=(fault['observed_at'] if fault and state == 'fault' else None),
             pending_until=config.get('pending_until')))
     return states
 
@@ -481,83 +453,34 @@ def _station_monitoring_data_axis(configs, values, db=None, *, site_id=None, fac
             last_valid_observation_at=None)
     if factor_states is None:
         factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    freshness = []
-    next_expected = []
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    for state in factor_states:
-        config = state
-        value = state.get('last_valid')
-        if value:
-            scheduled_at = value.get('scheduled_at') or value.get('observed_at')
-            next_at = (monitoring_next_business_slot(db, config, scheduled_at) if db else
-                       (datetime.fromisoformat(scheduled_at) + timedelta(
-                            seconds=int(config.get('expected_interval_seconds') or 0))).isoformat())
-            next_expected.append(next_at)
-            deadline = datetime.fromisoformat(monitoring_business_slot_deadline(config, next_at)) if next_at else None
-            freshness.append({'state': 'fresh' if deadline and now <= deadline else 'stale', 'reason_code': None})
-        else:
-            next_at = config.get('next_expected_at')
-            if next_at:
-                next_expected.append(next_at)
-            freshness.append({'state': state['state'], 'reason_code': state['reason_code']})
     last_valid = max(
         (item.get('observed_at') or item.get('scheduled_at') for item in values
          if item.get('status', 'value') == 'value'
          and (item.get('observed_at') or item.get('scheduled_at'))),
         default=None,
     )
-    next_expected_at = min((item for item in next_expected if item), default=None)
-    if any(item['state'] == 'review_required' for item in factor_states):
-        return _station_monitoring_axis(
-            '观测数据', 'review_required', '结果待核对', status='attention',
-            reason='同一采集结果存在多个不同有效值，无法自动选择',
-            last_valid_observation_at=last_valid, next_expected_at=next_expected_at,
-            reason_code='valid_value_conflict')
-    if last_valid and any(not item.get('expected_interval_seconds') for item in configs):
-        return _station_monitoring_axis(
-            '观测数据', 'result_available', '已有监测结果', status='info',
-            reason='已显示最新有效结果；未配置预期周期，无法判断结果是否及时',
-            reason_code='result_freshness_unknown',
-            last_valid_observation_at=last_valid, next_expected_at=next_expected_at)
+    fault_states = [item for item in factor_states if item['state'] == 'fault']
+    device_fault = next(iter(fault_states), None)
     if not last_valid:
-        if any(item['state'] == 'fault' for item in factor_states):
+        if device_fault:
             return _station_monitoring_axis(
                 '观测数据', 'quality_fault', '存在故障值', status='attention',
                 reason='仪器质量标记无效，故障值未发布', last_valid_observation_at=None,
-                next_expected_at=next_expected_at, reason_code='quality_fault')
-        if not any(item['state'] == 'missing' for item in factor_states):
-            return _station_monitoring_axis(
-                '观测数据', 'analysis_pending', '等待分析结果', status='pending',
-                reason='当前业务时点仍在分析结果窗口内', last_valid_observation_at=None,
-                next_expected_at=next_expected_at, reason_code='analysis_pending')
+                next_expected_at=None, reason_code='quality_fault')
         return _station_monitoring_axis(
             '观测数据', 'no_valid_observation', '暂无有效观测', status='attention',
-            reason='完整结果窗口结束后仍无有效观测', last_valid_observation_at=None,
-            next_expected_at=next_expected_at, reason_code='missing_observation')
-    if any(item['state'] == 'fault' for item in factor_states):
+            reason='当前配置因子尚无可展示的有效测量值', last_valid_observation_at=None,
+            next_expected_at=None, reason_code='missing_observation')
+    if device_fault:
         return _station_monitoring_axis(
             '观测数据', 'quality_fault', '存在故障值', status='attention',
-            reason='当前配置因子存在未发布的仪器故障值', last_valid_observation_at=last_valid,
-            next_expected_at=next_expected_at, reason_code='quality_fault')
-    if any(item['state'] == 'missing' for item in factor_states):
-        return _station_monitoring_axis(
-            '观测数据', 'no_valid_observation', '有效观测不完整', status='attention',
-            reason='完整结果窗口结束后仍有配置因子缺测', last_valid_observation_at=last_valid,
-            next_expected_at=next_expected_at, reason_code='missing_observation')
-    if any(item['state'] == 'pending' for item in factor_states):
-        return _station_monitoring_axis(
-            '观测数据', 'analysis_pending', '部分因子分析中', status='pending',
-            reason='当前业务时点仍有配置因子处于分析结果窗口内', last_valid_observation_at=last_valid,
-            next_expected_at=next_expected_at, reason_code='analysis_pending')
-    if all(item['state'] == 'fresh' for item in freshness):
-        return _station_monitoring_axis(
-            '观测数据', 'fresh', '在配置周期内', status='normal',
-            reason='最近正式业务观测仍在应到周期内', last_valid_observation_at=last_valid,
-            next_expected_at=next_expected_at, reason_code=None)
+            reason='当前存在未发布的仪器故障值；最近有效测量值继续展示',
+            last_valid_observation_at=last_valid, next_expected_at=None,
+            reason_code='quality_fault')
     return _station_monitoring_axis(
-        '观测数据', 'stale', '超出配置周期', status='attention',
-        reason='最近正式业务观测已超过下一应到时点', last_valid_observation_at=last_valid,
-        next_expected_at=next_expected_at, reason_code='stale_observation')
+        '观测数据', 'result_available', '已有监测结果', status='normal',
+        reason='各配置因子按真实测量时间展示最新有效值；无值因子单独标记',
+        last_valid_observation_at=last_valid, next_expected_at=None, reason_code=None)
 
 
 _STATION_MONITORING_FACTOR_LABELS = {
@@ -600,8 +523,7 @@ def _station_monitoring_overview(db, site_id, *, include_diagnostics=True):
     configs = [item for item in monitoring_factor_configurations(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     values = [item for item in monitoring_latest_values(db, site_id) if item.get('endpoint_id') == profile['endpoint_id']] if profile else []
     factor_states = _station_monitoring_factor_states(db, site_id, configs, values)
-    # Current collection values remain separate from formal-cycle completeness.
-    # Missing factors stay missing instead of being filled from an older collection.
+    # Each factor keeps its own latest valid measurement; missing factors stay empty.
     latest = values
     latest = [dict(
         _station_monitoring_presented_value(item),
@@ -1998,86 +1920,9 @@ def station_monitoring_trend(site_id):
         configurations = [item for item in monitoring_factor_configurations(db, site_id) if item['business_metric'] == metric]
         if not configurations:
             return jsonify({'error': '业务因子未发布或不存在', 'code': 'MONITORING_METRIC_NOT_PUBLISHED'}), 404
-        policy_events = _station_service_policy_events_batch(
-            db, [site_id], through=min(end, now.isoformat())).get(site_id, [])
         points, has_more, next_boundary = monitoring_result_trend_page(
             db, site_id, metric, start, end, limit=point_limit, before=cursor)
-        points = [point for point in points if _site_reporting_required_at(
-            policy_events, site_id, point.get('observed_at')) or point.get('status') == 'value']
-        intervals = {
-            int(item['expected_interval_seconds']) for item in configurations
-            if item.get('expected_interval_seconds')
-        }
-        interval = next(iter(intervals)) if len(intervals) == 1 else None
-        gaps = []
-        expected_slots = []
-        pending_slots = []
-        diagnostics = {
-            'late_points': 0, 'suspect_points': 0,
-            'duplicate_records': 0, 'conflict_slots': 0,
-        }
-        coverage_is_complete = (
-            cursor is None and not has_more
-            and end_time - start_time <= timedelta(days=30)
-        )
-        if coverage_is_complete:
-            diagnostics = monitoring_business_slot_diagnostics(
-                db, site_id, metric, start, end)
-            slot_records = {
-                slot['scheduled_at']: slot
-                for configuration in configurations
-                for slot in monitoring_expected_business_slots(
-                    db, configuration, start, end)
-            }
-            all_scheduled_slots = sorted(slot_records)
-            due_slots = {
-                scheduled_at for scheduled_at, slot in slot_records.items()
-                if datetime.fromisoformat(slot['result_window_end_at']) <= now
-                and _site_reporting_required_at(policy_events, site_id, scheduled_at)
-            }
-            expected_slots = sorted(due_slots)
-            pending_slots = sorted(
-                scheduled_at for scheduled_at in set(all_scheduled_slots) - set(expected_slots)
-                if _site_reporting_required_at(policy_events, site_id, scheduled_at)
-            )
-        valid_slots = {
-            point['observed_at'] for point in points
-            if point['observed_at'] in expected_slots
-        }
-        missing_slots = [
-            index for index, slot in enumerate(expected_slots) if slot not in valid_slots
-        ]
-        if expected_slots:
-            gap_start = None
-            previous_slot = None
-            for slot in missing_slots:
-                if gap_start is None:
-                    gap_start = slot
-                elif slot != previous_slot + 1:
-                    gap_end = previous_slot
-                    gap_from = datetime.fromisoformat(expected_slots[gap_start])
-                    gap_to = datetime.fromisoformat(expected_slots[gap_end])
-                    gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
-                                 'seconds': (gap_to - gap_from).total_seconds(),
-                                 'missing_points': gap_end - gap_start + 1})
-                    gap_start = slot
-                previous_slot = slot
-            if gap_start is not None:
-                gap_end = previous_slot
-                gap_from = datetime.fromisoformat(expected_slots[gap_start])
-                gap_to = datetime.fromisoformat(expected_slots[gap_end])
-                gaps.append({'from': gap_from.isoformat(), 'to': gap_to.isoformat(),
-                             'seconds': (gap_to - gap_from).total_seconds(),
-                             'missing_points': gap_end - gap_start + 1})
-        expected_points = len(expected_slots) if coverage_is_complete else None
-        valid_points = len(valid_slots) if coverage_is_complete else None
         displayed_points = len(points)
-        if not coverage_is_complete:
-            coverage_state = 'partial_page' if cursor is not None or has_more else 'not_evaluated'
-        elif expected_slots or all(item.get('schedule_id') for item in configurations):
-            coverage_state = 'configured'
-        else:
-            coverage_state = 'unconfigured'
         return jsonify({
             'site_id': site_id, 'metric': metric,
             'factor_name_cn': _STATION_MONITORING_FACTOR_LABELS.get(metric, '监测因子'),
@@ -2094,16 +1939,17 @@ def station_monitoring_trend(site_id):
                 'next_cursor': _monitoring_trend_cursor_encode(next_boundary),
             },
             'coverage': {
-                'state': coverage_state,
-                'expected_interval_seconds': interval,
-                'valid_points': valid_points, 'displayed_points': displayed_points, 'expected_points': expected_points,
-                'coverage_rate': valid_points / expected_points if expected_points else None,
-                'gap_count': len(gaps) if coverage_is_complete else None,
-                'missing_points': len(missing_slots) if coverage_is_complete else None,
-                'pending_points': len(pending_slots) if coverage_is_complete else None,
-                **diagnostics,
+                'state': 'hourly_sample',
+                'aggregation_source': 'hourly_sample',
+                'sample_interval_seconds': 3600,
+                'expected_interval_seconds': None,
+                'valid_points': displayed_points, 'displayed_points': displayed_points,
+                'expected_points': None, 'coverage_rate': None,
+                'gap_count': None, 'missing_points': None, 'pending_points': None,
+                'late_points': 0, 'suspect_points': 0,
+                'duplicate_records': 0, 'conflict_slots': 0,
                 'window_start': start, 'window_end': end, 'point_limit': point_limit,
-            }, 'gaps': gaps, 'normalization_version': points[-1].get('normalization_version') if points else None,
+            }, 'gaps': [], 'normalization_version': points[-1].get('normalization_version') if points else None,
         })
 
 

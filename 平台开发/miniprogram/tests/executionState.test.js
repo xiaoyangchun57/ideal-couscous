@@ -19,14 +19,15 @@ const fieldCategories = [{ items: [
   { item_id: 1, result: 'normal', review_status: 3, evidence_status: 'supplement_required' },
   { item_id: 2, result: 'normal', review_status: 1, evidence_status: 'replacement_submitted' },
 ] }];
-assert.equal(inspectionFieldItemCompleted(fieldCategories[0].items[0]), false);
+assert.equal(inspectionFieldItemCompleted(fieldCategories[0].items[0]), true);
+assert.equal(inspectionFieldItemCompleted({result: null, review_status: 2}), false);
 assert.equal(inspectionFieldItemCompleted(fieldCategories[0].items[1]), true);
-assert.deepEqual(inspectionFieldProgress(fieldCategories), { total: 2, completed: 1, percent: 50 });
+assert.deepEqual(inspectionFieldProgress(fieldCategories), { total: 2, completed: 2, percent: 100 });
 assert.deepEqual(
   projectInspectionFieldProgress(fieldCategories).categories.map(category => ({
     total: category.total, completed: category.completed,
   })),
-  [{ total: 2, completed: 1 }],
+  [{ total: 2, completed: 2 }],
 );
 const fieldAfterRejectedPurge = [{
   items: fieldCategories[0].items.map(item => item.item_id === 1
@@ -36,8 +37,8 @@ const fieldAfterRejectedPurge = [{
 assert.deepEqual(
   projectInspectionFieldProgress(fieldAfterRejectedPurge).categories
     .map(category => ({ total: category.total, completed: category.completed })),
-  [{ total: 2, completed: 1 }],
-  'purging rejected evidence must immediately keep the category at one of two complete',
+  [{ total: 2, completed: 2 }],
+  'photo quality and photo removal must not erase the actual execution result',
 );
 const fieldAfterSubmission = applyInspectionSubmission(
   fieldCategories, 1, 'normal', ['/uploads/replacement.jpg'], false, 1, 'replacement_submitted');

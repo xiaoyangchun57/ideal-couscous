@@ -956,8 +956,8 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                     self.assertEqual(display.getpixel((content_right - 1,
                                                        content_top + content_height // 2)),
                                      (255, 0, 0))
-                    self.assertEqual(display.getpixel((content_right - 1, content_bottom - 1)),
-                                     (255, 0, 0))
+                    self.assertNotEqual(display.getpixel((content_right - 1, content_bottom - 1)),
+                                        (255, 0, 0))
                     self.assertEqual(display.getpixel((content_left,
                                                        content_top + content_height // 4)),
                                      (255, 0, 0))
@@ -971,7 +971,16 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                                  ['站点', '检查项', '拍摄时间', '位置坐标', '防伪码'])
                 self.assertEqual(watermark['site_name'], '测试站')
                 self.assertEqual(watermark['item_name'], '浊度仪表读数')
-                self.assertEqual(watermark['font_name'], 'Noto Sans CJK SC')
+                self.assertEqual(watermark['font_name'], 'HarmonyOS Sans')
+                expected_scale = (content_right - content_left) / 1080
+                self.assertEqual(watermark['font_sizes'], {
+                    'site': max(4, round(60 * expected_scale)),
+                    'time': max(3, round(30 * expected_scale)),
+                    'detail': max(3, round(27 * expected_scale)),
+                })
+                self.assertEqual(watermark['font_weights'], {
+                    'site': 'Bold', 'time': 'Bold', 'detail': 'Regular'})
+                self.assertEqual(watermark['background_rgba'], [255, 255, 255, 77])
                 self.assertEqual(watermark['image_size'], list(expected_canvas))
                 self.assertEqual(watermark['content_box'], display_meta['content_box'])
                 left, top, right, bottom = watermark['layout_box']
@@ -980,11 +989,14 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 self.assertGreaterEqual(top, content_top)
                 self.assertLessEqual(right, content_right)
                 self.assertLessEqual(bottom, content_bottom)
-                self.assertLess(right - left, content_right - content_left)
+                self.assertEqual([left, right], [content_left, content_right])
+                self.assertGreaterEqual(bottom - top, max(1, round(150 * expected_scale)))
 
-        font = app_module._site_photo_watermark_font(24)
-        glyphs = {bytes(font.getmask(char)) for char in '拍摄时间位置坐标防伪码'}
+        regular_font = app_module._site_photo_watermark_font(24, 'regular')
+        bold_font = app_module._site_photo_watermark_font(24, 'bold')
+        glyphs = {bytes(regular_font.getmask(char)) for char in '拍摄时间位置坐标防伪码'}
         self.assertGreaterEqual(len(glyphs), 8)
+        self.assertNotEqual(bytes(regular_font.getmask('站')), bytes(bold_font.getmask('站')))
 
         hidden_bytes, hidden_meta = app_module._create_site_photo_display_copy(
             portrait_jpeg_bytes('white'), {'format': 'JPEG'}, facts,
@@ -995,7 +1007,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(hidden_meta['server_watermark']['anti_counterfeit_code'],
                          facts['anti_counterfeit_code'])
 
-    def test_server_watermark_uses_text_stroke_without_background_plate(self):
+    def test_server_watermark_uses_translucent_white_band(self):
         facts = {
             'site_name': '测试站',
             'item_name': '浊度仪表读数',
@@ -1019,17 +1031,62 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
                 Image.open(io.BytesIO(hidden_bytes)).convert('RGB') as hidden:
             self.assertIsNone(ImageChops.difference(hidden, source).getbbox())
             left, top, right, bottom = visible_meta['server_watermark']['layout_box']
-            plate_probe = ((left + right) // 2, min(bottom - 1, top + 2))
-            self.assertEqual(visible.getpixel(plate_probe), source_color)
+            plate_probe = ((left + right) // 2, min(bottom - 1, top + 1))
+            expected_blend = tuple(round(channel * 0.7 + 255 * 0.3)
+                                   for channel in source_color)
+            for actual, expected in zip(visible.getpixel(plate_probe), expected_blend):
+                self.assertLessEqual(abs(actual - expected), 1)
             crop = visible.crop((left, top, right, bottom))
             pixels = list(getattr(crop, 'get_flattened_data', crop.getdata)())
             self.assertTrue(any(min(pixel) < 30 for pixel in pixels))
-            self.assertTrue(any(max(pixel) > 220 for pixel in pixels))
+            self.assertTrue(any(max(pixel) > 150 for pixel in pixels))
             self.assertIsNotNone(ImageChops.difference(visible, hidden).getbbox())
 
         self.assertTrue(visible_meta['server_watermark']['rendered'])
+        self.assertEqual(visible_meta['server_watermark']['background_rgba'],
+                         [255, 255, 255, 77])
         self.assertFalse(hidden_meta['server_watermark']['rendered'])
         self.assertEqual(hidden_meta['server_watermark']['rendered_lines'], [])
+
+    def test_server_watermark_uses_1080_design_scale_and_grows_for_long_fields(self):
+        source = Image.new('RGB', (1080, 1440), (44, 88, 132))
+        buffer = io.BytesIO()
+        source.save(buffer, format='PNG')
+        source_bytes = buffer.getvalue()
+        base_facts = {
+            'site_name': '昌南',
+            'item_name': '废液处理登记本',
+            'capture_time': '2026-11-02 17:08:26',
+            'gps_lat': 28.540409,
+            'gps_lng': 115.819860,
+            'anti_counterfeit_code': 'WQ-20261102-AB23D8',
+        }
+        _, base_meta = app_module._create_site_photo_display_copy(
+            source_bytes, {'format': 'PNG'}, base_facts)
+        base_watermark = base_meta['server_watermark']
+        self.assertEqual(base_watermark['font_sizes'], {
+            'site': 60, 'time': 30, 'detail': 27})
+        self.assertEqual(base_watermark['layout_box'], [0, 1290, 1080, 1440])
+
+        long_facts = dict(
+            base_facts,
+            site_name='南江水质自动监测联合巡检站超长站点名称',
+            item_name='废液处理登记本与设备检查记录及现场环境核验超长照片名称',
+            anti_counterfeit_code='WQ-20261102-VERY-LONG-CODE-AB23D8-KEEP-COMPLETE')
+        _, long_meta = app_module._create_site_photo_display_copy(
+            source_bytes, {'format': 'PNG'}, long_facts)
+        long_watermark = long_meta['server_watermark']
+        left, top, right, bottom = long_watermark['layout_box']
+        self.assertEqual([left, right, bottom], [0, 1080, 1440])
+        self.assertGreater(bottom - top, 150)
+        rendered_text = ''.join(long_watermark['rendered_lines'])
+        self.assertIn(long_facts['site_name'], rendered_text)
+        self.assertIn(long_facts['anti_counterfeit_code'], rendered_text)
+        for group_box in long_watermark['layout_groups'].values():
+            self.assertGreaterEqual(group_box[0], left)
+            self.assertGreaterEqual(group_box[1], top)
+            self.assertLessEqual(group_box[2], right)
+            self.assertLessEqual(group_box[3], bottom)
 
     def test_trusted_camera_frame_keeps_legacy_cover_and_accepts_full_frame(self):
         self.assertEqual(app_module._trusted_camera_frame_contract({
@@ -1765,7 +1822,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             server_watermark['anti_counterfeit_code'], capture['anti_counterfeit_code'])
         self.assertEqual(server_watermark['labels'],
                          ['站点', '检查项', '拍摄时间', '签到位置', '防伪码'])
-        self.assertEqual(server_watermark['font_name'], 'Noto Sans CJK SC')
+        self.assertEqual(server_watermark['font_name'], 'HarmonyOS Sans')
         self.assertEqual(len(server_watermark['layout_box']), 4)
         self.assertEqual(extra['watermark_fields']['site_name'], '测试站')
         self.assertEqual(extra['watermark_fields']['item_name'], '浊度仪表读数')
@@ -1824,7 +1881,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM mobile_idempotency').fetchone()[0], 1)
 
-    def test_camera_duplicate_and_server_code_reuse_leave_new_sessions_unconsumed(self):
+    def test_camera_duplicate_and_server_code_reuse_warn_without_blocking(self):
         first_session = self.create_capture_session()
         image = patterned_jpeg_bytes()
         first = self.upload(
@@ -1840,7 +1897,7 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             capture_session=duplicate_session.json['capture_session'],
             gps_lat=28.071303, gps_lng=115.539684,
             _idempotency_key='camera-duplicate-second')
-        self.assertFalse(duplicate.json['accepted_for_review'])
+        self.assertTrue(duplicate.json['accepted_for_review'], duplicate.json)
         self.assertIn('重复', duplicate.json['reason'])
 
         code_session = self.create_capture_session()
@@ -1854,16 +1911,20 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
             capture_session=code_session.json['capture_session'],
             gps_lat=28.071303, gps_lng=115.539684,
             _idempotency_key='camera-code-reuse')
-        self.assertFalse(code_reuse.json['accepted_for_review'])
+        self.assertTrue(code_reuse.json['accepted_for_review'], code_reuse.json)
         self.assertIn('重复', code_reuse.json['reason'])
         with app_module.get_db() as db:
             sessions = db.execute("""SELECT used_at,attachment_id
                 FROM photo_capture_sessions ORDER BY id""").fetchall()
             self.assertEqual(db.execute(
-                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 1)
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 3)
         self.assertIsNotNone(sessions[0]['used_at'])
-        self.assertIsNone(sessions[1]['used_at'])
-        self.assertIsNone(sessions[2]['used_at'])
+        self.assertIsNotNone(sessions[1]['used_at'])
+        self.assertIsNotNone(sessions[2]['used_at'])
+        with app_module.get_db() as db:
+            recovered = app_module._pending_inspection_photo_urls(db, 10, 1, 2)
+            self.assertIn(duplicate.json['url'], recovered[100])
+            self.assertIn(code_reuse.json['url'], recovered[100])
 
     def test_wrong_item_camera_photo_gets_independent_new_watermark_attachment(self):
         with app_module.get_db() as db:

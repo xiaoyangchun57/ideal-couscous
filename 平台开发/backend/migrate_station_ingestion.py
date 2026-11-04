@@ -32,6 +32,8 @@ MIGRATIONS = (
     ("20261016_014_station_ingest_retention_windows", Path(__file__).with_name("migrations") / "20261016_014_station_ingest_retention_windows.sql"),
     ("20261020_015_station_factor_display_precision", Path(__file__).with_name("migrations") / "20261020_015_station_factor_display_precision.sql"),
     ("20261021_016_station_raw_value_text", Path(__file__).with_name("migrations") / "20261021_016_station_raw_value_text.sql"),
+    ("20261103_017_station_retention_partial_status", Path(__file__).with_name("migrations") / "20261103_017_station_retention_partial_status.sql"),
+    ("20261103_018_station_hourly_last_values", Path(__file__).with_name("migrations") / "20261103_018_station_hourly_last_values.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -48,9 +50,13 @@ STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
 STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION = "20261016_014_station_ingest_retention_windows"
 STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION = "20261020_015_station_factor_display_precision"
 STATION_RAW_VALUE_TEXT_MIGRATION_VERSION = "20261021_016_station_raw_value_text"
+STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION = "20261103_017_station_retention_partial_status"
+STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION = "20261103_018_station_hourly_last_values"
 STATION_NON_RELATIONAL_INCREMENTAL_MIGRATIONS = frozenset({
     STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION,
     STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,
+    STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION,
+    STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION,
 })
 STATION_INGEST_RETENTION_WINDOW_TABLES = frozenset({
     "station_ingest_current_state",
@@ -81,6 +87,22 @@ CONTROLLED_EXISTING_SCHEMA_CHANGES = {
         "observation_values": "ALTER TABLE observation_values ADD COLUMN raw_value_text TEXT",
     },
 }
+CONTROLLED_EXISTING_SCHEMA_TARGETS = {
+    STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION: {
+        "station_ingest_retention_runs": """CREATE TABLE "station_ingest_retention_runs" (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cutoff_time TEXT NOT NULL,
+            archived_parse_attempts INTEGER NOT NULL DEFAULT 0,
+            archived_errors INTEGER NOT NULL DEFAULT 0,
+            archived_error_summaries INTEGER NOT NULL DEFAULT 0,
+            deleted_raw_frames INTEGER NOT NULL DEFAULT 0,
+            retained_protected_frames INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK (status IN ('completed', 'partial', 'failed')),
+            detail TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""",
+    },
+}
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
 STATION_INGESTION_TABLES = frozenset({
     "schema_migrations",
@@ -103,6 +125,7 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_raw_archive_parts",
     "monitoring_raw_archive_part_frames",
     "monitoring_hourly_value_series",
+    "monitoring_hourly_last_values",
     "monitoring_storage_health",
     "monitoring_business_schedules",
     "monitoring_business_observations",
@@ -243,6 +266,11 @@ def _verify_existing_schema_changes(
             expected_changes[object_name] = _expected_controlled_schema_sql(
                 before_sql, object_name, ddl,
             )
+        expected_changes.update({
+            name: sql
+            for name, sql in CONTROLLED_EXISTING_SCHEMA_TARGETS.get(version, {}).items()
+            if name in before_schema
+        })
     if changed_existing != set(expected_changes):
         raise MigrationError("migration modified pre-existing schema objects")
     if any(
@@ -322,6 +350,17 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     missing = required - existing
     if missing:
         raise MigrationError(f"missing monitoring tables: {', '.join(sorted(missing))}")
+    hourly_last = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION,),
+    ).fetchone()
+    if hourly_last:
+        if hourly_last[0] != migration_checksum(
+                STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION):
+            raise MigrationError(
+                "station hourly-last-value migration is missing or incompatible")
+        if "monitoring_hourly_last_values" not in existing:
+            raise MigrationError("station hourly-last-value table is missing")
     applied = connection.execute(
         "SELECT checksum FROM schema_migrations WHERE version=?", (MONITORING_MIGRATION_VERSION,)
     ).fetchone()
@@ -413,6 +452,21 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
         }
         if "raw_value_text" not in observation_value_columns:
             raise MigrationError("station raw-value-text column is missing")
+    partial_status_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION,),
+    ).fetchone()
+    if partial_status_migration:
+        if partial_status_migration[0] != migration_checksum(
+                STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION):
+            raise MigrationError("station retention partial-status migration is incompatible")
+        retention_run_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='station_ingest_retention_runs'"
+        ).fetchone()
+        normalized_retention_run_sql = "".join(
+            str(retention_run_sql[0] if retention_run_sql else "").lower().split())
+        if "statusin('completed','partial','failed')" not in normalized_retention_run_sql:
+            raise MigrationError("station retention partial status is missing")
     required_read_indexes = {
         "idx_ingest_raw_logical_key",
         "idx_ingest_raw_authenticated_endpoint_received",

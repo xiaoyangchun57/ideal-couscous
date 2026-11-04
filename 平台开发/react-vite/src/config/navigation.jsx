@@ -62,7 +62,7 @@ export function getNavigation(roles, capabilities = {}) {
     {
       key: 'monitoring',
       label: '任务闭环',
-      children: ['/workorders', '/plan-schedules', '/reports'],
+      children: ['/workorders', '/plan-schedules', '/audit'],
     },
     {
       key: 'operations',
@@ -105,6 +105,7 @@ export function getSearchablePages(roles, capabilities = {}) {
   return Object.entries(routeMeta)
     .filter(([path]) => {
       return allowed(pageRoles[path], roles)
+        && path !== '/reports'
         && (path !== '/sites/data-access' || capabilities.station_monitoring_public === true);
     })
     .map(([path, meta]) => ({ type: '页面', title: meta.title, subtitle: meta.group, path }));

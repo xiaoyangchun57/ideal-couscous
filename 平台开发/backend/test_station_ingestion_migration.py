@@ -560,6 +560,32 @@ class StationIngestionMigrationTest(unittest.TestCase):
         self.assertIn("raw_value_text", columns)
         self.assertEqual(precision, {"conductivity": 2, "turbidity": 2})
 
+    def test_017_converts_historical_partial_detail_and_allows_partial_status(self):
+        self._apply_until(
+            self.database, migration.STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,status,detail,created_at)
+                   VALUES (?,'completed',?,?)""",
+                ("2026-10-01T00:00:00+00:00", '{"status":"partial"}',
+                 "2026-10-16T00:00:00+00:00"),
+            )
+            connection.commit()
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM station_ingest_retention_runs").fetchone()[0], "partial")
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,status,detail,created_at)
+                   VALUES (?,'partial','{}',?)""",
+                ("2026-10-02T00:00:00+00:00", "2026-10-16T00:00:00+00:00"),
+            )
     def test_incremental_015_016_failure_rolls_back_schema_data_and_markers(self):
         self._apply_until(
             self.database, migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION)

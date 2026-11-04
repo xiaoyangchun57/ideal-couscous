@@ -6,6 +6,7 @@ import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import { formatTablePaginationTotal } from '../../components/WorkspacePage';
 import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { filterInputWidth } from '../../services/pageStyles';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
@@ -17,6 +18,7 @@ export default function ReagentMasterPage({
   onBack,
   searchParamKey = 'q',
   pageParamKey = 'page',
+  pageSizeParamKey = 'page_size',
 }) {
   const { message } = App.useApp();
   const { user } = useAuth();
@@ -31,6 +33,8 @@ export default function ReagentMasterPage({
   const [form, setForm] = useState({ name: '', manufacturer: '', spec: '', unit: '瓶', shelf_life_days: 365 });
   const urlSearch = searchParams.get(searchParamKey) || '';
   const currentPage = Math.max(1, Number(searchParams.get(pageParamKey)) || 1);
+  const requestedPageSize = Number(searchParams.get(pageSizeParamKey));
+  const pageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
 
   const updateSearch = useCallback((value) => {
     setSearchParams((previous) => {
@@ -244,13 +248,18 @@ export default function ReagentMasterPage({
           columns={columns}
           pagination={{
             current: currentPage,
-            pageSize: 20,
-            showSizeChanger: false,
-            hideOnSinglePage: true,
-            onChange: (page) => setSearchParams((previous) => {
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            showTotal: formatTablePaginationTotal,
+            onChange: (page, nextPageSize) => setSearchParams((previous) => {
               const next = new URLSearchParams(previous);
-              if (page > 1) next.set(pageParamKey, String(page));
+              const sizeChanged = nextPageSize !== pageSize;
+              const nextPage = sizeChanged ? 1 : page;
+              if (nextPage > 1) next.set(pageParamKey, String(nextPage));
               else next.delete(pageParamKey);
+              if (nextPageSize !== 20) next.set(pageSizeParamKey, String(nextPageSize));
+              else next.delete(pageSizeParamKey);
               return next;
             }, { replace: true }),
           }}

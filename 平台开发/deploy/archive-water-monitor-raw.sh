@@ -20,15 +20,17 @@ for name in "${required[@]}"; do
 done
 
 receiver="${STATION_RECEIVER_CONTAINER:-water-monitor-station-ingest}"
-day="${ARCHIVE_DAY:-$(date -u -d yesterday +%F)}"
+day="${ARCHIVE_DAY:-$(date -u +%F)}"
 [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "ARCHIVE_DAY must use YYYY-MM-DD" >&2; exit 1; }
 echo "ARCHIVE_WRAPPER_CONTRACT=action-result-v2"
 
 test "$(docker inspect "$receiver" --format '{{.State.Running}}')" = true
 test "$(docker inspect "$receiver" --format '{{.State.Health.Status}}')" = healthy
 
+archive_action=archive-next
+[[ -n "${ARCHIVE_DAY:-}" ]] && archive_action=archive
 result="$(docker exec -e SQLITE_TMPDIR=/var/lib/station-ingest/raw "$receiver" \
-  python station_ingest_retention.py archive \
+  python station_ingest_retention.py "$archive_action" \
   --database /app/backend/data/water.db \
   --day "$day" \
   --raw-storage-dir /var/lib/station-ingest/raw \
@@ -46,12 +48,15 @@ import sys
 item = json.loads(sys.argv[1])
 day = sys.argv[2]
 batch_limit = int(sys.argv[3])
-if item.get("action") != "archive":
+if item.get("action") not in {"archive", "archive-next"}:
     raise SystemExit("archive result action mismatch")
 
 # Current releases return action/result. The older host wrapper shape remains accepted
 # so a wrapper retry can report the already-registered archive without duplicating it.
-if "result" in item:
+if item.get("action") == "archive-next" and isinstance(item.get("result"), dict):
+    day = item["result"].get("day")
+    processed = item["result"].get("processed")
+elif "result" in item:
     processed = item["result"]
 elif item.get("day") == day and "processed" in item:
     processed = item["processed"]

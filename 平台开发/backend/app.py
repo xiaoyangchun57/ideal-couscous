@@ -126,6 +126,9 @@ from flask import (Flask, Response, jsonify, request, g, send_from_directory,
 from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos as _validate_submission_photos
+from photo_quality import (R30ContractError, record_photo_quality,
+                           ensure_schema as ensure_photo_quality_schema,
+                           current_photo_quality)
 def validate_submission_photos(result, required_photos, photo_urls):
     return _validate_submission_photos(result, required_photos, photo_urls)
 from station_monitoring import (
@@ -371,6 +374,8 @@ def _project_workorder_detail(db, workorder, user):
     service_mode = _workorder_service_mode(row)
     no_action_closure = _workorder_no_action_closure(db, row)
     can_end_without_processing = _workorder_can_end_without_processing(row, user, db)
+    no_action_block_reason = _workorder_end_without_processing_block_reason(
+        row, user, db)
     primary_action = None
     block_reason = ''
     if can_operate:
@@ -400,6 +405,7 @@ def _project_workorder_detail(db, workorder, user):
         'closure_reason': no_action_closure['reason'] if no_action_closure else '',
         'closure_time': no_action_closure['time'] if no_action_closure else '',
         'can_end_without_processing': can_end_without_processing,
+        'end_without_processing_block_reason': no_action_block_reason,
         'actions': {
             'primary': primary_action,
             'can_apply_resources': bool(can_operate and status in ('accepted', 'dispatched', 'in_progress')),
@@ -3968,6 +3974,19 @@ def _load_alert_rules(db):
     _alert_rules_cache_time = now
     return rules
 
+
+def _alert_rule_allows_new_records(db, metric):
+    """Return False only when an existing metric rule is explicitly disabled."""
+    try:
+        row = db.execute(
+            'SELECT enabled FROM alert_rule_config WHERE metric=? LIMIT 1',
+            (metric,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return True
+    return row is None or bool(row['enabled'])
+
+
 def detect_site_anomalies(db, site_id, site_type, metric, current_value, recorded_at):
     """检测单个站点指标的异常情况：突变、冻结、缺失"""
     METRIC_CN = {
@@ -4051,9 +4070,10 @@ def detect_site_anomalies(db, site_id, site_type, metric, current_value, recorde
         latest = values[0]
 
         # 1. 数据冻结检测：连续N条完全相同（N从规则引擎读取，默认6条）
-        rule_freeze = _load_alert_rules(db).get('data_freeze', {})
-        freeze_n = int((rule_freeze.get('thresholds') or {}).get('yellow', 6))
-        if len(values) >= freeze_n and metric not in EXCLUDE_SPIKE:
+        rules = _load_alert_rules(db)
+        rule_freeze = rules.get('data_freeze')
+        freeze_n = int((rule_freeze.get('thresholds') or {}).get('yellow', 6)) if rule_freeze else 0
+        if rule_freeze and len(values) >= freeze_n and metric not in EXCLUDE_SPIKE:
             frozen = len(set(round(v, 4) for v in values[:freeze_n])) == 1
             if frozen:
                 create_alert_internal(db, site_id, 'data_freeze', latest, 'yellow',
@@ -4082,9 +4102,11 @@ def detect_site_anomalies(db, site_id, site_type, metric, current_value, recorde
             abs_change = abs(latest - mean)
             min_abs = min_abs_change.get(metric, abs(mean) * 0.35)
             # 从规则引擎读取突变百分比阈值（默认30%），同时保留Z-score和绝对变化值双重校验
-            rule_spike = _load_alert_rules(db).get('data_spike', {})
-            spike_pct = (rule_spike.get('thresholds') or {}).get('yellow', 30)
-            if pct_change * 100 > spike_pct and z_score > 8 and abs_change > min_abs:
+            rule_spike = rules.get('data_spike')
+            spike_pct = ((rule_spike.get('thresholds') or {}).get('yellow', 30)
+                         if rule_spike else None)
+            if (rule_spike and pct_change * 100 > spike_pct
+                    and z_score > 8 and abs_change > min_abs):
                 direction = '陡增' if latest > mean else '陡降'
                 level = 'red' if z_score > 10 else 'orange'
                 create_alert_internal(db, site_id, 'data_spike', latest, level,
@@ -4096,9 +4118,9 @@ def detect_site_anomalies(db, site_id, site_type, metric, current_value, recorde
                 t1 = datetime.strptime(str(timestamps[0])[:19], '%Y-%m-%d %H:%M:%S')
                 t0 = datetime.strptime(str(timestamps[1])[:19], '%Y-%m-%d %H:%M:%S')
                 gap_min = (t1 - t0).total_seconds() / 60
-                rule_gap = _load_alert_rules(db).get('data_gap', {})
-                threshold = int((rule_gap.get('thresholds') or {}).get('yellow', 60))
-                if gap_min > threshold:
+                rule_gap = rules.get('data_gap')
+                threshold = int((rule_gap.get('thresholds') or {}).get('yellow', 60)) if rule_gap else None
+                if rule_gap and gap_min > threshold:
                     create_alert_internal(db, site_id, 'data_gap', gap_min, 'yellow',
                         f'数据延迟：{metric_cn}已有{gap_min:.0f}分钟未更新')
             except Exception:
@@ -4289,7 +4311,45 @@ def migrate_alert_flow():
         print("[Migrate] alert_flow 迁移完成: flow_type/flow_status 字段已添加并初始化")
 
 def _auto_convert_alert(db, alert_id, site_id, alert_level, message, metric):
-    """A级告警自动转工单（防重复：同站点离线类已有未闭环工单则跳过，避免列表重复）"""
+    """A级告警自动转工单；同一告警在一个事务内只能认领并转换一次。"""
+    # 先用告警行做原子认领。SQLite 会串行化写事务，后到的重复/并发请求
+    # 只能读到首个事务写回的关联，不会穿过“先查后插”的并发窗口。
+    claim = db.execute(
+        """UPDATE alerts
+           SET flow_status='converting'
+           WHERE id=?
+             AND (related_order_no IS NULL OR related_order_no='')
+             AND COALESCE(flow_status,'pending')!='converting'""",
+        (alert_id,),
+    )
+    if claim.rowcount != 1:
+        alert = db.execute(
+            "SELECT related_order_no FROM alerts WHERE id=?", (alert_id,)
+        ).fetchone()
+        if alert and str(alert['related_order_no'] or '').strip():
+            db.execute(
+                "UPDATE alerts SET flow_status='converted', status='pending' WHERE id=?",
+                (alert_id,),
+            )
+            return alert['related_order_no']
+        return None
+
+    # 兼容旧数据：工单已经保存 related_alert_id，但告警侧关联曾写入失败或丢失。
+    if _table_has_column(db, 'work_orders', 'related_alert_id'):
+        linked = db.execute(
+            """SELECT order_no FROM work_orders
+               WHERE related_alert_id=? ORDER BY id LIMIT 1""",
+            (alert_id,),
+        ).fetchone()
+        if linked and str(linked['order_no'] or '').strip():
+            db.execute(
+                """UPDATE alerts
+                   SET flow_status='converted', related_order_no=?, status='pending'
+                   WHERE id=?""",
+                (linked['order_no'], alert_id),
+            )
+            return linked['order_no']
+
     # 离线类告警（设备离线/数据缺失）视为同一现场事件，按站点去重
     OFFLINE_METRICS = ('device_status', 'data_gap')
     if metric in OFFLINE_METRICS:
@@ -4301,7 +4361,7 @@ def _auto_convert_alert(db, alert_id, site_id, alert_level, message, metric):
             # 已存在未闭环工单：仅关联告警，不再新建，消除重复工单
             db.execute("UPDATE alerts SET flow_status='converted', related_order_no=?, status='pending' WHERE id=?",
                        (dup['order_no'], alert_id))
-            return
+            return dup['order_no']
     now = datetime.now()
     order_no = f"WO-{now.strftime('%Y%m%d')}-{random.randint(100,999)}"
     order_level = 'critical' if alert_level == 'red' else ('urgent' if alert_level == 'orange' else 'normal')
@@ -4330,6 +4390,7 @@ def _auto_convert_alert(db, alert_id, site_id, alert_level, message, metric):
                ('alert', alert_id, 'auto_converted', '系统', f'自动转工单 {order_no}'))
     db.execute("INSERT INTO timeline_events (source_type,source_id,event_type,operator,remark) VALUES (?,?,?,?,?)",
                ('order', 0, 'auto_created', '系统', f'告警{alert_id}自动转工单-{order_no}'))
+    return order_no
 
 # =============================================================================
 # 微信订阅消息推送（移动端）
@@ -4774,6 +4835,8 @@ def _wx_push_alert(site_id, metric, value, level, message):
 
 def create_alert_internal(db, site_id, metric, value, level, message):
     """创建告警——同站点合并为一条告警（不同异常追加消息），去重同站点同metric"""
+    if not _alert_rule_allows_new_records(db, metric):
+        return None
     policy = _station_service_policy_rows_batch(db, [site_id]).get(
         int(site_id), _default_station_service_policy(site_id))
     service_active = policy.get('service_status') == 'active'
@@ -6868,37 +6931,74 @@ def data_overview():
 @login_required
 def get_alerts():
     site_ids = _readable_site_ids()
-    status = request.args.get('status', '')
-    limit = request.args.get('limit', 50, type=int)
+    status = request.args.get('status', '').strip()
+    level = request.args.get('level', '').strip()
+    search = request.args.get('search', '').strip().lower()
+    date_range = request.args.get('date_range', '').strip()
+    paginated = (request.args.get('paginated') == '1'
+                 or request.args.get('page') is not None
+                 or request.args.get('page_size') is not None)
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    page_size = max(1, min(request.args.get('page_size', 20, type=int) or 20, 100))
+    limit = max(1, min(request.args.get('limit', 50, type=int) or 50, 1000))
     date_from = request.args.get('date_from', '')
     date_to = request.args.get('date_to', '')
     site_filter = request.args.get('site_id', '')  # 可选，按站点过滤
     with get_db() as db:
-        q = """
-            SELECT a.*, s.name as site_name, s.code as site_code
-            FROM alerts a LEFT JOIN sites s ON a.site_id=s.id
-            WHERE 1=1
-        """
+        from_sql = ' FROM alerts a LEFT JOIN sites s ON a.site_id=s.id'
+        where = ['1=1']
         params = []
         if site_ids is not None:
-            placeholders = ','.join('?' * len(site_ids))
-            q += f" AND a.site_id IN ({placeholders})"
-            params.extend(site_ids)
+            if not site_ids:
+                where.append('0=1')
+            else:
+                placeholders = ','.join('?' * len(site_ids))
+                where.append(f'a.site_id IN ({placeholders})')
+                params.extend(site_ids)
         if site_filter:
-            q += " AND a.site_id=?"
-            params.append(int(site_filter))
+            try:
+                where.append('a.site_id=?')
+                params.append(int(site_filter))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'site_id 参数无效'}), 400
         if status:
-            q += " AND a.status=?"
+            where.append('a.status=?')
             params.append(status)
+        if level:
+            where.append('a.level=?')
+            params.append(level)
+        if search:
+            where.append('''(
+                lower(COALESCE(s.name,'')) LIKE ?
+                OR lower(COALESCE(s.code,'')) LIKE ?
+                OR lower(COALESCE(a.message,'')) LIKE ?
+            )''')
+            search_param = f'%{search}%'
+            params.extend([search_param] * 3)
+        if date_range == 'today':
+            where.append("date(a.created_at)=date('now','localtime')")
+        elif date_range == 'week':
+            where.append("datetime(a.created_at)>=datetime('now','localtime','-7 days')")
+        elif date_range == 'month':
+            where.append("strftime('%Y-%m',a.created_at)=strftime('%Y-%m','now','localtime')")
+        elif date_range not in ('', 'all'):
+            return jsonify({'error': 'date_range 参数无效'}), 400
         if date_from:
-            q += " AND a.created_at>=?"
+            where.append('a.created_at>=?')
             params.append(date_from)
         if date_to:
-            q += " AND a.created_at<=?"
+            where.append('a.created_at<=?')
             params.append(date_to + ' 23:59:59')
-        q += " ORDER BY CASE a.level WHEN 'red' THEN 1 WHEN 'orange' THEN 2 WHEN 'yellow' THEN 3 ELSE 4 END, a.created_at DESC LIMIT ?"
-        params.append(limit)
-        rows = [dict(r) for r in db.execute(q, params).fetchall()]
+        where_sql = ' WHERE ' + ' AND '.join(where)
+        total = db.execute('SELECT COUNT(*)' + from_sql + where_sql, params).fetchone()[0] if paginated else None
+        result_limit = page_size if paginated else limit
+        offset = (page - 1) * page_size if paginated else 0
+        order_sql = " ORDER BY CASE a.level WHEN 'red' THEN 1 WHEN 'orange' THEN 2 WHEN 'yellow' THEN 3 ELSE 4 END, a.created_at DESC, a.id DESC"
+        rows = [dict(r) for r in db.execute(
+            'SELECT a.*,s.name AS site_name,s.code AS site_code'
+            + from_sql + where_sql + order_sql + ' LIMIT ? OFFSET ?',
+            [*params, result_limit, offset],
+        ).fetchall()]
         order_nos = sorted({
             str(row.get('related_order_no') or '').strip()
             for row in rows if str(row.get('related_order_no') or '').strip()
@@ -6926,7 +7026,43 @@ def get_alerts():
                 linked_orders.get(order_no),
                 can_view=can_view_workorders,
             ))
-        return jsonify(rows)
+        if not paginated:
+            return jsonify(rows)
+
+        incident_where = [*where, "a.status!='resolved'"]
+        incident_sql = ' WHERE ' + ' AND '.join(incident_where)
+        incident_rows = db.execute(
+            '''SELECT
+                   COALESCE(NULLIF(a.metric,''),'unknown') AS metric,
+                   CAST(strftime('%s',a.created_at) AS INTEGER) / 1800 AS time_bucket,
+                   COUNT(*) AS alerts,
+                   COUNT(DISTINCT COALESCE(CAST(a.site_id AS TEXT),s.name)) AS site_count,
+                   COUNT(DISTINCT NULLIF(a.related_order_no,'')) AS order_count,
+                   MAX(a.created_at) AS latest_at,
+                   MIN(CASE a.level WHEN 'red' THEN 1 WHEN 'orange' THEN 2
+                       WHEN 'yellow' THEN 3 WHEN 'blue' THEN 4 ELSE 5 END) AS level_rank
+               ''' + from_sql + incident_sql + '''
+               GROUP BY metric,time_bucket
+               ORDER BY alerts DESC,latest_at DESC
+               LIMIT 4''', params).fetchall()
+        level_by_rank = {1: 'red', 2: 'orange', 3: 'yellow', 4: 'blue'}
+        incident_groups = [{
+            'key': f"{row['metric']}:{row['time_bucket']}",
+            'metric': row['metric'],
+            'alerts': int(row['alerts'] or 0),
+            'siteCount': int(row['site_count'] or 0),
+            'orderCount': int(row['order_count'] or 0),
+            'latestAt': row['latest_at'],
+            'level': level_by_rank.get(int(row['level_rank'] or 5), 'blue'),
+        } for row in incident_rows]
+        return jsonify({
+            'items': rows,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if total else 0,
+            'incident_groups': incident_groups,
+        })
 
 
 @app.route('/api/alerts/<int:alert_id>')
@@ -7512,7 +7648,7 @@ def simulate_alert():
         return jsonify({'id': alert_id, 'site_name': site_name, 'level': level, 'message': msg})
 
 # --- Work Orders ---
-def _workorder_flow_events(db, order):
+def _workorder_flow_events(db, order, prefetched_rows=None, prefetched_columns=None):
     """Project only events provably belonging to this work order for mobile detail."""
     order_no = str(order.get('order_no') or '').strip()
     order_id = order.get('id')
@@ -7530,19 +7666,24 @@ def _workorder_flow_events(db, order):
         'operator': order.get('creator') or '系统', 'time': order.get('created_at') or '',
         'remark': '工单创建', '_event_id': 0,
     }]
-    columns = {row['name'] for row in db.execute('PRAGMA table_info(timeline_events)').fetchall()}
+    columns = (set(prefetched_columns) if prefetched_columns is not None else
+               {row['name'] for row in db.execute('PRAGMA table_info(timeline_events)').fetchall()})
     if {'source_type', 'source_id', 'event_type'}.issubset(columns):
         time_sql = 'created_at' if 'created_at' in columns else "''"
         id_sql = 'id' if 'id' in columns else 'rowid'
-        rows = db.execute(f"""SELECT source_type,source_id,event_type,operator,remark,
-                   {time_sql} AS created_at,{id_sql} AS event_id
-            FROM timeline_events
-            WHERE (source_type='workorder' AND source_id=?)
-               OR (source_type='order' AND source_id=0)
-            ORDER BY {time_sql},{id_sql}""", (order_id,)).fetchall()
+        rows = prefetched_rows
+        if rows is None:
+            rows = db.execute(f"""SELECT source_type,source_id,event_type,operator,remark,
+                       {time_sql} AS created_at,{id_sql} AS event_id
+                FROM timeline_events
+                WHERE (source_type='workorder' AND source_id=?)
+                   OR (source_type='order' AND source_id=0)
+                ORDER BY {time_sql},{id_sql}""", (order_id,)).fetchall()
         exact_legacy_marker = re.compile(r'工单' + re.escape(order_no) + r'(?![A-Za-z0-9_-])')
         for row in rows:
             source_type = str(row['source_type'] or '')
+            if source_type == 'workorder' and int(row['source_id'] or 0) != int(order_id):
+                continue
             remark = str(row['remark'] or '')
             if source_type == 'order' and not exact_legacy_marker.search(remark):
                 continue
@@ -7591,47 +7732,171 @@ def _workorder_flow_events(db, order):
         event.pop('_event_id', None)
     return events
 
+
+def _workorder_list_timeline_rows(db, orders):
+    if not orders or not _table_exists(db, 'timeline_events'):
+        return [], set()
+    columns = {row['name'] for row in db.execute(
+        'PRAGMA table_info(timeline_events)').fetchall()}
+    if not {'source_type', 'source_id', 'event_type'}.issubset(columns):
+        return [], columns
+    order_ids = [int(order['id']) for order in orders if order.get('id')]
+    if not order_ids:
+        return [], columns
+    time_sql = 'created_at' if 'created_at' in columns else "''"
+    id_sql = 'id' if 'id' in columns else 'rowid'
+    id_marks = ','.join('?' * len(order_ids))
+    legacy_terms = []
+    legacy_params = []
+    if 'remark' in columns:
+        for order in orders:
+            order_no = str(order.get('order_no') or '').strip()
+            if order_no:
+                legacy_terms.append('remark LIKE ?')
+                legacy_params.append(f'%工单{order_no}%')
+    legacy_sql = (f" OR (source_type='order' AND source_id=0 AND ({' OR '.join(legacy_terms)}))"
+                  if legacy_terms else '')
+    rows = db.execute(f"""SELECT source_type,source_id,event_type,operator,remark,
+               {time_sql} AS created_at,{id_sql} AS event_id
+        FROM timeline_events
+        WHERE (source_type='workorder' AND source_id IN ({id_marks})){legacy_sql}
+        ORDER BY {time_sql},{id_sql}""", [*order_ids, *legacy_params]).fetchall()
+    return rows, columns
+
 @app.route('/api/workorders')
 @login_required
 def get_workorders():
     if not _has_any_role(g.current_user, 'admin', 'operator', 'reviewer'):
         return jsonify({'error': '当前角色无权查看工单列表'}), 403
-    status = request.args.get('status', '')
-    limit = request.args.get('limit', 50, type=int)
+    status = request.args.get('status', '').strip()
+    level = request.args.get('level', '').strip()
+    assignee = request.args.get('assignee', '').strip()
+    search = request.args.get('search', '').strip().lower()
+    paginated = (request.args.get('paginated') == '1'
+                 or request.args.get('page') is not None
+                 or request.args.get('page_size') is not None)
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    page_size = max(1, min(request.args.get('page_size', 20, type=int) or 20, 100))
+    limit = max(1, request.args.get('limit', 50, type=int) or 50)
     site_ids = _readable_site_ids()
     with get_db() as db:
-        q = """
-            SELECT w.*, s.name as site_name
-            FROM work_orders w LEFT JOIN sites s ON w.site_id=s.id
-            WHERE 1=1
-        """
+        from_sql = ' FROM work_orders w LEFT JOIN sites s ON w.site_id=s.id'
+        where = ['1=1']
         params = []
         if site_ids is not None:
-            ph = ','.join('?' * len(site_ids))
-            q += f" AND w.site_id IN ({ph})"
-            params.extend(site_ids)
+            if not site_ids:
+                where.append('0=1')
+            else:
+                ph = ','.join('?' * len(site_ids))
+                where.append(f'w.site_id IN ({ph})')
+                params.extend(site_ids)
         if status:
-            q += " AND w.status=?"
+            where.append('w.status=?')
             params.append(status)
-        q += " ORDER BY w.created_at DESC LIMIT ?"
-        params.append(limit)
-        rows = [dict(r) for r in db.execute(q, params).fetchall()]
+        if level:
+            where.append('w.level=?')
+            params.append(level)
+        if assignee:
+            where.append('w.assignee=?')
+            params.append(assignee)
+        if search:
+            where.append('''(
+                lower(COALESCE(w.order_no,'')) LIKE ?
+                OR lower(COALESCE(w.title,'')) LIKE ?
+                OR lower(COALESCE(w.description,'')) LIKE ?
+                OR lower(COALESCE(s.name,'')) LIKE ?
+            )''')
+            search_param = f'%{search}%'
+            params.extend([search_param] * 4)
+        where_sql = ' WHERE ' + ' AND '.join(where)
+
+        total = None
+        status_counts = {}
+        if paginated:
+            total = db.execute('SELECT COUNT(*)' + from_sql + where_sql, params).fetchone()[0]
+            status_counts = {str(item['status'] or ''): item['count'] for item in db.execute(
+                'SELECT w.status,COUNT(*) AS count' + from_sql + where_sql + ' GROUP BY w.status',
+                params,
+            ).fetchall()}
+            result_limit = page_size
+            offset = (page - 1) * page_size
+        else:
+            result_limit = limit
+            offset = 0
+        q = ('SELECT w.*, s.name AS site_name' + from_sql + where_sql
+             + ' ORDER BY w.created_at DESC,w.id DESC LIMIT ? OFFSET ?')
+        rows = [dict(r) for r in db.execute(q, [*params, result_limit, offset]).fetchall()]
+        timeline_rows, timeline_columns = _workorder_list_timeline_rows(db, rows)
+        user_id = int(g.current_user.get('id') or 0)
+        user_site_ids = {int(item['site_id']) for item in db.execute(
+            'SELECT site_id FROM user_sites WHERE user_id=?', (user_id,)).fetchall()}
+        user_identities = {
+            str(g.current_user.get('real_name') or '').strip(),
+            str(g.current_user.get('username') or '').strip(),
+        }
+        user_identities.discard('')
+        operator_role = _has_any_role(g.current_user, 'operator')
+        review_role = _has_any_role(g.current_user, 'admin', 'reviewer')
+        related_alert_ids = sorted({int(row['related_alert_id']) for row in rows
+                                    if row.get('related_alert_id')})
+        linked_alerts = {}
+        if related_alert_ids:
+            marks = ','.join('?' * len(related_alert_ids))
+            linked_alerts = {int(item['id']): dict(item) for item in db.execute(
+                f'SELECT id,status,related_order_no FROM alerts WHERE id IN ({marks})',
+                related_alert_ids).fetchall()}
+        eligible_sites = {int(row['site_id']) for row in rows
+                          if row.get('site_id') is not None
+                          and str(row.get('assignee') or '').strip() in user_identities
+                          and int(row['site_id']) in user_site_ids}
+        shared_checkins = {site_id: _inspection_effective_checkin_time(db, site_id, user_id)
+                           for site_id in eligible_sites}
         for row in rows:
             row['display_title'] = _workorder_display_title(row)
-            row['can_operate'] = _workorder_user_can_operate(row, g.current_user, db)
-            row['can_dismiss_auto_alert'] = _workorder_can_dismiss_auto_alert(
-                row, g.current_user, db)
-            no_action_closure = _workorder_no_action_closure(db, row)
+            site_id = int(row['site_id']) if row.get('site_id') is not None else None
+            can_operate = bool(site_id in user_site_ids
+                               and str(row.get('assignee') or '').strip() in user_identities)
+            row['can_operate'] = can_operate
+            linked_alert = linked_alerts.get(int(row['related_alert_id'])) if row.get('related_alert_id') else None
+            row['can_dismiss_auto_alert'] = bool(
+                operator_role and can_operate and row.get('source') == 'auto'
+                and row.get('status') == 'pending' and linked_alert
+                and linked_alert.get('status') == 'pending'
+                and str(linked_alert.get('related_order_no') or '') == str(row.get('order_no') or ''))
+            flow_events = _workorder_flow_events(
+                db, row, prefetched_rows=timeline_rows,
+                prefetched_columns=timeline_columns)
+            closure_event = next((event for event in reversed(flow_events)
+                                  if event.get('type') == 'ended_without_processing'), None)
+            no_action_closure = ({'reason': closure_event.get('remark') or '',
+                                  'time': closure_event.get('time') or ''}
+                                 if closure_event else None)
             row['closure_type'] = 'no_action_required' if no_action_closure else ''
             row['closure_reason'] = no_action_closure['reason'] if no_action_closure else ''
             row['closure_time'] = no_action_closure['time'] if no_action_closure else ''
-            row['can_end_without_processing'] = _workorder_can_end_without_processing(
-                row, g.current_user, db)
-            effective_checkin = _workorder_effective_checkin_time(db, row, g.current_user)
+            status_value = str(row.get('status') or '').strip().lower()
+            row['can_end_without_processing'] = bool(
+                (status_value in ('pending', 'accepted', 'dispatched', 'in_progress')
+                 and operator_role and can_operate)
+                or (status_value in ('reviewing', 'acceptance') and review_role))
+            direct_checkin = row.get('check_in_time')
+            parsed_direct = _parse_dt(direct_checkin)
+            effective_checkin = (direct_checkin if can_operate and parsed_direct
+                                 and parsed_direct.date() == datetime.now().date()
+                                 else (shared_checkins.get(site_id) if can_operate else None))
             row['effective_check_in_time'] = effective_checkin or ''
             row['checked_in'] = bool(effective_checkin)
-            row['flow_events'] = _workorder_flow_events(db, row)
-        return jsonify(rows)
+            row['flow_events'] = flow_events
+        if not paginated:
+            return jsonify(rows)
+        return jsonify({
+            'items': rows,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if total else 0,
+            'counts': status_counts,
+        })
 
 
 @app.route('/api/workorders/<order_no>')
@@ -7869,6 +8134,19 @@ def _workorder_can_end_without_processing(order, user, db):
     if status in ('reviewing', 'acceptance'):
         return _workorder_user_can_review(order, user, db)
     return False
+
+
+def _workorder_end_without_processing_block_reason(order, user, db):
+    if _workorder_can_end_without_processing(order, user, db):
+        return ''
+    status = str(order.get('status') or '').strip().lower() if order else ''
+    if status in ('pending', 'accepted', 'dispatched', 'in_progress'):
+        return '当前阶段只能由已指派且仍有该站点权限的运维负责人提前结束'
+    if status in ('reviewing', 'acceptance'):
+        return '当前阶段只能由有工单审核权限的人员提前结束'
+    if status in ('closed', 'resolved'):
+        return '工单已经办结，不能改为提前结束'
+    return '当前工单状态不支持提前结束'
 
 
 def _workorder_no_action_closure(db, order):
@@ -8130,8 +8408,14 @@ def end_workorder_without_processing(order_no):
         else:
             allowed = False
         if not allowed:
+            if status in ('pending', 'accepted', 'dispatched', 'in_progress'):
+                denied_reason = '当前阶段只能由已指派且仍有该站点权限的运维负责人提前结束'
+            elif status in ('reviewing', 'acceptance'):
+                denied_reason = '当前阶段只能由有工单审核权限的人员提前结束'
+            else:
+                denied_reason = '当前工单状态不支持提前结束'
             return jsonify({
-                'error': '当前账号无权提前结束该工单',
+                'error': denied_reason,
                 'code': 'WORKORDER_NO_ACTION_FORBIDDEN',
             }), 403
 
@@ -8314,16 +8598,6 @@ def _inspection_item_checkin_time(db, item, user_id):
     """Resolve the arrival that may authorize this specific inspection item."""
     if not item:
         return None
-    keys = set(item.keys())
-    required_at = item['rework_required_at'] if 'rework_required_at' in keys else None
-    review_status = int(item['review_status'] or 0) if 'review_status' in keys else 0
-    evidence_status = (item['evidence_status'] or '') if 'evidence_status' in keys else ''
-    is_rework = bool(required_at and (
-        review_status == 3 or evidence_status in ('supplement_required', 'replacement_submitted')
-    ))
-    if is_rework:
-        return _inspection_rework_checkin_time(
-            db, item['plan_id'], item['site_id'], user_id, required_at)
     return _inspection_plan_checkin_time(
         db, item['plan_id'], item['site_id'], user_id)
 
@@ -8836,10 +9110,11 @@ def submit_workorder_review(order_no):
             }), 409
         if cur['status'] != 'in_progress':
             return jsonify({'error': f'当前状态 {cur["status"]} 不允许提交核验'}), 400
-        # 现场处置仍必须具备合格影像；远程协助以结构化过程记录为必需证据，照片只作补充。
+        # 现场影像质量只作提示；远程协助的结构化过程记录仍按原规则校验。
+        gate = None
         if service_mode == 'onsite':
             gate = _evidence_gate(db, 'workorder', cur['id'], 1)
-            if gate:
+            if gate and gate.get('blocking', True):
                 return jsonify(gate), 409
         submitted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
         changed = db.execute("""UPDATE work_orders
@@ -8871,7 +9146,8 @@ def submit_workorder_review(order_no):
             page=_wx_page('/pages/review/view', target_type='workorder_review',
                           target_id=order_no, cycle_key=f'review:{review_cycle}'))
         db.commit()
-        return jsonify({'success': True, 'status': 'reviewing'})
+        return jsonify({'success': True, 'status': 'reviewing',
+                        'photo_quality_warning': gate})
 
 
 def _workorder_linked_alerts_for_close(db, order, order_no):
@@ -8948,7 +9224,7 @@ def approve_workorder(order_no):
             return jsonify({'error': f'当前状态 {cur["status"]} 不允许核验通过'}), 400
         if _workorder_service_mode(cur) == 'onsite':
             gate = _evidence_gate(db, 'workorder', cur['id'], 1)
-            if gate:
+            if gate and gate.get('blocking', True):
                 return jsonify(gate), 409
         risky_evidence = db.execute("""
             SELECT id, flag_reason, taken_at, duplicate_of_id
@@ -8957,12 +9233,6 @@ def approve_workorder(order_no):
               AND evidence_qualification='qualified'
               AND (is_flagged=1 OR duplicate_of_id IS NOT NULL)
         """, (cur['id'],)).fetchall()
-        if risky_evidence:
-            return jsonify({
-                'error': f'该工单有 {len(risky_evidence)} 张已标记风险的影像，不能通过普通审核放行',
-                'code': 'EVIDENCE_RISK_REVIEW_REQUIRED',
-                'evidence_risks': [dict(row) for row in risky_evidence],
-            }), 409
         linked_alerts, link_error = _workorder_linked_alerts_for_close(db, cur, order_no)
         if link_error:
             code, message = link_error
@@ -9037,7 +9307,8 @@ def approve_workorder(order_no):
             page=_wx_page('/pages/workorder/workorder', order_no=order_no,
                           notification_id=result_notice_id))
         db.commit()
-        return jsonify({'success': True, 'status': 'closed'})
+        return jsonify({'success': True, 'status': 'closed',
+                        'evidence_risks': [dict(row) for row in risky_evidence]})
 
 @app.route('/api/workorders/<order_no>/reject', methods=['POST'])
 @login_required
@@ -10745,6 +11016,18 @@ def _decorate_attachment(db, attachment):
         result['uploader_name'] = result['uploader_real_name']
     result.update(_attachment_presentation(db, result))
     result.update(_attachment_similarity_payload(db, result))
+    quality = None
+    if _table_exists(db, 'photo_quality_evaluations'):
+        quality = db.execute("""SELECT status,reason,score_month,attribution_status
+            FROM photo_quality_evaluations WHERE attachment_id=? ORDER BY id DESC LIMIT 1""",
+            (result.get('id'),)).fetchone()
+    result['quality_reason'] = quality['reason'] if quality else (result.get('reject_reason') or '')
+    result['quality_score_month'] = quality['score_month'] if quality else ''
+    result['quality_deduction'] = int(bool(quality and quality['status'] == 'unqualified'
+                                         and quality['attribution_status'] == 'reliable'))
+    result['quality_note'] = (f"{quality['score_month']} 扣 {result['quality_deduction']} 分"
+                              if quality and quality['attribution_status'] == 'reliable'
+                              else '审核意见保留，未计扣分')
     result['display_url'] = _attachment_display_url(result)
     result.pop('uploader_real_name', None)
     return result
@@ -15735,7 +16018,7 @@ def v2_update_plan_item(plan_id, item_id):
             except (TypeError, json.JSONDecodeError):
                 paths = []
             gate = _evidence_gate(db, 'inspection', item_id, req_photos, paths)
-            if gate:
+            if gate and gate.get('blocking', True):
                 return jsonify(gate), 409
         # 更新检查项结果
         fields = ["result=?", "check_time=?"]
@@ -16118,7 +16401,7 @@ def v2_review_item(item_id):
             gate = _evidence_gate(
                 db, 'inspection', item_id,
                 item['required_photos'] if 'required_photos' in item.keys() else 0)
-            if gate:
+            if gate and gate.get('blocking', True):
                 return jsonify(gate), 409
             db.execute("""
                 UPDATE insp_plan_items SET review_status=2, review_comment=?, reviewer_id=?, review_time=?
@@ -16217,7 +16500,7 @@ def v2_batch_review_items():
                 }), 409
         for item_id in approve_ids:
             gate = _evidence_gate(db, 'inspection', item_id, row_map[item_id]['required_photos'])
-            if gate:
+            if gate and gate.get('blocking', True):
                 gate['item_id'] = item_id
                 return jsonify(gate), 409
         # 驳回会撤销现场提交结果。记录受影响执行包，稍后统一回算完成率，
@@ -16493,10 +16776,16 @@ def evaluation_personnel():
         d['sla_breach'] = closed_breach + open_overdue
         result.append(d)
 
+    with get_db() as db:
+        for row in result:
+            photos = current_photo_quality(db, row['id'], start, end,
+                                           allowed_site_ids=allowed_sites)
+            row['photo_quality_deduction'] = sum(photo['deduction'] for photo in photos)
     # 人均概览
     n = len(result) or 1
     overview = {
         'staff_count': len(result),
+        'photo_quality_deduction': sum(d['photo_quality_deduction'] for d in result),
         'wo_total': sum(d['wo_total'] for d in result),
         'wo_closed': sum(d['wo_closed'] for d in result),
         'closed_sla_sample': sum(d['closed_sla_sample'] for d in result),
@@ -16515,6 +16804,50 @@ def evaluation_personnel():
         'period': period, 'period_label': period_label, 'days': days,
         'scope_label': scope_label, 'overview': overview, 'list': result,
     })
+
+
+@app.route('/api/evaluation/personnel/<int:user_id>/photo-quality')
+@app.route('/api/mobile/photo-quality-monthly', defaults={'user_id': None})
+@login_required
+def photo_quality_monthly(user_id):
+    """One authorized source for monthly deduction and its original photo evidence."""
+    own = user_id is None or user_id == g.current_user['id']
+    if not own:
+        denied = require_reviewer()
+        if denied:
+            return denied
+    user_id = g.current_user['id'] if user_id is None else user_id
+    month = request.args.get('month')
+    if month:
+        try:
+            first = datetime.strptime(month, '%Y-%m')
+            following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+            start = first.strftime('%Y-%m-%d 00:00:00')
+            end = (following - timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': '月份格式应为YYYY-MM'}), 400
+    else:
+        start, end, _, _ = _resolve_period(request.args.get('period', 'month'),
+                                         request.args.get('start'), request.args.get('end'))
+    with get_db() as db:
+        allowed_sites = None if own else _report_scope_context(db)[0]
+        rows = current_photo_quality(db, user_id, start, end, allowed_site_ids=allowed_sites)
+        photos = []
+        for row in rows:
+            if not row['deduction']:
+                continue
+            attachment = db.execute('SELECT * FROM operation_attachments WHERE id=?',
+                                    (row['attachment_id'],)).fetchone()
+            photos.append({
+                'attachment_id': row['attachment_id'], 'item_id': row['item_id'],
+                'plan_id': row['plan_id'], 'site_id': row['site_id'],
+                'item_name': row['item_name'], 'score_month': row['score_month'],
+                'deduction': row['deduction'],
+                'reason': row['history'][0]['reason'] if row['history'] else row['reject_reason'],
+                'display_url': _attachment_display_url(dict(attachment)),
+            })
+    return jsonify({'user_id': user_id, 'start': start, 'end': end,
+                    'deduction': sum(row['deduction'] for row in photos), 'photos': photos})
 
 
 # =============================================================================
@@ -16717,12 +17050,13 @@ def export_evaluation():
             d['wo_closed_rate'] = round(closed / total * 100, 1) if total else None
             d['closed_sla_breach'] = max(0, sla_sample - sla_met)
             d['on_time_rate'] = round(sla_met / sla_sample * 100, 1) if sla_sample else None
+            d['photo_quality_deduction'] = sum(photo['deduction'] for photo in current_photo_quality(db, d['id'], start, end, allowed_site_ids=allowed_sites))
             data.append(d)
 
     role_cn = {'manager':'主管','operator':'运维员','inspector':'审核员'}
     wb = Workbook(); ws = wb.active; ws.title = '人员评估'
-    header_row = _init_report_table(ws, '人员运维绩效评估', start, end, 13, scope_label)
-    headers = ['姓名','角色','工单处理','闭环数','闭环率(%)','平均响应(h)','平均处理(天)','已关单SLA样本','已关单超时','SLA达标率(%)','开放已逾期','巡检执行','巡检审核']
+    header_row = _init_report_table(ws, '人员运维绩效评估', start, end, 14, scope_label)
+    headers = ['姓名','角色','工单处理','闭环数','闭环率(%)','平均响应(h)','平均处理(天)','已关单SLA样本','已关单超时','SLA达标率(%)','开放已逾期','巡检执行','巡检审核','照片质量扣分（按实际检查月）']
     ws.append(headers)
     for c in ws[header_row]: _set_header_style(c)
     for d in data:
@@ -16731,7 +17065,7 @@ def export_evaluation():
             d['wo_closed_rate'] if d['wo_closed_rate'] is not None else '无样本', d['response_hours'] if d['response_hours'] is not None else '—',
             d['wo_avg_days'] if d['wo_avg_days'] is not None else '—',
             d['closed_sla_sample'], d['closed_sla_breach'], d['on_time_rate'] if d['on_time_rate'] is not None else '无样本',
-            d['open_overdue'], d['insp_done'], d['insp_reviewed']
+            d['open_overdue'], d['insp_done'], d['insp_reviewed'], d['photo_quality_deduction']
         ])
     _finish_report_table(ws, header_row, max_width=24)
     for column, width in {'E': 14, 'F': 16, 'G': 17, 'H': 18, 'I': 14, 'J': 16, 'K': 14}.items():
@@ -16901,12 +17235,12 @@ def export_ops_report_details():
 
         # ---- Sheet 2: 人员绩效 ----
         ws2 = wb.create_sheet('人员绩效')
-        header_row2 = _init_report_table(ws2, '人员运维绩效', start, end, 13, scope_label)
-        headers2 = ['姓名','角色','工单处理','闭环数','闭环率(%)','平均响应(h)','平均处理(天)','已关单SLA样本','已关单超时','SLA达标率(%)','开放已逾期','巡检执行','巡检审核']
+        header_row2 = _init_report_table(ws2, '人员运维绩效', start, end, 14, scope_label)
+        headers2 = ['姓名','角色','工单处理','闭环数','闭环率(%)','平均响应(h)','平均处理(天)','已关单SLA样本','已关单超时','SLA达标率(%)','开放已逾期','巡检执行','巡检审核','照片质量扣分（按实际检查月）']
         ws2.append(headers2)
         for c in ws2[header_row2]: _set_header_style(c)
         rows = db.execute(f"""
-            SELECT DISTINCT u.real_name, 'operator' AS role,
+            SELECT DISTINCT u.id, u.real_name, 'operator' AS role,
                    (SELECT COUNT(*) FROM work_orders w WHERE w.assignee=u.real_name {wo_scope} AND (CASE WHEN w.status='closed' AND w.resolved_at IS NOT NULL THEN w.resolved_at ELSE w.created_at END) BETWEEN ? AND ?) AS wo_total,
                    (SELECT COUNT(*) FROM work_orders w WHERE w.assignee=u.real_name {wo_scope} AND w.status='closed' AND w.resolved_at BETWEEN ? AND ?) AS wo_closed,
                    (SELECT AVG((julianday(w.check_in_time)-julianday(w.created_at))*24.0)
@@ -16940,7 +17274,8 @@ def export_ops_report_details():
                 sla_sample, closed_breach,
                 round(sla_met / sla_sample * 100, 1) if sla_sample else '无样本',
                 d['open_overdue'] or 0,
-                d['insp_done'] or 0, d['insp_reviewed'] or 0
+                d['insp_done'] or 0, d['insp_reviewed'] or 0,
+                sum(photo['deduction'] for photo in current_photo_quality(db, d['id'], start, end, allowed_site_ids=allowed_sites))
             ])
         _finish_report_table(ws2, header_row2, max_width=24)
         for column, width in {'E': 14, 'F': 16, 'G': 17, 'H': 18, 'I': 14, 'J': 16, 'K': 14}.items():
@@ -17661,7 +17996,6 @@ def audit_pending():
             LEFT JOIN insp_plan_items i ON a.site_id=i.site_id AND ({inspection_link_sql})
             LEFT JOIN insp_plans p ON p.id=i.plan_id
             WHERE a.is_deleted=0 AND a.review_status='pending'
-              AND COALESCE(a.evidence_qualification,'review')='qualified'
               AND COALESCE(json_extract(CASE WHEN json_valid(a.extra_json)
                     THEN a.extra_json ELSE '{{}}' END, '$.material_role'),'formal')!='supplement'
               AND i.id IS NOT NULL AND i.review_status=1
@@ -18099,127 +18433,16 @@ def notification_maintenance_job():
 
 
 def _reject_inspection_items(db, item_reasons, reviewer_id, now, batch_key):
-    """Reject items without reopening a returned vehicle's historical trip.
-
-    A terminal original vehicle creates one resource-gated remediation package per
-    source execution package/site batch. All other cases retain the legacy
-    in-place rework behavior.
-    """
-    rows = _inspection_rejection_rows(db, item_reasons)
+    """Keep an item-level opinion without inventing per-photo deductions or rework."""
+    ensure_photo_quality_schema(db)
     outcomes = {}
-    if not rows:
-        return outcomes
-    # Content rejection is an item-level retake request. Keep the original visit,
-    # result, checkout and plan progress intact; only this item returns to the
-    # operator for replacement photos.
-    seen_item_ids = set()
-    notification_groups = {}
-    for item, plan, reason in rows:
-        if item['id'] in seen_item_ids:
-            continue
-        seen_item_ids.add(item['id'])
-        updates = [
-            'review_status=3', 'review_comment=?', 'reviewer_id=?',
-            'review_time=?', 'rework_required_at=?',
-        ]
-        params = [reason, reviewer_id, now, now]
-        if _table_has_column(db, 'insp_plan_items', 'evidence_status'):
-            updates.append("evidence_status='supplement_required'")
-        if _table_has_column(db, 'insp_plan_items', 'supplement_reason'):
-            updates.append('supplement_reason=?')
-            params.append(reason)
-        params.append(item['id'])
-        db.execute(f"UPDATE insp_plan_items SET {','.join(updates)} WHERE id=?", params)
-        notification_groups.setdefault(
-            (plan['assignee_id'], plan['id'], item['site_id']), 0)
-        notification_groups[(plan['assignee_id'], plan['id'], item['site_id'])] += 1
-        outcomes[item['id']] = {
-            'resource_replan_required': False,
-            'rework_plan_id': None,
-            'item_retake': True,
-        }
-    for (assignee_id, plan_id, site_id), item_count in notification_groups.items():
-        _notify_inspection_rework(db, assignee_id, plan_id, site_id, item_count, False)
-    return outcomes
-
-    # Legacy whole-plan rework is intentionally unreachable for content review.
-    supports_replan = _inspection_rejection_supports_resource_replan(db)
-    terminal_groups = {}
-    for item, plan, reason in rows:
-        schedule_id = plan['plan_schedule_id'] if 'plan_schedule_id' in plan.keys() else None
-        if supports_replan and _terminal_plan_vehicle_exists(db, schedule_id):
-            terminal_groups.setdefault((plan['id'], item['site_id']), []).append((item, plan, reason))
-
-    terminal_item_ids = {item['id'] for group in terminal_groups.values() for item, _, _ in group}
-    for (source_plan_id, site_id), group in terminal_groups.items():
-        source_plan = group[0][1]
-        item_ids = sorted(item['id'] for item, _, _ in group)
-        group_key = f'{batch_key}:{source_plan_id}:{site_id}:{"-".join(str(item_id) for item_id in item_ids)}'
-        rework = db.execute("""SELECT id FROM insp_plans
-            WHERE rework_of_plan_id=? AND rework_batch_key=? LIMIT 1""",
-            (source_plan_id, group_key)).fetchone()
-        if rework:
-            rework_plan_id = rework['id']
-        else:
-            plan_name = f'{source_plan["plan_name"] or "巡检"}·整改补检'
-            cur = db.execute("""INSERT INTO insp_plans
-                (plan_name, assignee, assignee_id, period, generate_date, status,
-                 plan_schedule_id, schedule_version, plan_snapshot,
-                 rework_of_plan_id, rework_batch_key, resource_state)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    plan_name, source_plan['assignee'], source_plan['assignee_id'],
-                    source_plan['period'], datetime.now().strftime('%Y-%m-%d'), 'active',
-                    source_plan['plan_schedule_id'], source_plan['schedule_version'],
-                    source_plan['plan_snapshot'], source_plan_id, group_key,
-                    'arrangement_required'))
-            rework_plan_id = cur.lastrowid
-        for item, _, reason in group:
-            # Keep the source item's submitted evidence and checkout as immutable
-            # historical facts. The new item is the only item that can be edited.
-            db.execute("""UPDATE insp_plan_items
-                SET review_status=3, review_comment=?, reviewer_id=?, review_time=?,
-                    rework_required_at=? WHERE id=?""",
-                (reason, reviewer_id, now, now, item['id']))
-            db.execute("""INSERT OR IGNORE INTO insp_plan_items
-                (plan_id, site_id, template_id, item_name, category, frequency,
-                 required_photos, rework_source_item_id, review_status,
-                 rework_required_at, photo_urls, remark)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    rework_plan_id, item['site_id'], item['template_id'], item['item_name'],
-                    item['category'], item['frequency'], item['required_photos'], item['id'],
-                    3, now, '[]', ''))
-            outcomes[item['id']] = {'resource_replan_required': True, 'rework_plan_id': rework_plan_id}
-        _ps_mark_field_rework(db, source_plan['plan_schedule_id'])
-        _notify_inspection_rework(
-            db, source_plan['assignee_id'], rework_plan_id, site_id, len(item_ids), True)
-
-    legacy_groups = {}
-    for item, plan, reason in rows:
-        if item['id'] in terminal_item_ids:
-            continue
-        updates = "review_status=3, review_comment=?, reviewer_id=?, review_time=?, result=NULL, completed_at=NULL"
-        params = [reason, reviewer_id, now]
-        if _table_has_column(db, 'insp_plan_items', 'rework_required_at'):
-            updates += ', rework_required_at=?'
-            params.append(now)
-        if _table_has_column(db, 'insp_plan_items', 'check_out_time'):
-            updates += ', check_out_time=NULL'
-        params.append(item['id'])
-        db.execute(f'UPDATE insp_plan_items SET {updates} WHERE id=?', params)
-        if _table_has_column(db, 'insp_plan_items', 'check_out_time'):
-            db.execute("""UPDATE insp_plan_items SET check_out_time=NULL
-                WHERE plan_id=? AND site_id=? AND COALESCE(execution_status, 'active')='active'""",
-                (item['plan_id'], item['site_id']))
-        _ps_mark_field_rework(db, plan['plan_schedule_id'] if 'plan_schedule_id' in plan.keys() else None)
-        try:
-            _ps_recalculate_field_execution(db, item['plan_id'])
-        except sqlite3.OperationalError:
-            pass
-        outcomes[item['id']] = {'resource_replan_required': False, 'rework_plan_id': None}
-        legacy_groups.setdefault((plan['id'], item['site_id']), []).append((item, plan))
-    for (plan_id, site_id), group in legacy_groups.items():
-        _notify_inspection_rework(
-            db, group[0][1]['assignee_id'], plan_id, site_id, len(group), False)
+    for item_id, reason in item_reasons:
+        db.execute("""UPDATE insp_plan_items SET review_status=2,review_comment=?,
+            reviewer_id=?,review_time=?,r30_history_quality_status='unscored',
+            r30_history_quality_reason=? WHERE id=?""",
+            (reason, reviewer_id, now, reason, item_id))
+        outcomes[item_id] = {'resource_replan_required': False, 'rework_plan_id': None,
+                             'quality_note': '未选择具体问题照片，保留审核意见，未计扣分'}
     return outcomes
 
 
@@ -18344,12 +18567,12 @@ def _reopen_items_for_rejected_attachment(db, attachment, reviewer_id, reason, n
 
 
 @app.route('/api/operation-attachments/review', methods=['POST'])
-def api_operation_attachments_review():
+def api_operation_attachments_review(_data=None):
     """审核操作附件；支持勾选驳回、其余一次通过的批次提交。"""
     g_ = require_reviewer()
     if g_:
         return g_
-    data = request.get_json() or {}
+    data = _data if _data is not None else (request.get_json() or {})
     attachment_ids = data.get('attachment_ids', [])
     action = data.get('action', 'approve')  # approve | reject
     approve_ids = data.get('approve_ids')
@@ -18414,6 +18637,7 @@ def api_operation_attachments_review():
     rejected_item_rows = []
     affected_inspection_batches = set()
     with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
         attachment_decision_ids = list(dict.fromkeys(aid for aid, _ in decisions))
         attachment_map = {}
         if attachment_decision_ids:
@@ -18425,6 +18649,10 @@ def api_operation_attachments_review():
             missing_ids = [aid for aid in attachment_decision_ids if aid not in attachment_map]
             if missing_ids:
                 return jsonify({'error': '附件不存在', 'attachment_ids': missing_ids}), 404
+            if (request.path == '/api/inspection/photos/batch-review'
+                    and len({row['site_id'] for row in attachment_rows}) > 1):
+                return jsonify({'error': '批量照片审核必须属于同一站点',
+                                'code': 'ATTACHMENT_SITE_MISMATCH'}), 400
             for aid in attachment_decision_ids:
                 att = attachment_map[aid]
                 if att['site_id'] is None:
@@ -18502,12 +18730,6 @@ def api_operation_attachments_review():
                         }), 409
                 if 'is_deleted' in att.keys() and att['is_deleted']:
                     return jsonify({'error': '附件已删除，无法审核', 'attachment_id': aid}), 409
-                if att['review_status'] not in (None, 'pending'):
-                    return jsonify({
-                        'error': '存在已处理或不可处理的附件',
-                        'attachment_id': aid,
-                        'code': 'REVIEW_ALREADY_PROCESSED',
-                    }), 409
 
         item_map = {}
         if approve_item_ids:
@@ -18528,47 +18750,25 @@ def api_operation_attachments_review():
                     return denied
             for item_id in approve_item_ids:
                 item = item_map[item_id]
-                if item['review_status'] != 1:
+                if item['review_status'] not in (1, 2):
                     return jsonify({
                         'error': '存在已审核或不可处理的检查项',
                         'item_id': item_id,
                         'code': 'REVIEW_ALREADY_PROCESSED',
                     }), 409
 
-        # Qualification details are evaluated only after every requested object has passed
-        # existence, type, scope, deletion and stale-state checks. This prevents a mixed-site
-        # request from learning evidence state for an object the reviewer cannot access.
-        for aid in attachment_decision_ids:
-            att = attachment_map[aid]
-            if dict(decisions).get(aid) == 'approve' and (
-                    'evidence_qualification' not in att.keys()
-                    or att['evidence_qualification'] != 'qualified'):
-                return jsonify({
-                    'error': att['evidence_reason'] if 'evidence_reason' in att.keys() and att['evidence_reason']
-                    else '该照片尚不具备正式证据资格，普通审核不能放行',
-                    'attachment_id': aid,
-                    'code': 'EVIDENCE_NOT_QUALIFIED',
-                    'next_action': att['evidence_next_action'] if 'evidence_next_action' in att.keys()
-                    else '请补传原图或现场重拍',
-                }), 409
-        for item_id in approve_item_ids:
-            item = item_map[item_id]
-            gate = _evidence_gate(db, 'inspection', item_id, item['required_photos'])
-            if gate:
-                gate['item_id'] = item_id
-                return jsonify(gate), 409
-
         for aid, decision in decisions:
             att = attachment_map[aid]
-            new_status = 'approved' if decision == 'approve' else 'rejected'
-            db.execute(
-                '''UPDATE operation_attachments
-                   SET review_status=?, reviewer_id=?, reviewed_at=?, reject_reason=?
-                   WHERE id=? AND (review_status='pending' OR review_status IS NULL)''',
-                (new_status, reviewer_id, now, reject_reason if decision == 'reject' else None, aid))
-            changed = db.execute('SELECT changes()').fetchone()[0]
-            if not changed:
-                continue
+            try:
+                expected = data.get('expected_current_statuses') or {}
+                base_key = str(data.get('_idempotency_key') or data.get('idempotency_key') or '')
+                record_photo_quality(
+                    db, aid, decision, reject_reason if decision == 'reject' else '', reviewer_id, now,
+                    idempotency_key=f'{base_key}:{aid}' if base_key else '',
+                    expected_current_status=expected.get(str(aid), data.get('expected_current_status')))
+            except R30ContractError as exc:
+                db.rollback()
+                return jsonify({'error': exc.message, 'code': exc.code}), exc.status
             affected_sites.add(att['site_id'])
             attachment_source_type = att['source_type'] if 'source_type' in att.keys() else ''
             attachment_source_id = att['source_id'] if 'source_id' in att.keys() else 0
@@ -18587,32 +18787,12 @@ def api_operation_attachments_review():
             affected_inspection_batches.update((row['plan_id'], row['site_id']) for row in linked_items)
             approved_count += 1 if decision == 'approve' else 0
             rejected_count += 1 if decision == 'reject' else 0
-            if decision == 'approve':
-                _sync_replacement_evidence_state(db, dict(att, reviewer_id=reviewer_id), now)
-            if decision == 'reject':
-                rejection_reason = reject_reason or '现场照片未通过审核'
-                replacement_item_id = _keep_replacement_required_after_rejection(
-                    db, dict(att), reviewer_id, rejection_reason, now)
-                linked_rejections = [] if replacement_item_id else _reopen_items_for_rejected_attachment(
-                    db, att, reviewer_id, rejection_reason, now)
-                rejected_item_rows.extend(linked_rejections)
-                # Linked inspection evidence is actionable only through its plan/site
-                # rework package. A per-photo reminder has no executable destination.
-                if replacement_item_id:
-                    replacement = db.execute("""SELECT i.plan_id,i.site_id,p.assignee_id
-                        FROM insp_plan_items i JOIN insp_plans p ON p.id=i.plan_id
-                        WHERE i.id=?""", (replacement_item_id,)).fetchone()
-                    if replacement:
-                        _notify_inspection_rework(
-                            db, replacement['assignee_id'], replacement['plan_id'],
-                            replacement['site_id'], 1, False)
-                elif not linked_rejections and att['uploader_id']:
-                    name = att['description'] or att['filename'] or f'照片#{aid}'
-                    db.execute(
-                        'INSERT INTO notifications (user_id, source_type, source_id, title, content) VALUES (?,?,?,?,?)',
-                        (att['uploader_id'], 'photo_review', aid,
-                         '照片被驳回',
-                         f'「{name}」被驳回，原因：{reject_reason or "未达标"}。请重新拍摄上传。'))
+            pending = db.execute("""SELECT 1 FROM operation_attachments
+                WHERE source_type='inspection' AND source_id=? AND COALESCE(is_deleted,0)=0
+                  AND COALESCE(review_status,'pending')='pending' LIMIT 1""", (att['source_id'],)).fetchone()
+            if not pending:
+                db.execute("""UPDATE insp_plan_items SET review_status=2,reviewer_id=?,review_time=?
+                    WHERE id=?""", (reviewer_id, now, att['source_id']))
         for item_id in approve_item_ids:
             item = db.execute('SELECT plan_id, site_id FROM insp_plan_items WHERE id=?', (item_id,)).fetchone()
             affected_inspection_batches.add((item['plan_id'], item['site_id']))
@@ -19066,17 +19246,22 @@ def _attachment_private_original_target(attachment):
         return None
 
 
-_SITE_PHOTO_WATERMARK_FONT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'assets', 'fonts', 'NotoSansCJKsc-Regular.otf',
-)
+_SITE_PHOTO_WATERMARK_FONTS = {
+    'regular': os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'assets', 'fonts', 'HarmonyOS_SansSC_Regular.ttf'),
+    'bold': os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'assets', 'fonts', 'HarmonyOS_SansSC_Bold.ttf'),
+}
 
 
-def _site_photo_watermark_font(size):
+def _site_photo_watermark_font(size, weight='regular'):
     from PIL import ImageFont
-    if not os.path.isfile(_SITE_PHOTO_WATERMARK_FONT):
-        raise RuntimeError('中文水印字体资源缺失，无法生成可信展示副本')
-    return ImageFont.truetype(_SITE_PHOTO_WATERMARK_FONT, size)
+    font_path = _SITE_PHOTO_WATERMARK_FONTS.get(weight)
+    if not font_path or not os.path.isfile(font_path):
+        raise RuntimeError('HarmonyOS Sans水印字体资源缺失，无法生成可信展示副本')
+    return ImageFont.truetype(font_path, max(1, int(size)))
 
 
 def _wrap_site_photo_watermark_line(draw, text, font, max_width):
@@ -19101,38 +19286,121 @@ def _site_photo_watermark_layout(draw, image_size, source_lines, content_box=Non
     frame_left, frame_top, frame_right, frame_bottom = frame
     frame_width = max(1, frame_right - frame_left)
     frame_height = max(1, frame_bottom - frame_top)
-    short_edge = min(frame_width, frame_height)
-    margin = max(2, min(18, int(round(short_edge * 0.02))))
-    initial_size = max(10, min(34, int(short_edge / 24)))
-    for font_size in range(initial_size, 2, -1):
-        font = _site_photo_watermark_font(font_size)
-        padding = max(2, int(round(font_size * 0.45)))
-        max_text_width = max(8, frame_width - (margin + padding) * 2)
-        lines = []
-        for line in source_lines:
-            lines.extend(_wrap_site_photo_watermark_line(
-                draw, line, font, max_text_width))
-        line_gap = max(1, font_size // 5)
-        boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
-        line_heights = [max(1, box[3] - box[1]) for box in boxes]
-        content_width = max(max(1, box[2] - box[0]) for box in boxes)
-        box_width = content_width + padding * 2
-        box_height = sum(line_heights) + line_gap * (len(lines) - 1) + padding * 2
-        if box_width <= frame_width - margin * 2 and box_height <= frame_height - margin * 2:
-            left = frame_left + margin
-            bottom = frame_bottom - margin
-            top = bottom - box_height
-            return {
-                'font': font,
-                'font_size': font_size,
-                'font_name': 'Noto Sans CJK SC',
-                'lines': lines,
-                'line_heights': line_heights,
-                'line_gap': line_gap,
-                'padding': padding,
-                'box': [left, top, left + box_width, bottom],
-            }
-    raise ValueError('图片尺寸过小，无法安全绘制中文水印')
+    if not isinstance(source_lines, dict):
+        raise TypeError('watermark layout facts must be a mapping')
+
+    scale = frame_width / 1080.0
+    margin = max(1, int(round(20 * scale)))
+    group_gap = max(1, int(round(12 * scale)))
+    vertical_padding = max(1, int(round(12 * scale)))
+    base_band_height = max(1, int(round(150 * scale)))
+    font_sizes = {
+        'site': max(4, int(round(60 * scale))),
+        'time': max(3, int(round(30 * scale))),
+        'detail': max(3, int(round(27 * scale))),
+    }
+    fonts = {
+        'site': _site_photo_watermark_font(font_sizes['site'], 'bold'),
+        'time': _site_photo_watermark_font(font_sizes['time'], 'bold'),
+        'detail': _site_photo_watermark_font(font_sizes['detail'], 'regular'),
+    }
+    usable_width = max(2, frame_width - margin * 2)
+    left_limit = max(1, int(round(usable_width * 0.43)))
+    right_limit = max(1, usable_width - left_limit)
+    continuation_gap = max(1, int(round(3 * scale)))
+
+    def line_metrics(text, font):
+        box = draw.textbbox((0, 0), text, font=font)
+        return {
+            'text': text,
+            'width': max(1, box[2] - box[0]),
+            'height': max(1, box[3] - box[1]),
+            'top_offset': box[1],
+        }
+
+    def wrapped_metrics(text, font, max_width, role):
+        return [dict(line_metrics(line, font), font=font, role=role)
+                for line in _wrap_site_photo_watermark_line(
+                    draw, text, font, max_width)]
+
+    site_lines = wrapped_metrics(
+        source_lines.get('site_name') or '', fonts['site'], left_limit, 'site')
+    time_lines = wrapped_metrics(
+        source_lines.get('capture_time') or '', fonts['time'], left_limit, 'time')
+    left_rows = [site_lines, time_lines]
+
+    right_rows = []
+    for text in (
+            '照片名称：{}'.format(source_lines.get('photo_name') or ''),
+            '位置坐标：{}'.format(source_lines.get('coordinates') or ''),
+            '防伪码：{}'.format(source_lines.get('anti_counterfeit_code') or '')):
+        right_rows.append(wrapped_metrics(text, fonts['detail'], right_limit, 'detail'))
+
+    def rows_height(rows):
+        total = 0
+        for row_index, row in enumerate(rows):
+            total += sum(line['height'] for line in row)
+            total += continuation_gap * max(0, len(row) - 1)
+            if row_index < len(rows) - 1:
+                total += group_gap
+        return total
+
+    left_height = rows_height(left_rows)
+    right_height = rows_height(right_rows)
+    band_height = max(base_band_height,
+                      max(left_height, right_height) + vertical_padding * 2)
+    if band_height > frame_height:
+        raise ValueError('水印字段过长，无法在当前图片内完整绘制')
+    band_top = frame_bottom - band_height
+    band_box = [frame_left, band_top, frame_right, frame_bottom]
+    commands = []
+
+    left_group_width = max(
+        line['width'] for row in left_rows for line in row)
+    left_group_width = min(left_group_width, left_limit)
+    left_y = band_top + (band_height - left_height) // 2
+    cursor_y = left_y
+    for row_index, row in enumerate(left_rows):
+        for line_index, line in enumerate(row):
+            x = frame_left + margin + max(0, (left_group_width - line['width']) // 2)
+            commands.append(dict(line, x=x, y=cursor_y - line['top_offset']))
+            cursor_y += line['height']
+            if line_index < len(row) - 1:
+                cursor_y += continuation_gap
+        if row_index < len(left_rows) - 1:
+            cursor_y += group_gap
+
+    right_y = band_top + (band_height - right_height) // 2
+    cursor_y = right_y
+    for row_index, row in enumerate(right_rows):
+        for line_index, line in enumerate(row):
+            x = frame_right - margin - line['width']
+            commands.append(dict(line, x=x, y=cursor_y - line['top_offset']))
+            cursor_y += line['height']
+            if line_index < len(row) - 1:
+                cursor_y += continuation_gap
+        if row_index < len(right_rows) - 1:
+            cursor_y += group_gap
+
+    return {
+        'font_size': font_sizes['detail'],
+        'font_sizes': font_sizes,
+        'font_name': 'HarmonyOS Sans',
+        'font_weights': {'site': 'Bold', 'time': 'Bold', 'detail': 'Regular'},
+        'lines': [command['text'] for command in commands],
+        'line_heights': [command['height'] for command in commands],
+        'line_gap': group_gap,
+        'padding': margin,
+        'box': band_box,
+        'background_rgba': [255, 255, 255, 77],
+        'groups': {
+            'left': [frame_left + margin, left_y,
+                     frame_left + margin + left_group_width, left_y + left_height],
+            'right': [frame_right - margin - right_limit, right_y,
+                      frame_right - margin, right_y + right_height],
+        },
+        'draw_commands': commands,
+    }
 
 
 def _trusted_camera_frame_contract(value):
@@ -19247,16 +19515,19 @@ def _create_site_photo_display_copy(image_bytes, original_file, server_watermark
             if (not site_name or not item_name or not capture_time or gps_lat is None
                     or gps_lng is None or not anti_counterfeit_code):
                 raise ValueError('server capture watermark facts are incomplete')
-            lines = (
-                f'站点  {site_name}  {item_label}  {item_name}',
-                f'拍摄时间  {capture_time}',
-                f'{location_label}  {float(gps_lat):.6f}, {float(gps_lng):.6f}',
-                f'防伪码  {anti_counterfeit_code}',
-            )
+            photo_name = item_name if item_name.endswith('照片') else f'{item_name}照片'
+            layout_facts = {
+                'site_name': site_name,
+                'capture_time': capture_time,
+                'photo_name': photo_name,
+                'coordinates': f'{float(gps_lat):.6f},{float(gps_lng):.6f}',
+                'anti_counterfeit_code': anti_counterfeit_code,
+            }
             watermark_metadata = {
                 'site_name': site_name,
                 'item_name': item_name,
                 'item_label': item_label,
+                'photo_name': photo_name,
                 'capture_time': capture_time,
                 'gps_lat': float(gps_lat),
                 'gps_lng': float(gps_lng),
@@ -19266,7 +19537,11 @@ def _create_site_photo_display_copy(image_bytes, original_file, server_watermark
                 'rendered': False,
                 'font_name': None,
                 'font_size': None,
+                'font_sizes': None,
+                'font_weights': None,
                 'layout_box': None,
+                'layout_groups': None,
+                'background_rgba': None,
                 'rendered_lines': [],
                 'image_size': [image.width, image.height],
                 'image_orientation': ('landscape' if image.width >= image.height else 'portrait'),
@@ -19274,21 +19549,21 @@ def _create_site_photo_display_copy(image_bytes, original_file, server_watermark
             }
             if render_watermark:
                 draw = ImageDraw.Draw(image, 'RGBA')
-                layout = _site_photo_watermark_layout(draw, image.size, lines, content_box)
-                left, top, right, bottom = layout['box']
-                y = top + layout['padding']
-                for line, line_height in zip(layout['lines'], layout['line_heights']):
-                    draw.text(
-                        (left + layout['padding'], y), line,
-                        fill=(255, 255, 255, 245), font=layout['font'],
-                        stroke_width=max(1, layout['font_size'] // 18),
-                        stroke_fill=(0, 0, 0, 210))
-                    y += line_height + layout['line_gap']
+                layout = _site_photo_watermark_layout(
+                    draw, image.size, layout_facts, content_box)
+                draw.rectangle(layout['box'], fill=tuple(layout['background_rgba']))
+                for command in layout['draw_commands']:
+                    draw.text((command['x'], command['y']), command['text'],
+                              fill=(0, 0, 0, 255), font=command['font'])
                 watermark_metadata.update({
                     'rendered': True,
                     'font_name': layout['font_name'],
                     'font_size': layout['font_size'],
+                    'font_sizes': layout['font_sizes'],
+                    'font_weights': layout['font_weights'],
                     'layout_box': layout['box'],
+                    'layout_groups': layout['groups'],
+                    'background_rgba': layout['background_rgba'],
                     'rendered_lines': layout['lines'],
                 })
         image_format = original_file['format']
@@ -20831,10 +21106,10 @@ def _evidence_gate(db, source_type, source_id, required=1, stored_paths=None):
         return None
     return {
         'error': f'有效现场证据不足：要求 {required} 张，当前 {qualified} 张',
-        'code': 'QUALIFIED_EVIDENCE_REQUIRED',
+        'code': 'PHOTO_QUALITY_WARNING', 'blocking': False,
         'required': required,
         'qualified': qualified,
-        'next_action': '请补传具备可信拍摄时间、有效作业窗口和站点位置的原图，或现场重拍',
+        'next_action': '质量疑点供审核参考，不阻止提交',
     }
 
 
@@ -20854,10 +21129,10 @@ def _inspection_plan_evidence_gate(db, plan_id):
     if not failures:
         return None
     return {
-        'error': f'仍有 {len(failures)} 个检查项的有效现场证据不足，无法完成计划',
-        'code': 'PLAN_QUALIFIED_EVIDENCE_REQUIRED',
+        'error': f'仍有 {len(failures)} 个检查项的有效现场证据不足',
+        'code': 'PLAN_PHOTO_QUALITY_WARNING', 'blocking': False,
         'items': failures,
-        'next_action': '请补传具备可信拍摄时间、有效作业窗口和站点位置的原图，或现场重拍',
+        'next_action': '质量疑点供审核参考，不阻止结束执行',
     }
 
 
@@ -20898,8 +21173,7 @@ def _inspection_submission_attachments(db, item, uploader_id, photo_urls):
             return None, '照片地址无效，请重新上传'
         rows = db.execute("""SELECT * FROM operation_attachments
             WHERE stored_path=? AND site_id=? AND uploader_id=? AND is_deleted=0
-              AND COALESCE(evidence_qualification,'review')='qualified'
-              AND review_status NOT IN ('rejected','voided','superseded')
+              AND review_status NOT IN ('voided','superseded')
               AND ((source_type='site_photo' AND COALESCE(source_id,0)=0
                     AND json_extract(CASE WHEN json_valid(extra_json) THEN extra_json ELSE '{}' END,
                                      '$.material_role')='pending_inspection'
@@ -20925,6 +21199,8 @@ def _bind_inspection_attachments(db, item, uploader_id, photo_urls, resolved_row
     item_name = item['item_name'] or f'检查项#{item["id"]}'
     category = item['category'] if 'category' in item.keys() else ''
     for row in rows:
+        if row['source_type'] == 'inspection' and row['source_id'] == item['id']:
+            continue
         try:
             extra = json.loads(row['extra_json'] or '{}')
         except (TypeError, json.JSONDecodeError):
@@ -24000,7 +24276,13 @@ def api_operation_logs():
     module = request.args.get('module', '').strip()
     target_type = request.args.get('target_type', '').strip()
     target_id = request.args.get('target_id', type=int)
-    limit = min(int(request.args.get('limit', 50)), 200)
+    paginated = (request.args.get('paginated') == '1'
+                 or request.args.get('page') is not None
+                 or request.args.get('page_size') is not None)
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    page_size = max(1, min(request.args.get('page_size', 20, type=int) or 20, 100))
+    limit = max(1, min(request.args.get('limit', 50, type=int) or 50, 200))
+    include_inventory = request.args.get('include_inventory') in ('1', 'true', 'yes')
     can_read_vehicle_logs = _has_any_role(g.current_user, 'admin', 'operator')
     explicitly_requests_vehicle = (
         module == 'vehicle'
@@ -24027,13 +24309,16 @@ def api_operation_logs():
         if target_id:
             sql += " AND ol.target_id=?"
             params.append(target_id)
-        sql += " ORDER BY ol.created_at DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY ol.created_at DESC,ol.id DESC"
+        if not paginated:
+            sql += " LIMIT ?"
+            params.append(limit)
         rows = db.execute(sql, params).fetchall()
         result = []
         for r in rows:
             d = dict(r)
             d['operator'] = _actor_display_name(db, d.get('operator'), d.get('operator_id'))
+            d['_source'] = 'operation'
             result.append(d)
         # 回收台账早于统一操作日志上线，读取时补齐历史事件；新记录仍以
         # operation_logs 为准，并按设备 ID 去重，避免迁移旧库时丢失审计链。
@@ -24048,8 +24333,10 @@ def api_operation_logs():
             if target_id:
                 recycle_sql += " AND device_id=?"
                 recycle_params.append(target_id)
-            recycle_sql += " ORDER BY created_at DESC LIMIT ?"
-            recycle_params.append(limit)
+            recycle_sql += " ORDER BY created_at DESC,id DESC"
+            if not paginated:
+                recycle_sql += " LIMIT ?"
+                recycle_params.append(limit)
             for row in db.execute(recycle_sql, recycle_params).fetchall():
                 item = dict(row)
                 if item.get('device_id') in logged_recycle_ids:
@@ -24071,10 +24358,58 @@ def api_operation_logs():
                         f"原因：{item.get('reason') or '未记录'}"
                     ),
                     'created_at': item.get('created_at') or item.get('recycle_date'),
+                    '_source': 'recycle',
                 })
-        result.sort(key=lambda item: item.get('created_at') or '', reverse=True)
-        result = result[:limit]
-    return jsonify(result)
+        if (include_inventory and module in ('', 'device') and target_type in ('', 'part')
+                and _table_exists(db, 'inventory_logs')):
+            inventory_sql = '''SELECT il.*,p.part_name,p.part_code
+                               FROM inventory_logs il
+                               LEFT JOIN spare_parts_inventory p ON p.id=il.part_id
+                               ORDER BY il.created_at DESC,il.id DESC'''
+            if not paginated:
+                inventory_sql += ' LIMIT ?'
+                inventory_rows = db.execute(inventory_sql, (limit,)).fetchall()
+            else:
+                inventory_rows = db.execute(inventory_sql).fetchall()
+            for row in inventory_rows:
+                item = dict(row)
+                direction = '入库' if item.get('type') == 'in' else '出库'
+                result.append({
+                    'id': f"inventory-{item['id']}",
+                    'module': 'device',
+                    'action': direction,
+                    'target_type': 'part',
+                    'target_id': item.get('part_id'),
+                    'operator': _actor_display_name(db, item.get('operator'), item.get('operator_id')),
+                    'operator_id': item.get('operator_id'),
+                    'details': (
+                        f"{item.get('part_name') or item.get('part_code') or '备件'} "
+                        f"{'+' if item.get('type') == 'in' else '-'}{item.get('quantity') or 0}"
+                    ),
+                    'created_at': item.get('created_at'),
+                    '_source': 'inventory',
+                })
+        result.sort(key=lambda item: (
+            item.get('created_at') or '',
+            str(item.get('_source') or ''),
+            str(item.get('id') or ''),
+        ), reverse=True)
+        if not paginated:
+            for item in result[:limit]:
+                item.pop('_source', None)
+            return jsonify(result[:limit])
+        total = len(result)
+        offset = (page - 1) * page_size
+        items = result[offset:offset + page_size]
+        for item in items:
+            item.pop('_source', None)
+        return jsonify({
+            'items': items,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total + page_size - 1) // page_size if total else 0,
+        })
 
 
 # --- 设备回收 ---
@@ -25532,18 +25867,15 @@ def mobile_my_today():
         allowed_set = set(allowed)
 
         # 首页不能把同一站点其他人员的任务混入“我的今日任务”。
-        insp_q = """SELECT pi.*, ip.generate_date AS task_date,
+        open_visit = _mobile_open_execution_item_condition(db, 'pi')
+        insp_q = f"""SELECT pi.*, ip.generate_date AS task_date,
                            s.name as site_name, s.code as site_code,
                            s.gps_lat as lat, s.gps_lng as lng, s.type as site_type
                     FROM insp_plan_items pi
                     JOIN insp_plans ip ON ip.id = pi.plan_id
                     JOIN sites s ON s.id = pi.site_id
                     LEFT JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
-                    WHERE ((pi.result IS NULL
-                            AND COALESCE(pi.evidence_status,'')<>'replacement_submitted') OR (
-                             COALESCE(pi.review_status,0)=3
-                             AND COALESCE(pi.evidence_status,'')='supplement_required'
-                           ))
+                    WHERE pi.result IS NULL AND {open_visit}
                       AND EXISTS (SELECT 1 FROM user_sites us
                                   WHERE us.user_id=? AND us.site_id=pi.site_id)
                       AND ip.assignee_id=? AND date(ip.generate_date)<=?
@@ -25591,9 +25923,8 @@ def mobile_my_today():
                 'photo_urls': item['photo_urls'],
                 'remark': item['remark'],
             }
-            is_rework = (int(item['review_status'] or 0) == 3
-                         and (item['evidence_status'] or '') == 'supplement_required')
-            is_replacement_submitted = ((item['evidence_status'] or '') == 'replacement_submitted')
+            is_rework = False
+            is_replacement_submitted = False
             if is_rework:
                 site_tasks[sid]['rework_items'] += 1
                 target = (item['plan_id'], item['id'])
@@ -25818,8 +26149,7 @@ def mobile_my_today():
         # Historical unfinished execution packages remain part of today's field workload.
         # They keep their original vehicle/resource context but do not repeat departure confirmation.
         field_completed = _inspection_field_completion_sql(db, 'pi')
-        carryover_condition = f"(NOT {field_completed} OR pi.check_out_time IS NULL)" \
-            if _mobile_checkout_supported(db) else f"NOT {field_completed}"
+        carryover_condition = _mobile_open_execution_item_condition(db, 'pi')
         carryover_rows = db.execute(f"""SELECT DISTINCT ip.id AS plan_id, ip.plan_schedule_id,
                    date(ip.generate_date) AS work_date, ps.vehicle_days, ps.spare_parts, ps.work_order_ids
             FROM insp_plans ip JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
@@ -25832,7 +26162,7 @@ def mobile_my_today():
             schedule_id = carryover['plan_schedule_id']
             site_rows = db.execute("""SELECT DISTINCT pi.site_id FROM insp_plan_items pi
                 WHERE plan_id=? AND COALESCE(execution_status,'active')='active'
-                  AND (result IS NULL OR check_out_time IS NULL)
+                  AND check_out_time IS NULL
                   AND EXISTS (SELECT 1 FROM user_sites us
                               WHERE us.user_id=? AND us.site_id=pi.site_id)""",
                 (carryover['plan_id'], user['id'])).fetchall() if _mobile_checkout_supported(db) else db.execute(
@@ -26070,7 +26400,7 @@ def mobile_site_tasks(site_id):
         site_payload['carryover_items'] = carryover_items
         site_payload['has_carryover'] = carryover_items > 0
         site_payload['task_state'] = 'carryover' if carryover_items else ('today' if assigned else 'unassigned')
-        rework_items = [item for item in items if item['review_status'] == 3] if items and 'review_status' in items[0].keys() else []
+        rework_items = []
         site_payload['rework_count'] = len(rework_items)
         site_payload['rework_reason'] = (rework_items[0]['review_comment'] or '') if rework_items else ''
         normal_checkin = _inspection_effective_checkin_time(db, site_id, user['id'])
@@ -26128,7 +26458,7 @@ def _inspection_photo_correction_capability(db, item, user):
     evidence_status = str(item.get('evidence_status') or '')
     if (evidence_status in ('supplement_required', 'replacement_submitted')
             or item.get('rework_required_at') or int(item.get('review_status') or 0) == 3):
-        return False, '整改轮次请按补拍流程处理'
+        return False, '原照片和质量意见已保留，无需补拍'
     if item.get('reviewer_id') is not None or str(item.get('review_time') or '').strip():
         return False, '审核人员已处理，照片只能回看'
     if int(item.get('review_status') or 0) not in (1, 2):
@@ -26191,11 +26521,7 @@ def _mobile_inspection_photo_state(item, evidence):
     keys = set(item.keys())
     required = max(0, int(item['required_photos'] or 0)) if 'required_photos' in keys else 0
     evidence_status = str(item['evidence_status'] if 'evidence_status' in keys else '')
-    supplement_required = (
-        evidence_status in ('supplement_required', 'replacement_submitted')
-        or ('review_status' in keys and int(item['review_status'] or 0) == 3
-            and 'rework_required_at' in keys and bool(item['rework_required_at']))
-    )
+    supplement_required = False
     def formal_item_attachment(row):
         try:
             metadata = json.loads(row.get('extra_json') or '{}')
@@ -26203,9 +26529,7 @@ def _mobile_inspection_photo_state(item, evidence):
             return False
         if not isinstance(metadata, dict) or str(metadata.get('material_role') or '') != 'formal':
             return False
-        if str(row.get('evidence_qualification') or 'review') != 'qualified':
-            return False
-        if str(row.get('review_status') or 'pending').lower() in ('rejected', 'voided', 'superseded'):
+        if str(row.get('review_status') or 'pending').lower() in ('voided', 'superseded'):
             return False
         source_type = str(row.get('source_type') or '')
         if source_type == 'inspection' and str(row.get('source_id') or '') == str(item.get('id') or ''):
@@ -26222,7 +26546,7 @@ def _mobile_inspection_photo_state(item, evidence):
                          if str(row.get('review_status') or '').lower() in ('rejected', 'voided', 'superseded')]
     # The business state is the lock. Attachment queries are an audit projection
     # and may be temporarily incomplete, so they must never reopen editing.
-    replacement_review_pending = evidence_status == 'replacement_submitted'
+    replacement_review_pending = False
     current, seen = [], set()
     # The attachment link is the durable source of truth.  photo_urls is only
     # a compatibility projection and can be stale after a review correction.
@@ -26250,6 +26574,9 @@ def _mobile_inspection_photo_state(item, evidence):
     ) if supplement_required else 0
     return {
         'current_photo_urls': current,
+        'historical_evidence_status': evidence_status,
+        'evidence_status': ('recorded' if evidence_status in
+                            ('supplement_required', 'replacement_submitted') else evidence_status),
         'retained_photo_count': len(current),
         'original_formal_pending_photo_urls': [row.get('stored_path') for row in pending_evidence]
             if evidence_status == 'supplement_required' else [],
@@ -26259,7 +26586,7 @@ def _mobile_inspection_photo_state(item, evidence):
         'replacement_required_photos': replacement_required,
         'replacement_photo_status': 'replacement_pending_review' if replacement_review_pending else (
             'ready' if supplement_required else 'not_applicable'),
-        'replacement_submission_allowed': not replacement_review_pending,
+        'replacement_submission_allowed': False,
         'replacement_block_reason': (
             '补拍照片已提交业务审核，审核完成前不能重复编辑'
             if replacement_review_pending else ''),
@@ -26288,7 +26615,6 @@ def _pending_inspection_photo_urls(db, plan_id, site_id, uploader_id):
         FROM operation_attachments
         WHERE source_type='site_photo' AND COALESCE(source_id,0)=0
           AND site_id=? AND uploader_id=? AND COALESCE(is_deleted,0)=0
-          AND COALESCE(evidence_qualification,'review')='qualified'
           AND COALESCE(review_status,'pending') NOT IN ('rejected','voided','superseded')
           AND json_valid(extra_json)
           AND json_extract(extra_json,'$.material_role')='pending_inspection'
@@ -26427,16 +26753,9 @@ def _effective_site_linked_workorders(db, site_id, limit=5, user=None):
 
 
 def _mobile_open_execution_item_condition(db, alias=''):
-    """Return one SQL predicate for work that must remain in the field package."""
+    """Departure closes field work; missing results remain visible as missing facts."""
     prefix = f'{alias}.' if alias else ''
-    terms = [f'{prefix}result IS NULL']
-    if _mobile_checkout_supported(db):
-        terms.append(f'{prefix}check_out_time IS NULL')
-    if _table_has_column(db, 'insp_plan_items', 'review_status'):
-        terms.append(f'COALESCE({prefix}review_status, 0)=3')
-    if _table_has_column(db, 'insp_plan_items', 'evidence_status'):
-        terms.append(f"COALESCE({prefix}evidence_status, '')='supplement_required'")
-    return '(' + ' OR '.join(terms) + ')'
+    return f'({prefix}check_out_time IS NULL)' if _mobile_checkout_supported(db) else f'({prefix}result IS NULL)'
 
 
 def _mobile_rework_departure_resource(db, plan_id, user_id):
@@ -26565,12 +26884,7 @@ def mobile_today_execution():
         has_review_status = _table_has_column(db, 'insp_plan_items', 'review_status')
         has_evidence_status = _table_has_column(db, 'insp_plan_items', 'evidence_status')
         carryover_condition = _mobile_open_execution_item_condition(db, 'pending')
-        site_rework_terms = []
-        if has_review_status:
-            site_rework_terms.append('COALESCE(pi.review_status, 0)=3')
-        if has_evidence_status:
-            site_rework_terms.append("COALESCE(pi.evidence_status, '')='supplement_required'")
-        site_rework_condition = ' OR '.join(site_rework_terms) or '0'
+        site_rework_condition = _inspection_active_rework_sql(db, 'pi')
         checkout_select = 'MAX(pi.check_out_time)' if checkout_supported else 'NULL'
         rework_select = (", ip.rework_of_plan_id, ip.resource_state"
                          if (_table_has_column(db, 'insp_plans', 'rework_of_plan_id')
@@ -26685,8 +26999,8 @@ def mobile_today_execution():
                 site_item = dict(site_row)
                 rework_pending = int(site_item.pop('_rework_pending', 0) or 0)
                 checked_out_items = int(site_item.pop('_checked_out_items', 0) or 0)
-                if (is_carryover and int(site_item['completed'] or 0) >= int(site_item['total'] or 0)
-                        and site_item.get('check_out_time') and not rework_pending):
+                if (is_carryover and int(site_item['total'] or 0)
+                        and checked_out_items == int(site_item['total'] or 0)):
                     continue
                 normal_checkin = _inspection_effective_checkin_time(
                     db, site_item['site_id'], user['id'])
@@ -26974,8 +27288,6 @@ def mobile_execution_site_check_out(plan_id, site_id):
             return jsonify({'error': '该站点没有可离站的检查项'}), 404
         if not any(_inspection_item_checkin_time(db, item, user['id']) for item in items):
             return jsonify({'error': '请先完成本站到站打卡'}), 400
-        if any(not _inspection_field_item_completed(row) for row in items):
-            return jsonify({'error': '请先完成本站全部检查项后再离站打卡'}), 400
         previous = next((row['check_out_time'] for row in items if row['check_out_time']), None)
         now = previous or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not previous:
@@ -27367,21 +27679,10 @@ def _inspection_photo_upload_context(db, item_id, site_id, plan_id, user):
                       'INSPECTION_ITEM_CANCELLED', 409)
 
     review_status = int(item['review_status'] or 0) if 'review_status' in item.keys() else 0
-    evidence_status = (item['evidence_status'] or '') if 'evidence_status' in item.keys() else ''
-    if evidence_status == 'replacement_submitted':
-        return None, ('补拍照片已提交业务审核，审核完成前不能重复编辑',
-                      'INSPECTION_REPLACEMENT_REVIEW_PENDING', 409)
-    required_at = (item['rework_required_at'] or '') \
-        if 'rework_required_at' in item.keys() else ''
-    current_retake = bool(required_at and evidence_status == 'supplement_required')
-    initial_open = item['result'] is None and review_status == 0
-    pending_review = review_status == 1
+    initial_open = item['result'] is None
     correction_open, _ = _inspection_photo_correction_capability(db, item, user)
-    if not (initial_open or pending_review or current_retake or correction_open):
-        if review_status == 2:
-            return None, ('该检查项已通过审核，现场证据已冻结',
-                          'INSPECTION_ITEM_APPROVED', 409)
-        return None, ('该检查项当前不能新增正式证据',
+    if not (initial_open or correction_open):
+        return None, ('该检查项已提交，原照片和审核意见保留，无需补拍',
                       'INSPECTION_ITEM_EVIDENCE_FROZEN', 409)
     return item, None
 
@@ -27425,47 +27726,14 @@ def mobile_submit_item():
                 or execution['status'] not in ('active', 'completed') \
                 or (execution['schedule_status'] is not None and execution['schedule_status'] != 'approved'):
             return jsonify({'error': '该检查项不属于当前已批准执行任务'}), 403
-        if (item['evidence_status'] if 'evidence_status' in item.keys() else '') == 'replacement_submitted':
-            return jsonify({
-                'error': '补拍照片已提交业务审核，审核完成前不能重复编辑',
-                'code': 'INSPECTION_REPLACEMENT_REVIEW_PENDING',
-            }), 409
         resource_ready, resource_code, resource_error = _rework_arrival_resource_state(
             db, item['plan_id'], g.current_user['id'])
         if not resource_ready:
             return jsonify({'error': resource_error, 'code': resource_code}), 409
-        supplement_only = bool(data.get('supplement'))
-        existing_result = item['result']
-        existing_review_status = int(item['review_status'] or 0) if 'review_status' in item.keys() else 0
-        explicit_supplement_required = ('evidence_status' in item.keys()
-                                        and item['evidence_status'] == 'supplement_required')
-        supplement_required = explicit_supplement_required
-        supplement_required = supplement_required or (
-            existing_review_status == 3
-            and 'rework_required_at' in item.keys()
-            and bool(item['rework_required_at'])
-        )
-        supplement_only = supplement_only or supplement_required
-        if existing_result is not None:
-            if existing_review_status == 2 and not explicit_supplement_required:
-                return jsonify({'error': '该检查项已通过审核，现场证据已冻结',
-                                'code': 'INSPECTION_ITEM_APPROVED'}), 409
-            if supplement_required:
-                pass
-            elif existing_review_status == 1 and supplement_only:
-                pass
-            else:
-                return jsonify({'error': '该检查项已提交审核，请补充证据后等待审核',
-                                'code': 'INSPECTION_ITEM_ALREADY_SUBMITTED', 'duplicate': True}), 409
-        elif supplement_only:
-            return jsonify({'error': '该检查项尚未提交，不能以补充证据方式提交',
-                            'code': 'INSPECTION_ITEM_SUPPLEMENT_INVALID'}), 409
-
-        # 普通执行只认当日到站。补拍项由每张照片绑定的本轮300米返场
-        # 会话证明当前位置，不创建或复用另一条整站签到。
-        rework_required_at = item['rework_required_at'] if 'rework_required_at' in item.keys() else ''
-        checked_in = True if supplement_required else _inspection_item_checkin_time(
-            db, item, g.current_user['id'])
+        if item['result'] is not None:
+            return jsonify({'error': '该检查项已提交，原照片和审核意见已保留，无需补拍',
+                            'code': 'INSPECTION_ITEM_ALREADY_SUBMITTED', 'duplicate': True}), 409
+        checked_in = _inspection_item_checkin_time(db, item, g.current_user['id'])
         if not checked_in:
             return jsonify({'error': '请先完成本站到站打卡后再提交检查项'}), 400
 
@@ -27480,114 +27748,14 @@ def mobile_submit_item():
             _attachment_storage_path(value) for value in submitted_photos
             if _attachment_storage_path(value)
         ]
-        try:
-            existing_photos = json.loads(item['photo_urls'] or '[]')
-        except Exception:
-            existing_photos = []
-        if not isinstance(existing_photos, list):
-            existing_photos = []
         requires_calibration = ((item['category'] if 'category' in item.keys() else '') or '') == 'qaqc_calibration'
         calibrator = data.get('calibrator') if requires_calibration else None
         calibration_values = data.get('calibration_values') if requires_calibration else None
-        if supplement_only:
-            rejected_paths = {
-                row['stored_path'] for row in db.execute("""SELECT stored_path
-                    FROM operation_attachments
-                    WHERE source_type='inspection' AND source_id=? AND is_deleted=0
-                      AND review_status IN ('rejected','voided','superseded')""", (item_id,)).fetchall()
-            }
-            existing_photos = [url for url in existing_photos
-                               if _attachment_storage_path(url) not in rejected_paths]
-            existing_keys = {_attachment_storage_path(url) for url in existing_photos}
-            new_photos = []
-            for url in submitted_photos:
-                normalized_url = _attachment_storage_path(url)
-                # Historical rejected/voided/superseded evidence remains in
-                # photo_urls for audit, but can never be revived by a retake.
-                if (not normalized_url or normalized_url in existing_keys
-                        or normalized_url in rejected_paths):
-                    continue
-                existing_keys.add(normalized_url)
-                new_photos.append(normalized_url)
-            merged_photos = existing_photos + new_photos
-            if not new_photos:
-                return jsonify({'error': '请先补充至少一张新的现场照片',
-                                'code': 'INSPECTION_ITEM_NO_NEW_EVIDENCE'}), 409
-            resolved_new_photos, attachment_error = _inspection_submission_attachments(
-                db, item, g.current_user['id'], new_photos)
-            if attachment_error:
-                return jsonify({'error': attachment_error,
-                                'code': 'INSPECTION_PHOTO_CONTEXT_MISMATCH'}), 409
-            resolved_by_path = {
-                row['stored_path']: row for row in resolved_new_photos
-            }
-            required_cycle = str(rework_required_at or '')
-            for stored_path in new_photos:
-                evidence = resolved_by_path.get(_attachment_storage_path(stored_path))
-                if not evidence or not _inspection_submission_evidence_matches(
-                        db, evidence, required_cycle):
-                    return jsonify({
-                        'error': '补拍照片不属于当前返场补拍，请重新拍摄或从相册上传',
-                        'code': 'RETAKE_EVIDENCE_CYCLE_MISMATCH',
-                    }), 409
-            photo_error = validate_submission_photos(
-                existing_result, item['required_photos'] if 'required_photos' in item.keys() else 0,
-                json.dumps(merged_photos, ensure_ascii=False),
-            )
-            if photo_error:
-                return jsonify({'error': photo_error}), 400
-            if not _bind_inspection_attachments(
-                    db, item, g.current_user['id'], new_photos, resolved_new_photos):
-                return jsonify({
-                    'error': '补拍照片已保留，但检查项关联写入失败，请保留当前页面并重试提交',
-                    'code': 'INSPECTION_ATTACHMENT_BIND_FAILED',
-                }), 409
-            db.execute("UPDATE insp_plan_items SET photo_urls=?, actual_photos=? WHERE id=?",
-                       (json.dumps(merged_photos, ensure_ascii=False), len(merged_photos), item_id))
-            supplement_updates = []
-            if 'evidence_status' in item.keys():
-                supplement_updates.append("evidence_status='replacement_submitted'")
-            if 'review_status' in item.keys():
-                supplement_updates.append('review_status=1')
-            if supplement_updates:
-                db.execute(f"UPDATE insp_plan_items SET {','.join(supplement_updates)} WHERE id=?",
-                           (item_id,))
-            for photo in new_photos:
-                stored_path = _attachment_storage_path(photo)
-                if _table_has_column(db, 'operation_attachments', 'review_required'):
-                    db.execute("""UPDATE operation_attachments
-                        SET review_required=1, review_status='pending'
-                        WHERE stored_path=? AND source_type='inspection' AND source_id=?
-                          AND is_deleted=0""", (stored_path, item_id))
-            _open_inspection_site_review(db, item['plan_id'], item['site_id'])
-            response = {'success': True, 'result': existing_result, 'supplemented': True,
-                        'review_status': 1, 'evidence_status': 'replacement_submitted',
-                        'added_photos': len(new_photos),
-                        'photo_urls': merged_photos, 'actual_photos': len(merged_photos)}
-            _mobile_idempotency_store(db, idempotency_key, 'submit-item', response)
-            db.commit()
-            return jsonify(response)
-        photo_error = validate_submission_photos(
-            result, item['required_photos'] if 'required_photos' in item.keys() else 0,
-            data.get('photo_urls'),
-        )
-        if photo_error:
-            return jsonify({'error': photo_error}), 400
-        # 禁止“点一下正常即完成”的空提交：每项至少应留下现场照片、读数/校准信息或文字说明。
-        if not (submitted_photos or (data.get('remark') or '').strip() or
-                (calibrator or '').strip() or (calibration_values or '').strip()):
-            return jsonify({'error': '请至少填写现场说明、读数或上传一张现场照片后再提交'}), 400
         resolved_photos, attachment_error = _inspection_submission_attachments(
             db, item, g.current_user['id'], submitted_photos)
         if attachment_error:
             return jsonify({'error': attachment_error,
                             'code': 'INSPECTION_PHOTO_CONTEXT_MISMATCH'}), 409
-        if any(not _inspection_submission_evidence_matches(db, photo, '')
-               for photo in resolved_photos):
-            return jsonify({
-                'error': '必需照片必须由当前检查项的现场拍照或相册上传入口生成',
-                'code': 'INSPECTION_PHOTO_TRUST_REQUIRED',
-            }), 409
         if not _bind_inspection_attachments(
                 db, item, g.current_user['id'], submitted_photos, resolved_photos):
             return jsonify({
@@ -28048,16 +28216,10 @@ def mobile_photo_capture_session():
             if context_error:
                 return jsonify({'error': context_error[0], 'code': context_error[1]}), context_error[2]
             plan_id = item['plan_id']
-            rework_required_at = (item['rework_required_at']
-                                  if 'rework_required_at' in item.keys() else None)
-            review_status = int(item['review_status'] or 0) if 'review_status' in item.keys() else 0
-            evidence_status = (item['evidence_status'] or '') if 'evidence_status' in item.keys() else ''
-            is_retake = bool(rework_required_at and (
-                review_status == 3 or evidence_status in (
-                    'supplement_required', 'replacement_submitted')))
-            if not is_retake:
-                checkin_location, location_error = _inspection_capture_checkin_location(
-                    db, item, g.current_user['id'])
+            rework_required_at = None
+            is_retake = False
+            checkin_location, location_error = _inspection_capture_checkin_location(
+                db, item, g.current_user['id'])
         elif order_no:
             order = db.execute('SELECT * FROM work_orders WHERE order_no=?',
                                (order_no,)).fetchone()
@@ -28326,15 +28488,8 @@ def mobile_upload_site_photo():
             initial_item_fingerprint = _inspection_photo_upload_fingerprint(inspection_item)
             plan_id = inspection_item['plan_id']
             requested_item_name = inspection_item['item_name'] or requested_item_name
-            rework_required_at = (inspection_item['rework_required_at']
-                                  if 'rework_required_at' in inspection_item.keys() else None)
-            review_status = int(inspection_item['review_status'] or 0) \
-                if 'review_status' in inspection_item.keys() else 0
-            evidence_status = (inspection_item['evidence_status'] or '') \
-                if 'evidence_status' in inspection_item.keys() else ''
-            is_retake = bool(rework_required_at and (
-                review_status == 3 or evidence_status in (
-                    'supplement_required', 'replacement_submitted')))
+            rework_required_at = None
+            is_retake = False
     else:
         # A generic site photo has no trusted inspection-item name.  Do not let
         # the client turn a filename or description into a false business link.
@@ -28405,15 +28560,8 @@ def mobile_upload_site_photo():
                 inspection_item = current_item
                 plan_id = inspection_item['plan_id']
                 requested_item_name = inspection_item['item_name'] or requested_item_name
-                rework_required_at = (inspection_item['rework_required_at']
-                                      if 'rework_required_at' in inspection_item.keys() else None)
-                review_status = int(inspection_item['review_status'] or 0) \
-                    if 'review_status' in inspection_item.keys() else 0
-                evidence_status = (inspection_item['evidence_status'] or '') \
-                    if 'evidence_status' in inspection_item.keys() else ''
-                is_retake = bool(rework_required_at and (
-                    review_status == 3 or evidence_status in (
-                        'supplement_required', 'replacement_submitted')))
+                rework_required_at = None
+                is_retake = False
             idempotency_endpoint = ('upload-site-photo:' + str(item_id or 0) + ':'
                                     + str(rework_required_at or 'initial'))
             cached, idempotency_error = _mobile_idempotency_strict_get(
@@ -28658,7 +28806,7 @@ def mobile_upload_site_photo():
             watermark_diagnostic = None
             taken_at = assessment.get('taken_at')
             source_qualified = assessment['qualification'] == 'qualified'
-            accepted_for_review = source_qualified and inspection_item is not None
+            accepted_for_review = inspection_item is not None and capture_source != 'supplement'
             if (inspection_item is not None and capture_source != 'supplement'
                     and not accepted_for_review):
                 response = {
@@ -28674,7 +28822,7 @@ def mobile_upload_site_photo():
                 }
                 db.rollback()
                 return jsonify(response)
-            if source_qualified and capture_source == 'camera':
+            if capture_source == 'camera':
                 session = _reserve_capture_session(db, session, now_str)
                 if not session:
                     response = {
@@ -29866,105 +30014,17 @@ def _inspection_attachment_review_scope(db, photo_ids, require_single_site=False
 
 @app.route('/api/inspection/photos/batch-review', methods=['POST'])
 def api_inspection_photos_batch_review():
-    denied = require_reviewer()
-    if denied:
-        return denied
-    """批量审核照片"""
-    data = request.get_json() or {}
-    photo_ids = data.get('photo_ids', [])
-    action = data.get('action', 'approve')  # 'approve' or 'reject'
-    if action not in ('approve', 'reject'):
-        return jsonify({'error': 'invalid review action'}), 400
-    reviewer_id = g.current_user.get('id')
-    reject_reason = data.get('reject_reason', '')
-    if action == 'reject' and (not isinstance(reject_reason, str) or not reject_reason.strip()):
-        return jsonify({'error': 'reject_reason is required'}), 400
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    if not photo_ids:
-        return jsonify({'error': '缺少 photo_ids'}), 400
-
-    with get_db() as db:
-        photo_map, denied = _inspection_attachment_review_scope(db, photo_ids, require_single_site=True)
-        if denied:
-            return denied
-        unique_photo_ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
-        if action == 'approve':
-            blocked = [pid for pid in unique_photo_ids
-                       if ('evidence_qualification' not in photo_map[pid].keys()
-                           or photo_map[pid]['evidence_qualification'] != 'qualified')]
-            if blocked:
-                return jsonify({'error': '存在尚不具备正式证据资格的照片，普通审核不能放行',
-                                'code': 'EVIDENCE_NOT_QUALIFIED', 'photo_ids': blocked}), 409
-        new_status = 'approved' if action == 'approve' else 'rejected'
-        for pid in unique_photo_ids:
-            # 查照片信息（用于通知和重传）
-            photo = photo_map[int(pid)]
-            db.execute(
-                '''UPDATE operation_attachments
-                   SET review_status=?, reviewer_id=?, reviewed_at=?, reject_reason=?
-                   WHERE id=?''',
-                (new_status, reviewer_id, now, reject_reason if action == 'reject' else None, pid))
-            if action == 'approve':
-                _sync_replacement_evidence_state(db, dict(photo, reviewer_id=reviewer_id), now)
-            else:
-                _keep_replacement_required_after_rejection(
-                    db, dict(photo), reviewer_id, reject_reason, now)
-            # 驳回时写通知，通知原上传人
-            if action == 'reject' and photo:
-                item_name = photo['description'] or f'照片#{pid}'
-                db.execute(
-                    'INSERT INTO notifications (user_id, source_type, source_id, title, content) VALUES (?,?,?,?,?)',
-                    (photo['uploader_id'] or 1, 'photo_review', pid,
-                     f'照片被驳回',
-                     f'「{item_name}」被驳回，原因：{reject_reason or "未达标"}。请重新拍摄上传。'))
-        db.commit()
-        return jsonify({'ok': True, 'count': len(unique_photo_ids), 'status': new_status})
+    data = dict(request.get_json(silent=True) or {})
+    data['attachment_ids'] = data.get('photo_ids', [])
+    return api_operation_attachments_review(_data=data)
 
 
 # ---------- 2.5 单张照片审核 ----------
 @app.route('/api/inspection/photos/<int:photo_id>/review', methods=['POST'])
 def api_inspection_photo_review(photo_id):
-    denied = require_reviewer()
-    if denied:
-        return denied
-    """审核单张照片"""
-    data = request.get_json() or {}
-    action = data.get('action', 'approve')
-    reviewer_id = g.current_user.get('id')
-    reject_reason = data.get('reject_reason', '')
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    if action not in ('approve', 'reject'):
-        return jsonify({'error': 'invalid review action'}), 400
-    if action == 'reject' and (not isinstance(reject_reason, str) or not reject_reason.strip()):
-        return jsonify({'error': 'reject_reason is required'}), 400
-    new_status = 'approved' if action == 'approve' else 'rejected'
-    with get_db() as db:
-        photo_map, denied = _inspection_attachment_review_scope(db, [photo_id])
-        if denied:
-            return denied
-        if action == 'approve' and (
-                'evidence_qualification' not in photo_map[photo_id].keys()
-                or photo_map[photo_id]['evidence_qualification'] != 'qualified'):
-            return jsonify({'error': '该照片尚不具备正式证据资格，普通审核不能放行',
-                            'code': 'EVIDENCE_NOT_QUALIFIED'}), 409
-        db.execute(
-            '''UPDATE operation_attachments
-               SET review_status=?, reviewer_id=?, reviewed_at=?, reject_reason=?
-               WHERE id=?''',
-            (new_status, reviewer_id, now, reject_reason if action == 'reject' else None, photo_id))
-        photo = photo_map[photo_id]
-        if action == 'approve':
-            _sync_replacement_evidence_state(db, dict(photo, reviewer_id=reviewer_id), now)
-        else:
-            _keep_replacement_required_after_rejection(
-                db, dict(photo), reviewer_id, reject_reason, now)
-        db.commit()
-        row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (photo_id,)).fetchone()
-        if not row:
-            return jsonify({'error': '照片不存在'}), 404
-        return jsonify(dict(row))
+    data = dict(request.get_json(silent=True) or {})
+    data['attachment_ids'] = [photo_id]
+    return api_operation_attachments_review(_data=data)
 
 
 # ---------- 2.6 缺项检查（巡检提交时校验） ----------
@@ -31929,6 +31989,12 @@ def api_vehicle_use_records():
         scope = request.args.get('scope', 'all')
         if scope not in ('all', 'current', 'history'):
             return jsonify({'error': '车辆行程范围参数无效'}), 400
+        legacy_complete_list = (
+            scope == 'all'
+            and request.args.get('page') is None
+            and request.args.get('limit') is None
+            and request.args.get('offset') is None
+        )
         page, limit, pagination_error = _pagination_args(default_limit=100, max_limit=200)
         if pagination_error:
             return pagination_error
@@ -31964,8 +32030,10 @@ def api_vehicle_use_records():
                 order_sql = ' ORDER BY r.id DESC'
             count_params = list(params)
             total = db.execute(count_q, count_params).fetchone()[0]
-            q += order_sql + ' LIMIT ? OFFSET ?'
-            params.extend([limit, offset])
+            q += order_sql
+            if not legacy_complete_list:
+                q += ' LIMIT ? OFFSET ?'
+                params.extend([limit, offset])
             rows = db.execute(q, params).fetchall()
             result = []
             for row in rows:
@@ -32851,36 +32919,19 @@ def _ensure_plan_schedule_vehicle_column(db):
 
 
 def _inspection_field_completion_sql(db, alias=''):
-    """Return the shared predicate for an item's current field completion."""
+    """Count submitted execution facts independently of photo review."""
     prefix = f'{alias}.' if alias else ''
-    terms = [f"TRIM(COALESCE({prefix}result,''))<>''"]
-    if _table_has_column(db, 'insp_plan_items', 'review_status'):
-        terms.append(f'COALESCE({prefix}review_status,0)<>3')
-    if _table_has_column(db, 'insp_plan_items', 'evidence_status'):
-        terms.append(f"COALESCE({prefix}evidence_status,'')<>'supplement_required'")
-    return '(' + ' AND '.join(terms) + ')'
+    return f"(TRIM(COALESCE({prefix}result,''))<>'')"
 
 
 def _inspection_active_rework_sql(db, alias=''):
-    """Return the current-item predicate for an unresolved field remediation."""
-    prefix = f'{alias}.' if alias else ''
-    terms = []
-    if _table_has_column(db, 'insp_plan_items', 'review_status'):
-        terms.append(f'COALESCE({prefix}review_status,0)=3')
-    if _table_has_column(db, 'insp_plan_items', 'evidence_status'):
-        terms.append(f"COALESCE({prefix}evidence_status,'')='supplement_required'")
-    return '(' + ' OR '.join(terms) + ')' if terms else '0'
+    """Photo quality no longer creates a field remediation obligation."""
+    return '0'
 
 
 def _inspection_field_item_completed(item):
-    """Apply the current field-completion contract to one sqlite row."""
-    keys = set(item.keys())
-    return bool(
-        str(item['result'] or '').strip() != ''
-        and ('review_status' not in keys or int(item['review_status'] or 0) != 3)
-        and ('evidence_status' not in keys
-             or str(item['evidence_status'] or '') != 'supplement_required')
-    )
+    """Quality opinions do not erase a submitted result or fill a missing one."""
+    return bool(str(item['result'] or '').strip())
 
 
 def _ps_expand_plan_vehicle(plan_data, vehicle_id, vehicle_days):
@@ -33487,13 +33538,13 @@ def _ps_prune_vehicle_days(plan_data, vehicle_days, period_start, period_end):
 def _ps_execution_completed(db, schedule_id):
     """Return whether every generated execution package completed its field loop."""
     try:
-        checkout_condition = ' OR pi.check_out_time IS NULL' if _mobile_checkout_supported(db) else ''
+        open_condition = 'pi.check_out_time IS NULL' if _mobile_checkout_supported(db) else 'pi.result IS NULL'
         summary = db.execute(f"""SELECT COUNT(*) AS total,
                 SUM(CASE WHEN ip.status!='completed' OR EXISTS (
                     SELECT 1 FROM insp_plan_items pi
                     WHERE pi.plan_id=ip.id
                       AND COALESCE(pi.execution_status, 'active')='active'
-                      AND (pi.result IS NULL{checkout_condition})
+                      AND ({open_condition})
                 ) THEN 1 ELSE 0 END) AS incomplete
             FROM insp_plans ip
             WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'""", (schedule_id,)).fetchone()
@@ -33592,10 +33643,10 @@ def _ps_period_overlap(db, user_id, schedule_type, period_start, period_end):
 
 def _ps_recalculate_field_execution(db, plan_id):
     """Update one execution package only after all active items have left the site."""
-    checkout_condition = ' OR check_out_time IS NULL' if _mobile_checkout_supported(db) else ''
+    open_condition = 'check_out_time IS NULL' if _mobile_checkout_supported(db) else 'result IS NULL'
     summary = db.execute(f"""SELECT COUNT(*) AS total,
             SUM(CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END) AS submitted,
-            SUM(CASE WHEN result IS NULL{checkout_condition} THEN 1 ELSE 0 END) AS field_open
+            SUM(CASE WHEN {open_condition} THEN 1 ELSE 0 END) AS field_open
         FROM insp_plan_items
         WHERE plan_id=? AND COALESCE(execution_status, 'active')='active'""", (plan_id,)).fetchone()
     total = int(summary['total'] or 0) if summary else 0
@@ -34502,7 +34553,6 @@ def _ps_field_execution_capability(db, schedule, execution_status, user):
                 GROUP BY ip.id, date(ip.generate_date), pi.site_id
                 HAVING rework_items=0
                    AND NOT (total_items>0
-                            AND completed_items=total_items
                             AND checked_out_items=total_items)
                 ORDER BY date(ip.generate_date), ip.id, pi.site_id""",
                 (user['id'], schedule['id'], user['id'], today)).fetchall()
@@ -34779,6 +34829,33 @@ def _ps_rebuild_tasks_on_change(db, schedule):
                       AND NOT ({execution_fact_sql})""", (ep['id'],))
             cancelled += cur.rowcount
             selected_by_site = day_data.get('inspection_items') or {} if isinstance(day_data, dict) else {}
+            # 同站检查项选择也必须同步；取消只退出待办，现场事实原样保留。
+            for site_id in sorted(desired_sites & existing_sites & current_service):
+                explicit, selected_ids = _ps_plan_site_selection(day_data, site_id)
+                if not explicit:
+                    continue
+                templates = _ps_site_template_items(
+                    db, site_id, schedule['schedule_type'],
+                    include_weekly_optional=(schedule['schedule_type'] == 'weekly'))
+                selected_templates = [item for item in templates if int(item['id']) in selected_ids]
+                selected_keys = {(item['template_id'], item['item_name']) for item in selected_templates}
+                active_rows = db.execute("""SELECT id,template_id,item_name FROM insp_plan_items
+                    WHERE plan_id=? AND site_id=? AND COALESCE(execution_status,'active')='active'""",
+                    (ep['id'], site_id)).fetchall()
+                active_keys = set()
+                for item in active_rows:
+                    key = (item['template_id'], item['item_name'])
+                    if key in selected_keys:
+                        active_keys.add(key)
+                    else:
+                        cancelled += db.execute("""UPDATE insp_plan_items SET execution_status='cancelled'
+                            WHERE id=? AND COALESCE(execution_status,'active')='active'""",
+                            (item['id'],)).rowcount
+                missing_ids = [item['id'] for item in selected_templates
+                               if (item['template_id'], item['item_name']) not in active_keys]
+                if missing_ids:
+                    added_items += _ps_add_site_tasks(
+                        db, ep['id'], site_id, schedule['schedule_type'], missing_ids)
             for added_site_id in desired_sites - existing_sites:
                 selected = selected_by_site.get(str(added_site_id)) if isinstance(selected_by_site, dict) else None
                 added_items += _ps_add_site_tasks(db, ep['id'], added_site_id, schedule['schedule_type'], selected)
@@ -35087,6 +35164,11 @@ def api_plan_schedules_list():
     period_start = request.args.get('period_start')
     mine = request.args.get('mine', '').lower() in ('1', 'true', 'yes')
     attention = request.args.get('attention', '')
+    paginated = (request.args.get('paginated') == '1'
+                 or request.args.get('page') is not None
+                 or request.args.get('page_size') is not None)
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    page_size = max(1, min(request.args.get('page_size', 20, type=int) or 20, 100))
     if attention not in ('', 'overdue', 'coverage', 'resource'):
         return jsonify({'error': '无效的关注项筛选'}), 400
     q = '''SELECT ps.*, u.real_name as user_name, u2.real_name as approver_name
@@ -35119,7 +35201,7 @@ def api_plan_schedules_list():
         # 周期重叠：计划的周期与查询周期相交
         q += ' AND ps.period_start <= date(?, "+6 days") AND ps.period_end >= ?'
         params.append(period_start, period_start)
-    q += ' ORDER BY ps.period_start DESC, ps.created_at DESC'
+    q += ' ORDER BY ps.period_start DESC, ps.created_at DESC, ps.id DESC'
     with get_db() as db:
         rows = []
         for raw in db.execute(q, params).fetchall():
@@ -35172,7 +35254,17 @@ def api_plan_schedules_list():
             r['attention_reason'] = '周巡检漏站，等待管理者确认例外原因'
         elif attention == 'resource':
             r['attention_reason'] = '车辆或库存校验未通过'
-    return jsonify(rows)
+    if not paginated:
+        return jsonify(rows)
+    total = len(rows)
+    offset = (page - 1) * page_size
+    return jsonify({
+        'items': rows[offset:offset + page_size],
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': (total + page_size - 1) // page_size if total else 0,
+    })
 
 
 @app.route('/api/plan-schedules', methods=['POST'])
@@ -38262,6 +38354,7 @@ def api_alert_rules_get():
 @login_required
 def api_alert_rules_update(rule_id):
     """更新告警规则阈值/启用状态"""
+    global _alert_rules_cache, _alert_rules_cache_time
     denied = require_admin()
     if denied:
         return denied
@@ -38295,6 +38388,8 @@ def api_alert_rules_update(rule_id):
                  g.current_user.get('id') or 0, details),
             )
         db.commit()
+        _alert_rules_cache = None
+        _alert_rules_cache_time = 0
         row = db.execute('SELECT * FROM alert_rule_config WHERE id=?', (rule_id,)).fetchone()
         d = dict(row)
         try: d['thresholds'] = _j.loads(d['thresholds']) if d.get('thresholds') else {}
@@ -39696,8 +39791,12 @@ def check_device_offline():
     try:
         db = _scheduler_db()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # 30分钟无数据 = 设备离线
-        threshold = (datetime.now() - timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
+        rules = _load_alert_rules(db)
+        device_rule = rules.get('device_status')
+        gap_rule = rules.get('data_gap')
+        # Device/site lifecycle remains the existing fixed 30-minute rule.
+        offline_minutes = 30
+        threshold = (datetime.now() - timedelta(minutes=offline_minutes)).strftime('%Y-%m-%d %H:%M:%S')
 
         # 1. 检测设备离线
         stale_devices = db.execute(
@@ -39715,7 +39814,7 @@ def check_device_offline():
             existing = db.execute(
                 "SELECT id FROM alerts WHERE site_id=? AND metric='device_status' AND status='pending' AND created_at > datetime('now','-5 minutes')",
                 (sid,)).fetchone()
-            if not existing:
+            if device_rule and not existing:
                 sname = dev.get('site_name', '') or f'站点{sid}'
                 dname = dev.get('device_name', '')
                 create_alert_internal(db, sid, 'device_status', 0, 'yellow',
@@ -39733,7 +39832,7 @@ def check_device_offline():
                 existing_gap = db.execute(
                     "SELECT id FROM alerts WHERE site_id=? AND metric='data_gap' AND status='pending'",
                     (sid,)).fetchone()
-                if not existing_gap:
+                if gap_rule and not existing_gap:
                     sname = dev.get('site_name', f'站点#{sid}')
                     create_alert_internal(db, sid, 'data_gap', 30, 'orange',
                         f'{sname} 所有设备离线，数据缺失超过30分钟')
@@ -39743,12 +39842,14 @@ def check_device_offline():
             print(f'[DeviceCheck] {len(stale_devices)} 设备离线, 已生成告警')
 
         # 3. 兜底：已离线但缺告警的设备（seed 遗留）
-        missing_alerts = db.execute(
-            "SELECT ds.id, ds.site_id, ds.device_name, s.name as site_name "
-            "FROM device_shadows ds JOIN sites s ON ds.site_id = s.id "
-            "WHERE ds.monitoring_enabled=1 AND ds.status='offline' AND NOT EXISTS ("
-            "  SELECT 1 FROM alerts WHERE site_id=ds.site_id AND metric='device_status' AND status='pending'"
-            ")").fetchall()
+        missing_alerts = []
+        if device_rule:
+            missing_alerts = db.execute(
+                "SELECT ds.id, ds.site_id, ds.device_name, s.name as site_name "
+                "FROM device_shadows ds JOIN sites s ON ds.site_id = s.id "
+                "WHERE ds.monitoring_enabled=1 AND ds.status='offline' AND NOT EXISTS ("
+                "  SELECT 1 FROM alerts WHERE site_id=ds.site_id AND metric='device_status' AND status='pending'"
+                ")").fetchall()
         for dev in missing_alerts:
             dev = dict(dev)
             sname = dev.get('site_name') or '站点' + str(dev['site_id'])
@@ -39794,7 +39895,8 @@ def alert_escalation_check():
                                WHERE id=? AND status NOT IN ('resolved','closed')''',
                             (next_lev, now, alert['id']))
                     # 自动生成工单：对同一站点+同一测项，未闭环前只保留一个升级工单，避免重复
-                    if cfg['auto_workorder'] and not alert['related_order_no']:
+                    if (cfg['auto_workorder'] and not alert['related_order_no']
+                            and _alert_rule_allows_new_records(db, alert['metric'])):
                         order_no = 'AL' + now[:10].replace('-', '') + str(alert['id']).zfill(4)
                         site_id = alert['site_id'] if alert['site_id'] else 0
                         event_type = alert['metric'] or '告警升级'
