@@ -25,8 +25,9 @@ services:
       APP_RUNTIME_PROFILE: "production"
       MINIPROGRAM_STATE: ${MINIPROGRAM_STATE:-formal}
       WX_APPSECRET: ${WX_APPSECRET:-}
-      # 1 = 注入演示数据，方便点开就能看到界面；若启动失败改成 "0"
-      ENABLE_DEMO_SEED: "1"
+      # 验收环境是全新空库，演示数据注入的多个 seed 会在空库上抛异常导致进程退出。
+      # 默认关闭；验收应用自带 init_db()+基础 seed 已足够初始化界面。
+      ENABLE_DEMO_SEED: "0"
       SKIP_BACKFILL: "1"
       # 关键：绑定到 0.0.0.0，否则局域网其它设备访问不到
       BACKEND_HOST: "0.0.0.0"
