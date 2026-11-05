@@ -8,7 +8,9 @@ services:
   water-monitor-accept:
     build:
       context: .
-      dockerfile: Dockerfile
+      # 验收专用：基础镜像走国内加速站（飞牛直连 Docker Hub 会卡住）。
+      # 生产（炎火云）仍用原 Dockerfile，未改动。
+      dockerfile: Dockerfile.acceptance
     image: water-monitor-app:acceptance
     container_name: water-monitor-accept
     restart: unless-stopped

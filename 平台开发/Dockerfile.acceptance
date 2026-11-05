@@ -1,0 +1,100 @@
+# 飞牛验收环境专用 Dockerfile
+#
+# 与生产 Dockerfile 的唯一差别：基础镜像走国内加速站、npm/apt 走国内源。
+# 原因：飞牛直接访问 Docker Hub 会卡住（实测 10 分钟拉不下 node/python 基础镜像，
+#       而 docker.m.daocloud.io 60 秒内拉完 168MB）。炎火云生产仍用原 Dockerfile，不受影响。
+# 其余构建步骤、产物、启动命令与生产完全一致，保证「验收的就是要上线的」。
+
+FROM docker.m.daocloud.io/library/node:22-alpine AS frontend-builder
+
+WORKDIR /build/react-vite
+COPY react-vite/package.json react-vite/package-lock.json ./
+RUN npm config set registry https://registry.npmmirror.com && npm ci
+COPY react-vite/ ./
+RUN npm run build
+
+FROM docker.m.daocloud.io/library/python:3.12-slim AS sqlite-group-mode-builder
+
+RUN (sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true) \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# SQLite's Unix VFS requests mode 0644 for new database files, so an umask cannot
+# grant the shared group write permission. This narrowly intercepts creations in
+# the evidence directory and turns that request into owner/group RW, other NONE.
+RUN printf '%s\n' \
+    '#define _GNU_SOURCE' \
+    '#include <dlfcn.h>' \
+    '#include <fcntl.h>' \
+    '#include <stdarg.h>' \
+    '#include <string.h>' \
+    '#include <sys/stat.h>' \
+    '' \
+    'typedef int (*open_fn)(const char *, int, ...);' \
+    '' \
+    'static int is_station_data_path(const char *path) {' \
+    '    return path && strncmp(path, "/app/backend/data/", 18) == 0;' \
+    '}' \
+    '' \
+    'static mode_t shared_database_mode(mode_t mode) {' \
+    '    return (mode & ~0007) | 0060;' \
+    '}' \
+    '' \
+    'static int call_open(const char *symbol, const char *path, int flags, va_list args) {' \
+    '    static open_fn real_open;' \
+    '    static open_fn real_open64;' \
+    '    open_fn target = strcmp(symbol, "open64") == 0 ? real_open64 : real_open;' \
+    '    if (!target) {' \
+    '        target = (open_fn)dlsym(RTLD_NEXT, symbol);' \
+    '        if (strcmp(symbol, "open64") == 0) real_open64 = target; else real_open = target;' \
+    '    }' \
+    '    if (flags & O_CREAT) {' \
+    '        mode_t mode = va_arg(args, mode_t);' \
+    '        if (is_station_data_path(path)) mode = shared_database_mode(mode);' \
+    '        return target(path, flags, mode);' \
+    '    }' \
+    '    return target(path, flags);' \
+    '}' \
+    '' \
+    'int open(const char *path, int flags, ...) {' \
+    '    va_list args; va_start(args, flags); int result = call_open("open", path, flags, args); va_end(args); return result;' \
+    '}' \
+    '' \
+    'int open64(const char *path, int flags, ...) {' \
+    '    va_list args; va_start(args, flags); int result = call_open("open64", path, flags, args); va_end(args); return result;' \
+    '}' \
+    > /tmp/sqlite-group-mode.c \
+    && gcc -shared -fPIC -O2 -Wall -Werror -o /opt/libsqlite-group-mode.so /tmp/sqlite-group-mode.c -ldl \
+    && chmod 0555 /opt/libsqlite-group-mode.so \
+    && rm /tmp/sqlite-group-mode.c
+
+FROM docker.m.daocloud.io/library/python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /app/backend
+
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --default-timeout=180 --retries=5 \
+    --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    -r requirements.txt
+
+COPY backend/ /app/backend/
+COPY frontend/ /app/frontend/
+COPY --from=frontend-builder /build/frontend/v2/ /app/frontend/v2/
+COPY --from=sqlite-group-mode-builder /opt/libsqlite-group-mode.so /opt/libsqlite-group-mode.so
+
+RUN groupadd --gid 10001 stationingest \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin stationingest \
+    && mkdir -p /app/backend/data /app/frontend/uploads \
+    && chown root:stationingest /app/backend/data \
+    && chmod 2770 /app/backend/data \
+    && command -v setpriv >/dev/null
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]
