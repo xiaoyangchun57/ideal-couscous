@@ -9,6 +9,11 @@
 #   /vol1/@team/水质设备运维 : /vol1/@team/水质设备运维
 # 这样容器内 docker compose 传给宿主机 Docker daemon 的 build context 路径，
 # 在宿主机上也是真实存在的，不会因为「容器内路径 ≠ 宿主机路径」而构建失败。
+#
+# 2026-11-05 更新（镜像生命周期）：
+#   - 每次部署成功后自动清理悬空镜像与过期构建缓存，避免 --build 反复留下 <none> 镜像占磁盘。
+#   - 部署成功的 commit SHA 落盘，轮询器容器重启后不会无谓重建，也就不会多产生悬空镜像。
+#   - 注意：容器 CMD 指向飞牛本地本文件，改脚本必须同时更新仓库副本并覆盖本文件。
 
 set -eu
 export LANG=C.UTF-8
@@ -17,6 +22,7 @@ export LC_ALL=C.UTF-8
 BASE="/vol1/@team/水质设备运维"
 REPO="$BASE/repo"
 COMPOSE="$REPO/平台开发/docker-compose.acceptance.yml"
+STATE="$BASE/.accept-deployed-sha"
 REMOTE="https://github.com/xiaoyangchun57/ideal-couscous.git"
 BRANCH="acceptance"
 INTERVAL="${POLL_INTERVAL:-60}"
@@ -43,8 +49,23 @@ if [ ! -d "$REPO/.git" ]; then
   echo "[poller] 首次克隆完成"
 fi
 
-# 3) 轮询：只在远端 HEAD 变化时才重建，避免无谓构建
+# 3) 重启后恢复上次成功部署的 SHA，避免重复构建（也就不会产生多余悬空镜像）
 LAST=""
+if [ -f "$STATE" ]; then
+  LAST=$(cat "$STATE" 2>/dev/null || true)
+  echo "[poller] 恢复上次成功部署的提交：${LAST:-<空>}"
+fi
+
+# 只删「无 tag 且无容器引用」的悬空镜像；现役的
+# water-monitor-app:acceptance 与 alpine:3.20 都有 tag 且被容器引用，不会被删。
+cleanup_images() {
+  echo "[poller] 清理悬空镜像与过期构建缓存"
+  docker image prune -f --filter "dangling=true" 2>&1 | tail -3 || true
+  # 只清理 72 小时前的构建缓存，保留近期缓存加速下次构建
+  docker builder prune -f --filter "until=72h" 2>&1 | tail -3 || true
+}
+
+# 4) 轮询：只在远端 HEAD 变化时才重建，避免无谓构建
 while true; do
   if git -C "$REPO" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1; then
     HEAD=$(git -C "$REPO" rev-parse FETCH_HEAD)
@@ -61,12 +82,14 @@ while true; do
           sleep 5
         done
         if [ "$OK" = "1" ]; then
-          echo "[poller] DEPLOY_OK  ${HEAD}  验收地址 http://192.168.2.250:8080"
+          echo "$HEAD" > "$STATE"
           LAST="$HEAD"
+          echo "[poller] DEPLOY_OK  ${HEAD}  验收地址 http://192.168.2.250:8080"
+          cleanup_images
         else
           echo "[poller] 容器已启动但健康检查未通过，输出最近日志："
           docker compose -f "$COMPOSE" -p water-accept logs --tail=40 || true
-          echo "[poller] 保留 LAST 为空，下轮将重试"
+          echo "[poller] 不更新部署状态，下轮将重试"
         fi
       else
         echo "[poller] docker compose 构建失败，下轮重试"
