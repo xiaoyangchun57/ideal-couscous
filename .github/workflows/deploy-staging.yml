@@ -76,7 +76,10 @@ jobs:
           # app.py 的 get_db() 硬编码 `timeout=3` / `PRAGMA busy_timeout=3000`。
           # 全新空库首次 seed（6000+ 条排程）在 GitHub runner 的 overlay2 上会撞
           # `sqlite3.OperationalError: database is locked`；飞牛靠容器重启策略收敛。
-          # 这里只在 CI 容器内放宽锁等待，不改仓库源码、不改业务逻辑。
+          # 这里只在 CI 容器内放宽锁等待；实测全新空库首次 seed 仍可能撞锁，
+          # 因此配合下面「重启同一容器、复用已初始化库」的重试一起收敛
+          # （与飞牛验收容器 restart: unless-stopped 的实际表现一致）。
+          # 不改仓库源码、不改业务逻辑。
           mkdir -p /tmp/ci-patch
           cat > /tmp/ci-patch/sitecustomize.py <<'PY'
           """CI-only: widen SQLite lock tolerance on a brand-new database."""
@@ -97,7 +100,9 @@ jobs:
 
           sqlite3.connect = _connect
           PY
-          python3 -c "import sys; sys.path.insert(0, '/tmp/ci-patch'); import sitecustomize, sqlite3; print('sitecustomize OK:', sqlite3.connect.__name__)"
+          # 显式按路径加载校验：直接 import sitecustomize 会命中 Python 启动时
+          # 已缓存的同名模块，得到假阳性。
+          python3 -c "import importlib.util, sqlite3; s=importlib.util.spec_from_file_location('ci_patch','/tmp/ci-patch/sitecustomize.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print('CI SQLite patch loaded:', sqlite3.connect.__name__)"
 
       - name: 构建验收镜像
         run: |
