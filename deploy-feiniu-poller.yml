@@ -1,0 +1,29 @@
+# 飞牛「零令牌轮询部署器」容器定义
+#
+# 用法 A（推荐）：飞牛「容器」→ 导入 compose，粘贴本文件，启动即可。
+# 用法 B：把 deploy-feiniu-poller.sh 上传到 /vol1/@team/水质设备运维/ 后，
+#         用 fnos-cli 的 docker container create 创建等价容器（见操作规范）。
+#
+# 为什么不需要 token：本仓库 PUBLIC，git clone/fetch 免凭证；
+# 飞牛主动轮询 GitHub，不依赖 GitHub Actions runner，也不需要仓库管理员权限。
+services:
+  water-accept-poller:
+    image: alpine:3.20
+    container_name: water-accept-poller
+    restart: unless-stopped
+    environment:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      POLL_INTERVAL: "60"
+    # 关键：两侧路径完全一致，容器内 docker CLI 传给宿主机 daemon 的路径才有效
+    command: ["sh", "/vol1/@team/水质设备运维/deploy-feiniu-poller.sh"]
+    volumes:
+      # 让容器能用飞牛宿主机的 Docker 构建/启动验收容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 代码、脚本、验收数据库都放在这里；必须「同名路径」挂载
+      - /vol1/@team/水质设备运维:/vol1/@team/水质设备运维
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

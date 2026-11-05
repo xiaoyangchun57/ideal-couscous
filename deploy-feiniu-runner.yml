@@ -9,15 +9,21 @@
 #   （除非你在 GitHub 那边删除了该 runner，需重新注册）。
 services:
   feiniu-github-runner:
-    image: myoung34/github-actions-runner:latest
+    # 固定到 ubuntu-noble（24.04），避免 latest 漂移；该镜像内置 docker CLI
+    image: myoung34/github-runner:ubuntu-noble
     container_name: feiniu-github-runner
     restart: unless-stopped
     environment:
       REPO_URL: "https://github.com/xiaoyangchun57/ideal-couscous"
       RUNNER_TOKEN: "<从 GitHub 仓库 Settings → Actions → Runners → New self-hosted runner 复制的 token>"
       RUNNER_NAME: "feiniu-accept"
-      RUNNER_LABELS: "self-hosted,feiniu-accept"
+      # 注意：此镜像的变量名是 LABELS，不是 RUNNER_LABELS。
+      # 写错会导致 runner 不带 feiniu-accept 标签，工作流永远排队等不到机器。
+      LABELS: "feiniu-accept"
       RUNNER_GROUP: "Default"
+      RUN_AS_ROOT: "true"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     # 让 runner 容器内能通过 host.docker.internal 访问飞牛宿主机的发布端口（如 8080）
     extra_hosts:
       - "host.docker.internal:host-gateway"
