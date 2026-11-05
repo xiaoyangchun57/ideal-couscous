@@ -1,0 +1,129 @@
+name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
+
+# 对应《验收环境搭建.md》3.2「添加工作流文件」的落地版。
+#
+# 为什么不能照抄原文的工作流：
+#   1) 本仓库没有 staging 分支，验收分支是 acceptance；默认分支是 integration，不是 main。
+#      原文 `git push origin main` 推上去也不会触发任何验收流程。
+#   2) 本仓库没有注册任何 self-hosted runner（yanhuo / feiniu 标签都不存在），
+#      runs-on: [self-hosted, ...] 的 job 会永久排队，永远不会执行。
+#   3) 仓库根目录没有 docker-compose.yml；验收 compose 在 平台开发/docker-compose.acceptance.yml，
+#      且依赖飞牛本地 .env 里的 INITIAL_ADMIN_PASSWORD，原文 `PORT=8081 docker compose up` 对它无效。
+#   4) 仓库是 PUBLIC，把 self-hosted runner + docker.sock 暴露出来是 GitHub 官方明确警告的高风险组合。
+#
+# 现在的分工（效果与原文一致：push 验收分支 -> Actions 绿色 ✓ -> 验收地址自动更新）：
+#   - 本工作流：在 GitHub 托管 runner（PUBLIC 仓库免费）上构建验收镜像、空库真实启动并打 /api/health，
+#     拦住会让验收环境崩掉的改动。
+#   - 飞牛 water-accept-poller：每 60 秒轮询 acceptance，发现新提交即 docker compose up -d --build，
+#     它是真正的部署者。主动出站，不需要 runner 注册令牌，也不需要公网端口。
+#
+# 若以后改用 staging 分支，需同步把飞牛 deploy-feiniu-poller.sh 里的 BRANCH 改成 staging。
+# 若要把本检查变成 PR 合并门禁，需把本文件合并进默认分支 integration。
+
+on:
+  push:
+    branches: [acceptance]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: 验收版构建 + 启动门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 生成仅用于本次 CI 的初始管理员密码
+        run: |
+          # 空库 seed_users() 要求 >=12 位；这是临时随机值，
+          # 不写入仓库，也不是飞牛验收环境的真实密码。
+          echo "INITIAL_ADMIN_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+
+      - name: 校验验收 compose 配置
+        run: |
+          docker compose -f 平台开发/docker-compose.acceptance.yml -p water-accept-ci config -q
+          echo "compose 配置校验通过（含必需变量 INITIAL_ADMIN_PASSWORD）"
+
+      - name: 生成 CI 专用 Dockerfile（仅替换下载源）
+        run: |
+          # 飞牛在国内，Dockerfile.acceptance 用 DaoCloud / 淘宝 / 清华源；
+          # GitHub 托管 runner 在海外，用官方源更快更稳。
+          # 只替换下载来源，基础镜像版本、构建步骤、产物与飞牛验收镜像完全一致。
+          # 生成到 /tmp，不写回仓库，不影响飞牛构建。
+          sed -e 's|docker.m.daocloud.io/library/||g' \
+              -e 's|npm config set registry https://registry.npmmirror.com && ||' \
+              -e 's|mirrors.tuna.tsinghua.edu.cn|deb.debian.org|g' \
+              -e 's|--index-url https://pypi.tuna.tsinghua.edu.cn/simple ||' \
+              平台开发/Dockerfile.acceptance > /tmp/Dockerfile.acceptance.ci
+          echo "--- CI Dockerfile 关键行 ---"
+          (grep -E '^(FROM|RUN (npm|pip|apt))' /tmp/Dockerfile.acceptance.ci | head -20) || true
+
+      - name: 构建验收镜像
+        run: |
+          docker build -f /tmp/Dockerfile.acceptance.ci -t water-monitor-app:ci 平台开发
+
+      - name: 空库启动 + /api/health 烟测
+        run: |
+          set -euo pipefail
+          docker rm -f water-accept-ci >/dev/null 2>&1 || true
+          # 直接跑镜像，绕开 compose 里飞牛专用的 /vol1 绝对路径挂载；
+          # 启动命令与 docker-compose.acceptance.yml 保持一致（先补表再启动）。
+          docker run -d --name water-accept-ci \
+            -p 127.0.0.1:8080:5000 \
+            -e TZ=Asia/Shanghai \
+            -e APP_RUNTIME_PROFILE=production \
+            -e ENABLE_DEMO_SEED=0 \
+            -e SKIP_BACKFILL=1 \
+            -e BACKEND_HOST=0.0.0.0 \
+            -e INITIAL_ADMIN_PASSWORD="$INITIAL_ADMIN_PASSWORD" \
+            -w /app/backend \
+            water-monitor-app:ci \
+            sh -ec 'python init_acceptance_schema.py && exec python app.py'
+          OK=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json 2>/dev/null; then
+              OK=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$OK" != "1" ]; then
+            echo "健康检查未通过，容器日志："
+            docker logs --tail 120 water-accept-ci || true
+            exit 1
+          fi
+          echo "健康检查通过：$(cat /tmp/health.json)"
+
+      - name: 收集日志 / 清理
+        if: always()
+        run: |
+          docker logs --tail 40 water-accept-ci 2>&1 || true
+          docker rm -f water-accept-ci >/dev/null 2>&1 || true
+
+      - name: 部署交接说明
+        run: |
+          {
+            echo "## 验收环境 CI 通过"
+            echo ""
+            echo "- 提交：\`$GITHUB_SHA\`"
+            echo "- 分支：\`$GITHUB_REF_NAME\`"
+            echo "- ✅ 验收 compose 可解析、镜像可构建、全新空库可启动、\`/api/health\` 返回 200"
+            echo ""
+            echo "### 部署由飞牛轮询器执行"
+            echo "本次 push 会被飞牛上的 \`water-accept-poller\` 在 ≤60 秒内发现，自动重建 \`water-monitor-accept\`。"
+            echo "验收地址：<http://192.168.2.250:8080>；健康接口：<http://192.168.2.250:8080/api/health>"
+            echo ""
+            echo "> GitHub 托管 runner 无法访问局域网飞牛，因此本工作流只做质量门禁，不做内网部署。"
+            echo "> 若改用 \`staging\` 分支，需同步修改飞牛 \`deploy-feiniu-poller.sh\` 的 \`BRANCH\`。"
+          } >> "$GITHUB_STEP_SUMMARY"
