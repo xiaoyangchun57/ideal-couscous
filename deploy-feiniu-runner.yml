@@ -18,6 +18,9 @@ services:
       RUNNER_NAME: "feiniu-accept"
       RUNNER_LABELS: "self-hosted,feiniu-accept"
       RUNNER_GROUP: "Default"
+    # 让 runner 容器内能通过 host.docker.internal 访问飞牛宿主机的发布端口（如 8080）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # 让 runner 容器能用飞牛宿主机的 Docker 来构建/启动验收容器
       - /var/run/docker.sock:/var/run/docker.sock

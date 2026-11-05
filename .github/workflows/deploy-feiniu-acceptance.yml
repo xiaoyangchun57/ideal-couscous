@@ -31,9 +31,9 @@ jobs:
           # 先停掉旧验收容器（保留数据卷），再重建，保证每次都是最新代码
           docker compose -f docker-compose.acceptance.yml -p water-accept down --remove-orphans || true
           docker compose -f docker-compose.acceptance.yml -p water-accept up -d --build
-          echo "Waiting for acceptance health check (http://127.0.0.1:8080/api/health) ..."
+          echo "Waiting for acceptance health check (http://host.docker.internal:8080/api/health) ..."
           for i in $(seq 1 24); do
-            if curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+            if curl -fsS http://host.docker.internal:8080/api/health >/dev/null 2>&1; then
               echo "ACCEPTANCE_UP:http://<飞牛局域网IP>:8080"
               exit 0
             fi
