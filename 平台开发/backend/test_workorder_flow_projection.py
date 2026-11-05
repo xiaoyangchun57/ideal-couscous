@@ -169,16 +169,37 @@ class WorkorderFlowProjectionTest(unittest.TestCase):
                                     headers={'Authorization': 'Bearer other-token'})
         self.assertEqual(forbidden.status_code, 403, forbidden.json)
 
+    def test_in_progress_action_requires_arrival_before_review_submission(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='in_progress',check_in_time=NULL,check_in_user=NULL WHERE id=10")
+        before_arrival = self.client.get('/api/workorders/WO-20260902-101',
+                                         headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(before_arrival.status_code, 200, before_arrival.json)
+        self.assertEqual(before_arrival.json['actions']['primary'], 'check_in')
+        self.assertFalse(before_arrival.json['checked_in'])
+
+        with app_module.get_db() as db:
+            check_in_time = app_module.datetime.now().strftime('%Y-%m-%d 09:00:00')
+            db.execute("UPDATE work_orders SET check_in_time=?,check_in_user='现场人员' WHERE id=10",
+                       (check_in_time,))
+        after_arrival = self.client.get('/api/workorders/WO-20260902-101',
+                                        headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(after_arrival.status_code, 200, after_arrival.json)
+        self.assertEqual(after_arrival.json['actions']['primary'], 'submit_review')
+        self.assertTrue(after_arrival.json['checked_in'])
+
     def test_rework_photo_projection_distinguishes_evidence_cycles(self):
         item = {'id': 100, 'photo_urls': '["/uploads/original.jpg"]', 'required_photos': 4, 'review_status': 3,
                 'evidence_status': 'supplement_required', 'rework_required_at': '2026-09-02'}
         pending = [{'stored_path': '/uploads/original.jpg', 'review_status': 'pending',
                     'source_type': 'inspection', 'source_id': 100,
+                    'evidence_qualification': 'qualified',
                     'extra_json': '{"material_role":"formal"}', 'is_effective_evidence': False}]
         original_pending = app_module._mobile_inspection_photo_state(item, pending)
         self.assertEqual((original_pending['replacement_photo_status'], original_pending['replacement_required_photos']),
-                         ('pending_review', None))
-        self.assertIn('原照片待审核', original_pending['replacement_block_reason'])
+                         ('ready', 4))
+        self.assertTrue(original_pending['replacement_submission_allowed'])
+        self.assertEqual(original_pending['replacement_block_reason'], '')
 
         rejected = app_module._mobile_inspection_photo_state(item, [{
             'stored_path': '/uploads/original.jpg', 'review_status': 'rejected',
@@ -191,14 +212,25 @@ class WorkorderFlowProjectionTest(unittest.TestCase):
         replacement_pending = app_module._mobile_inspection_photo_state(replacement_item, pending)
         self.assertEqual((replacement_pending['replacement_photo_status'], replacement_pending['replacement_required_photos']),
                          ('replacement_pending_review', None))
-        self.assertIn('补拍照片待审核', replacement_pending['replacement_block_reason'])
+        self.assertFalse(replacement_pending['replacement_submission_allowed'])
+        self.assertIn('业务审核', replacement_pending['replacement_block_reason'])
+
+        replacement_without_attachment = app_module._mobile_inspection_photo_state(replacement_item, [])
+        self.assertEqual((replacement_without_attachment['replacement_photo_status'],
+                          replacement_without_attachment['replacement_required_photos']),
+                         ('replacement_pending_review', None))
+        self.assertFalse(replacement_without_attachment['replacement_submission_allowed'])
 
         replacement_approved = app_module._mobile_inspection_photo_state(replacement_item, [{
             'stored_path': '/uploads/retained.jpg', 'review_status': 'approved',
             'source_type': 'inspection', 'source_id': 100,
+            'evidence_qualification': 'qualified',
             'extra_json': '{"material_role":"formal"}', 'is_effective_evidence': True,
         }])
-        self.assertEqual((replacement_approved['retained_photo_count'], replacement_approved['replacement_required_photos']), (1, 3))
+        self.assertEqual((replacement_approved['replacement_photo_status'],
+                          replacement_approved['replacement_required_photos']),
+                         ('replacement_pending_review', None))
+        self.assertFalse(replacement_approved['replacement_submission_allowed'])
 
         no_evidence = app_module._mobile_inspection_photo_state(item, [])
         self.assertEqual((no_evidence['replacement_photo_status'], no_evidence['replacement_required_photos']), ('ready', 4))

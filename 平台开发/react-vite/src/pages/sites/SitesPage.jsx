@@ -1,17 +1,19 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+﻿import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Table, Input, Select, Button, Space, Tag, Badge,
   Modal, Descriptions, Tabs, Typography, message, Spin, Empty, Alert,
-  Upload, Timeline, Divider, Form, InputNumber, Popconfirm, DatePicker, Image, Radio,
+  Upload, Timeline, Divider, Form, InputNumber, Popconfirm, DatePicker, Image, Radio, Checkbox,
 } from 'antd';
 import {
   SearchOutlined, FileSearchOutlined,
   ReloadOutlined, DownloadOutlined, UploadOutlined,
   FileTextOutlined, CloudServerOutlined, ApiOutlined, InboxOutlined,
-  PlusOutlined, DeleteOutlined, ExperimentOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, EditOutlined,
+  PlusOutlined, ExperimentOutlined, CheckCircleOutlined,
+  CloseCircleOutlined, SettingOutlined,
+  BookOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
@@ -20,11 +22,19 @@ import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
+import { StationMonitoringDrawer } from './SiteMonitoringPage';
 import { filterSiteManagerCandidates } from './siteManagerCandidates';
 import dayjs from 'dayjs';
-import { hasAdminRole, mergeMonitoringSites, monitoringStatusView, monitoringSummaryItems, monitoringLatestSummary } from './stationMonitoring';
+import {
+  communicationStatusView, hasAdminRole, mergeMonitoringSites,
+  REPORTING_CONDITION_META, SERVICE_STATUS_META,
+  stationServicePolicyView,
+  formatMonitoringTime, readSiteDirectorySnapshot, siteDirectoryLoadMode,
+  stationDirectorySnapshotKey, validateMonitoringDirectoryPayload, writeSiteDirectorySnapshot,
+} from './stationMonitoring';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
+import ReagentMasterPage from '../reagents/ReagentMasterPage';
 
 const { Text } = Typography;
 
@@ -58,6 +68,9 @@ const statusConfig = {
   maintenance: { color: 'orange', text: '维护中' },
 };
 
+const serviceStatusMeta = SERVICE_STATUS_META;
+const reportingConditionMeta = REPORTING_CONDITION_META;
+
 function getStatusCfg(status) {
   return statusConfig[status] || { color: 'default', text: status || '未知' };
 }
@@ -67,24 +80,52 @@ function getStatusCfg(status) {
 // ---------------------------------------------------------------------------
 export default function SitesPage() {
   const navigate = useNavigate();
+  const { siteId: routeMonitoringSiteId } = useParams();
   const { tokens } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const isAdmin = hasAdminRole(user);
+  const moduleView = searchParams.get('view');
+  const moduleScrollRef = useRef(0);
   const monitoringPublic = user?.capabilities?.station_monitoring_public === true;
-  const monitoringScope = isAdmin ? 'all' : 'mine';
-  const monitoringRequestKey = `${user?.id ?? user?.username ?? ''}:${monitoringScope}:${monitoringPublic}`;
+  const monitoringScope = monitoringPublic ? 'all' : 'mine';
+  const siteServiceScope = isAdmin && searchParams.get('service_scope') === 'all' ? 'all' : 'current';
+  const serviceScope = isAdmin ? siteServiceScope : 'current';
+  const monitoringRequestKey = stationDirectorySnapshotKey(
+    user, monitoringScope, token, serviceScope,
+  );
 
   // ---- data state ----
-  const [siteSnapshot, setSiteSnapshot] = useState({ key: null, rows: [] });
-  const sites = siteSnapshot.key === monitoringRequestKey ? siteSnapshot.rows : [];
-  const sitesRef = useRef({ key: null, rows: [] });
+  const [siteSnapshot, setSiteSnapshot] = useState(() => (
+    readSiteDirectorySnapshot(monitoringRequestKey)
+    || { key: monitoringRequestKey, rows: [], summary: {}, scopeFacts: null, resultSnapshot: null, ready: false }
+  ));
+  const activeSiteSnapshot = (siteSnapshot.key === monitoringRequestKey
+    ? siteSnapshot : readSiteDirectorySnapshot(monitoringRequestKey));
+  const sites = activeSiteSnapshot?.rows || [];
+  const sitesRef = useRef(siteSnapshot);
   const fetchRequestRef = useRef({ id: 0, controller: null });
-  const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(() => siteDirectoryLoadMode(siteSnapshot) === 'initial');
+  const [refreshing, setRefreshing] = useState(false);
+  const [monitoringLoading, setMonitoringLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
-  const [monitoringSummary, setMonitoringSummary] = useState({});
-  const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(null);
+  const [monitoringScopeFacts, setMonitoringScopeFacts] = useState(siteSnapshot.scopeFacts || null);
   const [monitoringError, setMonitoringError] = useState(null);
+  const directoryLoading = initialLoading || !activeSiteSnapshot?.ready;
+
+  const openModuleView = useCallback((view) => {
+    moduleScrollRef.current = document.scrollingElement?.scrollTop || window.scrollY || 0;
+    const next = new URLSearchParams(searchParams);
+    next.set('view', view);
+    setSearchParams(next);
+  }, [searchParams, setSearchParams]);
+  const closeModuleView = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('view');
+    next.delete('rule_tab');
+    setSearchParams(next);
+    requestAnimationFrame(() => window.scrollTo({ top: moduleScrollRef.current }));
+  }, [searchParams, setSearchParams]);
 
   // ---- filter state ----
   const urlSearchText = searchParams.get('q') || '';
@@ -97,12 +138,34 @@ export default function SitesPage() {
       const normalized = value.trim();
       if (normalized) next.set('q', normalized);
       else next.delete('q');
+      next.delete('page');
       return next;
     }, { replace: true });
   }, [setSearchParams]);
   const { draft: searchText, inputProps: searchInputProps } = useUrlSyncedSearch(
     urlSearchText, commitSearchText,
   );
+  const listQuery = useMemo(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('monitoring');
+    return next.toString();
+  }, [searchParams]);
+  const monitoringSiteId = routeMonitoringSiteId || searchParams.get('monitoring');
+  const tablePage = Math.max(1, Number(searchParams.get('page')) || 1);
+  const openMonitoring = useCallback((siteId) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('monitoring', String(siteId));
+    setSearchParams(next);
+  }, [searchParams, setSearchParams]);
+  const closeMonitoring = useCallback(() => {
+    if (routeMonitoringSiteId) {
+      navigate(`/sites${listQuery ? `?${listQuery}` : ''}`, { replace: true });
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('monitoring');
+    setSearchParams(next, { replace: true });
+  }, [listQuery, navigate, routeMonitoringSiteId, searchParams, setSearchParams]);
 
   // ---- archive modal ----
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
@@ -116,9 +179,6 @@ export default function SitesPage() {
   const [reagentModalMode, setReagentModalMode] = useState('edit'); // 'create' | 'edit'
   const [reagentMaster, setReagentMaster] = useState([]); // 试剂主数据目录（用于新增下拉）
   const [reagentSubmitting, setReagentSubmitting] = useState(false);
-  const [reagentDelete, setReagentDelete] = useState(null);
-  const [reagentDeleting, setReagentDeleting] = useState(false);
-  const reagentDeletingRef = useRef(false);
   // 试剂标定（更换后使用标样验证）
   const [qcOpen, setQcOpen] = useState(false);
   const [qcTarget, setQcTarget] = useState(null);
@@ -129,6 +189,14 @@ export default function SitesPage() {
   const [profileEditOpen, setProfileEditOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileForm] = Form.useForm();
+  const [servicePolicyOpen, setServicePolicyOpen] = useState(false);
+  const [servicePolicyLoading, setServicePolicyLoading] = useState(false);
+  const [servicePolicySaving, setServicePolicySaving] = useState(false);
+  const [servicePolicyData, setServicePolicyData] = useState(null);
+  const [servicePolicySite, setServicePolicySite] = useState(null);
+  const [servicePolicyForm] = Form.useForm();
+  const servicePolicyRetryRef = useRef({ fingerprint: '', key: '' });
+  const selectedServiceStatus = Form.useWatch('service_status', servicePolicyForm);
   const [selectedTrendParam, setSelectedTrendParam] = useState('ph');
   const [thresholds, setThresholds] = useState([]);
 
@@ -151,48 +219,144 @@ export default function SitesPage() {
     const controller = new AbortController();
     const requestId = fetchRequestRef.current.id + 1;
     fetchRequestRef.current = { id: requestId, controller };
-    setLoading(true);
+    const previousSnapshot = sitesRef.current?.key === monitoringRequestKey
+      ? sitesRef.current : null;
+    const loadMode = siteDirectoryLoadMode(previousSnapshot);
+    setInitialLoading(loadMode === 'initial');
+    setRefreshing(loadMode === 'refresh');
+    setMonitoringLoading(monitoringPublic);
     setFetchError(null);
     setMonitoringError(null);
-    if (sitesRef.current.key !== monitoringRequestKey) {
-      setMonitoringSummary({});
+    if (!previousSnapshot?.ready) {
       setMonitoringScopeFacts(null);
     }
+    const monitoringResultPromise = monitoringPublic
+      ? api.stationMonitoringSites({
+        scope: monitoringScope, serviceScope, signal: controller.signal,
+      }).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason }),
+      )
+      : null;
+    const storeSnapshot = (snapshotData) => {
+      const stored = writeSiteDirectorySnapshot(
+        monitoringRequestKey, snapshotData,
+      ) || snapshotData;
+      sitesRef.current = stored;
+      setSiteSnapshot(stored);
+      setMonitoringScopeFacts(stored.scopeFacts || null);
+      return stored;
+    };
     try {
-      const requests = [api.getStrict('/sites', { signal: controller.signal })];
-      if (monitoringPublic) requests.push(api.stationMonitoringSites({ scope: monitoringScope, signal: controller.signal }));
-      const [siteResult, monitoringResult] = await Promise.allSettled(requests);
+      const data = await api.getStrict(`/sites?service_scope=${serviceScope}`, { signal: controller.signal });
       if (fetchRequestRef.current.id !== requestId) return;
-      if (siteResult.status === 'rejected') throw siteResult.reason;
-      const data = siteResult.value;
-      if (monitoringPublic && monitoringResult?.status === 'rejected') setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
-      else if (monitoringPublic && monitoringResult?.status === 'fulfilled') {
-        setMonitoringSummary(monitoringResult.value?.summary || {});
-        setMonitoringScopeFacts({
-          scope: monitoringResult.value?.scope ?? null,
-          availableScopes: Array.isArray(monitoringResult.value?.available_scopes) ? monitoringResult.value.available_scopes : [],
-        });
-      }
       const rows = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null);
       if (!rows) {
+        controller.abort();
         setFetchError('站点列表返回格式异常，请稍后重试');
         return;
       }
-      const previousRows = sitesRef.current.key === monitoringRequestKey ? sitesRef.current.rows : [];
-      const merged = monitoringPublic
-        ? mergeMonitoringSites(rows, monitoringResult?.status === 'fulfilled' ? monitoringResult.value : null, previousRows)
+      const previousRows = previousSnapshot?.rows || [];
+      const baseRows = monitoringPublic
+        ? mergeMonitoringSites(rows, null, previousRows)
         : rows;
-      sitesRef.current = { key: monitoringRequestKey, rows: merged };
-      setSiteSnapshot({ key: monitoringRequestKey, rows: merged });
+      const previousResultSnapshot = previousSnapshot?.resultSnapshot || null;
+      const baseResultSnapshot = monitoringPublic
+        ? {
+          ...(previousResultSnapshot || {}),
+          state: previousResultSnapshot?.source_updated_at ? 'stale' : 'loading',
+          refreshing: true,
+          source_updated_at: previousResultSnapshot?.source_updated_at || null,
+        }
+        : previousResultSnapshot;
+      const baseSnapshot = storeSnapshot({
+        key: monitoringRequestKey,
+        rows: baseRows,
+        summary: previousSnapshot?.summary || {},
+        scopeFacts: previousSnapshot?.scopeFacts || null,
+        resultSnapshot: baseResultSnapshot,
+        ready: true,
+      });
+      setInitialLoading(false);
+      setRefreshing(false);
+      if (!monitoringResultPromise) return;
+
+      const monitoringResult = await monitoringResultPromise;
+      if (fetchRequestRef.current.id !== requestId) return;
+      if (monitoringResult.status === 'rejected') {
+        setMonitoringError(monitoringResult.reason?.message || '监测状态加载失败');
+        storeSnapshot({
+          ...baseSnapshot,
+          resultSnapshot: {
+            ...(baseSnapshot.resultSnapshot || {}),
+            state: baseSnapshot.resultSnapshot?.source_updated_at ? 'stale' : 'error',
+            refreshing: false,
+          },
+        });
+        return;
+      }
+      const monitoringPayload = monitoringResult.value;
+      const monitoringContract = validateMonitoringDirectoryPayload(
+        rows, monitoringPayload, {
+          scope: monitoringScope,
+          serviceScope,
+          allowMonitoringSuperset: monitoringPublic && !isAdmin,
+        },
+      );
+      if (!monitoringContract.ok) {
+        setMonitoringError(monitoringContract.error);
+        storeSnapshot({
+          ...baseSnapshot,
+          resultSnapshot: {
+            ...(baseSnapshot.resultSnapshot || {}),
+            state: baseSnapshot.resultSnapshot?.source_updated_at ? 'stale' : 'error',
+            refreshing: false,
+          },
+        });
+        return;
+      }
+      storeSnapshot({
+        key: monitoringRequestKey,
+        rows: mergeMonitoringSites(rows, monitoringPayload, baseSnapshot.rows),
+        summary: monitoringPayload?.summary || {},
+        scopeFacts: {
+          scope: monitoringPayload?.scope ?? null,
+          availableScopes: Array.isArray(monitoringPayload?.available_scopes)
+            ? monitoringPayload.available_scopes : [],
+          serviceScope: monitoringPayload?.service_scope ?? null,
+          availableServiceScopes: Array.isArray(monitoringPayload?.available_service_scopes)
+            ? monitoringPayload.available_service_scopes : [],
+        },
+        resultSnapshot: {
+          ...(monitoringPayload?.result_snapshot || {}),
+          state: monitoringPayload?.result_snapshot?.state || 'fresh',
+          refreshing: false,
+          source_updated_at: monitoringPayload?.result_snapshot?.source_updated_at
+            || monitoringPayload?.updated_at || null,
+        },
+        ready: true,
+      });
     } catch (err) {
       if (fetchRequestRef.current.id !== requestId || err?.code === 'REQUEST_ABORTED') return;
+      controller.abort();
       setFetchError(err.message || '网络异常，无法加载站点列表');
     } finally {
-      if (fetchRequestRef.current.id === requestId) setLoading(false);
+      if (fetchRequestRef.current.id === requestId) {
+        setInitialLoading(false);
+        setRefreshing(false);
+        setMonitoringLoading(false);
+      }
     }
-  }, [monitoringPublic, monitoringRequestKey, monitoringScope]);
+  }, [monitoringPublic, monitoringRequestKey, monitoringScope, serviceScope]);
 
   useEffect(() => {
+    const cached = readSiteDirectorySnapshot(monitoringRequestKey)
+      || { key: monitoringRequestKey, rows: [], summary: {}, scopeFacts: null, resultSnapshot: null, ready: false };
+    sitesRef.current = cached;
+    setSiteSnapshot(cached);
+    setMonitoringScopeFacts(cached.scopeFacts || null);
+    setInitialLoading(siteDirectoryLoadMode(cached) === 'initial');
+    setRefreshing(false);
     fetchSites();
     return () => {
       fetchRequestRef.current.id += 1;
@@ -339,7 +503,6 @@ export default function SitesPage() {
   }, [loadArchive]);
 
   const closeArchive = useCallback(() => {
-    if (reagentDeletingRef.current) return;
     setArchiveModalOpen(false);
     setArchiveData(null);
     setArchiveError('');
@@ -347,7 +510,8 @@ export default function SitesPage() {
     setReagentInventoryError('');
     setReagentUpdOpen(false);
     setReagentUpdTarget(null);
-    setReagentDelete(null);
+    setServicePolicyOpen(false);
+    setServicePolicyData(null);
   }, []);
 
   const openProfileEdit = useCallback(() => {
@@ -386,6 +550,70 @@ export default function SitesPage() {
       setProfileSaving(false);
     }
   }, [archiveData, fetchSites, openArchive, profileForm]);
+
+  const openServicePolicy = useCallback(async (targetSite = null) => {
+    const site = targetSite?.id ? targetSite : archiveData;
+    if (!site) return;
+    setServicePolicySite({ id: site.id, name: site.name || '' });
+    setServicePolicyOpen(true);
+    setServicePolicyLoading(true);
+    setServicePolicyData(null);
+    servicePolicyRetryRef.current = { fingerprint: '', key: '' };
+    try {
+      const policy = await api.stationServicePolicy(site.id);
+      setServicePolicyData(policy);
+      servicePolicyForm.setFieldsValue({
+        service_status: policy.service_status || 'active',
+        reporting_condition: policy.reporting_condition || 'normal',
+        reason: '',
+        confirmed: false,
+      });
+    } catch (error) {
+      message.error(error?.message || '服务政策加载失败');
+      setServicePolicyOpen(false);
+      setServicePolicySite(null);
+    } finally {
+      setServicePolicyLoading(false);
+    }
+  }, [archiveData, servicePolicyForm]);
+
+  const saveServicePolicy = useCallback(async () => {
+    const targetSite = servicePolicySite || archiveData;
+    if (!targetSite || !servicePolicyData) return;
+    const values = await servicePolicyForm.validateFields();
+    const payload = {
+      service_status: values.service_status,
+      reporting_condition: values.reporting_condition,
+      reason: values.reason.trim(),
+      confirmed: values.service_status === 'ended' ? values.confirmed === true : false,
+      expected_version: Number(servicePolicyData.version || 0),
+    };
+    const fingerprint = JSON.stringify(payload);
+    if (servicePolicyRetryRef.current.fingerprint !== fingerprint) {
+      servicePolicyRetryRef.current = {
+        fingerprint,
+        key: `site-policy-${targetSite.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      };
+    }
+    setServicePolicySaving(true);
+    try {
+      const saved = await api.updateStationServicePolicy(targetSite.id, {
+        ...payload,
+        idempotency_key: servicePolicyRetryRef.current.key,
+      });
+      setServicePolicyData(saved);
+      message.success(saved.unchanged ? '服务政策未变化' : '服务政策已保存');
+      setServicePolicyOpen(false);
+      servicePolicyRetryRef.current = { fingerprint: '', key: '' };
+      if (archiveData?.id === targetSite.id) await loadArchive(targetSite.id);
+      fetchSites();
+      setServicePolicySite(null);
+    } catch (error) {
+      message.error(error?.message || '服务政策保存失败，当前输入已保留');
+    } finally {
+      setServicePolicySaving(false);
+    }
+  }, [archiveData, fetchSites, loadArchive, servicePolicyData, servicePolicyForm, servicePolicySite]);
 
   // 试剂库存：新增 / 编辑（更换时间 + 可用天数 + 余量）
   const openReagentUpd = (row) => {
@@ -460,42 +688,14 @@ export default function SitesPage() {
       message.error(e?.message || '保存失败');
     } finally { setReagentSubmitting(false); }
   };
-  const deleteReagent = async () => {
-    const row = reagentDelete?.row;
-    const reason = reagentDelete?.reason.trim();
-    if (!row || reagentDeletingRef.current) return;
-    if (!reason) {
-      setReagentDelete((current) => ({ ...current, error: '请填写删除原因' }));
-      return;
-    }
-    const key = reagentDelete.key || `reagent-delete-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-    setReagentDelete((current) => ({ ...current, key, error: '' }));
-    reagentDeletingRef.current = true;
-    setReagentDeleting(true);
+  const deleteReagent = async (row) => {
     try {
-      await api.deleteStrict(`/reagent-inventory/${row.site_id}/${row.reagent_id}`, {
-        reason, _idempotency_key: key,
-      });
-      setReagentDelete(null);
-      setReagentInventory((current) => current.filter((item) =>
-        String(item.site_id) !== String(row.site_id) || String(item.reagent_id) !== String(row.reagent_id)));
+      await api.delete(`/reagent-inventory/${row.site_id}/${row.reagent_id}`);
       message.success('已删除');
-      try {
-        const inv = await api.getStrict(`/reagent-inventory/${row.site_id}`);
-        if (Array.isArray(inv)) {
-          setReagentInventory(inv);
-          setReagentInventoryError('');
-        } else {
-          throw new Error('试剂库存返回格式异常，请重新加载');
-        }
-      } catch (error) {
-        setReagentInventoryError(error?.message || '库存刷新失败，请重新加载');
-      }
-    } catch (error) {
-      setReagentDelete((current) => current && { ...current, error: error?.message || '删除失败，请用原请求重试' });
-    } finally {
-      reagentDeletingRef.current = false;
-      setReagentDeleting(false);
+      const inv = await api.get(`/reagent-inventory/${row.site_id}`);
+      if (Array.isArray(inv)) setReagentInventory(inv);
+    } catch {
+      message.error('删除失败');
     }
   };
 
@@ -553,12 +753,13 @@ export default function SitesPage() {
     const normalizedValue = typeof value === 'string' ? value.trim() : value;
     if (normalizedValue) nextParams.set(key, normalizedValue);
     else nextParams.delete(key);
+    nextParams.delete('page');
     setSearchParams(nextParams, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const resetFilters = useCallback(() => {
     const nextParams = new URLSearchParams(searchParams);
-    ['q', 'type', 'district', 'manager'].forEach(key => nextParams.delete(key));
+    ['q', 'type', 'district', 'manager', 'page'].forEach(key => nextParams.delete(key));
     setSearchParams(nextParams, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -568,94 +769,80 @@ export default function SitesPage() {
   const columns = useMemo(
     () => [
       {
-        title: '站点身份',
+        title: '站点',
         key: 'identity',
-        width: 230,
+        width: 220,
         ellipsis: true,
         sorter: (a, b) => (a.name || '').localeCompare(b.name || ''),
         render: (_, record) => (
           <div>
             <Text strong ellipsis={{ tooltip: record.name }}>{record.name}</Text>
-            <div style={{ marginTop: 2 }}>
-              <Tag color={typeColorMap[record.type] || 'default'} style={tagStyle}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
+            <div style={{ marginTop: 4 }}>
+              <Text type="secondary">{record.code || '未提供编码'}</Text>
+              <Tag color={typeColorMap[record.type] || 'default'} style={{ ...tagStyle, marginLeft: 8 }}>{stationTypeMap[record.type] || record.type || '未分类'}</Tag>
             </div>
           </div>
         ),
       },
       {
-        title: '区县/地址',
-        key: 'location',
-        width: 180,
-        ellipsis: true,
-        render: (_, record) => {
-          if (!record.district && !record.address) {
-            return <Text type="secondary">未录入</Text>;
-          }
-          return (
-            <span>
-              {record.district ? <Text type="secondary">{record.district}</Text> : null}
-              {record.district && record.address ? <Text type="secondary"> · </Text> : null}
-              {record.address ? <Text>{record.address}</Text> : null}
-            </span>
-          );
-        },
-      },
-      ...(monitoringPublic ? [{
-        title: '监测状态',
-        dataIndex: 'monitoring_status',
-        key: 'status',
-        width: 170,
-        render: (_, record) => {
-          const view = monitoringStatusView(record);
-          return <Space direction="vertical" size={0}><Badge color={view.color} text={view.label} />{view.reason && <Text type="secondary" ellipsis={{ tooltip: view.reason }} style={{ maxWidth: 170 }}>{view.reason}</Text>}</Space>;
-        },
-      }, {
-        title: '最后数据',
-        key: 'latest_values',
-        width: 190,
-        render: (_, record) => {
-          const { visible, remaining, total } = monitoringLatestSummary(record.latest_values);
-          if (!total) return <Text type="secondary">暂无已形成的有效观测</Text>;
-          return (
-            <Space direction="vertical" size={0}>
-              {visible.map((item, index) => (
-                <Text key={`${item.business_metric || 'factor'}-${index}`} ellipsis={{ tooltip: true }} style={{ display: 'block', width: 168, fontSize: 12 }}>
-                  {item.factor_name_cn || item.business_metric || `监测因子${index + 1}`}：{item.standard_value ?? '暂无数值'} {item.standard_unit || ''}
-                </Text>
-              ))}
-              {remaining > 0 && <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => navigate(`/sites/${record.id}`)}>还有 {remaining} 项 · 查看全部</Button>}
-            </Space>
-          );
-        },
-      }, {
-        title: '关键时间',
-        key: 'monitoring_times',
-        width: 235,
-        render: (_, record) => (
-          <Space direction="vertical" size={0}>
-            <Text style={{ fontSize: 12 }}>最后收到报文：{record.last_received_at || record.last_communication_at ? dayjs(record.last_received_at || record.last_communication_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>观测：{record.last_valid_observation_at ? dayjs(record.last_valid_observation_at).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'}</Text>
-          </Space>
-        ),
-      }] : []),
-      {
         title: '负责人',
         dataIndex: 'manager',
         key: 'manager',
-        width: 100,
+        width: 110,
         ellipsis: true,
+        render: (value) => value || <Text type="secondary">未设置</Text>,
       },
+      {
+        title: '服务状态',
+        key: 'service_policy',
+        width: 150,
+        render: (_, record) => {
+          const policy = stationServicePolicyView(record);
+          return <Space direction="vertical" size={2}>
+            <Tag color={policy.service.color}>{policy.service.label}</Tag>
+            {policy.showReportingCondition
+              ? <Tag color={policy.reporting.color}>{policy.reporting.label}</Tag> : null}
+          </Space>;
+        },
+      },
+      ...(monitoringPublic ? [{
+        title: '接收情况',
+        dataIndex: 'communication',
+        key: 'communication',
+        width: 190,
+        render: (_, record) => {
+          const communicationView = communicationStatusView(record.communication);
+          const receivedAt = record.communication?.last_received_at || record.last_received_at || record.last_communication_at;
+          return <Space direction="vertical" size={2}>
+            <Badge color={communicationView.color} text={communicationView.label} />
+            <Text>{receivedAt ? dayjs(receivedAt).format('YYYY-MM-DD HH:mm') : '暂无接收记录'}</Text>
+          </Space>;
+        },
+      }, {
+        title: '最新结果时间',
+        dataIndex: 'latest_cycle',
+        key: 'latest_cycle',
+        width: 220,
+        render: (_, record) => {
+          const resultAt = record.last_valid_observation_at;
+          return <Text>{resultAt ? dayjs(resultAt).format('YYYY-MM-DD HH:mm') : '暂无数据'}</Text>;
+        },
+      }] : []),
       {
         title: '操作',
         key: 'actions',
-        width: 110,
+        width: isAdmin ? 205 : 110,
         fixed: 'right',
         render: (_, record) => (
-          <Space size={0}>{monitoringPublic && <Button type="link" size="small" onClick={() => navigate(`/sites/${record.id}`)}>监测</Button>}<Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button></Space>
+          <Space size={0}>
+            {monitoringPublic && <Button type="link" size="small" onClick={() => openMonitoring(record.id)}>{record.service_status === 'ended' ? '历史' : '监测'}</Button>}
+            {isAdmin && <Button type="link" size="small" icon={<SettingOutlined />} onClick={() => openServicePolicy(record)}>服务状态</Button>}
+            <Button type="link" size="small" icon={<FileSearchOutlined />} aria-label={`查看 ${record.name} 的站点档案`} onClick={() => openArchive(record.id)}>档案</Button>
+          </Space>
         ),
       },
     ],
-    [monitoringPublic, navigate, openArchive],
+    [isAdmin, monitoringPublic, openArchive, openMonitoring, openServicePolicy],
   );
 
   // ========================================================================
@@ -698,6 +885,9 @@ export default function SitesPage() {
       gps_lat, gps_lng, build_date, elevation, equipment, basin,
       fault_records, replacement_records, inspection_records, calibration_reports,
     } = archiveData;
+    const servicePolicy = archiveData.service_policy || {};
+    const serviceMeta = serviceStatusMeta[servicePolicy.service_status] || serviceStatusMeta.active;
+    const reportingMeta = reportingConditionMeta[servicePolicy.reporting_condition] || reportingConditionMeta.normal;
 
     const basicItems = [
       { key: 'code', label: '站点编码', children: code },
@@ -715,12 +905,39 @@ export default function SitesPage() {
           return <Badge color={cfg.color} text={cfg.text} />;
         })(),
       },
+      {
+        key: 'service_status',
+        label: '运维服务',
+        children: <Tag color={serviceMeta.color}>{servicePolicy.service_status_label || serviceMeta.label}</Tag>,
+      },
+      {
+        key: 'reporting_condition',
+        label: '到报条件',
+        children: servicePolicy.service_status === 'ended'
+          ? <Text type="secondary">服务结束，不参与当前到报评价</Text>
+          : <Tag color={reportingMeta.color}>{servicePolicy.reporting_condition_label || reportingMeta.label}</Tag>,
+      },
+      {
+        key: 'service_effective_from',
+        label: '政策生效时间',
+        children: servicePolicy.effective_from
+          ? dayjs(servicePolicy.effective_from).format('YYYY-MM-DD HH:mm:ss')
+          : <Text type="secondary">默认政策，尚无变更记录</Text>,
+      },
+      {
+        key: 'service_reason',
+        label: '变更说明',
+        children: servicePolicy.reason || <Text type="secondary">暂无变更说明</Text>,
+        span: 2,
+      },
       ...(monitoringPublic ? [{
         key: 'data_access',
         label: '数据接入状态',
-        children: archiveData.has_sensor_data
-          ? <Tag color="green">已接入真实采集</Tag>
-          : <Tag>未接入真实采集</Tag>,
+        children: servicePolicy.service_status === 'ended'
+          ? <Tag>服务结束（保留历史）</Tag>
+          : archiveData.has_sensor_data
+            ? <Tag color="green">已接入真实采集</Tag>
+            : <Tag>未接入真实采集</Tag>,
       }] : []),
       { key: 'district', label: '所属区县', children: extractDistrict(district) || <Text type="secondary">未录入</Text> },
       { key: 'address', label: '详细地址', children: address || <Text type="secondary">未录入</Text>, span: 2 },
@@ -753,9 +970,14 @@ export default function SitesPage() {
               styles={{ label: { width: 90, minWidth: 90 }, content: { width: 'auto' } }}
             />
             {isAdmin && (
-              <Button type="link" icon={<EditOutlined />} onClick={openProfileEdit} style={{ paddingInline: 0, marginTop: 8 }}>
-                完善基础档案
-              </Button>
+              <Space size={8}>
+                <Button type="link" icon={<HoverGifIcon name="pencil" size={14} />} onClick={openProfileEdit} style={{ paddingInline: 0, marginTop: 8 }}>
+                  完善基础档案
+                </Button>
+                <Button type="link" onClick={() => openServicePolicy()} style={{ paddingInline: 0, marginTop: 8 }}>
+                  维护服务政策
+                </Button>
+              </Space>
             )}
             {monitoringPublic && (
               <>
@@ -987,7 +1209,15 @@ export default function SitesPage() {
               <Button size="small" type="link" onClick={() => openQc(r)}>开展质控</Button>
             )}
             <Button size="small" type="link" onClick={() => openReagentUpd(r)}>编辑</Button>
-            <Button size="small" type="link" danger onClick={() => setReagentDelete({ row: r, reason: '', key: '', error: '' })}>删除</Button>
+            <Popconfirm
+              title="确认删除该试剂库存？"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => deleteReagent(r)}
+            >
+              <Button size="small" type="link" danger>删除</Button>
+            </Popconfirm>
           </Space>
         ),
       },
@@ -1016,33 +1246,6 @@ export default function SitesPage() {
           ) : (
             <Empty description="该站点暂无试剂库存信息，点「新增试剂」添加" style={{ padding: '32px 0' }} />
           )}
-          <Modal
-            title={`确认删除试剂库存 · ${reagentDelete?.row?.reagent_name || ''}`}
-            open={!!reagentDelete}
-            okText="确认删除"
-            okButtonProps={{ danger: true, disabled: !reagentDelete?.reason.trim() }}
-            cancelText="取消"
-            confirmLoading={reagentDeleting}
-            closable={!reagentDeleting}
-            maskClosable={false}
-            onCancel={() => { if (!reagentDeletingRef.current) setReagentDelete(null); }}
-            onOk={deleteReagent}
-          >
-            <Text type="secondary">此操作会删除该站点的库存记录并保留服务端审计，请确认并填写原因。</Text>
-            <Form layout="vertical" style={{ marginTop: 12 }}>
-              <Form.Item label="删除原因" required validateStatus={reagentDelete?.error ? 'error' : undefined} help={reagentDelete?.error}>
-                <Input.TextArea
-                  aria-label="删除原因"
-                  value={reagentDelete?.reason || ''}
-                  maxLength={200}
-                  showCount
-                  disabled={reagentDeleting}
-                  onChange={(event) => setReagentDelete((current) => ({ ...current, reason: event.target.value, key: '', error: '' }))}
-                  placeholder="请填写删除原因（最多200字）"
-                />
-              </Form.Item>
-            </Form>
-          </Modal>
           <Modal
             title={reagentModalMode === 'create' ? '新增试剂库存' : `编辑试剂 · ${reagentUpdTarget?.reagent_name || ''}`}
             open={reagentUpdOpen}
@@ -1232,12 +1435,15 @@ export default function SitesPage() {
   // ========================================================================
   // Render
   // ========================================================================
+  if (moduleView === 'reagents' && isAdmin) {
+    return <ReagentMasterPage embedded onBack={closeModuleView} searchParamKey="reagent_q" pageParamKey="reagent_page" pageSizeParamKey="reagent_page_size" />;
+  }
   return (
     <WorkspacePage
       title="站点全景"
       subtitle="查看站点台账、负责人和现场档案。"
-      statusItems={monitoringPublic ? monitoringSummaryItems(siteSnapshot.key === monitoringRequestKey ? monitoringSummary : {}) : []}
       primaryAction={<Space>
+        {isAdmin && <Button icon={<BookOutlined />} onClick={() => openModuleView('reagents')}>试剂主数据</Button>}
         <Button type="primary" icon={<PlusOutlined />} onClick={openSiteCreate} disabled={!isAdmin}>新增站点</Button>
         {isAdmin && monitoringPublic && <Button icon={<ApiOutlined />} onClick={() => navigate('/sites/data-access')}>接入观察</Button>}
         <Button
@@ -1255,13 +1461,27 @@ export default function SitesPage() {
       <WorkspaceToolbar
         actions={(
           <Space>
+            {isAdmin ? (
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                value={serviceScope}
+                onChange={(event) => updateFilter(
+                  'service_scope', event.target.value === 'all' ? 'all' : undefined,
+                )}
+                options={[
+                  { label: '当前服务站点', value: 'current' },
+                  { label: '含服务结束', value: 'all' },
+                ]}
+              />
+            ) : null}
             <Button icon={<ReloadOutlined />} onClick={resetFilters}>
               重置
             </Button>
             <Button
               icon={<ReloadOutlined />}
               onClick={fetchSites}
-              loading={loading}
+              loading={directoryLoading || refreshing}
             >
               刷新
             </Button>
@@ -1342,20 +1562,58 @@ export default function SitesPage() {
         />
       ) : null}
       {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && <Text type="secondary">
-        监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}
+        监测范围：{monitoringScopeFacts.scope === 'all' ? '全部有权站点' : monitoringScopeFacts.scope === 'mine' ? '本人负责站点' : '服务端未提供'}；服务范围：{monitoringScopeFacts.serviceScope === 'all' ? '含服务结束' : monitoringScopeFacts.serviceScope === 'current' ? '当前服务站点' : '服务端未提供'}
       </Text>}
-      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope)) && (
+      {monitoringPublic && activeSiteSnapshot?.resultSnapshot?.state === 'stale' ? <Alert
+        type="warning"
+        showIcon
+        message="当前展示上次成功结果，状态待更新"
+        description={`上次成功更新时间：${formatMonitoringTime(activeSiteSnapshot.resultSnapshot.source_updated_at)}${activeSiteSnapshot.resultSnapshot.refreshing ? '；后台正在刷新' : ''}`}
+        action={<Button size="small" onClick={fetchSites}>重新加载</Button>}
+        style={{ marginTop: 8, marginBottom: 12 }}
+      /> : null}
+      {monitoringPublic && activeSiteSnapshot?.resultSnapshot?.state === 'fresh'
+        && activeSiteSnapshot.resultSnapshot.source_updated_at ? <Text type="secondary" style={{ marginLeft: 12 }}>
+          监测结果更新时间：{formatMonitoringTime(activeSiteSnapshot.resultSnapshot.source_updated_at)}
+        </Text> : null}
+      {refreshing && sites.length > 0 ? <Text type="secondary">正在后台更新站点台账…</Text> : null}
+      {monitoringPublic && monitoringLoading && sites.length > 0 ? <Text type="secondary">
+        {sites.some((site) => site.monitoring_status)
+          ? '站点台账已更新，正在核对最新监测状态；当前暂保留上次成功结果。'
+          : '站点台账已加载，监测状态仍在加载中。'}
+      </Text> : null}
+      {monitoringPublic && siteSnapshot.key === monitoringRequestKey && monitoringScopeFacts && (monitoringScopeFacts.scope !== monitoringScope || !monitoringScopeFacts.availableScopes.includes(monitoringScope) || monitoringScopeFacts.serviceScope !== serviceScope || !monitoringScopeFacts.availableServiceScopes?.includes(serviceScope)) && (
         <Alert type="warning" showIcon message="监测范围尚未确认"
           description="服务端未确认本次请求范围，监测结果仅按实际返回的站点投影展示。"
           action={<Button size="small" onClick={fetchSites}>重新加载</Button>} />
       )}
-      {fetchError && !loading && sites.length === 0 ? (
+      {fetchError && !directoryLoading && sites.length === 0 ? (
         <WorkspaceEmpty type="error" onRefresh={fetchSites} description={fetchError} />
       ) : (
-        <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={loading}
+        <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={directoryLoading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
-          scroll={{ x: monitoringPublic ? 1215 : 1025, y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }} />
+          pagination={{
+            current: tablePage,
+            pageSize: 20,
+            showSizeChanger: false,
+            onChange: (page) => {
+              const next = new URLSearchParams(searchParams);
+              if (page > 1) next.set('page', String(page));
+              else next.delete('page');
+              setSearchParams(next, { replace: true });
+            },
+          }}
+          rowClassName={(record) => String(record.id) === String(monitoringSiteId)
+            ? 'station-monitoring-selected-row' : ''}
+          scroll={{ x: 960, scrollToFirstRowOnChange: false }} />
       )}
+
+      {monitoringPublic ? <StationMonitoringDrawer
+        siteId={monitoringSiteId}
+        open={Boolean(monitoringSiteId)}
+        onClose={closeMonitoring}
+        onOpenArchive={openArchive}
+      /> : null}
 
       <Modal
         title="新增站点"
@@ -1450,6 +1708,87 @@ export default function SitesPage() {
           </Space>
           <Form.Item name="operation_frequency" label="试点频次"><Input placeholder="非试点站点可留空" /></Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={`维护服务政策${servicePolicySite?.name || archiveData?.name ? ` · ${servicePolicySite?.name || archiveData?.name}` : ''}`}
+        open={servicePolicyOpen}
+        onCancel={() => {
+          if (servicePolicySaving) return;
+          setServicePolicyOpen(false);
+          setServicePolicySite(null);
+          servicePolicyRetryRef.current = { fingerprint: '', key: '' };
+        }}
+        onOk={saveServicePolicy}
+        confirmLoading={servicePolicySaving}
+        okButtonProps={{ disabled: servicePolicyLoading || !servicePolicyData }}
+        okText="保存政策"
+        cancelText="取消"
+        destroyOnHidden={false}
+        zIndex={1100}
+      >
+        <Spin spinning={servicePolicyLoading}>
+          <Alert
+            type="info"
+            showIcon
+            message="服务政策只影响当前服务范围、到报评价和新缺报提醒"
+            description="历史数据、原始报文、照片、审计、已有任务和车辆履约不会被删除或自动完成。"
+            style={{ marginBottom: 16 }}
+          />
+          <Form form={servicePolicyForm} layout="vertical" preserve>
+            <Form.Item
+              name="service_status"
+              label="运维服务"
+              rules={[{ required: true, message: '请选择运维服务状态' }]}
+            >
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                options={[
+                  { label: '在服务', value: 'active' },
+                  { label: '服务结束', value: 'ended' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="reporting_condition"
+              label="服务期间到报条件"
+              rules={[{ required: true, message: '请选择到报条件' }]}
+            >
+              <Select
+                disabled={selectedServiceStatus === 'ended'}
+                options={[
+                  { label: '正常到报要求', value: 'normal' },
+                  { label: '临时停站', value: 'temporary_stop' },
+                  { label: '暂无上传条件', value: 'no_upload_condition' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="reason"
+              label="变更说明"
+              rules={[
+                { required: true, whitespace: true, message: '请填写变更说明' },
+                { max: 500, message: '变更说明不能超过500字' },
+              ]}
+            >
+              <Input.TextArea rows={3} maxLength={500} showCount placeholder="说明业务原因，不填写技术接入状态" />
+            </Form.Item>
+            {selectedServiceStatus === 'ended' ? (
+              <Form.Item
+                name="confirmed"
+                valuePropName="checked"
+                rules={[{
+                  validator: (_, value) => value
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('请明确确认服务结束影响')),
+                }]}
+              >
+                <Checkbox>我确认该站点将退出当前服务范围、到报分母和新缺报提醒</Checkbox>
+              </Form.Item>
+            ) : null}
+          </Form>
+        </Spin>
       </Modal>
 
       {/* ===== Data Import Modal ===== */}
@@ -1555,7 +1894,7 @@ export default function SitesPage() {
                             </div>
                             <Space size={4}>
                               <Popconfirm title="确认删除此数据源？" onConfirm={() => handleDeleteDs(ds.id)} okText="删除" cancelText="取消">
-                                <Button type="link" size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                                <Button type="link" size="small" danger icon={<HoverGifIcon name="trash-bin" size={14} />}>删除</Button>
                               </Popconfirm>
                             </Space>
                           </div>

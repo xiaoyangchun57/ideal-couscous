@@ -1,9 +1,16 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 
-const configPath = require.resolve('../utils/config.js');
+const configPath = path.resolve(__dirname, '..', 'utils', 'config.js');
+const prepareScriptPath = path.resolve(
+  __dirname, '..', '..', 'dev_scripts', 'prepare-miniprogram-local-api.ps1',
+);
+const preparedValuePattern = /const PREPARED_REAL_DEVICE_API_BASE_URL = '[^']*'; \/\/ local-api-prepared-value/;
 
 test('repository root is the only WeChat project entry', () => {
   const root = path.resolve(__dirname, '..', '..');
@@ -21,52 +28,82 @@ test('miniprogram enables required component lazy loading', () => {
   assert.equal(appConfig.lazyCodeLoading, 'requiredComponents');
 });
 
-function loadConfig(platform, envVersion, override) {
-  const storage = {};
-  if (override) storage.api_base_url_override = override;
-  global.wx = {
+test('review baseline carries no generated real-device LAN address', () => {
+  assert.match(
+    fs.readFileSync(configPath, 'utf8'),
+    /const PREPARED_REAL_DEVICE_API_BASE_URL = ''; \/\/ local-api-prepared-value/,
+  );
+});
+
+function loadConfig(platform, envVersion, preparedUrl = '', storedOverride = '') {
+  let storageReads = 0;
+  const wx = {
     getSystemInfoSync: () => ({ platform }),
     getAccountInfoSync: () => ({ miniProgram: { envVersion } }),
-    getStorageSync: (key) => storage[key] || '',
-    setStorageSync: (key, value) => { storage[key] = value; },
-    removeStorageSync: (key) => { delete storage[key]; },
+    getStorageSync: () => {
+      storageReads += 1;
+      return storedOverride;
+    },
   };
-  delete require.cache[configPath];
-  return { config: require(configPath), storage };
+  const source = fs.readFileSync(configPath, 'utf8').replace(
+    preparedValuePattern,
+    `const PREPARED_REAL_DEVICE_API_BASE_URL = '${preparedUrl}'; // local-api-prepared-value`,
+  );
+  const module = { exports: {} };
+  vm.runInNewContext(source, { module, exports: module.exports, wx }, { filename: configPath });
+  return { config: module.exports, storageReads };
 }
 
-test('develop packages use the fixed development API on simulator and real devices', () => {
-  for (const platform of ['devtools', 'ios', 'android', 'windows', 'mac']) {
+test('develop simulator packages keep using localhost', () => {
+  for (const platform of ['devtools', 'windows', 'mac']) {
     const { config } = loadConfig(platform, 'develop');
-    assert.equal(config.BASE_URL, 'http://192.168.2.107:5000');
+    assert.equal(config.BASE_URL, 'http://127.0.0.1:5000');
     assert.equal(config.API_PROFILE, 'local');
+  }
+});
+
+test('develop real-device packages use the prepared private-LAN address without storage', () => {
+  for (const preparedUrl of [
+    'http://192.168.2.107:5000',
+    'http://10.0.0.8:5000',
+    'http://172.20.1.5:8080',
+  ]) {
+    for (const platform of ['ios', 'android']) {
+      const { config, storageReads } = loadConfig(
+        platform, 'develop', preparedUrl, 'http://192.168.2.88:5000',
+      );
+      assert.equal(config.BASE_URL, preparedUrl);
+      assert.equal(config.API_PROFILE, 'local');
+      assert.equal(storageReads, 0);
+    }
+  }
+});
+
+test('developer tools use localhost even when a real-device address is prepared', () => {
+  const { config } = loadConfig('devtools', 'develop', 'http://192.168.2.88:5000');
+  assert.equal(config.BASE_URL, 'http://127.0.0.1:5000');
+  assert.equal(config.API_PROFILE, 'local');
+});
+
+test('develop real-device packages fail closed when no valid address was prepared', () => {
+  for (const preparedUrl of ['', 'http://127.0.0.1:5000', 'http://8.8.8.8:5000', 'not-a-url']) {
+    assert.throws(
+      () => loadConfig('ios', 'develop', preparedUrl),
+      /REAL_DEVICE_LOCAL_API_NOT_PREPARED/,
+    );
   }
 });
 
 test('trial and release packages always use the online API', () => {
   for (const envVersion of ['trial', 'release']) {
     for (const platform of ['devtools', 'ios', 'android', 'windows', 'mac']) {
-      const { config } = loadConfig(platform, envVersion);
+      const { config, storageReads } = loadConfig(
+        platform, envVersion, 'http://192.168.2.107:5000', 'http://10.0.0.8:5000',
+      );
       assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
       assert.equal(config.API_PROFILE, 'online');
+      assert.equal(storageReads, 0);
     }
-  }
-});
-
-test('legacy, expired, and malformed overrides do not affect the API profile', () => {
-  for (const override of [
-    'http://127.0.0.1:5020',
-    { url: 'http://127.0.0.1:5020', expires_at: Date.now() - 1 },
-    { url: 'https://ops.hhyc-tec.cn', expires_at: Date.now() + 60_000 },
-  ]) {
-    const develop = loadConfig('devtools', 'develop', override);
-    assert.equal(develop.config.BASE_URL, 'http://192.168.2.107:5000');
-    assert.equal(develop.config.API_PROFILE, 'local');
-    assert.deepEqual(develop.storage.api_base_url_override, override);
-
-    const trial = loadConfig('ios', 'trial', override).config;
-    assert.equal(trial.BASE_URL, 'https://ops.hhyc-tec.cn');
-    assert.equal(trial.API_PROFILE, 'online');
   }
 });
 
@@ -74,4 +111,33 @@ test('unknown account environment fails closed to the online API', () => {
   const { config } = loadConfig('devtools', 'unknown');
   assert.equal(config.BASE_URL, 'https://ops.hhyc-tec.cn');
   assert.equal(config.API_PROFILE, 'online');
+});
+
+test('local preparation script writes a private address and clears stale output on failure', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'miniprogram-local-api-'));
+  const tempConfigPath = path.join(tempDir, 'config.js');
+  fs.copyFileSync(configPath, tempConfigPath);
+  try {
+    const prepared = childProcess.spawnSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', prepareScriptPath,
+      '-ConfigPath', tempConfigPath, '-Address', '192.168.50.23', '-Port', '5000',
+    ], { encoding: 'utf8' });
+    assert.equal(prepared.status, 0, prepared.stderr || prepared.stdout);
+    assert.match(
+      fs.readFileSync(tempConfigPath, 'utf8'),
+      /PREPARED_REAL_DEVICE_API_BASE_URL = 'http:\/\/192\.168\.50\.23:5000'/,
+    );
+
+    const rejected = childProcess.spawnSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', prepareScriptPath,
+      '-ConfigPath', tempConfigPath, '-Address', '203.0.113.10', '-Port', '5000',
+    ], { encoding: 'utf8' });
+    assert.notEqual(rejected.status, 0);
+    assert.match(
+      fs.readFileSync(tempConfigPath, 'utf8'),
+      /PREPARED_REAL_DEVICE_API_BASE_URL = ''/,
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

@@ -1,14 +1,18 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Table, Button, Space, Tag, Typography, App as AntApp, Modal, Form, Input, InputNumber, Tabs, Segmented, Select, Upload, Drawer, Descriptions, Alert, Checkbox, Tooltip } from 'antd';
-import { PlusOutlined, ReloadOutlined, ToolOutlined, FireOutlined, UploadOutlined, EditOutlined, SearchOutlined, FileProtectOutlined, SafetyCertificateOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Table, Button, Space, Tag, Typography, App as AntApp, Modal, Form, Input, InputNumber, Tabs, Segmented, Select, Upload, Drawer, Descriptions, Alert, Checkbox, Tooltip, Divider } from 'antd';
+import { PlusOutlined, ReloadOutlined, ToolOutlined, FireOutlined, UploadOutlined, FileProtectOutlined, SafetyCertificateOutlined, CheckOutlined } from '@ant-design/icons';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { statusColors } from '../../theme/tokens';
-import WorkspacePage, { TableLongText, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, { TableLongText, WorkspaceTable, WorkspaceToolbar, standardListPagination } from '../../components/WorkspacePage';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { filterInputWidth } from '../../services/pageStyles';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
+import { formatVehicleCorrectionLog, runVehicleEditSubmission } from './vehicleCorrectionContract';
+import { runIndependentLoads } from '../../services/independentLoads';
+import { vehicleSummary } from './vehicleSummary';
 
 const { Text } = Typography;
 
@@ -18,9 +22,17 @@ const VEH_STATUS = {
   retired: { label: '已报废', color: 'default' },
 };
 const MAINT_TYPE = { routine: '例行保养', regular: '定期保养', major: '大修', minor: '小修', other: '其他' };
+const MAINT_STATUS = {
+  open: { label: '未完成', color: 'orange' },
+  in_progress: { label: '进行中', color: 'blue' },
+  completed: { label: '已完成', color: 'green' },
+};
 const DOC_TYPE = { insurance: '保险', annual_inspection: '年检', registration: '行驶证', driving_license: '驾驶证' };
 const ENERGY_TYPE = { gasoline: '汽油', diesel: '柴油', electric: '纯电', phev: '插电混动', hybrid: '混动', other: '其他' };
 const isElectric = (fuelType) => fuelType === 'electric';
+const localDateTimeValue = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+  .toISOString().slice(0, 16);
+const newMaintenanceKey = () => `vehicle_maintenance_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 export default function VehiclesPage() {
   const { message, modal } = AntApp.useApp();
@@ -43,6 +55,7 @@ export default function VehiclesPage() {
   const [inspections, setInspections] = useState([]);
   const [inspectionTemplate, setInspectionTemplate] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [auxiliaryLoading, setAuxiliaryLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [vehicleForm] = Form.useForm();
   const [maintForm] = Form.useForm();
@@ -60,6 +73,8 @@ export default function VehiclesPage() {
   const [submittingMaint, setSubmittingMaint] = useState(false);
   const [submittingRefuel, setSubmittingRefuel] = useState(false);
   const [submittingVehicle, setSubmittingVehicle] = useState(false);
+  const [submittingEditVehicle, setSubmittingEditVehicle] = useState(false);
+  const [completingMaintenanceId, setCompletingMaintenanceId] = useState(null);
   const [pendingMaintRecordId, setPendingMaintRecordId] = useState(null);
   const [pendingRefuelRecordId, setPendingRefuelRecordId] = useState(null);
   const [maintUploadNotice, setMaintUploadNotice] = useState('');
@@ -68,31 +83,80 @@ export default function VehiclesPage() {
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
   const [submittingDocument, setSubmittingDocument] = useState(false);
+  const [vehicleCorrectionLogs, setVehicleCorrectionLogs] = useState([]);
+  const [vehicleCorrectionLoading, setVehicleCorrectionLoading] = useState(false);
+  const [vehicleCorrectionError, setVehicleCorrectionError] = useState('');
   const documentIdempotencyKey = useRef('');
+  const maintenanceIdempotencyKey = useRef('');
+  const editVehicleSubmittingRef = useRef(false);
+  const editVehicleTargetIdRef = useRef(null);
+  const vehicleCorrectionRequestRef = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setAuxiliaryLoading(true);
     setLoadError('');
     const sources = [
-      ['车辆台账', '/vehicles', setVehicles],
-      ['使用记录', '/vehicle/use-records', setUseRecords],
-      ['保养记录', '/vehicle/maintenance', setMaintRecords],
-      ['能源补给', '/vehicle/refueling', setRefuelRecords],
-      ['车辆证照', '/vehicle/documents', setDocuments],
-      ['车况检查', '/vehicle/inspections', setInspections],
-      ['检查模板', '/vehicle/inspection-template', setInspectionTemplate],
+      ['vehicles', '车辆台账', '/vehicles', setVehicles, true],
+      ['use', '使用记录', '/vehicle/use-records', setUseRecords],
+      ['maintenance', '保养记录', '/vehicle/maintenance', setMaintRecords],
+      ['refueling', '能源补给', '/vehicle/refueling', setRefuelRecords],
+      ['documents', '车辆证照', '/vehicle/documents', setDocuments],
+      ['inspections', '车况检查', '/vehicle/inspections', setInspections],
+      ['template', '检查模板', '/vehicle/inspection-template', setInspectionTemplate],
     ];
-    const results = await Promise.allSettled(sources.map(([, url]) => api.getStrict(url)));
-    const failures = [];
-    results.forEach((result, index) => {
-      const [label, , setter] = sources[index];
-      if (result.status === 'fulfilled' && Array.isArray(result.value)) setter(result.value);
-      else failures.push(`${label}：${result.reason?.message || '返回格式异常'}`);
-    });
-    if (failures.length) setLoadError(failures.join('；'));
+    const failures = new Map();
+    const recordFailure = (key, label, error) => {
+      failures.set(key, `${label}：${error?.message || '返回格式异常'}`);
+      setLoadError([...failures.values()].join('；'));
+    };
+    await runIndependentLoads(sources.map(([key, label, url, setter, primary]) => ({
+      key,
+      load: () => api.getStrict(url),
+      onSuccess: (value) => {
+        if (!Array.isArray(value)) {
+          recordFailure(key, label, new Error('返回格式异常'));
+          if (primary) setLoading(false);
+          return;
+        }
+        setter(value);
+        if (primary) {
+          setActiveVehicle(previous => previous
+            ? (value.find(item => item.id === previous.id) || previous) : previous);
+          setLoading(false);
+        }
+      },
+      onError: (error) => {
+        recordFailure(key, label, error);
+        if (primary) setLoading(false);
+      },
+    })));
     setLoading(false);
+    setAuxiliaryLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const loadVehicleCorrectionLogs = useCallback(async (vehicleId) => {
+    const requestId = vehicleCorrectionRequestRef.current + 1;
+    vehicleCorrectionRequestRef.current = requestId;
+    setVehicleCorrectionLoading(true);
+    setVehicleCorrectionError('');
+    try {
+      const rows = await api.getStrict(`/operation-logs?module=vehicle&target_type=vehicle&target_id=${vehicleId}&limit=50`);
+      if (vehicleCorrectionRequestRef.current !== requestId) return;
+      setVehicleCorrectionLogs((Array.isArray(rows) ? rows : [])
+        .filter(row => row.action === 'admin_correction')
+        .map(formatVehicleCorrectionLog));
+    } catch (error) {
+      if (vehicleCorrectionRequestRef.current !== requestId) return;
+      setVehicleCorrectionLogs([]);
+      setVehicleCorrectionError(error?.message || '纠错记录加载失败');
+    } finally {
+      if (vehicleCorrectionRequestRef.current === requestId) setVehicleCorrectionLoading(false);
+    }
+  }, []);
+
+  useEffect(() => () => { vehicleCorrectionRequestRef.current += 1; }, []);
 
   const updateQuery = useCallback((updates) => {
     const next = new URLSearchParams(searchParams);
@@ -153,9 +217,11 @@ export default function VehiclesPage() {
       let recordId = pendingMaintRecordId;
       if (!recordId) {
         const values = await maintForm.validateFields();
+        if (!maintenanceIdempotencyKey.current) maintenanceIdempotencyKey.current = newMaintenanceKey();
         const result = await api.postStrict('/vehicle/maintenance', {
           ...values,
           evidence_expected_count: maintPhotos.length,
+          _idempotency_key: maintenanceIdempotencyKey.current,
         });
         recordId = result.id;
         setPendingMaintRecordId(recordId);
@@ -172,14 +238,38 @@ export default function VehiclesPage() {
         }
       }
       message.success(`已记录保养${maintPhotos.length ? `，并上传 ${maintPhotos.length} 张照片` : ''}`);
-      setMaintOpen(false); maintForm.resetFields(); setMaintPhotos([]); load();
+      setMaintOpen(false); maintForm.resetFields(); setMaintPhotos([]); await load();
       setPendingMaintRecordId(null); setMaintUploadNotice('');
+      maintenanceIdempotencyKey.current = '';
     } catch (e) {
       const reason = e?.message || String(e);
       if (maintPhotos.length) setMaintUploadNotice(`提交失败：${reason}。已选照片仍保留，请修正后重试。`);
       message.error('失败：' + reason);
     }
     finally { setSubmittingMaint(false); }
+  };
+  const completeMaintenance = (record) => {
+    modal.confirm({
+      title: `结束维修 - ${record.plate_no || `记录 #${record.id}`}`,
+      content: '确认该条维修已经实际完成。系统会保留完成时间和操作者审计；车辆状态仍需按实际限制单独恢复。',
+      okText: '确认完成',
+      cancelText: '取消',
+      onOk: async () => {
+        setCompletingMaintenanceId(record.id);
+        try {
+          await api.putStrict(`/vehicle/maintenance/${record.id}/complete`, {
+            completion_note: '网页端确认维修已完成',
+          });
+          message.success('维修记录已完成');
+          await load();
+        } catch (error) {
+          message.error('结束维修失败：' + (error?.message || String(error)));
+          throw error;
+        } finally {
+          setCompletingMaintenanceId(null);
+        }
+      },
+    });
   };
   const onRefuel = async () => {
     if (submittingRefuel) return;
@@ -220,13 +310,17 @@ export default function VehiclesPage() {
 
   const openMaint = (r) => {
     const mileage = Number(r.current_mileage || 0);
+    const nextMileage = Number(r.next_maintenance_mileage || 0);
     setActiveVehicle(r);
+    maintForm.resetFields();
     maintForm.setFieldsValue({
       vehicle_id: r.id,
       maint_type: 'routine',
+      maint_at: localDateTimeValue(),
       mileage_at: mileage,
-      next_maint_mileage: mileage + 5000,
+      next_maint_mileage: nextMileage > mileage ? nextMileage : mileage + 5000,
     });
+    maintenanceIdempotencyKey.current = newMaintenanceKey();
     setMaintPhotos([]); setPendingMaintRecordId(null); setMaintUploadNotice(''); setMaintOpen(true);
   };
   const openRefuel = (r) => {
@@ -241,8 +335,10 @@ export default function VehiclesPage() {
     setActiveVehicle(vehicle);
     maintForm.setFieldsValue({
       vehicle_id: vehicleId,
+      maint_at: maintForm.getFieldValue('maint_at') || localDateTimeValue(),
       mileage_at: mileage,
-      next_maint_mileage: mileage + 5000,
+      next_maint_mileage: Number(vehicle?.next_maintenance_mileage || 0) > mileage
+        ? Number(vehicle.next_maintenance_mileage) : mileage + 5000,
     });
   };
 
@@ -267,18 +363,39 @@ export default function VehiclesPage() {
   };
 
   const onEditVehicle = async () => {
-    try {
-      const values = await editForm.validateFields();
-      const editableValues = Object.fromEntries(
-        Object.entries(values).filter(([key]) => !['current_mileage', 'next_maintenance_mileage'].includes(key)),
-      );
-      await api.putStrict(`/vehicles/${activeVehicle.id}`, {
-        ...editableValues,
-        seats: values.seats == null ? 5 : Number(values.seats),
-      });
+    if (editVehicleSubmittingRef.current) return;
+    const vehicleId = editVehicleTargetIdRef.current;
+    if (!vehicleId) return;
+    setSubmittingEditVehicle(true);
+    const result = await runVehicleEditSubmission({
+      guard: editVehicleSubmittingRef,
+      vehicleId,
+      validate: () => editForm.validateFields(),
+      buildPayload: (values) => {
+        const editableValues = isAdmin ? values : Object.fromEntries(
+          Object.entries(values).filter(([key]) => ![
+            'current_mileage', 'next_maintenance_mileage', 'status', 'correction_reason',
+          ].includes(key)),
+        );
+        return {
+          ...editableValues,
+          seats: values.seats == null ? 5 : Number(values.seats),
+        };
+      },
+      save: (targetId, payload) => api.putStrict(`/vehicles/${targetId}`, payload),
+      reload: load,
+    });
+    setSubmittingEditVehicle(false);
+    if (editVehicleTargetIdRef.current !== vehicleId) return;
+    if (result.status === 'saved') {
       message.success('车辆台账已更新');
-      setEditVehicleOpen(false); editForm.resetFields(); load();
-    } catch (e) { if (e?.message) message.error(e.message); }
+      if (detailOpen && activeVehicle?.id === vehicleId) await loadVehicleCorrectionLogs(vehicleId);
+      setEditVehicleOpen(false);
+      editVehicleTargetIdRef.current = null;
+      editForm.resetFields();
+    } else if (result.status === 'failed' && result.error?.message) {
+      message.error(result.error.message);
+    }
   };
 
   const onDeleteVehicle = (vehicle) => {
@@ -288,7 +405,18 @@ export default function VehiclesPage() {
     }});
   };
 
-  const openDetail = (vehicle) => { setActiveVehicle(vehicle); setDetailOpen(true); };
+  const openDetail = (vehicle) => {
+    setActiveVehicle(vehicle);
+    setDetailOpen(true);
+    loadVehicleCorrectionLogs(vehicle.id);
+  };
+  const closeDetail = () => {
+    vehicleCorrectionRequestRef.current += 1;
+    setDetailOpen(false);
+    setVehicleCorrectionLogs([]);
+    setVehicleCorrectionLoading(false);
+    setVehicleCorrectionError('');
+  };
 
   const openInspection = (vehicle, inspectionType = 'routine') => {
     setActiveVehicle(vehicle);
@@ -341,13 +469,15 @@ export default function VehiclesPage() {
   const isThisMonth = (d) => { const dt = new Date(d); return dt.getFullYear() === thisYear && dt.getMonth() === thisMonth; };
 
   const stats = useMemo(() => {
+    const stateSummary = vehicleSummary(vehicles);
     const mileage = useRecords
       .filter(r => r.returned_at && isThisMonth(r.returned_at) && r.end_mileage != null && r.start_mileage != null)
       .reduce((s, r) => s + (r.end_mileage - r.start_mileage), 0);
     return {
       total: vehicles.length,
-      inUse: vehicles.filter(v => v.status === 'in_use').length,
-      unavailable: vehicles.filter(v => !v.dispatchable).length,
+      inUse: stateSummary.inUse,
+      restrictedOrMaintenance: stateSummary.restrictedOrMaintenance,
+      maintenanceReminder: stateSummary.maintenanceReminder,
       documentDue: vehicles.filter(v => (v.document_state?.expired?.length || v.document_state?.due_soon?.length)).length,
       returnPending: useRecords.filter(r => !r.returned_at).length,
       maintThisMonth: maintRecords.filter(r => isThisMonth(r.maint_at)).length,
@@ -447,9 +577,9 @@ export default function VehiclesPage() {
     { title: '下次保养', dataIndex: 'next_maintenance_mileage', width: 120, render: v => v != null ? `${Math.round(v).toLocaleString()} km` : '-' },
     { title: '操作', width: 130, render: (_, r) => (
       <Space size={4}>
-        <Tooltip title="查看车辆档案"><Button size="small" aria-label={`查看 ${r.plate_no} 的车辆档案`} icon={<EyeOutlined />} onClick={() => openDetail(r)} /></Tooltip>
+        <Tooltip title="查看车辆档案"><Button size="small" aria-label={`查看 ${r.plate_no} 的车辆档案`} icon={<HoverGifIcon name="eye" size={14} />} onClick={() => openDetail(r)} /></Tooltip>
         {canMaintain && (
-          <Tooltip title="编辑车辆"><Button size="small" aria-label={`编辑车辆 ${r.plate_no}`} icon={<EditOutlined />} onClick={() => {
+          <Tooltip title="编辑车辆"><Button size="small" aria-label={`编辑车辆 ${r.plate_no}`} icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => {
             editForm.setFieldsValue({
               plate_no: r.plate_no, vehicle_name: r.vehicle_name, model: r.model, seats: r.seats,
               department: r.department, fuel_type: r.fuel_type, status: r.status,
@@ -457,10 +587,11 @@ export default function VehiclesPage() {
               purchase_date: r.purchase_date, insurance_expiry: r.insurance_expiry,
               annual_inspection_expiry: r.annual_inspection_expiry, registration_expiry: r.registration_expiry,
             });
+            editVehicleTargetIdRef.current = r.id;
             setActiveVehicle(r); setEditVehicleOpen(true);
           }} /></Tooltip>
         )}
-        {isAdmin && <Tooltip title="删除车辆"><Button size="small" danger aria-label={`删除车辆 ${r.plate_no}`} icon={<DeleteOutlined />} onClick={() => onDeleteVehicle(r)} /></Tooltip>}
+        {isAdmin && <Tooltip title="删除车辆"><Button size="small" danger aria-label={`删除车辆 ${r.plate_no}`} icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={() => onDeleteVehicle(r)} /></Tooltip>}
         {canMaintain && <Tooltip title="登记车况检查"><Button size="small" aria-label={`登记 ${r.plate_no} 的车况检查`} icon={<SafetyCertificateOutlined />} onClick={() => openInspection(r)} /></Tooltip>}
       </Space>
     )},
@@ -482,15 +613,32 @@ export default function VehiclesPage() {
     { title: '车牌', dataIndex: 'plate_no', width: 110 },
     { title: '保养时间', dataIndex: 'maint_at', width: 150 },
     { title: '类型', dataIndex: 'maint_type', width: 100, render: v => MAINT_TYPE[v] || v || '-' },
+    { title: '状态', dataIndex: 'maint_status', width: 90, render: value => {
+      const status = MAINT_STATUS[value] || { label: value || '-', color: 'default' };
+      return <Tag color={status.color}>{status.label}</Tag>;
+    } },
     { title: '当前里程', dataIndex: 'mileage_at', width: 110, render: v => v != null ? `${Math.round(v)} km` : '-' },
     { title: '保养项目', dataIndex: 'items', width: 260, render: v => <TableLongText value={v} /> },
     { title: '费用', dataIndex: 'cost', width: 100, render: v => v ? `¥${v}` : '-' },
     { title: '下次保养里程', dataIndex: 'next_maint_mileage', width: 120, render: v => v != null ? `${Math.round(v)} km` : '-' },
+    { title: '实际完成时间', dataIndex: 'actual_return_at', width: 150, render: value => value || '-' },
     { title: '影像', width: 130, render: (_, r) => {
       if (r.evidence_status === 'not_required' || !r.evidence_expected_count) return <Text type="secondary">未要求</Text>;
       if (r.evidence_status === 'complete') return <Tag color="green">已完整</Tag>;
       return <Space size={4}><Tag color="orange">{r.evidence_status === 'partial' ? '部分成功' : '待补传'}</Tag><Upload showUploadList={false} multiple beforeUpload={(file) => supplementVehicleEvidence(file, r, 'maintenance')}><Button size="small">补传</Button></Upload></Space>;
     } },
+    { title: '操作', width: 120, render: (_, record) => (
+      isAdmin && ['open', 'in_progress'].includes(record.maint_status)
+        ? <Tooltip title="确认这条维修已经实际完成；完成后车辆不会自动恢复可用，需在车辆编辑中按实际限制单独处理">
+            <Button
+              size="small"
+              icon={<CheckOutlined />}
+              loading={completingMaintenanceId === record.id}
+              onClick={() => completeMaintenance(record)}
+            >完成维修</Button>
+          </Tooltip>
+        : null
+    ) },
   ];
 
   const refuelColumns = [
@@ -510,7 +658,13 @@ export default function VehiclesPage() {
   const historyData = historyView === 'use' ? useRecords : historyView === 'maint' ? maintRecords : refuelRecords;
   const historyColumns = historyView === 'use' ? useColumns : historyView === 'maint' ? maintColumns : refuelColumns;
   const historyAction = historyView === 'maint' && canMaintain
-    ? <Button type="primary" icon={<PlusOutlined />} onClick={() => { setActiveVehicle(null); maintForm.resetFields(); setMaintOpen(true); }}>记录保养</Button>
+    ? <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+        setActiveVehicle(null);
+        maintForm.resetFields();
+        maintForm.setFieldsValue({ maint_type: 'routine', maint_at: localDateTimeValue() });
+        maintenanceIdempotencyKey.current = newMaintenanceKey();
+        setMaintPhotos([]); setPendingMaintRecordId(null); setMaintUploadNotice(''); setMaintOpen(true);
+      }}>记录保养</Button>
     : historyView === 'refuel' && canMaintain
       ? <Button type="primary" icon={<PlusOutlined />} onClick={() => { setActiveVehicle(null); refuelForm.resetFields(); setRefuelPhotos([]); setRefuelOpen(true); }}>记录补给</Button>
       : null;
@@ -524,7 +678,8 @@ export default function VehiclesPage() {
         { label: '待处理', value: decisionCount, color: tokens.colorWarning },
         { label: '出车中', value: stats.inUse, color: statusColors.info[isDark ? 'dark' : 'light'] },
         { label: '待归还', value: stats.returnPending, color: tokens.colorWarning },
-        { label: '受限或维修', value: stats.unavailable, color: tokens.colorError },
+        { label: '维修 / 限制', value: stats.restrictedOrMaintenance, color: tokens.colorError },
+        { label: '保养提醒', value: stats.maintenanceReminder, color: tokens.colorWarning },
         { label: '证照需关注', value: stats.documentDue, color: tokens.colorWarning },
       ]}
     >
@@ -538,34 +693,37 @@ export default function VehiclesPage() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
-      <Tabs activeKey={tab} onChange={(key) => updateQuery({ tab: key === 'ledger' ? '' : key })} type="line" items={[
+      <Tabs className="workspace-tabs" activeKey={tab} onChange={(key) => updateQuery({ tab: key === 'ledger' ? '' : key })} type="line" items={[
         {
-          key: 'ledger', label: '台账', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          key: 'ledger', label: '台账', children: <div className="workspace-embedded-page">
             <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
-              <Input aria-label="车辆搜索" placeholder="搜索车牌号 / 负责人" prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+              <Input aria-label="车辆搜索" placeholder="搜索车牌号 / 负责人" prefix={<HoverGifIcon name="magnifier" size={14} style={{ opacity: 0.45 }} />}
                 allowClear {...searchInputProps} style={{ width: filterInputWidth }} />
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={filteredVehicles} loading={loading} columns={ledgerColumns}
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }}
               emptyType={searchText ? 'filtered' : 'empty'} onRefresh={load} />
           </div>,
         },
         {
-          key: 'history', label: '履历', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          key: 'history', label: '履历', children: <div className="workspace-embedded-page">
             <Segmented value={historyView} onChange={(value) => updateQuery({ history: value === 'use' ? '' : value })} options={[
               { value: 'use', label: '使用' }, { value: 'maint', label: '保养' }, { value: 'refuel', label: '补给' },
             ]} />
-            <WorkspaceToolbar actions={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>{historyAction}</Space>}>
+            <WorkspaceToolbar actions={<Space><Button icon={<ReloadOutlined />} onClick={load} loading={loading || auxiliaryLoading}>刷新</Button>{historyAction}</Space>}>
               <Text type="secondary">{historyView === 'use' ? '来自巡检计划和工单的出车、还车记录。' : historyView === 'maint' ? '车辆保养历史与下次保养里程。' : '车辆加油、充电和费用记录。'}</Text>
             </WorkspaceToolbar>
-            <WorkspaceTable rowKey="id" dataSource={historyData} loading={loading} columns={historyColumns} emptyType="empty" onRefresh={load} />
+            <WorkspaceTable rowKey="id" dataSource={historyData} loading={auxiliaryLoading} columns={historyColumns}
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }} emptyType="empty" onRefresh={load} />
           </div>,
         },
         {
-          key: 'decision', label: decisionCount ? `待办 ${decisionCount}` : '待办', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
+          key: 'decision', label: decisionCount ? `待办 ${decisionCount}` : '待办', children: <div className="workspace-embedded-page">
+            <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading || auxiliaryLoading}>刷新</Button>}>
               <Text type="secondary">仅列出需要处理的证照、车况、维修和归还事项。</Text>
             </WorkspaceToolbar>
-            <WorkspaceTable rowKey="id" dataSource={decisionRows.filter(row => row.issues.length)} loading={loading} emptyType="empty" onRefresh={load}
+            <WorkspaceTable rowKey="id" dataSource={decisionRows.filter(row => row.issues.length)} loading={auxiliaryLoading} emptyType="empty" onRefresh={load}
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }}
               columns={[
                 { title: '车辆', width: 140, render: (_, r) => <span>{r.plate_no}<br /><Text type="secondary" style={{ fontSize: 12 }}>{r.model || '-'}</Text></span> },
                 { title: '待处理事项', width: 220, render: (_, r) => <Space size={[4, 4]} wrap>{r.issues.map(issue => <Tag color={issue === '证照临期' ? 'orange' : 'red'} key={issue}>{issue}</Tag>)}</Space> },
@@ -578,7 +736,7 @@ export default function VehiclesPage() {
         },
       ]} />
 
-      <Drawer open={detailOpen} onClose={() => setDetailOpen(false)} width={640}
+      <Drawer open={detailOpen} onClose={closeDetail} width={640}
         title={activeVehicle ? `${activeVehicle.plate_no} · 车辆档案` : '车辆档案'}>
         {activeVehicle && <Space direction="vertical" size={16} style={{ width: '100%' }}>
           {!activeVehicle.dispatchable && <Alert type="error" showIcon message={`当前不可出车：${activeVehicle.dispatch_block_reason || '车辆状态受限'}`} />}
@@ -620,6 +778,43 @@ export default function VehiclesPage() {
                 { title: '结论', dataIndex: 'overall_status', render: v => <Tag color={{ normal: 'green', attention: 'orange', blocked: 'red' }[v]}>{{ normal: '正常', attention: '需关注', blocked: '不合格' }[v] || v}</Tag> },
                 { title: '检查人', dataIndex: 'inspector_name', render: v => v || '-' },
               ]} locale={{ emptyText: '暂无检查记录' }} />
+          </div>
+          <div>
+            <Text strong>管理员纠错记录</Text>
+            {vehicleCorrectionError ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 8 }}
+                message="纠错记录加载失败"
+                description={vehicleCorrectionError}
+                action={<Button size="small" onClick={() => loadVehicleCorrectionLogs(activeVehicle.id)}>重试</Button>}
+              />
+            ) : (
+              <Table
+                size="small"
+                style={{ marginTop: 8 }}
+                pagination={false}
+                loading={vehicleCorrectionLoading}
+                rowKey="id"
+                dataSource={vehicleCorrectionLogs}
+                columns={[
+                  { title: '时间', dataIndex: 'createdAt', width: 150, render: value => value || '-' },
+                  { title: '变更', dataIndex: 'changes', render: changes => changes.length
+                    ? <Space direction="vertical" size={2}>{changes.map(change => (
+                        <Text key={change.field}>{change.label}：{change.before} → {change.after}</Text>
+                      ))}</Space>
+                    : <Text type="secondary">未识别到字段变化</Text> },
+                  { title: '原因 / 操作者', width: 150, render: (_, record) => (
+                    <Space direction="vertical" size={2}>
+                      <Text>{record.reason}</Text>
+                      <Text type="secondary">{record.operator}</Text>
+                    </Space>
+                  ) },
+                ]}
+                locale={{ emptyText: '暂无管理员纠错记录' }}
+              />
+            )}
           </div>
         </Space>}
       </Drawer>
@@ -667,19 +862,28 @@ export default function VehiclesPage() {
       <Modal open={maintOpen} onCancel={() => {
         if (pendingMaintRecordId && maintPhotos.length) { message.warning('记录已保存，仍有照片待补传；请重试上传或移除失败照片后关闭'); return; }
         setMaintOpen(false); maintForm.resetFields(); setMaintPhotos([]); setPendingMaintRecordId(null); setMaintUploadNotice('');
+        maintenanceIdempotencyKey.current = '';
       }} onOk={onMaint} confirmLoading={submittingMaint} title={activeVehicle ? `记录保养 - ${activeVehicle.plate_no}` : '记录保养'} okText={pendingMaintRecordId ? '重试上传' : '保存'} cancelText="取消" destroyOnHidden>
         <Form form={maintForm} layout="vertical">
           {maintUploadNotice && <Alert type="warning" showIcon message={maintUploadNotice} style={{ marginBottom: 16 }} />}
+          <Alert
+            type="info" showIcon style={{ marginBottom: 16 }}
+            message="登记实际已发生的保养（含历史补录）"
+            description={isAdmin
+              ? `${activeVehicle ? `该车台账当前里程为 ${Number(activeVehicle.current_mileage || 0).toLocaleString()} km，仅作对照。` : ''}请按真实发生时间和里程登记；仅当前最新有效保养会更新台账保养时间和提醒，较早历史补录只保留历史。车辆当前里程不会因保养记录回写，也不会自动结束未完成维修。`
+              : `${activeVehicle ? `该车台账当前里程为 ${Number(activeVehicle.current_mileage || 0).toLocaleString()} km。` : ''}实际保养里程按车辆台账锁定，下次保养里程由系统计算；保存不会自动结束未完成维修。`}
+          />
           <Form.Item name="vehicle_id" label="车辆" rules={[{ required: true }]}>
             <Select options={vehicleOptions} disabled={!!activeVehicle} placeholder="请选择车辆" onChange={selectMaintenanceVehicle} />
           </Form.Item>
           <Form.Item name="maint_type" label="类型" initialValue="routine" rules={[{ required: true }]}>
             <Select options={Object.entries(MAINT_TYPE).map(([k, v]) => ({ value: k, label: v }))} />
           </Form.Item>
-          <Form.Item name="mileage_at" label="当前里程"><InputNumber style={{ width: '100%' }} min={0} disabled suffix="km" /></Form.Item>
-          <Form.Item name="items" label="保养项目"><Input.TextArea rows={2} placeholder="如 更换机油、机滤" /></Form.Item>
+          <Form.Item name="maint_at" label="实际保养时间" extra="填写保养实际发生的时间；本条记录的写入时间由系统自动留存。" rules={[{ required: true, message: '请选择实际保养时间' }]}><Input type="datetime-local" /></Form.Item>
+          <Form.Item name="mileage_at" label="实际保养里程" extra={isAdmin ? '按保养发生时的真实里程填写，可高于或低于当前台账里程。' : '普通运维按车辆台账当前里程登记，不可补改历史里程。'} rules={[{ required: true, message: '请填写实际保养里程' }]}><InputNumber style={{ width: '100%' }} min={0} disabled={!isAdmin} suffix="km" /></Form.Item>
+          <Form.Item name="items" label="保养项目 / 材料" rules={[{ required: true, message: '请填写保养项目或使用材料' }]}><Input.TextArea rows={2} placeholder="如 更换机油、机滤" /></Form.Item>
           <Form.Item name="cost" label="费用"><InputNumber style={{ width: '100%' }} min={0} step={0.01} prefix="¥" /></Form.Item>
-          <Form.Item name="next_maint_mileage" label="下次保养里程（当前里程 + 5000 km）"><InputNumber style={{ width: '100%' }} min={0} disabled suffix="km" /></Form.Item>
+          <Form.Item name="next_maint_mileage" label="下次保养里程" extra={isAdmin ? '仅当前最新有效保养更新提醒；较早历史补录只保存历史，不覆盖现有更新基线。' : '普通运维保存时由系统按当前台账里程计算提醒基线。'} rules={isAdmin ? [{ required: true, message: '请明确填写下次保养里程' }] : []}><InputNumber style={{ width: '100%' }} min={0} disabled={!isAdmin} suffix="km" /></Form.Item>
           <Form.Item name="remark" label="备注"><Input.TextArea rows={2} /></Form.Item>
           <Form.Item label="保养照片" style={{ marginBottom: 8 }}>
             <Upload
@@ -735,23 +939,57 @@ export default function VehiclesPage() {
         </Form>
       </Modal>
 
-      <Modal open={editVehicleOpen} onCancel={() => { setEditVehicleOpen(false); editForm.resetFields(); }}
+      <Modal open={editVehicleOpen} onCancel={() => {
+        if (submittingEditVehicle) return;
+        setEditVehicleOpen(false);
+        editVehicleTargetIdRef.current = null;
+        editForm.resetFields();
+      }}
         onOk={onEditVehicle} title={activeVehicle ? `编辑车辆 - ${activeVehicle.plate_no}` : '编辑车辆'}
-        okText="保存" cancelText="取消" destroyOnHidden>
+        okText="保存" cancelText="取消" confirmLoading={submittingEditVehicle}
+        closable={!submittingEditVehicle} keyboard={!submittingEditVehicle} maskClosable={!submittingEditVehicle} destroyOnHidden>
         <Form form={editForm} layout="vertical">
+          <Divider orientation="left" plain style={{ marginTop: 0 }}>基础资料</Divider>
           {isAdmin && <Form.Item name="plate_no" label="车牌号" rules={[{ required: true }]}><Input /></Form.Item>}
           <Form.Item name="vehicle_name" label="车辆名称"><Input /></Form.Item>
           <Form.Item name="model" label="车型"><Input /></Form.Item>
           <Form.Item name="seats" label="座位数"><InputNumber min={1} max={99} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name="department" label="归属部门"><Input /></Form.Item>
           <Form.Item name="fuel_type" label="能源类型"><Select options={Object.entries(ENERGY_TYPE).map(([value, label]) => ({ value, label }))} /></Form.Item>
-          {isAdmin && <Form.Item name="status" label="车辆状态"><Select options={Object.entries(VEH_STATUS).map(([value, item]) => ({ value, label: item.label }))} /></Form.Item>}
-          <Form.Item name="current_mileage" label="当前里程（系统记录）"><InputNumber min={0} style={{ width: '100%' }} disabled /></Form.Item>
-          <Form.Item name="next_maintenance_mileage" label="下次保养里程（系统计算）"><InputNumber min={0} style={{ width: '100%' }} disabled /></Form.Item>
           <Form.Item name="purchase_date" label="购置日期"><Input type="date" /></Form.Item>
           <Form.Item name="insurance_expiry" label="保险到期日"><Input type="date" /></Form.Item>
           <Form.Item name="annual_inspection_expiry" label="年检到期日"><Input type="date" /></Form.Item>
           <Form.Item name="registration_expiry" label="行驶证有效期"><Input type="date" /></Form.Item>
+
+          {isAdmin && <>
+            <Divider orientation="left" plain>管理员纠错</Divider>
+            <Alert
+              type="info" showIcon style={{ marginBottom: 16 }}
+              message="里程可按真实情况纠正（可调高也可调低），每次调整必须填写纠错原因"
+              description="系统会保留调整前后数值、操作者和时间，可在审计中追溯。修改状态标签不会释放真实占用，也不会替代还车、维修或检查流程。"
+            />
+            {activeVehicle?.status === 'in_use' && (
+              <Alert
+                type="warning" showIcon style={{ marginBottom: 16 }}
+                message="该车当前处于出车中（真实履约占用）"
+                description="可以登记为“限制使用”，但原行程和申请仍须由还车流程结束。不能在此释放占用、伪造出车中状态，或修改冲突里程和保养基线。"
+              />
+            )}
+            <Form.Item name="status" label="车辆状态（可用性纠错）" extra={activeVehicle?.status === 'in_use' ? '在途时仅可追加“限制使用”；真实占用仍由还车流程释放。' : undefined}>
+              <Select options={Object.entries(VEH_STATUS).map(([value, item]) => ({
+                value,
+                label: item.label,
+                disabled: activeVehicle?.status === 'in_use'
+                  ? !['in_use', 'restricted'].includes(value)
+                  : value === 'in_use',
+              }))} />
+            </Form.Item>
+            <Form.Item name="current_mileage" label="当前里程（纠错）"><InputNumber min={0} style={{ width: '100%' }} disabled={activeVehicle?.status === 'in_use'} suffix="km" /></Form.Item>
+            <Form.Item name="next_maintenance_mileage" label="保养基线 / 下次保养里程（纠错）"><InputNumber min={0} style={{ width: '100%' }} disabled={activeVehicle?.status === 'in_use'} suffix="km" /></Form.Item>
+            <Form.Item name="correction_reason" label="纠错原因" extra="调整里程、保养基线或可用性时必填；未调整这些项可留空。">
+              <Input.TextArea rows={2} placeholder="请说明纠正依据，如：仪表盘点检、历史台账补登" maxLength={500} />
+            </Form.Item>
+          </>}
         </Form>
       </Modal>
     </WorkspacePage>

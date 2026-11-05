@@ -35,6 +35,7 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
         app_module._tokens.update({
             'operator-token': {'id': 9, 'role': 'operator', 'real_name': '执行人员'},
             'manager-token': {'id': 1, 'role': 'manager', 'real_name': '审批人员'},
+            'outsider-token': {'id': 8, 'role': 'operator', 'real_name': '其他人员'},
         })
         with temporary_db() as db:
             db.executescript('''
@@ -201,6 +202,68 @@ class PlanScheduleChangeApprovalTest(unittest.TestCase):
         self.assertEqual((row['period_start'], row['period_end']), ('2026-07-21', '2026-07-27'))
         self.assertEqual(row['coverage_exception_reason'], '历史覆盖')
         self.assertEqual(row['version'], 9)
+
+    def test_owner_can_abandon_unsubmitted_change_and_restore_original_snapshot(self):
+        start = self.client.post(
+            '/api/plan-schedules/5/request-change',
+            headers={'Authorization': 'Bearer operator-token'},
+            json={'change_reason': '调整巡检日期'})
+        self.assertEqual(start.status_code, 200, start.json)
+        with app_module.get_db() as db:
+            db.execute("""UPDATE plan_schedules SET
+                plan_data=?, vehicle_days=?, vehicle_id=?, spare_parts=?, work_order_ids=?,
+                remarks=?, period_start=?, period_end=?, coverage_exception_reason=?,
+                vehicle_exception_reason=?, no_vehicle_required=1, version=2
+                WHERE id=5""", (
+                    json.dumps({'2026-07-26': {'sites': [1], 'notes': '临时修改'}}),
+                    json.dumps({}), None, json.dumps([]), json.dumps([]), '临时备注',
+                    '2026-07-26', '2026-07-28', '临时覆盖说明', '临时不用车'))
+
+        denied = self.client.post(
+            '/api/plan-schedules/5/abandon-change',
+            headers={'Authorization': 'Bearer outsider-token'}, json={'version': 2})
+        self.assertEqual(
+            (denied.status_code, denied.json['code']),
+            (403, 'PLAN_CHANGE_ABANDON_FORBIDDEN'))
+        stale = self.client.post(
+            '/api/plan-schedules/5/abandon-change',
+            headers={'Authorization': 'Bearer operator-token'}, json={'version': 1})
+        self.assertEqual(
+            (stale.status_code, stale.json['code']), (409, 'PLAN_VERSION_CONFLICT'))
+
+        restored = self.client.post(
+            '/api/plan-schedules/5/abandon-change',
+            headers={'Authorization': 'Bearer operator-token'}, json={'version': 2})
+        self.assertEqual(restored.status_code, 200, restored.json)
+        self.assertEqual(
+            (restored.json['status'], restored.json['version']), ('approved', 3))
+        repeated = self.client.post(
+            '/api/plan-schedules/5/abandon-change',
+            headers={'Authorization': 'Bearer operator-token'}, json={})
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertTrue(repeated.json['already_abandoned'])
+
+        with app_module.get_db() as db:
+            row = db.execute('SELECT * FROM plan_schedules WHERE id=5').fetchone()
+            events = db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                WHERE schedule_id=5 AND event_type='change_abandoned'""").fetchone()[0]
+        self.assertEqual((row['status'], row['version']), ('approved', 3))
+        self.assertEqual(json.loads(row['plan_data']), {
+            '2026-07-25': {'sites': [1], 'notes': '原路线'},
+        })
+        self.assertEqual(json.loads(row['vehicle_days']), {'2026-07-25': 3})
+        self.assertEqual(row['vehicle_id'], 3)
+        self.assertEqual(json.loads(row['spare_parts']), [{'part_id': 8, 'quantity': 2}])
+        self.assertEqual(json.loads(row['work_order_ids']), [101])
+        self.assertEqual(row['remarks'], '原备注')
+        self.assertEqual((row['period_start'], row['period_end']),
+                         ('2026-07-21', '2026-07-27'))
+        self.assertEqual(row['coverage_exception_reason'], '原覆盖说明')
+        self.assertEqual(row['vehicle_exception_reason'], '')
+        self.assertEqual(row['no_vehicle_required'], 0)
+        self.assertIsNone(row['change_reason'])
+        self.assertIsNone(row['previous_plan_data'])
+        self.assertEqual(events, 1)
 
     def test_completed_execution_cannot_request_a_change(self):
         with app_module.get_db() as db:

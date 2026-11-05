@@ -29,7 +29,8 @@ function workorderCn(w) {
   if (!Array.isArray(imagesArr)) imagesArr = [];
   return Object.assign({}, w, {
     level_cn: map(WORKORDER_LEVEL, w.level, '未知'),
-    status_cn: map(WORKORDER_STATUS, w.status, '未知'),
+    status_cn: w.closure_type === 'no_action_required'
+      ? '已提前结束' : map(WORKORDER_STATUS, w.status, '未知'),
     status_cls: WORKORDER_STATUS_CLS[w.status] || 'default',
     level_cls: WORKORDER_LEVEL_CLS[w.level] || 'gray',
     source_cn: s != null ? s : '其他来源',

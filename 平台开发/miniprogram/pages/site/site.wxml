@@ -1,92 +1,127 @@
 <view class="page" wx:if="{{site}}">
   <view class="sync-bar" wx:if="{{!readOnlySource && !online}}">当前离线，打卡会暂存并在联网后自动同步</view>
-  <view class="sync-bar" wx:elif="{{!readOnlySource && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
+  <view class="sync-bar sync-bar--action" wx:elif="{{!readOnlySource && syncCount > 0}}" bindtap="onSyncNow">有 {{syncCount}} 项待同步 · 点击立即同步</view>
   <view class="card site-summary">
     <view class="site-name">{{site.name}}</view>
     <view class="site-tags">
-      <text class="tag tag-brand">{{site.type_cn}}</text>
+      <text class="tag tag-neutral">{{site.type_cn}}</text>
       <text class="tag">编码 {{site.code}}</text>
     </view>
   </view>
-  <view wx:if="{{monitoringError}}" class="sync-bar"><text>{{monitoringError}}</text><button class="btn-ghost" bindtap="onRetryMonitoring">重试</button></view>
-  <!-- 监测信息区（只读监测入口） -->
-  <view wx:if="{{monitoringPublic && monitoringSource}}">
-    <!-- 监测状态卡片 -->
-    <view class="mon-hero-card">
-      <view class="mon-hero-chip-wrap">
-        <view class="mon-status-chip mon-status-{{site.monitoring_status || 'unknown'}}">
-          <text class="mon-status-tx">{{site.monitoring_status_label || '状态未知'}}</text>
-        </view>
-      </view>
-      <text class="mon-hero-reason" wx:if="{{site.monitoring_reason}}">{{site.monitoring_reason}}</text>
-      <text class="mon-hero-reason mon-hero-reason--muted" wx:else>暂无状态说明</text>
-      <view class="mon-hero-times">
-        <view class="mon-time-item">
-          <image class="mon-time-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
-          <view class="mon-time-copy">
-            <text class="mon-time-label">最后收到报文</text>
-            <text class="mon-time-value">{{site.last_received_at || site.last_communication_at || '暂无记录'}}</text>
-          </view>
-        </view>
-        <view class="mon-time-divider"></view>
-        <view class="mon-time-item">
-          <image class="mon-time-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
-          <view class="mon-time-copy">
-            <text class="mon-time-label">最后有效观测</text>
-            <text class="mon-time-value">{{site.last_valid_observation_at || '暂无有效观测'}}</text>
-          </view>
-        </view>
-      </view>
+  <!-- 监测信息区（仅从监测入口进入时展示，由 monitoringIntent 控制） -->
+  <!-- 语义分离：monitoringLoading=加载中 / monitoringError=网络或服务失败 / monitoringUnavailable=能力未开通 / else=正常展示 -->
+  <view wx:if="{{monitoringIntent}}">
+
+    <!-- 加载中 -->
+    <view class="mon-loading-card" wx:if="{{monitoringLoading}}">
+      <view class="mon-loading-spinner"></view>
+      <text class="mon-loading-text">监测数据加载中…</text>
     </view>
 
-    <!-- 有效观测值 -->
-    <view class="mon-section">
-      <view class="mon-section-head">
-        <text class="mon-section-title">有效观测值</text>
-        <text class="mon-section-count" wx:if="{{site.monitoring.latest_values.length > 0}}">{{site.monitoring.latest_values.length}} 项</text>
+    <!-- 加载失败：网络或服务端错误，档案区不受影响 -->
+    <view class="mon-error-card" wx:elif="{{monitoringError}}">
+      <view class="mon-error-copy">
+        <text class="mon-error-title">监测数据加载失败</text>
+        <text class="mon-error-desc">{{monitoringError}}</text>
       </view>
-      <view class="card mon-values-card" wx:if="{{site.monitoring.latest_values.length > 0}}">
-        <view class="mon-value-row" wx:for="{{site.monitoring.latest_values}}" wx:key="protocol_code">
-          <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
-          <view class="mon-value-right">
-            <text class="mon-value-num">{{item.standard_value}}</text>
-            <text class="mon-value-unit">{{item.standard_unit}}</text>
-          </view>
-        </view>
-      </view>
-      <view class="mon-empty-inline" wx:else>
-        <image class="mon-empty-inline-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
-        <text class="mon-empty-inline-tx">暂无有效观测值</text>
-        <text class="mon-empty-inline-sub">站点尚未形成有效观测数据</text>
-      </view>
+      <view class="mon-error-retry" bindtap="onRetryMonitoring">重试</view>
     </view>
 
-    <!-- 分轴状态 -->
-    <view class="mon-section">
-      <view class="mon-section-head">
-        <text class="mon-section-title">数据事实</text>
-      </view>
-      <view class="card mon-axes-card" wx:if="{{site.monitoring.axes && (site.monitoring.axes.communication || site.monitoring.axes.data)}}">
-        <view class="mon-axis-row" wx:if="{{site.monitoring.axes.communication}}">
-          <image class="mon-axis-ico" src="/images/station-monitoring/icon-communication.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.communication.name || '数据接收'}}</text>
-          <view class="mon-status-chip mon-status-{{site.monitoring.axes.communication.status || 'unknown'}}">
-            <text class="mon-status-tx">{{site.monitoring.axes.communication.status_label || '未知'}}</text>
-          </view>
-        </view>
-        <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.data}}">
-          <image class="mon-axis-ico" src="/images/station-monitoring/icon-data.svg" mode="aspectFit"/>
-          <text class="mon-axis-name">{{site.monitoring.axes.data.name || '观测数据'}}</text>
-          <view class="mon-status-chip mon-status-{{site.monitoring.axes.data.status || 'unknown'}}">
-            <text class="mon-status-tx">{{site.monitoring.axes.data.status_label || '未知'}}</text>
-          </view>
-        </view>
-      </view>
-      <view class="mon-empty-inline mon-empty-inline--small" wx:else>
-        <text class="mon-empty-inline-tx">暂无分轴数据</text>
-        <text class="mon-empty-inline-sub">分轴状态尚未接入</text>
-      </view>
+    <!-- 监测能力不可用：已知 403 / 未开通，中性提示，不残留监测值 -->
+    <!-- （由开发接线：能力 403 或 station_monitoring_public=false + 监测入口意图 派生） -->
+    <view class="mon-gate-closed-card" wx:elif="{{monitoringUnavailable}}">
+      <image class="mon-gate-closed-ico" src="/images/station-monitoring/icon-gate-closed.svg" mode="aspectFit"/>
+      <text class="mon-gate-closed-title">监测能力暂不可用</text>
+      <text class="mon-gate-closed-desc">该站点监测数据暂未开通，如需开通请联系管理员</text>
     </view>
+
+    <!-- 正常：展示完整监测数据 -->
+    <block wx:elif="{{monitoringPublic && monitoringSource}}">
+      <!-- 监测状态卡片 -->
+      <view class="mon-hero-card">
+        <view class="mon-hero-chip-wrap">
+          <view class="mon-status-chip mon-status-{{site.monitoring_status || 'unknown'}}">
+            <text class="mon-status-tx">{{site.monitoring_status_label || '状态未知'}}</text>
+          </view>
+        </view>
+        <text class="mon-hero-reason" wx:if="{{site.monitoring_reason}}">{{site.monitoring_reason}}</text>
+        <text class="mon-hero-reason mon-hero-reason--muted" wx:else>暂无状态说明</text>
+        <view class="mon-hero-times">
+          <view class="mon-time-item">
+            <image class="mon-time-ico" src="/images/station-monitoring/icon-clock.svg" mode="aspectFit"/>
+            <view class="mon-time-copy">
+              <text class="mon-time-label">最后收到报文</text>
+              <text class="mon-time-value">{{site.last_received_at || site.last_communication_at || '暂无记录'}}</text>
+            </view>
+          </view>
+          <view class="mon-time-divider"></view>
+          <view class="mon-time-item">
+            <image class="mon-time-ico" src="/images/station-monitoring/icon-activity.svg" mode="aspectFit"/>
+            <view class="mon-time-copy">
+              <text class="mon-time-label">最后有效观测</text>
+              <text class="mon-time-value">{{site.last_valid_observation_at || '暂无有效观测'}}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <!-- 最新实际结果 -->
+      <view class="mon-section">
+        <view class="mon-section-head">
+          <text class="mon-section-title">最新结果</text>
+          <text class="mon-section-count" wx:if="{{site.monitoring.latest_values.length > 0}}">{{site.monitoring.latest_values.length}} 项</text>
+        </view>
+        <view class="card mon-values-card" wx:if="{{site.monitoring.latest_values.length > 0}}">
+          <view class="mon-value-row" wx:if="{{site.monitoring.latest_result_at}}">
+            <text class="mon-value-name">结果时间</text>
+            <text class="mon-value-unit">{{site.monitoring.latest_result_time_display}}</text>
+          </view>
+          <view class="mon-value-row" wx:for="{{site.monitoring.latest_results}}" wx:key="business_metric">
+            <text class="mon-value-name">{{item.factor_name_cn || '监测因子'}}</text>
+            <view>
+              <view class="mon-value-right">
+                <text class="mon-value-num">{{item.has_value ? (item.standard_value_display !== undefined && item.standard_value_display !== null ? item.standard_value_display : item.standard_value) : item.status_label}}</text>
+                <text class="mon-value-unit">{{item.standard_unit}}</text>
+              </view>
+              <view class="mon-value-unit" wx:if="{{item.has_value && item.status_label}}">{{item.status_label}}</view>
+              <view class="mon-value-unit" wx:if="{{item.result_time_display}}">{{item.result_time_display}}</view>
+            </view>
+          </view>
+        </view>
+        <view class="mon-empty-inline" wx:else>
+          <image class="mon-empty-inline-ico" src="/images/station-monitoring/empty-monitoring.svg" mode="aspectFit"/>
+          <text class="mon-empty-inline-tx">暂无有效观测值</text>
+          <text class="mon-empty-inline-sub">站点尚未形成有效观测数据</text>
+        </view>
+      </view>
+
+      <!-- 分轴状态 -->
+      <view class="mon-section">
+        <view class="mon-section-head">
+          <text class="mon-section-title">数据事实</text>
+        </view>
+        <view class="card mon-axes-card" wx:if="{{site.monitoring.axes && (site.monitoring.axes.communication || site.monitoring.axes.data)}}">
+          <view class="mon-axis-row" wx:if="{{site.monitoring.axes.communication}}">
+            <image class="mon-axis-ico" src="/images/station-monitoring/icon-communication.svg" mode="aspectFit"/>
+            <text class="mon-axis-name">{{site.monitoring.axes.communication.name || '数据接收'}}</text>
+            <view class="mon-status-chip mon-status-{{site.monitoring.axes.communication.status || 'unknown'}}">
+              <text class="mon-status-tx">{{site.monitoring.axes.communication.status_label || '未知'}}</text>
+            </view>
+          </view>
+          <view class="mon-axis-row mon-axis-row--border" wx:if="{{site.monitoring.axes.data}}">
+            <image class="mon-axis-ico" src="/images/station-monitoring/icon-data.svg" mode="aspectFit"/>
+            <text class="mon-axis-name">{{site.monitoring.axes.data.name || '观测数据'}}</text>
+            <view class="mon-status-chip mon-status-{{site.monitoring.axes.data.status || 'unknown'}}">
+              <text class="mon-status-tx">{{site.monitoring.axes.data.status_label || '未知'}}</text>
+            </view>
+          </view>
+        </view>
+        <view class="mon-empty-inline mon-empty-inline--small" wx:else>
+          <text class="mon-empty-inline-tx">暂无分轴数据</text>
+          <text class="mon-empty-inline-sub">分轴状态尚未接入</text>
+        </view>
+      </view>
+    </block>
   </view>
 
   <view wx:if="{{!readOnlySource}}" class="task-status {{site.task_state === 'carryover' ? 'task-status-carryover' : (site.can_check_in ? 'task-status-ready' : 'task-status-blocked')}}">
@@ -174,7 +209,7 @@
         </picker>
         <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'loading'}}" class="wop-note">库存加载中</text>
         <text wx:elif="{{partsApply.fulfillment_type === 'stock' && partsInventoryStatus === 'empty'}}" class="wop-note">暂无可领用库存</text>
-        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
+        <text wx:elif="{{partsApply.fulfillment_type === 'stock'}}" class="wop-note wop-note--retry" bindtap="onRetryPartsInventory">库存加载失败：{{partsInventoryError}}，点击重试</text>
 
         <!-- 非库存：备件名称 -->
         <view class="wos-field" wx:if="{{partsApply.fulfillment_type !== 'stock'}}">

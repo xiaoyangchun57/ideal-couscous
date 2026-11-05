@@ -5,134 +5,121 @@
   padding-bottom: calc(88rpx + env(safe-area-inset-bottom));
 }
 
-/* 导航栏标题 */
+/* 导航栏标题区 — 消费 nav-bar wechat-custom 规格：17px/600
+   范围切换器样式见全局 .nav-scope */
+.stab-nav-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 100%;
+}
+
 .stab-nav-title {
-  font-size: 34rpx;
-  font-weight: 600;
+  font-size: var(--font-title-1);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
 }
 
-/* 主模式分段：站点 / 试剂 */
-.stab-seg {
-  padding: 24rpx 32rpx 16rpx;
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  background: var(--color-background);
-}
+/* ========= 工具条层级体系 =========
+   一级（主模式分段）：全宽胶囊，88rpx 高，font-callout → 页面级切换，最重
+   二级（搜索/筛选）：列表级工具，归属内容区 → 中等
+   三级（试剂筛选标签）：描边小标签，最轻
+   导航栏→一级间距 16rpx（与计划/告警页统一）
+   一级→内容间距 12rpx
+   所有可点击元素触控热区 ≥ 88rpx（铁律第5条） */
 
-.stab-seg-inner {
-  display: flex;
-  background: var(--color-type-bg);
-  border-radius: var(--radius-sm);
-  padding: 4rpx;
-  height: 88rpx;
+/* 主模式分段外层：与计划/告警页统一 16rpx 上 / 12rpx 下
+   控件本身样式消费全局 .segment-control，页面级只调间距 */
+.segment-wrap {
+  padding: var(--space-4) var(--space-8) var(--space-3);
   box-sizing: border-box;
 }
 
-.stab-seg-item {
-  flex: 1;
+/* 三级筛选（试剂模式下）：列表级筛选标签
+   视觉降权：描边小标签（64rpx 视觉高 / 1rpx 边框 / 透明底）
+   触控铁律：外层 padding 扩展至 88rpx 总高，视觉与触控分离
+   左对齐 + 内容宽度 → 归属内容区，不是导航 */
+.reagent-filter-wrap {
+  padding: var(--space-1) 0 var(--space-3);
+}
+.reagent-filter-wrap .segment-control {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  height: auto;
+  margin: 0 var(--space-8);
+  gap: var(--space-4);
+  display: flex;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.reagent-filter-wrap .segment-item {
+  flex: 0 0 auto;
+  min-width: 88rpx;       /* 铁律：触控热区 ≥ 88rpx */
+  min-height: 88rpx;      /* 铁律：触控热区 ≥ 88rpx */
+  padding: var(--space-3) 0; /* 只纵向扩展触控热区；横向间隙全部交给 gap，避免视觉间距被 padding 撑大 */
+  background: transparent;
+  box-shadow: none;
+  position: relative;
+  transition: all 0.2s ease;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: calc(var(--radius-sm) - 2rpx);
-  transition: all 0.2s ease;
 }
-
-.stab-seg-on {
-  background: var(--color-card);
-  box-shadow: var(--shadow-sm);
+/* 杀掉全局 .segment-item.active 的白底+阴影——它们作用在 88rpx 透明热区上，
+   正是"立体底框叠在描边药丸后面"的根因 */
+.reagent-filter-wrap .segment-item.active {
+  background: transparent;
+  box-shadow: none;
 }
-
-.stab-seg-tx {
-  font-size: 28rpx;
-  font-weight: 500;
+/* 视觉标签层：64rpx 高，描边样式 */
+.reagent-filter-wrap .segment-item text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 64rpx;
+  padding: 0 var(--space-6);
+  border: 1rpx solid var(--color-divider);
+  border-radius: var(--radius-full);
+  font-size: var(--font-footnote);
+  font-weight: var(--font-weight-regular);
   color: var(--color-text-secondary);
+  background: transparent;
+  box-sizing: border-box;
+  line-height: 1;
 }
-
-.stab-seg-on .stab-seg-tx {
-  font-weight: 600;
-  color: var(--color-text-primary);
+.reagent-filter-wrap .segment-item.active text {
+  border-color: var(--color-primary);
+  background: var(--color-primary-surface);
+  color: var(--color-primary);
+  font-weight: var(--font-weight-medium);
 }
 
 .stab-bottom-spacer {
   height: 40rpx;
 }
 
-/* ============ 顶部工具栏（范围切换 + 搜索） ============ */
-.mon-toolbar {
-  padding: 12rpx 0 20rpx;
-  display: flex;
-  flex-direction: column;
-  gap: 16rpx;
-  position: sticky;
-  top: 128rpx;
-  z-index: 10;
-  background: var(--color-background);
-}
-
-/* 分段控件：胶囊式 */
-.mon-seg-wrap {
-  padding: 0 32rpx;
-}
-
-.mon-seg {
-  display: flex;
-  background: var(--color-type-bg);
-  border-radius: var(--radius-sm);
-  padding: 4rpx;
-  height: 88rpx;
-  box-sizing: border-box;
-}
-
-.mon-seg-item {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8rpx;
-  font-size: 26rpx;
-  color: var(--color-text-secondary);
-  font-weight: 500;
-  border-radius: calc(var(--radius-sm) - 2rpx);
-  transition: all 0.2s ease;
-}
-
-.mon-seg-active {
-  background: var(--color-card);
-  color: var(--color-text-primary);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
-}
-
-.mon-seg-count {
-  font-size: 22rpx;
-  color: var(--color-text-tertiary);
-  font-weight: 500;
-  line-height: 1;
-}
-
-.mon-seg-active .mon-seg-count {
-  color: var(--color-text-secondary);
-}
-
-/* 搜索栏 */
+/* 三级搜索栏：80rpx 高（输入框规格，不适用按钮触控规则）
+   清除按钮单独 88rpx 热区 */
 .mon-search-wrap {
   display: flex;
   align-items: center;
-  padding: 0 32rpx;
+  padding: 0 32rpx 12rpx;
   gap: 12rpx;
 }
 
 .mon-search-bar {
   flex: 1;
-  height: 88rpx;
+  height: 72rpx;
   background: var(--color-muted);
   border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   padding: 0 16rpx;
   gap: 10rpx;
+  overflow: visible; /* 允许清除按钮溢出以扩展触控热区 */
 }
 
 .mon-search-ico {
@@ -146,16 +133,17 @@
 .mon-search-input {
   flex: 1;
   min-width: 0;
-  height: 88rpx;
-  font-size: 28rpx;
+  height: 72rpx;
+  font-size: 26rpx;
   color: var(--color-text-primary);
 }
 
 .mon-search-placeholder {
   color: var(--color-text-tertiary);
-  font-size: 28rpx;
+  font-size: 26rpx;
 }
 
+/* 清除按钮：88rpx 触控热区（铁律），视觉上在 72rpx 搜索栏内居中溢出 */
 .mon-search-clear {
   width: 88rpx;
   height: 88rpx;
@@ -223,13 +211,13 @@
 }
 
 .mon-empty-tx {
-  font-size: 32rpx;
-  font-weight: 500;
+  font-size: var(--font-title-3);
+  font-weight: var(--font-weight-medium);
   color: var(--color-text-secondary);
 }
 
 .mon-empty-sub {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-tertiary);
   margin-top: 12rpx;
   line-height: 1.5;
@@ -240,9 +228,10 @@
   margin-top: 32rpx;
 }
 
-/* ============ 列表 ============ */
+/* ============ 列表 ============
+   左右 32rpx 与搜索栏、说明条、分段控件统一对齐 */
 .mon-list {
-  padding: 8rpx 24rpx 40rpx;
+  padding: 8rpx 32rpx 40rpx;
 }
 
 .mon-site-card {
@@ -271,8 +260,8 @@
 .mon-site-name {
   flex: 1;
   min-width: 0;
-  font-size: 32rpx;
-  font-weight: 600;
+  font-size: var(--font-title-3);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
   line-height: 1.4;
   word-break: break-all;
@@ -287,7 +276,7 @@
 
 /* 标签（我负责等辅助标签，区别于状态胶囊） */
 .mon-tag {
-  padding: 3rpx 12rpx;
+  padding: var(--space-1) var(--space-4);
   border-radius: var(--radius-xs);
   white-space: nowrap;
 }
@@ -360,16 +349,36 @@
   color: var(--color-info);
 }
 
+/* 过渡态：中性灰（等待首次数据 / 配置待完成 / 周期待设置 / 未接入） */
+.mon-status-not_connected,
+.mon-status-awaiting_first_frame,
+.mon-status-raw_received_config_pending,
+.mon-status-interval_unconfigured,
+.mon-status-waiting_first_valid,
+.mon-status-default,
+.mon-status-unknown {
+  background: var(--color-type-bg);
+}
+.mon-status-not_connected .mon-status-tx,
+.mon-status-awaiting_first_frame .mon-status-tx,
+.mon-status-raw_received_config_pending .mon-status-tx,
+.mon-status-interval_unconfigured .mon-status-tx,
+.mon-status-waiting_first_valid .mon-status-tx,
+.mon-status-default .mon-status-tx,
+.mon-status-unknown .mon-status-tx {
+  color: var(--color-type-text);
+}
+
 /* 站点编号 */
 .mon-site-code {
-  font-size: 24rpx;
+  font-size: var(--font-footnote);
   color: var(--color-text-tertiary);
   line-height: 1;
 }
 
 /* 原因 */
 .mon-site-reason {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-secondary);
   line-height: 1.5;
   word-break: break-all;
@@ -396,7 +405,7 @@
 }
 
 .mon-meta-tx {
-  font-size: 24rpx;
+  font-size: var(--font-footnote);
   color: var(--color-text-tertiary);
   line-height: 1;
 }
@@ -410,8 +419,17 @@
   border-top: 0.5rpx solid var(--color-divider);
 }
 
+/* 紧凑尾部（无监测/纯目录卡）：去掉分隔线和上边距，箭头融入卡片
+   不制造"缺了一整行数据"的空白高度 */
+.mon-site-bottom--compact {
+  padding-top: 0;
+  border-top: none;
+  justify-content: flex-end;
+  margin-top: -4rpx;
+}
+
 .mon-factor-count {
-  font-size: 24rpx;
+  font-size: var(--font-footnote);
   color: var(--color-text-secondary);
 }
 
@@ -452,15 +470,15 @@
 
 .mon-neutral-title {
   display: block;
-  font-size: 26rpx;
-  font-weight: 600;
+  font-size: var(--font-callout);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-secondary);
   margin-bottom: 4rpx;
 }
 
 .mon-neutral-sub {
   display: block;
-  font-size: 24rpx;
+  font-size: var(--font-footnote);
   color: var(--color-text-tertiary);
   line-height: 1.5;
 }
@@ -508,192 +526,211 @@
 }
 
 /* ============ 试剂模式 ============ */
-.ro-filter-bar {
-  position: sticky;
-  top: 128rpx;
-  z-index: 10;
-  background: var(--color-background);
-  padding: 12rpx 0 8rpx;
+/* 注：试剂筛选直接消费全局 .segment-control，见 .segment-wrap */
+
+/* 站点分组列表 */
+.ro-group-list {
+  padding: 8rpx 0 0;
 }
 
-.ro-filter-scroll {
-  white-space: nowrap;
-  padding: 0 28rpx;
+/* 站点组 */
+.ro-site-group {
+  margin: 0 32rpx 16rpx;
+  background: var(--color-card);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
 }
 
-.ro-filter-chips {
-  display: inline-flex;
-  gap: 12rpx;
-}
-
-.ro-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12rpx 28rpx;
-  background: var(--color-type-bg);
-  min-height: 88rpx;
-  box-sizing: border-box;
-  border-radius: var(--radius-full);
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.ro-chip:active {
-  opacity: 0.85;
-}
-
-.ro-chip--active {
-  background: var(--color-primary);
-}
-
-.ro-chip--active .ro-chip-tx {
-  color: var(--color-primary-foreground);
-  font-weight: 500;
-}
-
-.ro-chip-tx {
-  font-size: 26rpx;
-  color: var(--color-text-secondary);
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
-.ro-list {
-  padding: 12rpx 32rpx 0;
-}
-
-.ro-card {
-  padding: 28rpx;
-  margin-bottom: 20rpx;
-}
-
-.ro-site-name {
-  display: block;
-  font-size: 30rpx;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  line-height: 1.3;
-  margin-bottom: 16rpx;
-  word-break: break-word;
-}
-
-.ro-reagent-head {
+/* 站点组标题（可点击展开/收起，热区 ≥ 88rpx）
+   左右 padding 32rpx（设计系统 list-row 标准边距） */
+.ro-site-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10rpx;
+  padding: 24rpx 32rpx;
+  min-height: 88rpx;
+  box-sizing: border-box;
+  transition: opacity 0.15s ease;
 }
 
-.ro-reagent-name {
-  font-size: 28rpx;
-  font-weight: 500;
-  color: var(--color-text-primary);
+.ro-site-header:active {
+  opacity: 0.85;
+}
+
+.ro-site-header-left {
   flex: 1;
   min-width: 0;
-  white-space: normal;
-  word-break: break-word;
-  margin-right: 16rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
 }
 
-/* 多原因标签组 */
-.ro-reason-tags {
+.ro-site-header-name {
+  font-size: var(--font-headline);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.ro-site-header-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 8rpx;
-  margin-bottom: 14rpx;
 }
 
-.ro-reason-tag {
-  display: inline-flex;
+.ro-site-header-right {
+  display: flex;
   align-items: center;
-  padding: 4rpx 12rpx;
-  border-radius: var(--radius-full);
+  gap: 8rpx;
   flex-shrink: 0;
+  margin-left: 16rpx;
 }
 
-.ro-reason-tx {
-  font-size: 22rpx;
-  font-weight: 500;
-  line-height: 1.4;
+.ro-site-header-count {
+  font-size: var(--font-footnote);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-error);
   white-space: nowrap;
 }
 
-/* 关注原因语义色：类型本身不绑定颜色 */
-.ro-reason--expired { background: var(--color-error-surface); }
-.ro-reason--expired .ro-reason-tx { color: var(--color-error); }
+.ro-site-header-count--muted {
+  color: var(--color-text-tertiary);
+}
 
-.ro-reason--failed_qc { background: var(--color-error-surface); }
-.ro-reason--failed_qc .ro-reason-tx { color: var(--color-error); }
+.ro-site-chevron {
+  font-size: 32rpx;
+  color: var(--color-text-tertiary);
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
 
-.ro-reason--expiring { background: var(--color-warning-surface); }
-.ro-reason--expiring .ro-reason-tx { color: var(--color-warning); }
+.ro-site-chevron--up {
+  transform: rotate(90deg);
+}
 
-.ro-reason--low_volume { background: var(--color-warning-surface); }
-.ro-reason--low_volume .ro-reason-tx { color: var(--color-warning); }
+/* 站内试剂行 */
+.ro-reagent-rows {
+  border-top: 1rpx solid var(--color-border);
+}
 
-.ro-reason--pending_qc { background: var(--color-warning-surface); }
-.ro-reason--pending_qc .ro-reason-tx { color: var(--color-warning); }
+.ro-reagent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 32rpx;
+  min-height: 88rpx;
+  box-sizing: border-box;
+  border-bottom: 1rpx solid var(--color-border);
+  gap: 16rpx;
+}
 
-.ro-reagent-meta {
+.ro-reagent-row:last-child {
+  border-bottom: none;
+}
+
+.ro-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+/* 试剂名 + QC 状态 同一行 */
+.ro-row-title {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  flex-wrap: wrap;
+}
+
+.ro-row-name {
+  font-size: var(--font-body);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  line-height: 1.3;
+  word-break: break-word;
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+/* QC 状态标签（独立权威状态，不由 attention_reasons 推断） */
+.ro-row-qc {
+  flex-shrink: 0;
+}
+
+.ro-row-qc--normal { background: var(--color-success-surface); color: var(--color-success); }
+.ro-row-qc--pending { background: var(--color-warning-surface); color: var(--color-warning); }
+.ro-row-qc--failed { background: var(--color-error-surface); color: var(--color-error); }
+.ro-row-qc--unknown { background: var(--color-type-bg); color: var(--color-text-tertiary); }
+
+.ro-row-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 0 8rpx;
-  margin-bottom: 16rpx;
 }
 
-.ro-meta-item {
-  font-size: 24rpx;
+.ro-row-meta-item {
+  font-size: var(--font-footnote);
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
-.ro-meta-dot {
-  font-size: 24rpx;
+.ro-row-meta-dot {
+  font-size: var(--font-footnote);
   color: var(--color-text-disabled);
   margin: 0 4rpx;
 }
 
-/* 操作按钮 */
-.ro-actions {
+.ro-row-tags {
   display: flex;
-  justify-content: flex-end;
-  gap: 16rpx;
-  padding-top: 8rpx;
+  flex-wrap: wrap;
+  gap: 8rpx;
+  margin-top: 2rpx;
 }
 
-.ro-btn {
-  display: inline-flex;
+/* 操作区：按钮真实盒模型 ≥ 88rpx（不使用负 margin 模拟触控区） */
+.ro-row-actions {
+  display: flex;
+  gap: 12rpx;
+  flex-shrink: 0;
+}
+
+.ro-row-btn {
+  display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 28rpx;
-  min-height: 88rpx;
-  border-radius: var(--radius-lg);
+  padding: 0 24rpx;
+  min-height: 88rpx; /* 真实触控热区 ≥ 88rpx，盒模型本身达标 */
+  min-width: 88rpx;  /* 窄按钮也保证 88rpx 方形触控区 */
+  border-radius: var(--radius-md);
+  background: var(--color-type-bg);
   transition: opacity 0.15s ease;
+  box-sizing: border-box;
 }
 
-.ro-btn:active {
+.ro-row-btn:active {
   opacity: 0.85;
 }
 
-.ro-btn--secondary {
-  border: 2rpx solid var(--color-border);
+.ro-row-btn--primary {
+  background: var(--color-primary);
 }
 
-.ro-btn--secondary .ro-btn-tx {
-  color: var(--color-primary);
+.ro-row-btn--primary .ro-row-btn-tx {
+  color: var(--color-primary-foreground);
   font-weight: 500;
 }
 
-.ro-btn--text .ro-btn-tx {
-  color: var(--color-primary);
+.ro-row-btn-tx {
+  font-size: 24rpx;
+  color: var(--color-text-secondary);
   font-weight: 500;
-}
-
-.ro-btn-tx {
-  font-size: 26rpx;
-  line-height: 1.4;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* 骨架屏 */
@@ -781,6 +818,53 @@
 }
 
 /* ============ 底部 Sheet 弹窗 ============ */
+/* 统一 box-sizing，防止 padding 导致横向溢出
+   注：WXSS 不支持 * 通配选择器，此处显式列出所有 sheet 子元素类 */
+.sheet-container,
+.sheet-mask,
+.sheet-handle,
+.sheet-header,
+.sheet-title,
+.sheet-close,
+.sheet-close-ico,
+.sheet-body,
+.sheet-section,
+.sheet-section-title,
+.sheet-info-row,
+.sheet-info-label,
+.sheet-info-value,
+.sheet-field,
+.sheet-field-label,
+.sheet-required,
+.sheet-input-wrap,
+.sheet-input,
+.sheet-input-suffix,
+.sheet-field-error,
+.sheet-error-icon,
+.sheet-picker,
+.sheet-picker-placeholder,
+.sheet-picker-arrow,
+.sheet-textarea-wrap,
+.sheet-textarea,
+.sheet-radio-group,
+.sheet-radio,
+.sheet-radio-dot,
+.sheet-radio-tx,
+.sheet-footer,
+.sheet-btn,
+.sheet-btn-tx,
+.sheet-success,
+.sheet-success-icon,
+.sheet-success-title,
+.sheet-success-sub,
+.sheet-success-btn,
+.sheet-success-btn-tx,
+.sheet-server-error,
+.sheet-server-error-tx,
+.sheet-server-error-retry {
+  box-sizing: border-box;
+}
+
 .sheet-mask {
   position: fixed;
   left: 0;
@@ -796,9 +880,9 @@
 
 .sheet-container {
   background: var(--color-card);
-  border-top-left-radius: 24rpx;
-  border-top-right-radius: 24rpx;
-  max-height: 75vh;
+  border-top-left-radius: 32rpx; /* 设计系统 bottom-sheet: 16px 顶部圆角 */
+  border-top-right-radius: 32rpx;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律：不超过屏幕 75% */
   display: flex;
   flex-direction: column;
   position: relative;
@@ -807,10 +891,9 @@
 .sheet-handle {
   width: 72rpx;
   height: 8rpx;
-  border-radius: 4rpx;
-  background: var(--color-text-disabled);
-  opacity: 0.3;
-  margin: 16rpx auto 0;
+ border-radius: 4rpx;
+  background: var(--color-divider); /* 设计系统: separator 色 */
+  margin: 0 auto var(--space-5);
   flex-shrink: 0;
 }
 
@@ -823,8 +906,8 @@
 }
 
 .sheet-title {
-  font-size: 34rpx;
-  font-weight: 600;
+  font-size: var(--font-title-2);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
 }
 
@@ -866,17 +949,23 @@
 .sheet-body {
   flex: 1;
   min-height: 0;
-  padding: 0 32rpx 32rpx;
+  padding: 8rpx 32rpx 24rpx;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .sheet-section {
-  margin-bottom: 32rpx;
+  margin-bottom: 28rpx;
+}
+
+.sheet-section:last-child {
+  margin-bottom: 0;
 }
 
 .sheet-section-title {
   display: block;
-  font-size: 24rpx;
-  font-weight: 500;
+  font-size: var(--font-caption-1);
+  font-weight: var(--font-weight-medium);
   color: var(--color-text-tertiary);
   letter-spacing: 0.5rpx;
   text-transform: uppercase;
@@ -897,15 +986,15 @@
 }
 
 .sheet-info-label {
-  font-size: 28rpx;
+  font-size: var(--font-body);
   color: var(--color-text-secondary);
   flex-shrink: 0;
 }
 
 .sheet-info-value {
-  font-size: 28rpx;
+  font-size: var(--font-body);
   color: var(--color-text-primary);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   text-align: right;
   flex: 1;
   min-width: 0;
@@ -919,11 +1008,16 @@
   margin-bottom: 24rpx;
 }
 
+.sheet-field:last-child {
+  margin-bottom: 0;
+}
+
+/* 表单标签：text-secondary */
 .sheet-field-label {
   display: block;
-  font-size: 26rpx;
+  font-size: var(--font-body);
   color: var(--color-text-secondary);
-  margin-bottom: 12rpx;
+  margin-bottom: 10rpx;
 }
 
 .sheet-required {
@@ -931,31 +1025,33 @@
   margin-left: 4rpx;
 }
 
+/* filled 输入框：40px = 80rpx 高，圆角 10px = radius-sm，灰底无边框
+   设计系统 input filled variant */
 .sheet-input-wrap {
   display: flex;
   align-items: center;
-  height: 88rpx;
-  background: var(--color-type-bg);
-  border-radius: var(--radius-md);
+  height: 80rpx;
+  background: var(--color-muted);
+  border-radius: var(--radius-sm);
   padding: 0 24rpx;
-  border: 2rpx solid transparent;
-  transition: border-color 0.15s ease;
+  border: none; /* filled 变体无边框 */
 }
 
+/* error 态：加 error 色描边 */
 .sheet-field--error .sheet-input-wrap {
-  border-color: var(--color-error);
+  box-shadow: 0 0 0 2rpx var(--color-error);
 }
 
 .sheet-input {
   flex: 1;
   min-width: 0;
-  height: 88rpx;
-  font-size: 28rpx;
+  height: 80rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-primary);
 }
 
 .sheet-input-suffix {
-  font-size: 26rpx;
+  font-size: var(--font-body);
   color: var(--color-text-tertiary);
   margin-left: 12rpx;
   flex-shrink: 0;
@@ -965,9 +1061,9 @@
   display: flex;
   align-items: center;
   gap: 6rpx;
-  font-size: 24rpx;
+  font-size: var(--font-caption-1);
   color: var(--color-error);
-  margin-top: 10rpx;
+  margin-top: 8rpx;
   line-height: 1.4;
 }
 
@@ -986,13 +1082,15 @@
   flex-shrink: 0;
 }
 
-/* Picker */
+/* Picker — 与 filled input 同高同字号 */
 .sheet-picker {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex: 1;
-  height: 88rpx;
+  height: 80rpx;
+  font-size: var(--font-callout);
+  color: var(--color-text-primary);
 }
 
 .sheet-picker-placeholder {
@@ -1005,18 +1103,18 @@
   line-height: 1;
 }
 
-/* Textarea */
+/* Textarea — filled 风格，灰底小圆角 */
 .sheet-textarea-wrap {
-  background: var(--color-type-bg);
-  border-radius: var(--radius-md);
-  padding: 20rpx 24rpx;
+  background: var(--color-muted);
+  border-radius: var(--radius-sm);
+  padding: 16rpx 24rpx;
   min-height: 140rpx;
 }
 
 .sheet-textarea {
   width: 100%;
-  min-height: 100rpx;
-  font-size: 28rpx;
+  min-height: 108rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-primary);
   line-height: 1.6;
 }
@@ -1070,9 +1168,9 @@
 }
 
 .sheet-radio-tx {
-  font-size: 28rpx;
+  font-size: var(--font-body);
   color: var(--color-text-primary);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 /* 底部操作栏 */
@@ -1105,7 +1203,7 @@
 
 .sheet-btn--ghost .sheet-btn-tx {
   color: var(--color-text-secondary);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .sheet-btn--primary {
@@ -1114,7 +1212,7 @@
 
 .sheet-btn--primary .sheet-btn-tx {
   color: var(--color-primary-foreground);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 .sheet-btn--disabled {
@@ -1123,25 +1221,21 @@
 }
 
 .sheet-btn-tx {
-  font-size: 30rpx;
+  font-size: var(--font-callout);
   line-height: 1.4;
 }
 
 /* 成功态覆盖层 */
 .sheet-success {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  background: var(--color-card);
-  border-top-left-radius: 24rpx;
-  border-top-right-radius: 24rpx;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 80rpx 48rpx;
+  background: var(--color-card);
+  border-top-left-radius: 24rpx;
+  border-top-right-radius: 24rpx;
 }
 
 .sheet-success-icon {
@@ -1166,14 +1260,14 @@
 }
 
 .sheet-success-title {
-  font-size: 34rpx;
-  font-weight: 600;
+  font-size: var(--font-title-2);
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
   margin-bottom: 12rpx;
 }
 
 .sheet-success-sub {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-text-secondary);
   text-align: center;
   line-height: 1.5;
@@ -1191,9 +1285,9 @@
 }
 
 .sheet-success-btn-tx {
-  font-size: 28rpx;
+  font-size: var(--font-body);
   color: var(--color-primary-foreground);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 /* 提交中遮罩态：不可点击关闭（视觉无变化，行为由 JS 控制） */
@@ -1219,7 +1313,7 @@
 }
 
 .sheet-server-error-tx {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-error);
   flex: 1;
   line-height: 1.4;
@@ -1228,9 +1322,9 @@
 }
 
 .sheet-server-error-retry {
-  font-size: 26rpx;
+  font-size: var(--font-callout);
   color: var(--color-error);
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   flex-shrink: 0;
   margin-left: 16rpx;
   min-width: 88rpx;

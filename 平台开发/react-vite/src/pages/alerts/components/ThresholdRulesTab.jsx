@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Button, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Switch, Tag, Tooltip, Typography, message } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../../../services/api';
 import { metricMap } from '../../../services/constants';
 import { useAuth } from '../../../hooks/useAuth';
 import { StatusStrip, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../../components/WorkspacePage';
+import { HoverGifIcon } from '../../../components/HoverGifIcon';
 
 const { Text } = Typography;
 const RULE_TYPE_LABEL = { static: '静态阈值', spc: 'SPC 动态', historical: '历史基线', correlated: '关联阈值' };
@@ -96,7 +97,7 @@ export default function ThresholdRulesTab() {
     { title: '告警级别', dataIndex: 'severity', width: 100, render: (value) => { const level = SEVERITY_OPTIONS.find((item) => item.value === value); return <Tag color={level?.color || 'default'}>{level?.label || value}</Tag>; } },
     { title: '阈值条件', key: 'conditions', render: (_, rule) => { const condition = rule.conditions || {}; if (rule.rule_type === 'static') return `${condition.min ?? '-'} ~ ${condition.max ?? '-'}`; if (rule.rule_type === 'spc') return `均值=${condition.mean ?? '-'}，标准差=${condition.std ?? '-'}`; return <Text type="secondary">复杂规则</Text>; } },
     { title: '已启用', dataIndex: 'enabled', width: 90, render: (value) => <Switch size="small" checked={Boolean(value)} disabled /> },
-    { title: '操作', key: 'actions', width: 120, fixed: 'right', render: (_, rule) => <Space><Tooltip title={isAdmin ? '编辑' : '仅管理员可操作'}><Button aria-label={`编辑规则${rule.name}`} size="small" icon={<EditOutlined />} onClick={() => openEdit(rule)} disabled={!isAdmin} /></Tooltip><Popconfirm title={`确认删除规则“${rule.name}”？`} description="删除后不再参与告警判断，且无法撤销。" onConfirm={() => remove(rule)} disabled={!isAdmin}><Button aria-label={`删除规则${rule.name}`} size="small" icon={<DeleteOutlined />} danger disabled={!isAdmin} /></Popconfirm></Space> },
+    { title: '操作', key: 'actions', width: 120, fixed: 'right', render: (_, rule) => <Space><Tooltip title={isAdmin ? '编辑' : '仅管理员可操作'}><Button aria-label={`编辑规则${rule.name}`} size="small" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => openEdit(rule)} disabled={!isAdmin} /></Tooltip><Popconfirm title={`确认删除规则“${rule.name}”？`} description="删除后不再参与告警判断，且无法撤销。" onConfirm={() => remove(rule)} disabled={!isAdmin}><Button aria-label={`删除规则${rule.name}`} size="small" icon={<HoverGifIcon name="trash-bin" size={14} />} danger disabled={!isAdmin} /></Popconfirm></Space> },
   ];
 
   return <div className="workspace-embedded-page">

@@ -80,7 +80,7 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                 INSERT INTO user_roles VALUES
                     (1,'admin'), (1,'operator'), (2,'operator'), (2,'reviewer'),
                     (3,'reviewer'), (4,'operator');
-                INSERT INTO user_sites VALUES (2,1), (3,2), (4,1);
+                INSERT INTO user_sites VALUES (2,1), (4,1);
                 INSERT INTO sites (id,name) VALUES (1,'site one'), (2,'site two');
                 INSERT INTO data_reviews (id,site_id,metric,status,auto_result,smart_result)
                     VALUES (100,1,'ph','smart_reviewed','reject','suspicious');
@@ -199,29 +199,14 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
         self.assertEqual(admin.status_code, 200, admin.json)
         self.assertEqual(admin.json['id'], 200)
 
-    def test_attachment_review_rejects_mixed_site_batch_atomically_and_admin_can_cross_site(self):
+    def test_zero_site_reviewer_can_review_company_attachments_but_site_less_rows_still_block(self):
         payload = {
             'approve_ids': [10, 20],
             'reject_ids': [],
             'approve_item_ids': [10, 20],
         }
-        denied = self.client.post('/api/operation-attachments/review',
-                                  headers=self.headers('secondary-reviewer-token'), json=payload)
-        self.assertEqual(denied.status_code, 403, denied.json)
-        with self.temporary_db() as db:
-            attachments = db.execute('SELECT id,review_status,reviewer_id FROM operation_attachments ORDER BY id').fetchall()
-            items = db.execute('SELECT id,review_status,reviewer_id FROM insp_plan_items ORDER BY id').fetchall()
-            notices = db.execute("""SELECT source_id,is_read FROM notifications
-                WHERE source_type='inspection_review_batch' ORDER BY source_id""").fetchall()
-        self.assertEqual([(row['id'], row['review_status'], row['reviewer_id']) for row in attachments],
-                         [(10, 'pending', None), (20, 'pending', None), (30, 'pending', None)])
-        self.assertEqual([(row['id'], row['review_status'], row['reviewer_id']) for row in items],
-                         [(10, 1, None), (20, 1, None), (30, 1, None)])
-        self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
-                         [('insp_batch_10_1', 0), ('insp_batch_20_2', 0)])
-
         site_less = self.client.post('/api/operation-attachments/review',
-                                     headers=self.headers('secondary-reviewer-token'), json={
+                                     headers=self.headers('out-of-scope-reviewer-token'), json={
                                          'approve_ids': [10, 30],
                                          'reject_ids': [],
                                          'approve_item_ids': [10, 30],
@@ -236,15 +221,19 @@ class MultiRoleNotificationFlowTest(unittest.TestCase):
                          [(10, 1, None), (20, 1, None), (30, 1, None)])
 
         allowed = self.client.post('/api/operation-attachments/review',
-                                   headers=self.headers('dual-admin-token'), json=payload)
+                                   headers=self.headers('out-of-scope-reviewer-token'), json=payload)
         self.assertEqual(allowed.status_code, 200, allowed.json)
         with self.temporary_db() as db:
             attachments = db.execute('SELECT id,review_status,reviewer_id FROM operation_attachments ORDER BY id').fetchall()
             items = db.execute('SELECT id,review_status,reviewer_id FROM insp_plan_items ORDER BY id').fetchall()
+            notices = db.execute("""SELECT source_id,is_read FROM notifications
+                WHERE source_type='inspection_review_batch' ORDER BY source_id""").fetchall()
         self.assertEqual([(row['id'], row['review_status'], row['reviewer_id']) for row in attachments],
-                         [(10, 'approved', 1), (20, 'approved', 1), (30, 'pending', None)])
+                         [(10, 'approved', 3), (20, 'approved', 3), (30, 'pending', None)])
         self.assertEqual([(row['id'], row['review_status'], row['reviewer_id']) for row in items],
-                         [(10, 2, 1), (20, 2, 1), (30, 1, None)])
+                         [(10, 2, 3), (20, 2, 3), (30, 1, None)])
+        self.assertEqual([(row['source_id'], row['is_read']) for row in notices],
+                         [('insp_batch_10_1', 1), ('insp_batch_20_2', 1)])
 
 
 if __name__ == '__main__':

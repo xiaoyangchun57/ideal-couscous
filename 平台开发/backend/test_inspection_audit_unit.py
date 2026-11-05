@@ -139,7 +139,36 @@ class InspectionAuditUnitTest(unittest.TestCase):
                 ALTER TABLE operation_attachments ADD COLUMN evidence_qualification TEXT DEFAULT 'qualified';
                 ALTER TABLE operation_attachments ADD COLUMN evidence_reason TEXT DEFAULT '';
                 ALTER TABLE operation_attachments ADD COLUMN evidence_next_action TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN evidence_basis TEXT DEFAULT 'unknown';
+                ALTER TABLE operation_attachments ADD COLUMN watermark_code TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN sha256_hash TEXT DEFAULT '';
+                ALTER TABLE operation_attachments ADD COLUMN plan_id INTEGER;
+                ALTER TABLE operation_attachments ADD COLUMN item_id INTEGER;
+                ALTER TABLE operation_attachments ADD COLUMN item_name TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN category TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN frequency TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN calibrator TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN calibration_values TEXT DEFAULT '';
+                ALTER TABLE insp_plan_items ADD COLUMN inspection_standard TEXT DEFAULT '';
                 ALTER TABLE insp_plan_items ADD COLUMN need_review INTEGER DEFAULT 0;
+                CREATE TABLE photo_capture_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE,
+                    user_id INTEGER, site_id INTEGER, plan_id INTEGER, item_id INTEGER,
+                    work_order_id INTEGER, issued_at TEXT, expires_at TEXT, used_at TEXT,
+                    attachment_id INTEGER, gps_lat REAL, gps_lng REAL, distance_m REAL,
+                    rework_required_at TEXT, capture_source TEXT,
+                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT ''
+                );
+                UPDATE operation_attachments
+                   SET capture_source='camera', evidence_basis='server_capture_session',
+                       watermark_code='AUDIT-' || id, plan_id=10, item_id=source_id;
+                INSERT INTO photo_capture_sessions
+                    (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                     attachment_id,capture_source,nonce,anti_counterfeit_code)
+                SELECT 'audit-token-' || id,uploader_id,site_id,10,source_id,
+                       datetime('now','localtime'),datetime('now','localtime','+15 minute'),
+                       datetime('now','localtime'),id,'camera','audit-nonce-' || id,'AUDIT-' || id
+                  FROM operation_attachments;
                 INSERT INTO inspection_checkins VALUES
                     (1, 'Site A', 2, 'Operator', datetime('now','localtime'), 28.6800, 115.7300);
             ''')
@@ -327,6 +356,89 @@ class InspectionAuditUnitTest(unittest.TestCase):
         self.assertIn(202, batch['attachment_ids'])
         self.assertNotIn(208, batch['attachment_ids'])
 
+    def test_eight_submitted_photos_persist_reenter_and_reach_audit_without_site_photo_zero(self):
+        self.prepare_last_item_submission()
+        extra_specs = [(208 + index, chr(ord('d') + index)) for index in range(7)]
+        with app_module.get_db() as db:
+            db.executemany("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,filename,review_status,source_type,source_id,
+                 is_deleted,review_required,created_at,extra_json,file_type,evidence_qualification,
+                 capture_source,evidence_basis,watermark_code,plan_id,item_id,item_name)
+                VALUES (?,?,?,?,?,'pending','site_photo',0,0,0,datetime('now'),?,'image','qualified',
+                        'camera','server_capture_session',?,?,?,?)""", [
+                (photo_id, f'/uploads/{suffix}.jpg', 1, 2, f'{suffix}.jpg',
+                 '{"material_role":"pending_inspection","plan_id":10,"item_id":101}',
+                 f'AUDIT-{photo_id}', 10, 101, 'Pump')
+                for photo_id, suffix in extra_specs
+            ])
+            db.executemany("""INSERT INTO photo_capture_sessions
+                (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,capture_source,nonce,anti_counterfeit_code)
+                VALUES (?,2,1,10,101,datetime('now'),datetime('now','+15 minute'),datetime('now'),
+                        ?,'camera',?,?)""", [
+                (f'audit-token-{photo_id}', photo_id, f'audit-nonce-{photo_id}',
+                 f'AUDIT-{photo_id}')
+                for photo_id, _ in extra_specs
+            ])
+
+        selected_ids = [202] + [photo_id for photo_id, _ in extra_specs]
+        selected_urls = ['/uploads/c.jpg'] + [
+            f'/uploads/{suffix}.jpg' for _, suffix in extra_specs]
+
+        submitted = self.client.post(
+            '/api/mobile/submit-item',
+            headers={'Authorization': 'Bearer operator-token'},
+            json={
+                'item_id': 101, 'plan_id': 10, 'result': 'normal',
+                'remark': 'eight-photo item',
+                'photo_urls': json.dumps(selected_urls),
+                '_idempotency_key': 'eight-photo-final-item',
+            },
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+
+        with app_module.get_db() as db:
+            placeholders = ','.join('?' for _ in selected_ids)
+            rows = db.execute("""SELECT id,source_type,source_id,plan_id,item_id,item_name,
+                    site_id,uploader_id,review_required,review_status,extra_json
+                FROM operation_attachments WHERE id IN (""" + placeholders + ") ORDER BY id",
+                selected_ids).fetchall()
+            leaked = db.execute("""SELECT COUNT(*) FROM operation_attachments
+                WHERE id IN (""" + placeholders + ") AND source_type='site_photo' "
+                "AND COALESCE(source_id,0)=0", selected_ids).fetchone()[0]
+            item = db.execute("""SELECT photo_urls,actual_photos,review_status
+                                  FROM insp_plan_items WHERE id=101""").fetchone()
+        self.assertEqual(len(rows), 8)
+        self.assertEqual(leaked, 0)
+        self.assertEqual(json.loads(item['photo_urls']), selected_urls)
+        self.assertEqual((item['actual_photos'], item['review_status']), (8, 1))
+        for row in rows:
+            self.assertEqual(
+                (row['source_type'], row['source_id'], row['plan_id'], row['item_id'],
+                 row['item_name'], row['site_id'], row['uploader_id'],
+                 row['review_required'], row['review_status']),
+                ('inspection', 101, 10, 101, 'Pump', 1, 2, 1, 'pending'),
+            )
+            self.assertEqual(json.loads(row['extra_json'])['material_role'], 'formal')
+
+        reentered = self.client.get(
+            '/api/mobile/execution-plans/10/sites/1?scope=result',
+            headers={'Authorization': 'Bearer operator-token'},
+        )
+        self.assertEqual(reentered.status_code, 200, reentered.json)
+        reentered_items = [item for category in reentered.json['categories']
+                           for item in category['items']]
+        reentered_item = next(item for item in reentered_items if item['item_id'] == 101)
+        self.assertEqual(json.loads(reentered_item['photo_urls']), selected_urls)
+        self.assertEqual(reentered_item['actual_photos'], 8)
+
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
+        self.assertTrue(set(selected_ids).issubset(set(batch['attachment_ids'])))
+        details = [row for row in batch['attachment_details'] if row['id'] in selected_ids]
+        self.assertEqual(len(details), 8)
+
     def test_checkout_after_approval_does_not_reopen_review(self):
         self.prepare_last_item_submission()
         self.assertEqual(self.submit_last_item().status_code, 200)
@@ -391,7 +503,7 @@ class InspectionAuditUnitTest(unittest.TestCase):
         )
         self.assertEqual({row['id'] for row in batch['attachment_details']}, {200, 201, 202})
 
-    def test_audit_excludes_formal_attachment_not_in_current_item_photo_urls(self):
+    def test_audit_uses_durable_attachment_link_instead_of_photo_url_projection(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO operation_attachments
                 (id,stored_path,site_id,uploader_id,filename,review_status,source_type,source_id,
@@ -401,16 +513,83 @@ class InspectionAuditUnitTest(unittest.TestCase):
         pending = self.client.get('/api/audit/pending', headers=self.headers())
         self.assertEqual(pending.status_code, 200, pending.json)
         batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
-        self.assertNotIn(209, batch['attachment_ids'])
-        self.assertNotIn(209, {row['id'] for row in batch['attachment_details']})
-        rejected = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
-            'attachment_ids': [209], 'action': 'reject', 'reject_reason': '不应进入当前集合',
-        })
-        self.assertEqual((rejected.status_code, rejected.json.get('code')),
-                         (409, 'ATTACHMENT_NOT_IN_ITEM_SUBMISSION'))
+        self.assertIn(209, batch['attachment_ids'])
+        self.assertIn(209, {row['id'] for row in batch['attachment_details']})
+
+    def test_audit_accepts_real_ticketed_upload_projection(self):
         with app_module.get_db() as db:
-            self.assertEqual(db.execute(
-                'SELECT review_status FROM operation_attachments WHERE id=209').fetchone()[0], 'pending')
+            db.execute("""UPDATE insp_plan_items SET photo_urls=? WHERE id=100""", (json.dumps([
+                'http://198.51.100.8:5000/uploads/a.jpg?ticket=signed.a',
+                'http://198.51.100.8:5000/uploads/b.jpg?ticket=signed.b',
+            ]),))
+            db.execute("""UPDATE insp_plan_items SET photo_urls=? WHERE id=101""", (json.dumps([
+                'https://ops.example/uploads/c.jpg?ticket=signed.c',
+            ]),))
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
+        self.assertEqual(set(batch['attachment_ids']), {200, 201, 202})
+
+    def test_audit_accepts_historical_absolute_projection_without_ticket(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items SET photo_urls=? WHERE id=100""", (json.dumps([
+                'http://legacy-host:5000/uploads/a.jpg',
+                'https://archive.example/uploads/b.jpg',
+            ]),))
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
+        self.assertEqual(set(batch['attachment_ids']), {200, 201, 202})
+        details = {row['id']: row for row in batch['attachment_details']}
+        self.assertEqual(details[200]['stored_path'], '/uploads/a.jpg')
+        self.assertEqual(details[201]['stored_path'], '/uploads/b.jpg')
+        self.assertIn('?ticket=', details[200]['display_url'])
+        self.assertIn('?ticket=', details[201]['display_url'])
+
+    def test_audit_signs_real_site_photo_storage_path_for_web_review(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET stored_path='/uploads/site_photos/a.jpg' WHERE id=200""")
+        pending = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(pending.status_code, 200, pending.json)
+        batch = next(row for row in pending.json if row['source_type'] == 'inspection_batch')
+        detail = next(row for row in batch['attachment_details'] if row['id'] == 200)
+        self.assertEqual(detail['source_type'], 'inspection')
+        self.assertTrue(detail['display_url'].startswith('/uploads/site_photos/a.jpg?ticket='), detail)
+
+    def test_review_uses_durable_attachment_relation_not_photo_url_projection(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items SET photo_urls=? WHERE id=100""", (json.dumps([
+                'http://198.51.100.8:5000/uploads/expired-display.jpg?ticket=expired.ticket',
+            ]),))
+            db.execute("""UPDATE operation_attachments
+                SET plan_id=10,item_id=100,
+                    extra_json='{"material_role":"formal","plan_id":10,"item_id":100}'
+                WHERE id=201""")
+        response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
+            'approve_ids': [201], 'reject_ids': [], 'approve_item_ids': [],
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            status = db.execute(
+                'SELECT review_status FROM operation_attachments WHERE id=201').fetchone()[0]
+        self.assertEqual(status, 'approved')
+
+    def test_review_rejects_conflicting_durable_attachment_relation_without_side_effect(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE operation_attachments
+                SET plan_id=10,item_id=101,
+                    extra_json='{"material_role":"formal","plan_id":10,"item_id":101}'
+                WHERE id=201""")
+        response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
+            'approve_ids': [201], 'reject_ids': [], 'approve_item_ids': [],
+        })
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'ATTACHMENT_RELATION_MISMATCH')
+        with app_module.get_db() as db:
+            status = db.execute(
+                'SELECT review_status FROM operation_attachments WHERE id=201').fetchone()[0]
+        self.assertEqual(status, 'pending')
 
     def test_final_submit_review_creation_failure_rolls_back_every_write(self):
         self.prepare_last_item_submission()
@@ -566,18 +745,50 @@ class InspectionAuditUnitTest(unittest.TestCase):
             ])
 
         headers = {'Authorization': 'Bearer operator-token'}
+        with app_module.get_db() as db:
+            before_get = {row['source_id']: row['is_read'] for row in db.execute(
+                """SELECT source_id,is_read FROM notifications
+                    WHERE source_type IN ('photo_review','replacement_review')""").fetchall()}
         first = self.client.get('/api/notifications?status=unread', headers=headers)
         second = self.client.get('/api/notifications?status=unread', headers=headers)
         self.assertEqual((first.status_code, second.status_code), (200, 200))
         with app_module.get_db() as db:
-            states = {row['source_id']: row['is_read'] for row in db.execute(
+            after_get = {row['source_id']: row['is_read'] for row in db.execute(
                 """SELECT source_id,is_read FROM notifications
                     WHERE source_type IN ('photo_review','replacement_review')""").fetchall()}
             rework_count = db.execute("""SELECT COUNT(*) FROM notifications
                 WHERE user_id=2 AND source_type='inspection_rework' AND is_read=0""").fetchone()[0]
-        self.assertEqual(states, {'200': 1, '201': 1, '999': 0})
+        self.assertEqual(before_get, {'200': 0, '201': 0, '999': 0})
+        self.assertEqual(after_get, before_get)
         self.assertEqual(rework_count, 1)
         self.assertEqual(first.json['unread_count'], second.json['unread_count'])
+
+        maintenance_lock = f'{self.db_path}.notification-maintenance.lock'
+        self.addCleanup(lambda: os.path.exists(maintenance_lock) and os.unlink(maintenance_lock))
+        with mock.patch.object(app_module, 'DB_PATH', self.db_path):
+            maintained = app_module.notification_maintenance_job()
+            self.assertEqual(maintained['status'], 'completed')
+            self.assertEqual(maintained['redundant_photo_rows'], 2)
+            with app_module.get_db() as db:
+                after_maintenance = {row['source_id']: row['is_read'] for row in db.execute(
+                    """SELECT source_id,is_read FROM notifications
+                        WHERE source_type IN ('photo_review','replacement_review')""").fetchall()}
+                rework_count = db.execute("""SELECT COUNT(*) FROM notifications
+                    WHERE user_id=2 AND source_type='inspection_rework' AND is_read=0""").fetchone()[0]
+            self.assertEqual(after_maintenance, {'200': 1, '201': 1, '999': 0})
+            self.assertEqual(rework_count, 1)
+
+            repeated = app_module.notification_maintenance_job()
+            self.assertEqual(repeated['status'], 'completed')
+            self.assertEqual(repeated['redundant_photo_rows'], 0)
+            with app_module.get_db() as db:
+                after_repeated = {row['source_id']: row['is_read'] for row in db.execute(
+                    """SELECT source_id,is_read FROM notifications
+                        WHERE source_type IN ('photo_review','replacement_review')""").fetchall()}
+                rework_count = db.execute("""SELECT COUNT(*) FROM notifications
+                    WHERE user_id=2 AND source_type='inspection_rework' AND is_read=0""").fetchone()[0]
+            self.assertEqual(after_repeated, after_maintenance)
+            self.assertEqual(rework_count, 1)
 
     def test_rework_notifications_are_separate_across_plan_and_site(self):
         with app_module.get_db() as db:
@@ -662,9 +873,67 @@ class InspectionAuditUnitTest(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 409, response.json)
         self.assertEqual(response.json['code'], 'ATTACHMENT_ITEM_REQUIRED')
+        self.assertEqual(response.json['photo_ids'], [203])
+        self.assertEqual(response.json['missing_relation'], 'plan_id/item_id/site_id/uploader')
+        self.assertTrue(response.json['next_action'])
         with app_module.get_db() as db:
             status = db.execute('SELECT review_status FROM operation_attachments WHERE id=203').fetchone()[0]
         self.assertEqual(status, 'pending')
+
+    def test_uniquely_provable_historical_attachment_is_relinked_before_review(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,
+                 source_type,source_id,is_deleted,review_required,file_type,created_at,
+                 evidence_qualification,plan_id,item_id,item_name,extra_json)
+                VALUES (203,'/uploads/recoverable.jpg',1,2,'Analyzer','recoverable.jpg','pending',
+                        'inspection',0,0,0,'image',datetime('now'),'qualified',10,100,'Analyzer',
+                        '{"material_role":"pending_inspection","plan_id":10,"item_id":100}')""")
+
+        response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
+            'attachment_ids': [203], 'action': 'approve',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT source_type,source_id,plan_id,item_id,item_name,
+                    site_id,uploader_id,review_required,review_status,extra_json
+                FROM operation_attachments WHERE id=203""").fetchone()
+        self.assertEqual(
+            (attachment['source_type'], attachment['source_id'], attachment['plan_id'],
+             attachment['item_id'], attachment['item_name'], attachment['site_id'],
+             attachment['uploader_id'], attachment['review_required'], attachment['review_status']),
+            ('inspection', 100, 10, 100, 'Analyzer', 1, 2, 1, 'approved'),
+        )
+        metadata = json.loads(attachment['extra_json'])
+        self.assertEqual(metadata['classification_source'], 'inspection_item_recovery')
+        self.assertEqual(metadata['material_role'], 'formal')
+
+    def test_ambiguous_historical_attachment_is_rejected_without_mislink(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO operation_attachments
+                (id,stored_path,site_id,uploader_id,description,filename,review_status,
+                 source_type,source_id,is_deleted,review_required,file_type,created_at,
+                 evidence_qualification,plan_id,item_id,item_name,extra_json)
+                VALUES (203,'/uploads/ambiguous.jpg',1,2,'Ambiguous','ambiguous.jpg','pending',
+                        'inspection',0,0,0,'image',datetime('now'),'qualified',10,100,'Analyzer',
+                        '{"material_role":"pending_inspection","plan_id":10,"item_id":101}')""")
+
+        response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
+            'attachment_ids': [203], 'action': 'reject', 'reject_reason': '归属不明',
+        })
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'ATTACHMENT_ITEM_REQUIRED')
+        self.assertEqual(response.json['photo_ids'], [203])
+        self.assertEqual(response.json['missing_relation'], 'plan_id/item_id/site_id/uploader')
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT source_type,source_id,plan_id,item_id,review_required,
+                    review_status,extra_json FROM operation_attachments WHERE id=203""").fetchone()
+        self.assertEqual(
+            (attachment['source_type'], attachment['source_id'], attachment['plan_id'],
+             attachment['item_id'], attachment['review_required'], attachment['review_status']),
+            ('inspection', 0, 10, 100, 0, 'pending'),
+        )
+        self.assertEqual(json.loads(attachment['extra_json'])['item_id'], 101)
 
     def test_replacement_required_item_without_pending_attachment_is_not_a_review_batch(self):
         with app_module.get_db() as db:
@@ -677,6 +946,21 @@ class InspectionAuditUnitTest(unittest.TestCase):
             card['source_type'] == 'inspection_batch' and card.get('plan_id') == 10
             for card in response.json
         ))
+
+    def test_photo_optional_submitted_items_still_form_review_batch(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE insp_plan_items
+                SET required_photos=0, actual_photos=0, photo_urls='[]', review_status=1
+                WHERE plan_id=10""")
+            db.execute("""UPDATE operation_attachments SET review_status='approved'
+                WHERE source_type='inspection' AND source_id IN (100,101)""")
+        response = self.client.get('/api/audit/pending', headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.json)
+        batch = next(card for card in response.json
+                     if card['source_type'] == 'inspection_batch' and card.get('plan_id') == 10)
+        self.assertEqual(batch['item_ids'], [100, 101])
+        self.assertEqual(batch['attachment_ids'], [])
+        self.assertEqual(batch['pending_photo_count'], 0)
 
     def test_legacy_per_photo_notifications_are_archived_without_new_batch(self):
         with app_module.get_db() as db:

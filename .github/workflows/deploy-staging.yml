@@ -3,7 +3,7 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 # 对应《验收环境搭建.md》3.2「添加工作流文件」的落地版。
 #
 # 为什么不能照抄原文的工作流：
-#   1) 本仓库没有 staging 分支，验收分支是 acceptance；默认分支是 integration，不是 main。
+#   1) 本仓库没有 staging 分支，验收分支和默认分支统一为 acceptance。
 #      原文 `git push origin main` 推上去也不会触发任何验收流程。
 #   2) 本仓库没有注册任何 self-hosted runner（yanhuo / feiniu 标签都不存在），
 #      runs-on: [self-hosted, ...] 的 job 会永久排队，永远不会执行。
@@ -18,7 +18,7 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 #     它是真正的部署者。主动出站，不需要 runner 注册令牌，也不需要公网端口。
 #
 # 若以后改用 staging 分支，需同步把飞牛 deploy-feiniu-poller.sh 里的 BRANCH 改成 staging。
-# 若要把本检查变成 PR 合并门禁，需把本文件合并进默认分支 integration。
+# 当前只在 push / 手动触发时检查；飞牛轮询部署独立运行，不等待此检查结果。
 
 on:
   push:

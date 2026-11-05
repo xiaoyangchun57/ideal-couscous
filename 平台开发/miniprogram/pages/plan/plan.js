@@ -1,6 +1,7 @@
 const api = require('../../services/api.js');
 const { getUser } = require('../../utils/auth.js');
 const { rolesForUser } = require('../../utils/reviewAccess.js');
+const { teamOverviewText } = require('../../utils/round1Wiring.js');
 const {
   filterPlans,
   projectFavoritePlans,
@@ -17,6 +18,9 @@ Page({
   data: {
     canSwitchTeam: false,
     canUseFavorites: false,
+    homeLayout: '', hasReviewRole: false, hasAdminRole: false,
+    reviewCount: 0,
+    teamOverviewText: '查看团队整体巡检进度',
     mainState: 'initial_loading',
     mainError: '',
     scope: 'mine',
@@ -67,17 +71,22 @@ Page({
     this.setData({
       canSwitchTeam: isAdmin || isReviewer,
       canUseFavorites: isOperator,
-      favoritesVisible: isOperator
+      favoritesVisible: isOperator,
+      homeLayout: isOperator ? 'operator' : (isReviewer ? 'reviewer' : (isAdmin ? 'admin' : '')),
+      hasReviewRole: isReviewer,
+      hasAdminRole: isAdmin,
     });
     this.setFavoriteSheetTabBarHidden(!!this.data.favoriteSheet.open);
     this.loadMain();
     if (isOperator) this.loadFavorites();
+    if (isReviewer) this.loadReviewEntry();
   },
 
   onPullDownRefresh() {
     const tasks = [this.loadMain(true)];
     if (this.data.canUseFavorites) tasks.push(this.loadFavorites(true));
-    Promise.all(tasks).then(() => wx.stopPullDownRefresh(), () => wx.stopPullDownRefresh());
+    if (this.data.hasReviewRole) tasks.push(this.loadReviewEntry());
+    return Promise.all(tasks).then(() => wx.stopPullDownRefresh(), () => wx.stopPullDownRefresh());
   },
 
   _beginRequest(kind) {
@@ -102,7 +111,7 @@ Page({
     if (this._actionInFlight) this._actionInFlight.delete(key);
   },
 
-  _navigateOnce(url) {
+  _navigateOnce(url, onFailure) {
     if (this._alive === false || this._navigationInFlight) return false;
     this._navigationInFlight = true;
     let finished = false;
@@ -111,8 +120,12 @@ Page({
       finished = true;
       this._navigationInFlight = false;
     };
+    const fail = () => {
+      if (onFailure) onFailure();
+      release();
+    };
     try {
-      wx.navigateTo({ url, fail: release, complete: release });
+      wx.navigateTo({ url, fail, complete: release });
     } catch (error) {
       release();
       return false;
@@ -121,6 +134,10 @@ Page({
   },
 
   setFavoriteSheetTabBarHidden(hidden) {
+    if (hidden === false && this._favoriteSheetTabBarHidden !== true) {
+      this._favoriteSheetTabBarHidden = false;
+      return;
+    }
     if (this._favoriteSheetTabBarHidden === hidden) return;
     const method = hidden ? 'hideTabBar' : 'showTabBar';
     if (typeof wx !== 'undefined' && typeof wx[method] === 'function') wx[method]({ animation: false });
@@ -135,7 +152,8 @@ Page({
       mainState: 'ready',
       mainError: '',
       allPlans,
-      visiblePlans: filterPlans(allPlans, this.data.filter)
+      visiblePlans: filterPlans(allPlans, this.data.filter),
+      teamOverviewText: scope === 'team' ? teamOverviewText(rows) : this.data.teamOverviewText,
     };
   },
 
@@ -181,6 +199,19 @@ Page({
     const targetScope = currentOrPending === 'team' ? 'mine' : 'team';
     this.setData({ pendingScope: targetScope });
     this.loadScope(targetScope);
+  },
+
+  loadReviewEntry() {
+    return api.auditPending().then(rows => {
+      if (this._alive === false) return false;
+      this.setData({ reviewCount: Array.isArray(rows) ? rows.length : 0 });
+      return true;
+    }).catch(() => false);
+  },
+
+  goReview() {
+    if (!this.data.hasReviewRole) return false;
+    return this._navigateOnce('/pages/review/view');
   },
 
   loadScope(targetScope) {

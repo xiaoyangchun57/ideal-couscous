@@ -38,7 +38,8 @@ function addOp(type, data) {
     const existing = list.find((operation) => operation.type === 'checkin'
       && belongsToOwner(operation, ownerUserId)
       && operation.syncStatus === 'pending'
-      && String(operation.data.site_id) === String(data.site_id));
+      && String(operation.data.site_id) === String(data.site_id)
+      && String(operation.data.plan_id || '') === String(data.plan_id || ''));
     if (existing) {
       data._idempotency_key = existing.id;
       return existing.id;

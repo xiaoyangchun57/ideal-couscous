@@ -18,7 +18,7 @@ global.wx = {
 };
 
 const api = require('../services/api.js');
-const originals = { siteTasks: api.siteTasks, siteProfile: api.siteProfile, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory };
+const originals = { siteTasks: api.siteTasks, siteProfile: api.siteProfile, stationMonitoringOverview: api.stationMonitoringOverview, partsInventory: api.partsInventory, calibrate: api.calibrate };
 require('../pages/site/site.js');
 
 function createPage() {
@@ -36,7 +36,17 @@ function createPage() {
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="task-status/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-primary checkin-btn/);
     assert.match(wxml, /wx:if="\{\{site\.can_calibrate\}\}"/);
-    assert.match(wxml, /wx:if="\{\{monitoringPublic && monitoringSource\}\}"/);
+    assert.match(wxml, /wx:if="\{\{monitoringIntent\}\}"/);
+    assert.match(wxml, /wx:elif="\{\{monitoringUnavailable\}\}"/);
+    assert.match(wxml, /wx:elif="\{\{monitoringPublic && monitoringSource\}\}"/);
+    assert.match(wxml, /最新结果/);
+    assert.match(wxml, /结果时间/);
+    assert.doesNotMatch(wxml, /最近检测周期|周期未配置/);
+    assert.doesNotMatch(wxml, /各因子最近可用值|各项可能来自不同检测周期/);
+    assert.match(wxml, /site\.monitoring\.latest_result_at/);
+    assert.match(wxml, /site\.monitoring\.latest_results/);
+    assert.match(wxml, /item\.standard_value_display[^<]+item\.standard_value/);
+    assert.doesNotMatch(wxml, /toFixed\(3\)/);
     assert.match(wxml, /wx:if="\{\{!readOnlySource\}\}" class="btn-ghost parts-apply-btn/);
     assert.match(wxml, /bindtap="onNavigate">导航到站/);
     assert.match(wxml, /!site && monitoringError/);
@@ -64,7 +74,26 @@ function createPage() {
       profileCalls += 1;
       return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', can_calibrate: true } });
     };
-    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({ site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true }, monitoring: { latest_values: [], axes: {} } }); };
+    api.stationMonitoringOverview = id => { monitoringCalls += 1; return Promise.resolve({
+      site: { id: Number(id), name: '万松站', code: 'WS-01', monitoring_status_label: '未接入', can_calibrate: true },
+      monitoring: {
+        latest_cycle: {
+          status: 'review_required', scheduled_at: '2026-10-21T12:00:00+08:00',
+          arrived_count: 3, formed_count: 2, expected_count: 4,
+          factors: [{ business_metric: 'ph', status: 'missing' }],
+        },
+        factors: [
+          { business_metric: 'ph', factor_name_cn: 'pH', standard_unit: '' },
+          { business_metric: 'ammonia', factor_name_cn: '氨氮', standard_unit: 'mg/L' },
+        ],
+        latest_values: [{
+          business_metric: 'ph', factor_name_cn: 'pH', standard_value: 7.23,
+          standard_value_display: '7.2300', standard_unit: '',
+          observed_at: '2026-10-21T08:00:00+08:00', status: 'value',
+        }],
+        axes: {},
+      },
+    }); };
     api.partsInventory = () => {
       inventoryCalls += 1;
       return Promise.resolve([]);
@@ -92,6 +121,8 @@ function createPage() {
     const staleSourcePage = createPage();
     staleSourcePage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
     await flush();
+    assert.equal(staleSourcePage.data.monitoringIntent, true);
+    assert.equal(staleSourcePage.data.monitoringUnavailable, true);
     assert.equal(staleSourcePage.data.monitoringSource, false);
     assert.equal(profileCalls, 2);
     assert.equal(monitoringCalls, 0, 'old source without an enabled capability cannot bypass the gate');
@@ -103,6 +134,20 @@ function createPage() {
     assert.equal(monitoringPage.data.readOnlySource, true);
     assert.equal(monitoringPage.data.monitoringSource, true);
     assert.equal(monitoringPage.data.site.can_calibrate, true);
+    assert.equal(monitoringPage.data.monitoringIntent, true);
+    assert.equal(monitoringPage.data.site.monitoring.latest_cycle.arrived_count_display, 3);
+    assert.equal(monitoringPage.data.site.monitoring.latest_cycle.status_label, '结果待核对');
+    assert.equal(monitoringPage.data.site.monitoring.latest_result_at, '2026-10-21T08:00:00+08:00');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[0].status, 'value');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[0].standard_value_display, '7.2300');
+    assert.equal(monitoringPage.data.site.monitoring.latest_results[1].status, 'missing');
+
+    api.stationMonitoringOverview = () => Promise.reject({ status: 403, error: 'forbidden' });
+    const gatedPage = createPage();
+    gatedPage.onLoad({ site_id: '20', source: 'responsible_sites_monitoring' });
+    await flush(); await flush();
+    assert.equal(gatedPage.data.monitoringUnavailable, true);
+    assert.deepEqual(gatedPage.data.site.monitoring.latest_values, []);
 
     const pending = [];
     api.stationMonitoringOverview = () => new Promise(resolve => pending.push(resolve));
@@ -157,6 +202,15 @@ function createPage() {
 
     const inspection = fs.readFileSync(path.join(__dirname, '../pages/inspection/inspection.js'), 'utf8');
     assert.match(inspection, /\/pages\/site\/site\?site_id=' \+ this\.data\.selSiteId \+ '&source=inspection_readonly'/);
+    const siteSource = fs.readFileSync(path.join(__dirname, '../pages/site/site.js'), 'utf8');
+    const serviceSource = fs.readFileSync(path.join(__dirname, '../services/api.js'), 'utf8');
+    assert.match(siteSource, /expected_old_lat:\s*expectedOldLat/);
+    assert.match(siteSource, /expected_old_lng:\s*expectedOldLng/);
+    assert.match(siteSource, /_idempotency_key:\s*calibrationKey/);
+    assert.match(siteSource, /SITE_LOCATION_CHANGED[\s\S]{0,120}loadSite\(s\.id\)/);
+    assert.match(serviceSource,
+      /calibrate:[\s\S]{0,180}\/calibrate'[\s\S]{0,180}\{ queue: false \}/,
+      '位置校准失败必须留在当前操作，不得进入后台失败队列后迟到执行');
     console.log('siteReadonlySource tests passed');
   } finally {
     Object.assign(api, originals);

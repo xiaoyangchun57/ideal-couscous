@@ -132,7 +132,7 @@
   justify-content: center;
   font-size: 22rpx;
   font-weight: 500;
-  padding: 4rpx 14rpx;
+  padding: var(--space-1) var(--space-4);
   border-radius: var(--radius-xs);
   line-height: 1.4;
   flex-shrink: 0;
@@ -352,7 +352,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
 }
@@ -362,7 +362,7 @@
   height: 8rpx;
   background: var(--color-divider);
   border-radius: 4rpx;
-  margin: 16rpx auto;
+  margin: 0 auto var(--space-5);
   flex-shrink: 0;
 }
 
@@ -370,7 +370,7 @@
   flex: 0 1 auto;
   height: 0;
   overflow-y: auto;
-  max-height: calc(85vh - 300rpx);
+  max-height: calc(75vh - 300rpx);
 }
 
 .sheet-content-spacer {
@@ -821,23 +821,161 @@
   flex-shrink: 0;
 }
 
-/* 备件申请 Sheet 底栏：横向双按钮 */
-.parts-apply-sheet .sheet-bottom-bar {
+/* ============================================================
+   v11 现场P0：用车 / 备件两张申请弹窗统一规范
+   依据设计库 bottom-sheet / action-bar / button / input /
+   textarea / switch / list-row + SPACING：
+   - 操作类 Sheet 横向 padding 32rpx（--space-8）
+   - 全部间距消费 --space-*，不硬编码
+   - 所有规则双类限定在两弹窗内，工单详情 om-sheet 不受影响
+   ============================================================ */
+
+/* 把手：8rpx 上 + 20rpx 下 */
+.parts-apply-sheet .sheet-handle,
+.wo-vehicle-apply-sheet .sheet-handle {
+  margin: var(--space-2) auto var(--space-5);
+}
+
+/* 头部：横向 32rpx，标题区下 24rpx */
+.parts-apply-sheet .sheet-header,
+.wo-vehicle-apply-sheet .sheet-header {
+  padding: 0 var(--space-8) var(--space-6);
+  min-height: 0;
+}
+
+/* ---- 用车弹窗 ---- */
+/* 上下文卡 / 选择车辆卡 */
+.wo-vehicle-apply-sheet .wo-detail-card {
+  padding: 0 var(--space-8);
+  margin-bottom: var(--space-5);
+}
+.wo-vehicle-apply-sheet .wo-detail-row {
+  padding: var(--space-5) 0;
+}
+.wo-vehicle-apply-sheet .wo-detail-card .wo-detail-row:first-child {
+  border-top: none;
+}
+
+/* 决策行：list-row with-subtitle 口径，整行满足 88rpx 触控 */
+.wo-vehicle-apply-sheet .wo-toggle-row {
+  margin: 0 var(--space-8) var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  gap: var(--space-6);
+  border-radius: var(--radius-lg);
+}
+
+/* 字段：label 14px medium secondary，标签与控件间距 12rpx */
+.wo-vehicle-apply-sheet .wo-detail-field {
+  margin: 0 var(--space-8) var(--space-5);
+  gap: var(--space-3);
+}
+.wo-vehicle-apply-sheet .wo-detail-field-label {
+  font-size: var(--font-body);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+}
+
+/* ---- 备件弹窗（wos-* 与工单详情共用，必须双类隔离）---- */
+.parts-apply-sheet .wop-group {
+  padding: 0 var(--space-8) var(--space-3);
+}
+.parts-apply-sheet .wos-divider {
+  margin: var(--space-3) var(--space-8) var(--space-6);
+}
+.parts-apply-sheet .wos-group-title {
+  font-size: var(--font-body);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-3);
+  padding: 0;
+}
+.parts-apply-sheet .wos-info-row {
+  padding: var(--space-5) 0;
+}
+.parts-apply-sheet .wos-field {
+  padding: 0;
+  margin-bottom: var(--space-5);
+}
+.parts-apply-sheet .wos-field-label {
+  font-size: var(--font-body);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-3);
+}
+.parts-apply-sheet .wop-picker-row {
+  padding: var(--space-5) 0;
+  min-height: 88rpx;
+}
+.parts-apply-sheet .wop-input {
+  min-height: 88rpx; /* 触控铁律优先于 input.json 40px */
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-md); /* input tokens/CHECKLIST 口径 10px */
+  background: var(--color-muted);
+  font-size: var(--font-title-3);
+}
+.parts-apply-sheet .wop-note {
+  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-footnote);
+  line-height: 1.5;
+}
+
+/* ---- 文本域（两弹窗共用）----
+   破例：textarea.json min-height 为 120px（240rpx），适用于独立表单页；
+   资源申请是 75vh 受限的短表单，v11 产品/设计裁决取 144rpx（约 3 行）
+   + auto-height 随内容增长，避免短弹窗内大空框密度失衡。 */
+.wo-vehicle-apply-sheet .wo-detail-textarea,
+.parts-apply-sheet .wos-textarea {
+  min-height: 144rpx;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--color-muted);
+  font-size: var(--font-title-3);
+  line-height: 1.5;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ---- 底部动作栏：action-bar 口径 padding 24/32、gap 24、安全区叠加 ---- */
+.parts-apply-sheet .sheet-bottom-bar,
+.wo-vehicle-apply-sheet .sheet-bottom-bar {
   display: flex;
   flex-direction: row;
-  gap: 20rpx;
+  padding: var(--space-6) var(--space-8);
+  padding-bottom: calc(var(--space-6) + env(safe-area-inset-bottom));
+  gap: var(--space-6);
 }
 
-.parts-apply-sheet .btn-lg {
+/* 按钮 lg：button.json 48px=96rpx、15px、medium、radius-lg */
+.parts-apply-sheet .btn-lg,
+.wo-vehicle-apply-sheet .btn-lg {
   flex: 1;
   width: auto;
-  min-height: 88rpx;
-  line-height: 88rpx;
-  height: auto;
+  height: 96rpx;
+  min-height: 96rpx;
+  line-height: 96rpx;
+  font-size: var(--font-title-3);
+  font-weight: var(--font-weight-medium);
+  border-radius: var(--radius-lg);
 }
-
-.parts-apply-sheet .btn-primary.btn-lg {
+.parts-apply-sheet .btn-primary.btn-lg,
+.wo-vehicle-apply-sheet .btn-primary.btn-lg {
   flex: 2;
+}
+/* ghost 按 button.json：灰底 muted + 深字 + 无边框（纠正页面级白底蓝描边） */
+.parts-apply-sheet .btn-ghost.btn-lg,
+.wo-vehicle-apply-sheet .btn-ghost.btn-lg {
+  flex: 1;
+  background: var(--color-muted);
+  color: var(--color-text-primary);
+  border: none;
+}
+/* 单按钮态（无需车辆）：满宽 */
+.parts-apply-sheet .sheet-bottom-bar--single .btn-lg,
+.wo-vehicle-apply-sheet .sheet-bottom-bar--single .btn-lg {
+  flex: 1;
+  width: 100%;
 }
 
 /* 按钮 lg */
@@ -935,7 +1073,7 @@
 .wos-level-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4rpx 12rpx;
+  padding: var(--space-1) var(--space-4);
   background: var(--color-error-surface);
   color: var(--color-error);
   border-radius: var(--radius-xs);
@@ -1255,7 +1393,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -1267,11 +1405,14 @@
   height: 8rpx;
   background: var(--color-divider);
   border-radius: 4rpx;
-  margin: 16rpx auto;
+  margin: 0 auto var(--space-5);
   flex-shrink: 0;
 }
 
-/* 头部 */
+.wo-detail-header {
+  /* 头部 */
+}
+
 .sheet-header {
   display: flex;
   align-items: center;
@@ -1306,6 +1447,23 @@
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* v23 现场P0：用车/备件申请弹窗正文塌缩修复
+   历史三处同名 .sheet-scroll 级联后仍残留 height:0（本文件上方早期规则），
+   flex:0 1 auto 的内容驱动模型因此失效，scroll-view 实际高度为 0、正文不可见。
+   双类特异性（0,2,0）覆盖三处单类残留，仅作用于两个申请弹窗；
+   工单详情走 .om-sheet.workorder-detail-sheet 高特异性规则，不受影响。
+   模型：短内容随内容收束（无底部真空），长内容到 75vh 上限后收缩滚动，底栏常驻。 */
+.wo-vehicle-apply-sheet .sheet-scroll,
+.parts-apply-sheet .sheet-scroll,
+.no-action-sheet .sheet-scroll {
+  flex: 0 1 auto;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .sheet-content-spacer {
@@ -1402,6 +1560,38 @@
   color: var(--color-text-primary);
   line-height: 1.55;
   font-weight: 500;
+}
+
+/* 阶段块语义色（纯展示，分支数据全部来自服务端 actions.primary / 详情状态）
+   action：有待办主动作（接单/到场签到/开始处置/提交核验），蓝面强调
+   stale：详情过期需刷新，黄面；error：详情读取失败，红面 */
+.wos-phase--action {
+  background: var(--color-info-surface);
+}
+.wos-phase--action .wos-phase-label {
+  color: var(--color-info);
+}
+.wos-phase--stale {
+  background: var(--color-warning-surface);
+}
+.wos-phase--stale .wos-phase-label {
+  color: var(--color-warning);
+}
+.wos-phase--error {
+  background: var(--color-error-surface);
+}
+.wos-phase--error .wos-phase-label {
+  color: var(--color-error);
+}
+
+/* 底栏内的提交门槛说明（如缺处置影像），与 disabled 主按钮配对 */
+.wos-action-hint {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 24rpx;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+  text-align: center;
 }
 
 /* 分隔线 */
@@ -1664,7 +1854,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -1812,6 +2002,31 @@
   line-height: 1.4;
 }
 
+.workorder-detail-sheet .wos-resource-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 18rpx;
+}
+
+.workorder-detail-sheet .wos-resource-btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 72rpx;
+  margin: 0;
+  padding: 0 16rpx;
+  border: 1.5rpx solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  color: var(--color-primary);
+  font-size: 26rpx;
+  font-weight: 500;
+  line-height: 72rpx;
+}
+
+.workorder-detail-sheet .wos-resource-btn::after {
+  border: 0;
+}
+
 /* 问题描述 */
 .workorder-detail-sheet .wos-desc {
   font-size: 28rpx;
@@ -1881,6 +2096,53 @@
 
 .workorder-detail-sheet .wos-upload-btn::after {
   border: none;
+}
+
+.workorder-detail-sheet .wos-photo-draft {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin: 4rpx 0 16rpx;
+  padding: 12rpx;
+  border: 1rpx solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-muted);
+}
+
+.workorder-detail-sheet .wos-photo-draft-image {
+  width: 112rpx;
+  height: 112rpx;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+}
+
+.workorder-detail-sheet .wos-photo-draft-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.workorder-detail-sheet .wos-photo-draft-status,
+.workorder-detail-sheet .wos-photo-draft-error {
+  display: block;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.workorder-detail-sheet .wos-photo-draft-status {
+  color: var(--color-text-secondary);
+}
+
+.workorder-detail-sheet .wos-photo-draft-error {
+  color: var(--color-error);
+}
+
+.workorder-detail-sheet .wos-photo-retry {
+  width: auto;
+  min-height: 52rpx;
+  line-height: 52rpx;
+  margin: 8rpx 0 0;
+  padding: 0 20rpx;
+  font-size: 24rpx;
 }
 
 /* --- 影像网格（处置影像） --- */
@@ -2077,19 +2339,46 @@
   margin-top: 12rpx;
 }
 
+.workorder-detail-sheet .wos-no-action-btn {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.no-action-retention {
+  margin: 0 40rpx 20rpx;
+  padding: 20rpx 24rpx;
+  border-radius: var(--radius-md);
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  font-size: 26rpx;
+  line-height: 1.5;
+}
+
+.no-action-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.no-action-actions .btn-ghost,
+.no-action-actions .btn-primary {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ============================================================
  *  10.2 返修：工单详情视觉收口
- *  - 双类选择器覆盖全局 88vh，短内容紧凑、长内容单滚动
+ *  - 双类选择器覆盖全局 75vh，短内容紧凑、长内容单滚动
  *  - 时间线按 tone 语义着色（done/current/pending）
  *  - 状态标签：设计系统 surface chip 兜底
  * ============================================================ */
 
-/* --- 根容器高度：内容驱动，上限 85vh ---
+/* --- 根容器高度：内容驱动，上限 75vh（设计系统 bottom-sheet 铁律）---
    双类选择器（特异性 0,2,0）覆盖全局 .om-sheet 单类（0,1,0）
-   短内容随内容收束，消除底部空白；长内容到上限后原生 scroll-view 接管 */
+   短内容随内容收束，消除底部空白；长内容到上限后原生 scroll-view 接管
+   注意：此 height:auto 是"内容收束"方案，与 om-sheet 固定高+flex 方案并存，勿混用 */
 .om-sheet.workorder-detail-sheet {
   height: auto;
-  max-height: 85vh;
+  max-height: 75vh;
 }
 
 /* --- 滚动层：flex-basis:auto 让高度随内容，min-height:0 允许收缩时滚动 ---

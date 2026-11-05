@@ -73,12 +73,24 @@ test('a successful write remains successful when the following refresh fails', (
   assert.match(inspectionItemRefreshNotice(false), /已保存.*刷新失败/);
 });
 
-test('item dialog prevents duplicate actions while saving', () => {
+test('item dialog prevents duplicate actions and protects unsaved input', () => {
   const source = fs.readFileSync(path.join(
     import.meta.dirname, 'InspectionSettingsPage.jsx',
   ), 'utf8');
   assert.match(source, /open=\{itemOpen\}[\s\S]*?confirmLoading=\{itemSaving\}/);
-  assert.match(source, /onCancel=\{\(\) => !itemSaving && setItemOpen\(false\)\}/);
+  assert.match(source, /const requestItemClose = \(\) => \{[\s\S]*?if \(itemSaving\) return;/);
+  assert.match(source, /itemForm\.isFieldsTouched\(\)/);
+  assert.match(source, /onCancel=\{requestItemClose\}/);
+  assert.match(source, /放弃未保存的检查项修改/);
+});
+
+test('template dialog protects any changed field before closing', () => {
+  const source = fs.readFileSync(path.join(
+    import.meta.dirname, 'InspectionSettingsPage.jsx',
+  ), 'utf8');
+  assert.match(source, /templateForm\.isFieldsTouched\(\)/);
+  assert.match(source, /onCancel=\{requestTemplateClose\}/);
+  assert.match(source, /放弃未保存的模板修改/);
 });
 
 test('template frequency is explicit, Chinese and leaves legacy values for manual handling', () => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Table, Card, Button, Space, Tag, Typography, message, Modal, Select, Empty,
@@ -6,10 +6,12 @@ import {
 } from 'antd';
 import {
   ReloadOutlined, CheckOutlined, CloseOutlined, ExclamationCircleOutlined,
-  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined, BulbOutlined,
-  StarOutlined, FolderOpenOutlined, DeleteOutlined,
-  ClearOutlined, EditOutlined, PlusOutlined,
+  CarOutlined, ToolOutlined, CalendarOutlined, FileSearchOutlined,
+  StarOutlined, FolderOpenOutlined,
+  ClearOutlined, PlusOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import dayjs from 'dayjs';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
@@ -17,10 +19,10 @@ import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
 import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
-import { replaceReworkWithSchedule, resolveReworkScheduleId } from './planScheduleNavigation';
+import { listLastPage } from '../../utils/listPagination';
 import {
-  DEFAULT_FOLLOW_UP_SCOPE, followUpRecommendationActionPayload, loadFollowUpRecommendations,
-} from './planRecommendationScope';
+  mergePlanEditSites, planEditSitesForDate, replaceReworkWithSchedule, resolveReworkScheduleId,
+} from './planScheduleNavigation';
 import {
   canCancelPlanSchedule,
   groupExecutionPackagesByDate,
@@ -43,6 +45,7 @@ import {
   planPurgeAuditPresentation,
 } from './planAuditPresentation';
 import './PlanSchedulesPage.css';
+import InspectionSettingsPage from '../inspection-settings/InspectionSettingsPage';
 
 const { Text } = Typography;
 
@@ -84,20 +87,38 @@ export default function PlanSchedulesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const userRoles = user?.roles || [user?.role];
   const canApprove = userRoles.some(role => role === 'admin' || role === 'manager');
+  const canViewTeam = userRoles.some(role => role === 'admin' || role === 'manager' || role === 'reviewer');
   const isAdmin = userRoles.includes('admin');
   const canCleanup = userRoles.includes('admin');
   const canUseFavorites = userRoles.includes('operator');
+  const moduleView = searchParams.get('view');
+  const moduleScrollRef = useRef(0);
+
+  const openInspectionSettings = () => {
+    moduleScrollRef.current = document.scrollingElement?.scrollTop || window.scrollY || 0;
+    const next = new URLSearchParams(searchParams);
+    next.set('view', 'inspection-settings');
+    setSearchParams(next);
+  };
+  const closeInspectionSettings = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('view');
+    setSearchParams(next);
+    requestAnimationFrame(() => window.scrollTo({ top: moduleScrollRef.current }));
+  };
 
   const [list, setList] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [teamOverview, setTeamOverview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [teamOverviewError, setTeamOverviewError] = useState('');
-  const [followUpError, setFollowUpError] = useState('');
-  const [followUpScope, setFollowUpScope] = useState(DEFAULT_FOLLOW_UP_SCOPE);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
   const [attentionFilter, setAttentionFilter] = useState(searchParams.get('attention') || undefined);
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || undefined);
+  const listPage = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1);
+  const requestedPageSize = Number.parseInt(searchParams.get('page_size') || '20', 10) || 20;
+  const listPageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
 
   // 详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -120,9 +141,6 @@ export default function PlanSchedulesPage() {
   const [purgeAudits, setPurgeAudits] = useState({ items: [], total: 0, page: 1, pageSize: 20 });
   const [purgeAuditsLoading, setPurgeAuditsLoading] = useState(false);
   const [purgeAuditsError, setPurgeAuditsError] = useState('');
-  const [followUpRecommendations, setFollowUpRecommendations] = useState([]);
-  const [followUpLoading, setFollowUpLoading] = useState(false);
-  const [followUpExpanded, setFollowUpExpanded] = useState(false);
   const [teamOverviewExpanded, setTeamOverviewExpanded] = useState(false);
   const [closingExecution, setClosingExecution] = useState(null);
   const [overdueCloseReason, setOverdueCloseReason] = useState('');
@@ -157,7 +175,6 @@ export default function PlanSchedulesPage() {
   const detailRequestRef = useRef(0);
   const editorRequestRef = useRef(0);
   const cleanupRequestRef = useRef(0);
-  const followUpRequestRef = useRef(0);
   const cleanupActionRef = useRef(false);
   const cancelActionRef = useRef(false);
   const purgeActionRef = useRef(false);
@@ -166,25 +183,44 @@ export default function PlanSchedulesPage() {
 
   const loadList = useCallback(async () => {
     const requestId = ++listRequestRef.current;
+    let correctingPage = false;
     setLoading(true);
     setLoadError('');
     try {
-      const params = [];
-      if (statusFilter) params.push(`status=${statusFilter}`);
-      if (typeFilter) params.push(`schedule_type=${typeFilter}`);
-      if (attentionFilter) params.push(`attention=${attentionFilter}`);
-      const rows = await api.getStrict('/plan-schedules' + (params.length ? '?' + params.join('&') : ''));
+      const params = new URLSearchParams({
+        paginated: '1',
+        page: String(listPage),
+        page_size: String(listPageSize),
+      });
+      if (statusFilter) params.set('status', statusFilter);
+      if (typeFilter) params.set('schedule_type', typeFilter);
+      if (attentionFilter) params.set('attention', attentionFilter);
+      const response = await api.getStrict(`/plan-schedules?${params}`);
       if (mountedRef.current && requestId === listRequestRef.current) {
+        const rows = Array.isArray(response) ? response : response?.items;
+        const total = Array.isArray(response) ? rows.length : Number(response?.total || 0);
+        const lastPage = listLastPage(total, listPageSize);
+        if (total > 0 && listPage > lastPage) {
+          correctingPage = true;
+          setSearchParams((current) => {
+            const next = new URLSearchParams(current);
+            if (lastPage > 1) next.set('page', String(lastPage));
+            else next.delete('page');
+            return next;
+          }, { replace: true });
+          return;
+        }
         setList(Array.isArray(rows) ? rows : []);
+        setListTotal(total);
       }
     } catch (error) {
       if (mountedRef.current && requestId === listRequestRef.current) {
         setLoadError(error.message || '计划列表加载失败');
       }
     } finally {
-      if (mountedRef.current && requestId === listRequestRef.current) setLoading(false);
+      if (mountedRef.current && requestId === listRequestRef.current && !correctingPage) setLoading(false);
     }
-  }, [statusFilter, typeFilter, attentionFilter]);
+  }, [statusFilter, typeFilter, attentionFilter, listPage, listPageSize, setSearchParams]);
 
   const loadPurgeAudits = useCallback(async (page = 1) => {
     if (!isAdmin) return;
@@ -270,54 +306,20 @@ export default function PlanSchedulesPage() {
   }, [cleanupSelected, loadCleanupCandidates, loadList]);
 
   const loadOverview = useCallback(async () => {
-    if (!canApprove) return;
+    if (!canViewTeam) return;
     try {
       setTeamOverview(await api.getStrict('/plan-schedules/overview'));
       setTeamOverviewError('');
     } catch (error) {
       setTeamOverviewError(error?.message || '团队概览加载失败');
     }
-  }, [canApprove]);
-
-  const loadFollowUps = useCallback(async () => {
-    const requestId = ++followUpRequestRef.current;
-    const result = await loadFollowUpRecommendations(
-      api,
-      followUpScope,
-      () => mountedRef.current && requestId === followUpRequestRef.current,
-    );
-    if (!result) return;
-    if (result.followUpRecommendations !== null) setFollowUpRecommendations(result.followUpRecommendations);
-    setFollowUpError(result.error);
-  }, [followUpScope]);
+  }, [canViewTeam]);
 
   const refreshAll = useCallback(() => {
     loadList();
     loadOverview();
-    loadFollowUps();
-  }, [loadList, loadOverview, loadFollowUps]);
+  }, [loadList, loadOverview]);
 
-  const handleFollowUpRecommendation = async (item) => {
-    setFollowUpLoading(true);
-    try {
-      const created = await api.postStrict(
-        '/plan-schedules/follow-up-recommendations',
-        followUpRecommendationActionPayload(followUpScope, item),
-      );
-      if (followUpScope === 'team') {
-        message.success(created?.notified ? '已通知负责人' : '负责人已有未读通知，无需重复通知');
-      } else {
-        message.success('已生成复查草稿；仍需确认资源并提交审批');
-      }
-      refreshAll();
-      if (created?.schedule?.id) openDetail(created.schedule.id);
-    } catch (error) {
-      message.error(error?.message || (followUpScope === 'team'
-        ? '通知失败，请刷新后重试' : '生成草稿失败，请刷新后重试'));
-    } finally {
-      setFollowUpLoading(false);
-    }
-  };
 
   const openFavorites = async () => {
     setFavoritesOpen(true);
@@ -392,7 +394,7 @@ export default function PlanSchedulesPage() {
   }, []);
 
   useEffect(() => { loadList(); }, [loadList]);
-  useEffect(() => { loadOverview(); loadFollowUps(); }, [loadOverview, loadFollowUps]);
+  useEffect(() => { loadOverview(); }, [loadOverview]);
 
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
@@ -404,12 +406,14 @@ export default function PlanSchedulesPage() {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
     else next.delete(key);
+    next.delete('page');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const resetFilters = useCallback(() => {
     const next = new URLSearchParams(searchParams);
     ['status', 'type', 'attention'].forEach((key) => next.delete(key));
+    next.delete('page');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -482,8 +486,7 @@ export default function PlanSchedulesPage() {
       const [siteRows, vehicleRows, partRows, scopeResult] = await Promise.all(requests);
       if (!mountedRef.current || requestId !== editorRequestRef.current) return;
       const authorizedIds = scopeResult?.site_ids ? new Set(scopeResult.site_ids.map(Number)) : null;
-      setEditSites((Array.isArray(siteRows) ? siteRows : siteRows?.sites || [])
-        .filter(site => !authorizedIds || authorizedIds.has(Number(site.id))));
+      setEditSites(mergePlanEditSites(siteRows, schedule, authorizedIds));
       setEditItemOptions({});
       setEditVehicles((Array.isArray(vehicleRows) ? vehicleRows : []).filter(vehicle => vehicle.status !== 'retired'));
       setEditParts(Array.isArray(partRows) ? partRows : []);
@@ -499,6 +502,10 @@ export default function PlanSchedulesPage() {
 
   const selectedEditSiteIds = useMemo(() => [...new Set(Object.values(editDraft?.plan_data || {})
     .flatMap(day => Array.isArray(day?.sites) ? day.sites.map(Number) : []))], [editDraft?.plan_data]);
+  const editSiteById = useMemo(
+    () => new Map(editSites.map(site => [Number(site.id), site])),
+    [editSites],
+  );
 
   useEffect(() => {
     if (!editOpen || !editDraft?.schedule_type) return undefined;
@@ -528,7 +535,8 @@ export default function PlanSchedulesPage() {
           const selected = { ...(day?.inspection_items || {}) };
           (day?.sites || []).forEach(siteId => {
             const key = String(siteId);
-            if (!(key in selected)) {
+            const site = editSiteById.get(Number(siteId));
+            if (!(key in selected) && !site?.is_historical_ended) {
               selected[key] = (options[Number(siteId)] || []).map(item => Number(item.id));
               changed = true;
             }
@@ -544,7 +552,7 @@ export default function PlanSchedulesPage() {
       setEditItemsReady(false);
     });
     return () => { cancelled = true; };
-  }, [editOpen, editDraft?.schedule_type, selectedEditSiteIds.join(','), editItemsReloadKey]);
+  }, [editOpen, editDraft?.schedule_type, editSiteById, selectedEditSiteIds.join(','), editItemsReloadKey]);
 
   const updateEditDay = useCallback((date, patch) => {
     setEditDraft(current => current ? {
@@ -1045,7 +1053,7 @@ export default function PlanSchedulesPage() {
     );
   };
 
-  const hasTeamAttention = canApprove && teamOverview && [
+  const hasTeamAttention = canViewTeam && teamOverview && [
     teamOverview.summary?.overdue_executions,
     teamOverview.summary?.coverage_exceptions,
     teamOverview.summary?.resource_blocks,
@@ -1056,14 +1064,19 @@ export default function PlanSchedulesPage() {
     { key: 'resource', label: '资源阻塞', count: teamOverview?.summary?.resource_blocks || 0, danger: true },
   ].filter(item => item.count > 0);
 
+  if (moduleView === 'inspection-settings' && isAdmin) {
+    return <InspectionSettingsPage embedded onBack={closeInspectionSettings} />;
+  }
+
   return (
     <WorkspacePage
       title="巡检计划"
       subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
       primaryAction={<Space>
+        {isAdmin && <Button icon={<SettingOutlined />} onClick={openInspectionSettings}>检查项设置</Button>}
         {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
         {isAdmin && <Button icon={<FileSearchOutlined />} onClick={openPurgeAudits}>删除记录</Button>}
-        {canCleanup && <Button icon={<DeleteOutlined />} danger onClick={openCleanup}>清理无效数据</Button>}
+        {canCleanup && <Button icon={<HoverGifIcon name="trash-bin" size={14} />} danger onClick={openCleanup}>清理无效数据</Button>}
       </Space>}
       statusItems={[
         { key: 'total', label: '当前结果', value: stats.total, color: tokens.colorText, always: true },
@@ -1076,46 +1089,10 @@ export default function PlanSchedulesPage() {
         { key: 'archived', label: '已归档', value: stats.archived, color: tokens.colorTextSecondary },
       ]}
     >
-      {followUpError && <Alert type="warning" showIcon message={followUpError} action={<Button size="small" onClick={loadFollowUps}>重试</Button>} />}
-      {teamOverviewError && canApprove && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
+      {teamOverviewError && canViewTeam && <Alert type="warning" showIcon message="团队执行概览加载失败，当前不能判断是否没有关注事项" action={<Button size="small" onClick={loadOverview}>重试</Button>} />}
       {supplementTarget && <Alert type="warning" showIcon
         message={`检查项待补传：${supplementTarget.itemName}（计划 #${supplementTarget.planId}，检查项 #${supplementTarget.itemId}）`}
         description="该网页暂不提供补传入口；请在小程序巡检中打开同一计划和站点完成补传。" />}
-
-      {(isAdmin || followUpRecommendations.length > 0) && (
-        <Alert
-          type={followUpRecommendations.length > 0 ? "warning" : "info"}
-          showIcon
-          icon={<BulbOutlined />}
-          message={followUpScope === 'team' ? '团队系统性异常复查' : '我的系统性异常复查'}
-          action={<Space size={4} wrap>
-            {isAdmin && <Button size="small" type="link" onClick={() => {
-              setFollowUpRecommendations([]); setFollowUpError('');
-              setFollowUpScope(scope => scope === 'team' ? 'mine' : 'team');
-            }}>{followUpScope === 'team' ? '返回我的复查' : '查看团队复查'}</Button>}
-            <Button size="small" type="link" onClick={() => setFollowUpExpanded(value => !value)}>
-              {followUpExpanded ? '收起' : `查看 ${followUpRecommendations.length} 条`}
-            </Button>
-          </Space>}
-          description={followUpExpanded && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {!followUpRecommendations.length && <Text type="secondary">当前范围暂无系统性异常复查建议</Text>}
-              {followUpRecommendations.map(item => (
-                <div key={`follow-up-${item.user_id}-${item.site_id}-${item.anomaly_type}`}>
-                  <Text style={{ fontSize: 12 }}>复查建议：{item.user_name} · {item.site_name} · {item.anomaly_type}</Text>
-                  <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-                    {item.window_days} 天内出现 {item.occurrence_count} 次；最近一次 {item.latest_at}；建议由负责人确认本周执行日期
-                  </Text>
-                  <Button size="small" type="link" danger loading={followUpLoading}
-                    onClick={() => handleFollowUpRecommendation(item)}>
-                    {followUpScope === 'team' ? '通知负责人' : '生成复查草稿'}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        />
-      )}
 
       {hasTeamAttention && (
         <>
@@ -1166,6 +1143,21 @@ export default function PlanSchedulesPage() {
           columns={columns}
           emptyType={statusFilter || typeFilter || attentionFilter ? 'filtered' : 'empty'}
           onRefresh={loadList}
+          pagination={{
+            current: listPage,
+            pageSize: listPageSize,
+            total: listTotal,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            disabled: loading,
+            onChange: (nextPage, nextPageSize) => {
+              const next = new URLSearchParams(searchParams);
+              const sizeChanged = nextPageSize !== listPageSize;
+              next.set('page', String(sizeChanged ? 1 : nextPage));
+              next.set('page_size', String(nextPageSize));
+              setSearchParams(next, { replace: true });
+            },
+          }}
           onRow={r => ({ onClick: () => openDetail(r.id), style: { cursor: 'pointer' } })}
         />}
       </section>
@@ -1181,7 +1173,7 @@ export default function PlanSchedulesPage() {
         footer={detail && (canCancelDetail || canEditDetail || canReviewDetail || canPurgeDetail) ? (
           <div className="plan-detail-actions">
             {canPurgeDetail && (
-              <Button danger icon={<DeleteOutlined />} onClick={openPlanPurge}
+              <Button danger icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={openPlanPurge}
                 loading={purgeLoading}>彻底删除无效计划</Button>
             )}
             {canCancelDetail && (
@@ -1189,7 +1181,7 @@ export default function PlanSchedulesPage() {
                 loading={cancelLoading}>取消计划</Button>
             )}
             {canEditDetail && (
-              <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(detail)}>编辑计划</Button>
+              <Button type="primary" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => openEditor(detail)}>编辑计划</Button>
             )}
             {canReviewDetail && (
               <>
@@ -1498,7 +1490,7 @@ export default function PlanSchedulesPage() {
                 return <div className="plan-edit-day" key={date}>
                   <div className="plan-edit-day__header">
                     <Space><Text strong>{date}</Text><Tag>{weekdayOf(date)}</Tag></Space>
-                    <Button type="text" danger icon={<DeleteOutlined />} aria-label={`删除${date}安排`} onClick={() => removeEditDay(date)} />
+                    <Button type="text" danger icon={<HoverGifIcon name="trash-bin" size={14} />} aria-label={`删除${date}安排`} onClick={() => removeEditDay(date)} />
                   </div>
                   <div className="plan-edit-form__row">
                     <div>
@@ -1506,7 +1498,8 @@ export default function PlanSchedulesPage() {
                       <Select mode="multiple" showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
                         value={day.sites || []} placeholder="选择当日巡检站点"
                         onChange={sites => updateEditDay(date, { sites })}
-                        options={editSites.map(site => ({ value: Number(site.id), label: site.name }))} />
+                        options={planEditSitesForDate(editSites, date)
+                          .map(site => ({ value: Number(site.id), label: site.name }))} />
                       {(day.sites || []).map(siteId => {
                         const choices = editItemOptions[Number(siteId)] || [];
                         const selected = day.inspection_items?.[String(siteId)] || [];
@@ -1549,7 +1542,7 @@ export default function PlanSchedulesPage() {
                     <InputNumber min={1} max={9999} precision={0} value={Number(part.quantity || 1)}
                       addonAfter={editParts.find(item => Number(item.id) === Number(part.part_id))?.unit || '件'}
                       onChange={quantity => updateEditPart(index, { quantity: Number(quantity || 1) })} />
-                    <Button danger icon={<DeleteOutlined />} aria-label={`移除备件${index + 1}`} onClick={() => removeEditPart(index)} />
+                    <Button danger icon={<HoverGifIcon name="trash-bin" size={14} />} aria-label={`移除备件${index + 1}`} onClick={() => removeEditPart(index)} />
                   </Space.Compact>
                 ))}
                 {!editDraft.spare_parts?.length && <Text type="secondary">无备件需求</Text>}
@@ -1668,7 +1661,7 @@ export default function PlanSchedulesPage() {
               系统按原计划的相对日期复用站点、车辆和备件，并重新校验冲突；一次性工单、审批和执行记录不会复制。
             </Text>
             <div style={{ textAlign: 'right' }}>
-              <Button danger type="text" icon={<DeleteOutlined />} onClick={deleteFavorite} loading={favoriteLoading}>删除此收藏</Button>
+              <Button danger type="text" icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={deleteFavorite} loading={favoriteLoading}>删除此收藏</Button>
             </div>
           </div>
         )}

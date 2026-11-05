@@ -1,0 +1,68 @@
+<view class="camera-page {{frameOrientation}}">
+  <view class="camera-stage">
+    <view class="camera-frame" style="{{cameraStyle}}">
+      <camera
+        class="camera-preview"
+        device-position="back"
+        flash="{{flashMode}}"
+        resolution="high"
+        bindinitdone="onCameraInit"
+        binderror="onCameraError"
+      ></camera>
+      <cover-view wx:if="{{displayWatermark}}" class="camera-watermark-preview" style="{{watermarkBandStyle}}">
+        <cover-view class="watermark-left">
+          <cover-view class="watermark-site" style="{{watermarkSiteStyle}}">
+            <cover-view class="watermark-line" wx:for="{{watermarkSiteLines}}" wx:key="index">{{item}}</cover-view>
+          </cover-view>
+          <cover-view class="watermark-time" style="{{watermarkTimeStyle}}">{{watermarkCaptureTime}}</cover-view>
+        </cover-view>
+        <cover-view class="watermark-right" style="{{watermarkDetailStyle}}">
+          <cover-view class="watermark-detail">
+            <cover-view class="watermark-line" wx:for="{{watermarkPhotoLines}}" wx:key="index">{{item}}</cover-view>
+          </cover-view>
+          <cover-view class="watermark-detail" style="{{watermarkDetailGapStyle}}">
+            <cover-view class="watermark-line" wx:for="{{watermarkCoordinateLines}}" wx:key="index">{{item}}</cover-view>
+          </cover-view>
+          <cover-view class="watermark-detail" style="{{watermarkDetailGapStyle}}">
+            <cover-view class="watermark-line" wx:for="{{watermarkCodeLines}}" wx:key="index">{{item}}</cover-view>
+          </cover-view>
+        </cover-view>
+      </cover-view>
+    </view>
+  </view>
+
+  <view class="camera-controls">
+    <view class="camera-status {{errorText ? 'is-error' : ''}}">
+      <text>{{statusText}}</text>
+    </view>
+    <button wx:if="{{errorText && !showSettings}}" class="camera-recovery" bindtap="onRetryPreparation">重试</button>
+    <button wx:elif="{{showSettings}}" class="camera-recovery" bindtap="onOpenSettings">去设置</button>
+    <view class="camera-toolbar">
+      <view class="camera-tool-slot">
+        <picker class="camera-picker" mode="selector" range="{{flashOptions}}" range-key="label"
+          value="{{flashOptionIndex}}" disabled="{{capturing}}" bindchange="onFlashModeChange">
+          <view class="camera-tool {{capturing ? 'is-disabled' : ''}}" aria-label="补光模式：{{flashModeLabel}}">
+            <view class="camera-tool-icon flash-icon"></view>
+            <text>{{flashModeLabel}}</text>
+          </view>
+        </picker>
+      </view>
+      <view class="camera-shutter-slot">
+        <button
+          class="camera-shutter {{ready ? 'is-ready' : ''}}"
+          disabled="{{!ready || capturing}}"
+          bindtap="onTakePhoto"
+          aria-label="拍照"
+        ><view class="shutter-core"></view></button>
+      </view>
+      <view class="camera-tool-slot">
+        <button class="camera-tool {{capturing ? 'is-disabled' : ''}}" disabled="{{capturing}}"
+          bindtap="onDisplayWatermarkChange" aria-label="{{displayWatermark ? '关闭画面水印' : '开启画面水印'}}"
+          aria-pressed="{{displayWatermark}}">
+          <view class="camera-tool-icon watermark-icon"><view></view><view></view><view></view></view>
+          <text>{{displayWatermark ? '水印开' : '水印关'}}</text>
+        </button>
+      </view>
+    </view>
+  </view>
+</view>

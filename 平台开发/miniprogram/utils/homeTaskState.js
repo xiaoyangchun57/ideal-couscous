@@ -58,6 +58,7 @@ function projectWorkorder(item) {
   if (!item) return null;
   const value = maps.workorderCn(item);
   const objectId = String(value.order_no || '').trim();
+  if (!objectId) return null;
   return {
     key: `workorder:${objectId || 'unavailable'}`,
     kind: 'workorder',
@@ -121,7 +122,11 @@ function projectRework(site) {
 function homeActions(workorders, alerts, sites) {
   const reworkActions = (Array.isArray(sites) ? sites : [])
     .map(projectRework).filter(Boolean);
-  return [...reworkActions, projectWorkorder(first(workorders)), projectAlert(first(alerts))].filter(Boolean);
+  const actionableStatuses = new Set(['pending', 'accepted', 'dispatched', 'in_progress']);
+  const workorderActions = (Array.isArray(workorders) ? workorders : [])
+    .filter(item => actionableStatuses.has(String(item && item.status || '').toLowerCase()))
+    .map(projectWorkorder).filter(Boolean);
+  return [...reworkActions, ...workorderActions, projectAlert(first(alerts))].filter(Boolean);
 }
 
 function homePackage(workPackage, summary) {
@@ -211,8 +216,20 @@ function projectReagentSummary(response) {
   const rows = response && Array.isArray(response.items) ? response.items : [];
   const count = optionalCount(response, 'concern_count');
   const concernCount = count === null ? rows.length : count;
+  const counts = response && response.status_counts && typeof response.status_counts === 'object'
+    ? response.status_counts : null;
+  const statusCount = key => {
+    if (!counts || !Object.prototype.hasOwnProperty.call(counts, key)) return null;
+    const value = Number(counts[key]);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  };
   return {
     concernCount,
+    expiredCount: statusCount('expired'),
+    expiringCount: statusCount('expiring'),
+    lowVolumeCount: statusCount('low_volume'),
+    pendingQcCount: statusCount('pending_qc'),
+    failedQcCount: statusCount('failed_qc'),
     display: concernCount > 0 ? `${concernCount}项需关注` : '暂无需处理',
     items: rows.slice(0, 2).map(item => ({
       key: `${item.site_id || ''}-${item.id || item.reagent_id || ''}`,

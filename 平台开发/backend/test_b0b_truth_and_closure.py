@@ -106,7 +106,10 @@ class B0BTruthAndClosureTest(unittest.TestCase):
                     site_id INTEGER, site_code TEXT, status TEXT, message TEXT, created_at TEXT
                 );
                 CREATE TABLE vehicles (id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT, status TEXT);
-                CREATE TABLE vehicle_documents (vehicle_id INTEGER, document_type TEXT, valid_until TEXT);
+                CREATE TABLE vehicle_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vehicle_id INTEGER, document_type TEXT, valid_until TEXT
+                );
                 CREATE TABLE vehicle_applications (
                     id INTEGER PRIMARY KEY, vehicle_id INTEGER, applicant_id INTEGER,
                     start_at TEXT, end_at TEXT, destination TEXT, reason TEXT, status TEXT,
@@ -222,13 +225,17 @@ class B0BTruthAndClosureTest(unittest.TestCase):
         with self.temporary_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM data_sources').fetchone()[0], 1)
 
-    def test_reviewer_can_close_own_site_workorder_but_not_other_site(self):
+    def test_reviewer_can_close_company_workorders_without_resource_approval_scope(self):
         stats = self.client.get('/api/audit/stats', headers=self.headers('reviewer-token'))
         self.assertEqual(stats.status_code, 200, stats.json)
-        self.assertEqual(stats.json['workorder_pending'], 1)
+        self.assertEqual(stats.json['workorder_pending'], 2)
 
-        forbidden = self.client.post('/api/workorders/WO-B0B-002/approve', headers=self.headers('reviewer-token'))
-        self.assertEqual(forbidden.status_code, 403, forbidden.json)
+        resource = self.client.post('/api/vehicle/applications/1/approve',
+                                    headers=self.headers('reviewer-token'), json={})
+        self.assertEqual(resource.status_code, 403, resource.json)
+
+        remote = self.client.post('/api/workorders/WO-B0B-002/approve', headers=self.headers('reviewer-token'))
+        self.assertEqual(remote.status_code, 200, remote.json)
 
         rejected = self.client.post('/api/workorders/WO-B0B-001/reject', headers=self.headers('reviewer-token'), json={
             'reason': '请补充处理后仪表读数',

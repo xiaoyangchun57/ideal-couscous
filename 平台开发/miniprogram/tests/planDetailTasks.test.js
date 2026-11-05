@@ -6,6 +6,9 @@ const fs = require('node:fs');
 const pagePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.js');
 const templatePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.wxml');
 const stylePath = path.resolve(__dirname, '../pages/plan-detail/plan-detail.wxss');
+const appConfig = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app.json'), 'utf8'));
+const tabBarPaths = new Set((appConfig.tabBar && appConfig.tabBar.list || [])
+  .map(item => '/' + item.pagePath));
 const apiPath = path.resolve(__dirname, '../services/api.js');
 const inspectionTemplatePath = path.resolve(__dirname, '../pages/inspection/inspection.wxml');
 const maps = require('../services/maps.js');
@@ -21,6 +24,7 @@ let currentUser = null;
 let toasts = [];
 let modals = [];
 let navigations = [];
+let tabSwitches = [];
 const testApp = { globalData: { token: 'token', executionTarget: null } };
 global.getApp = () => testApp;
 global.wx = {
@@ -29,6 +33,10 @@ global.wx = {
   showModal: options => { modals.push(options); },
   reLaunch: () => {},
   navigateTo: options => { navigations.push(options); },
+  switchTab: options => {
+    if (!tabBarPaths.has(options.url)) throw new Error('switchTab target is not a tabBar page');
+    tabSwitches.push(options);
+  },
   stopPullDownRefresh: () => {},
 };
 global.Page = page => { pageDefinition = page; };
@@ -40,6 +48,8 @@ const originalApi = {
   planScheduleDetail: api.planScheduleDetail,
   planScheduleFavorites: api.planScheduleFavorites,
   cancelPlanSchedule: api.cancelPlanSchedule,
+  requestPlanScheduleChange: api.requestPlanScheduleChange,
+  abandonPlanScheduleChange: api.abandonPlanScheduleChange,
 };
 
 function flush() {
@@ -108,6 +118,7 @@ test.afterEach(() => {
   toasts = [];
   modals = [];
   navigations = [];
+  tabSwitches = [];
   testApp.globalData.executionTarget = null;
 });
 
@@ -146,6 +157,66 @@ test('candidate site tasks win over legacy packages and keep same-day sites dist
   assert.deepEqual(result.items.map(item => item.status_cn),
     ['待执行', '部分完成', '已完成', '变更待审']);
   assert.equal(result.items.some(item => item.display_name === '旧内部包'), false);
+  assert.deepEqual(result.items.map(item => item.can_view_result), [false, false, true, false]);
+  assert.equal(result.items[2].result_action_text, '查看记录');
+});
+
+test('completed single-site plan opens the exact read-only field result target', async () => {
+  const detail = detailResponse({
+    generated_site_tasks: [{
+      plan_id: 141, site_id: 362, site_name: '青云水站', execution_date: '2026-10-10',
+      status: 'completed', completed_items: 8, total_items: 8,
+    }],
+  });
+  const page = await loadPage(detail, { id: 7, role: 'operator' });
+  assert.equal(page.data.canViewCompletedResult, true);
+  assert.deepEqual(page.data.completedResultTarget, { executionPlanId: 141, siteId: 362 });
+
+  assert.equal(page.onViewPrimaryResult(), true);
+  assert.deepEqual(testApp.globalData.executionTarget, {
+    executionPlanId: 141,
+    siteId: 362,
+    readOnly: true,
+    source: 'completed_plan_detail',
+  });
+  assert.equal(tabSwitches.length, 0);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].url, '/pages/inspection/inspection');
+
+  navigations[0].fail();
+  assert.equal(testApp.globalData.executionTarget, null);
+  assert.equal(toasts.at(-1).title, '现场记录打开失败，请重试');
+  assert.equal(page.onViewPrimaryResult(), true);
+  assert.equal(navigations.length, 2, 'failed navigation remains retryable');
+  assert.deepEqual(testApp.globalData.executionTarget, {
+    executionPlanId: 141,
+    siteId: 362,
+    readOnly: true,
+    source: 'completed_plan_detail',
+  });
+});
+
+test('multi-site completed rows preserve each plan and site result identity', async () => {
+  const detail = detailResponse({
+    generated_site_tasks: [
+      { plan_id: 151, site_id: 401, site_name: '一站', status: 'completed' },
+      { plan_id: 152, site_id: 402, site_name: '二站', status: 'completed' },
+    ],
+  });
+  const page = await loadPage(detail, { id: 7, role: 'operator' });
+  assert.equal(page.data.canViewCompletedResult, false, 'multi-site plans use per-row result actions');
+  assert.deepEqual(page.data.generatedPlans.map(item => item.can_view_result), [true, true]);
+
+  page.onViewSiteResult({ currentTarget: { dataset: { planId: 152, siteId: 402 } } });
+  assert.deepEqual(testApp.globalData.executionTarget, {
+    executionPlanId: 152,
+    siteId: 402,
+    readOnly: true,
+    source: 'completed_plan_detail',
+  });
+  assert.equal(tabSwitches.length, 0);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].url, '/pages/inspection/inspection');
 });
 
 test('site task item counts use authoritative fields and retain explicit zero values', () => {
@@ -225,6 +296,98 @@ test('plan cancellation gate uses owner or admin across all roles and only actio
   assert.equal(canCancelPlanSchedule({ user_id: 7, status: 'cancelled' }, { id: 9, roles: ['admin'] }), false);
 });
 
+test('change request explains reapproval before collecting reason and writing state', async () => {
+  const page = await loadPage(
+    detailResponse({ user_id: 7, status: 'approved' }),
+    { id: 7, role: 'operator' }
+  );
+  let writes = 0;
+  api.requestPlanScheduleChange = (id, reason) => {
+    writes += 1;
+    assert.equal(id, '46');
+    assert.equal(reason, '调整巡检日期');
+    return Promise.resolve({ status: 'modifying' });
+  };
+
+  page.onChangeRequest();
+  assert.equal(modals.length, 1);
+  assert.match(modals[0].content, /原审批结果失效/);
+  assert.match(modals[0].content, /重新提交并审核/);
+  modals[0].success({ confirm: false });
+  assert.equal(writes, 0);
+  assert.equal(navigations.length, 0);
+
+  page.onChangeRequest();
+  modals[1].success({ confirm: true });
+  assert.equal(modals.length, 3);
+  assert.equal(modals[2].editable, true);
+  modals[2].success({ confirm: false, content: '不应提交' });
+  assert.equal(writes, 0);
+
+  page.onChangeRequest();
+  modals[3].success({ confirm: true });
+  modals[4].success({ confirm: true, content: '   ' });
+  assert.equal(writes, 0);
+  assert.equal(toasts.at(-1).title, '请填写变更原因');
+
+  page.onChangeRequest();
+  modals[5].success({ confirm: true });
+  modals[6].success({ confirm: true, content: '  调整巡检日期  ' });
+  await flush();
+  assert.equal(writes, 1);
+  assert.equal(navigations.at(-1).url, '/pages/plan-edit/plan-edit?id=46');
+  assert.equal(toasts.at(-1).title, '请修改后重新提交审批');
+});
+
+test('an unsubmitted modifying plan can explicitly restore its approved snapshot', async () => {
+  const page = await loadPage(detailResponse({
+    user_id: 7,
+    status: 'modifying',
+    version: 6,
+    can_abandon_change: true,
+    abandon_change_block_reason: '',
+  }), { id: 7, role: 'operator' });
+  assert.equal(page.data.canAbandonChange, true);
+  let writes = 0;
+  const pending = deferred();
+  api.abandonPlanScheduleChange = (id, version) => {
+    writes += 1;
+    assert.equal(id, '46');
+    assert.equal(version, 6);
+    return pending.promise;
+  };
+
+  page.onAbandonChange();
+  assert.equal(modals.length, 1);
+  assert.match(modals[0].content, /恢复变更前已审批计划/);
+  modals[0].success({ confirm: false });
+  assert.equal(writes, 0);
+
+  page.onAbandonChange();
+  modals[1].success({ confirm: true });
+  assert.equal(writes, 1);
+  assert.equal(page.data.abandoningChange, true);
+  page.onAbandonChange();
+  assert.equal(writes, 1);
+  assert.equal(toasts.at(-1).title, '正在恢复原计划，请稍候');
+
+  pending.resolve({ status: 'approved', version: 7 });
+  await flush();
+  await flush();
+  assert.equal(page.data.abandoningChange, false);
+  assert.ok(toasts.some(item => item.title === '已恢复原计划'));
+
+  page.data.canAbandonChange = false;
+  page.data.abandonChangeBlockReason = '原计划快照不可用，请联系管理员处理';
+  page.onAbandonChange();
+  assert.equal(toasts.at(-1).title, '原计划快照不可用，请联系管理员处理');
+
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const apiSource = fs.readFileSync(apiPath, 'utf8');
+  assert.match(template, /canAbandonChange[\s\S]*放弃变更并恢复原计划/);
+  assert.match(apiSource, /abandonPlanScheduleChange:[\s\S]*\/abandon-change/);
+});
+
 test('cancelled detail retains server audit and actual inspection frequencies without inference', async () => {
   const cancellation = { reason: '原路线无效', operator_name: '真实操作人', occurred_at: '2026-09-15 10:00:00' };
   const template_context = [{ date: '2026-09-15', site_name: 'A', frequency: 'monthly', frequency_cn: '月检', item_count: 2 }];
@@ -243,6 +406,11 @@ test('owner and admin cancellation actions load the real page and open without w
     return Promise.resolve({});
   };
   const cases = [
+    {
+      name: 'owner submitted',
+      detail: detailResponse({ user_id: 7, status: 'submitted', execution_completed: false }),
+      user: { id: 7, role: 'operator' },
+    },
     {
       name: 'owner approved',
       detail: detailResponse({ user_id: 7, status: 'approved', execution_completed: true }),
@@ -694,7 +862,8 @@ test('detail cancellation source preserves retry context and package labels keep
   assert.match(template, /placeholder="请填写取消原因（必填，最多500字）"/);
   assert.match(template, /loading="\{\{cancelSheet\.submitting\}\}"/);
   assert.match(template, /提交审批/);
-  assert.match(page, /开始修改计划/);
+  assert.match(page, /原审批结果失效/);
+  assert.match(page, /重新提交并审核/);
   assert.match(page, /vehicleAdjustmentRequired:\s*res\.vehicle_adjustment_required === true/);
   assert.match(template, /vehicleAdjustmentRequired[\s\S]*车辆需调整[\s\S]*bindtap="onChangeRequest"[\s\S]*调整车辆/);
   const editPage = fs.readFileSync(path.resolve(__dirname, '../pages/plan-edit/plan-edit.js'), 'utf8');

@@ -33,6 +33,7 @@
 .workspace-table > .ant-card-body { height: 100%; display: flex; min-height: 0; flex-direction: column; }
 .workspace-table .workspace-empty { flex: 1; }
 .workspace-table .ant-table-body { overscroll-behavior: contain; overflow-y: auto !important; }
+.workspace-table .ant-table-pagination { flex: 0 0 auto; margin: 12px 16px !important; }
 .workspace-table .ant-table-thead > tr > th { white-space: nowrap; }
 .workspace-table--fill .ant-table-wrapper,
 .workspace-table--fill .ant-spin-nested-loading,
@@ -54,3 +55,4 @@
 .workspace-tabs .ant-tabs-tabpane-active { height: 100%; display: flex; min-height: 0; flex-direction: column; }
 .workspace-embedded-page { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 12px; }
 @media (max-width: 900px) { .workspace-status-strip { max-width: 100%; overflow-x: auto; } .workspace-toolbar__filters, .workspace-toolbar__actions { flex-basis: 100%; width: 100%; } .workspace-toolbar__actions { justify-content: flex-start; margin-left: 0; overflow-x: auto; } .workspace-page__header { flex-wrap: wrap; } .archive-toolbar .workspace-toolbar__filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .archive-toolbar .workspace-filter-field:first-child { grid-column: 1 / -1; } .archive-toolbar .archive-date-filters { grid-template-columns: 1fr; } }
+@media (max-height: 700px) { .workspace-page { flex: 0 0 auto; min-height: 680px; } }

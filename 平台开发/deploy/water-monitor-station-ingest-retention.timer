@@ -1,0 +1,11 @@
+[Unit]
+Description=Run station-ingestion retention every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=water-monitor-station-ingest-retention.service
+
+[Install]
+WantedBy=timers.target

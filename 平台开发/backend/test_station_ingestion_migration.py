@@ -53,6 +53,14 @@ class StationIngestionMigrationTest(unittest.TestCase):
             self.assertEqual(str(site_columns["master_status"][4]).strip("'"), "active")
             self.assertTrue(migration._table_exists(connection, "site_name_aliases"))
             self.assertTrue(migration._table_exists(connection, "station_master_refresh_audits"))
+            value_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(observation_values)")
+            }
+            self.assertIn("raw_value_text", value_columns)
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+            ).fetchone())
         self.assertEqual(self._run_check(self.database), 0)
         second_applied, second_backup = migration.apply_migration(self.database, self.backups)
         self.assertFalse(second_applied)
@@ -63,6 +71,20 @@ class StationIngestionMigrationTest(unittest.TestCase):
             "migrate_station_ingestion.py", "--database", str(database), "--backup-dir", str(self.backups), "--check",
         ]):
             return migration.main()
+
+    @staticmethod
+    def _apply_until(database: Path, stop_before: str) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == stop_before:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version),
+                     "2026-10-16T00:00:00+00:00", "isolated-prior"),
+                )
+            connection.commit()
 
     @staticmethod
     def _apply_through_006(database: Path) -> None:
@@ -89,6 +111,82 @@ class StationIngestionMigrationTest(unittest.TestCase):
                     (version, migration.migration_checksum(version), "2026-09-22T00:00:00+00:00", "isolated-007"),
                 )
             connection.commit()
+
+    @staticmethod
+    def _apply_through_009(database: Path) -> None:
+        with closing(sqlite3.connect(database)) as connection:
+            for version, path in migration.MIGRATIONS:
+                if version == migration.PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION:
+                    break
+                migration._execute_migration_sql(connection, path.read_text(encoding="utf-8"))
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                    (version, migration.migration_checksum(version), "2026-10-12T00:00:00+00:00", "isolated-009"),
+                )
+            connection.commit()
+
+    def test_existing_009_database_adds_pending_partial_index_and_query_uses_it(self):
+        self._apply_through_009(self.database)
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            index_rows = {
+                row[1]: row for row in connection.execute("PRAGMA index_list(ingest_raw_frames)")
+            }
+            self.assertIn("idx_ingest_raw_pending_normalization", index_rows)
+            self.assertEqual(index_rows["idx_ingest_raw_pending_normalization"][4], 1)
+            plan = connection.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT raw.id FROM ingest_raw_frames raw
+                   LEFT JOIN monitoring_normalization_retries retry
+                     ON retry.raw_frame_id=raw.id AND retry.normalization_version=?
+                   WHERE raw.id>? AND raw.persistence_state IN ('pending_parse', 'pending_reparse')
+                     AND (retry.raw_frame_id IS NULL OR (retry.state!='exhausted'
+                          AND (retry.next_attempt_at IS NULL OR retry.next_attempt_at<=?)))
+                   ORDER BY raw.id LIMIT ?""",
+                ("station-monitoring-normalizer-v1", 0, "2026-10-12T00:00:00+00:00", 100),
+            ).fetchall()
+            self.assertIn(
+                "idx_ingest_raw_pending_normalization",
+                " ".join(str(row[3]) for row in plan),
+            )
+            migration.verify_station_monitoring_schema(connection)
+        second_applied, second_backup = migration.apply_migration(self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_pending_partial_index_removal_is_rejected(self):
+        migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP INDEX idx_ingest_raw_pending_normalization")
+            connection.commit()
+            with self.assertRaisesRegex(
+                    migration.MigrationError, "pending normalization partial index"):
+                migration.verify_station_monitoring_schema(connection)
+
+    def test_failed_010_upgrade_restores_the_009_database(self):
+        self._apply_through_009(self.database)
+        with mock.patch.object(
+                migration, "verify_station_monitoring_contract",
+                side_effect=migration.MigrationError("forced-010")):
+            with self.assertRaisesRegex(migration.MigrationError, "forced-010"):
+                migration.apply_migration(self.database, self.backups)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION,),
+            ).fetchone())
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_ingest_raw_pending_normalization",),
+            ).fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (migration.STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
+            ).fetchone())
 
     def test_existing_001_through_007_database_upgrades_to_008_and_repeats_without_writes(self):
         self._apply_through_007(self.database)
@@ -164,7 +262,7 @@ class StationIngestionMigrationTest(unittest.TestCase):
             ).fetchall()
 
         with mock.patch.object(
-            migration, "verify_station_monitoring_schema",
+            migration, "verify_station_monitoring_contract",
             side_effect=migration.MigrationError("forced 007 verification failure"),
         ):
             with self.assertRaisesRegex(migration.MigrationError, "forced 007 verification failure"):
@@ -259,6 +357,10 @@ class StationIngestionMigrationTest(unittest.TestCase):
             connection.execute(
                 'DELETE FROM schema_migrations WHERE version=?',
                 (migration.MONITORING_RESULT_WINDOW_MIGRATION_VERSION,),
+            )
+            connection.execute(
+                'DELETE FROM schema_migrations WHERE version=?',
+                (migration.STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
             )
             endpoint = connection.execute(
                 """INSERT INTO trusted_endpoints(
@@ -377,6 +479,186 @@ class StationIngestionMigrationTest(unittest.TestCase):
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertFalse(migration._table_exists(connection, "ingest_raw_frames"))
 
+    def test_strict_014_only_path_uses_affected_table_foreign_key_checks(self):
+        self._apply_until(
+            self.database, migration.STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            applied, backup = migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True,
+                require_014_only=True)
+
+        self.assertTrue(applied)
+        self.assertIsNone(backup)
+        self.assertEqual(sum(
+            statement.strip().upper() == "PRAGMA FOREIGN_KEY_CHECK"
+            for statement in statements
+        ), 0)
+        affected_checks = [
+            statement for statement in statements
+            if statement.strip().upper().startswith("PRAGMA FOREIGN_KEY_CHECK(")
+        ]
+        self.assertGreater(len(affected_checks), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            self.assertIn(migration.STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION, versions)
+            self.assertNotIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+            self.assertNotIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
+
+    def test_strict_014_only_path_rejects_missing_earlier_migration(self):
+        self._apply_until(self.database, migration.STATION_SERVICE_POLICY_MIGRATION_VERSION)
+
+        with self.assertRaisesRegex(
+            migration.MigrationError, "requires complete migrations 001 through 013"
+        ):
+            migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True,
+                require_014_only=True)
+
+    def test_incremental_015_016_path_skips_foreign_key_table_scans(self):
+        self._apply_until(
+            self.database, migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION)
+        original_connect = sqlite3.connect
+        statements = []
+
+        def traced_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(sqlite3, "connect", side_effect=traced_connect):
+            applied, backup = migration.apply_migration(
+                self.database, None, external_recovery_confirmed=True)
+
+        self.assertTrue(applied)
+        self.assertIsNone(backup)
+        self.assertFalse(any(
+            statement.strip().upper().startswith("PRAGMA FOREIGN_KEY_CHECK")
+            for statement in statements
+        ))
+        with closing(sqlite3.connect(self.database)) as connection:
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+            precision = dict(connection.execute(
+                """SELECT business_metric,MIN(decimal_precision)
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   GROUP BY business_metric"""
+            ).fetchall())
+        self.assertIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+        self.assertIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
+        self.assertIn("raw_value_text", columns)
+        self.assertEqual(precision, {"conductivity": 2, "turbidity": 2})
+
+    def test_017_converts_historical_partial_detail_and_allows_partial_status(self):
+        self._apply_until(
+            self.database, migration.STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,status,detail,created_at)
+                   VALUES (?,'completed',?,?)""",
+                ("2026-10-01T00:00:00+00:00", '{"status":"partial"}',
+                 "2026-10-16T00:00:00+00:00"),
+            )
+            connection.commit()
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM station_ingest_retention_runs").fetchone()[0], "partial")
+            connection.execute(
+                """INSERT INTO station_ingest_retention_runs(
+                       cutoff_time,status,detail,created_at)
+                   VALUES (?,'partial','{}',?)""",
+                ("2026-10-02T00:00:00+00:00", "2026-10-16T00:00:00+00:00"),
+            )
+    def test_incremental_015_016_failure_rolls_back_schema_data_and_markers(self):
+        self._apply_until(
+            self.database, migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            before_precision = connection.execute(
+                """SELECT protocol_code,decimal_precision
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   ORDER BY protocol_code"""
+            ).fetchall()
+        original_execute = migration._execute_migration_sql
+
+        def fail_raw_value_text(connection, script):
+            if "ADD COLUMN raw_value_text" in script:
+                raise RuntimeError("injected 016 failure")
+            original_execute(connection, script)
+
+        with mock.patch.object(
+                migration, "_execute_migration_sql", side_effect=fail_raw_value_text):
+            with self.assertRaisesRegex(RuntimeError, "injected 016 failure"):
+                migration.apply_migration(
+                    self.database, None, external_recovery_confirmed=True)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            after_precision = connection.execute(
+                """SELECT protocol_code,decimal_precision
+                   FROM monitoring_factor_definitions
+                   WHERE business_metric IN ('turbidity','conductivity')
+                   ORDER BY protocol_code"""
+            ).fetchall()
+            versions = {row[0] for row in connection.execute(
+                "SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+        self.assertEqual(after_precision, before_precision)
+        self.assertNotIn(migration.STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION, versions)
+        self.assertNotIn(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION, versions)
+        self.assertNotIn("raw_value_text", columns)
+
+    def test_existing_015_database_adds_raw_value_text_and_repeats_without_writes(self):
+        self._apply_until(self.database, migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION)
+
+        applied, backup = migration.apply_migration(self.database, self.backups)
+
+        self.assertTrue(applied)
+        self.assertTrue(backup.is_file())
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(observation_values)")}
+            self.assertIn("raw_value_text", columns)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+            ).fetchone()[0], 1)
+        second_applied, second_backup = migration.apply_migration(
+            self.database, self.backups)
+        self.assertFalse(second_applied)
+        self.assertIsNone(second_backup)
+
+    def test_recorded_016_without_raw_value_text_column_is_rejected(self):
+        self._apply_until(self.database, migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO schema_migrations(version,checksum,applied_at,app_version) VALUES (?,?,?,?)",
+                (migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,
+                 migration.migration_checksum(migration.STATION_RAW_VALUE_TEXT_MIGRATION_VERSION),
+                 "2026-10-21T00:00:00+00:00", "isolated-corrupt-016"),
+            )
+            connection.commit()
+            with self.assertRaisesRegex(
+                    migration.MigrationError, "raw-value-text column is missing"):
+                migration.verify_station_monitoring_schema(connection)
+
     def test_checksum_conflict_is_rejected(self):
         migration.apply_migration(self.database, self.backups)
         with closing(sqlite3.connect(self.database)) as connection:
@@ -404,7 +686,9 @@ class StationIngestionMigrationTest(unittest.TestCase):
             connection.execute("INSERT INTO legacy(note) VALUES ('before')")
             before_schema = migration._schema_snapshot(connection)
             connection.commit()
-        with mock.patch.object(migration, "verify_station_ingestion_schema", side_effect=migration.MigrationError("forced")):
+        with mock.patch.object(
+                migration, "verify_station_monitoring_contract",
+                side_effect=migration.MigrationError("forced")):
             with self.assertRaisesRegex(migration.MigrationError, "forced"):
                 migration.apply_migration(self.database, self.backups)
         with closing(sqlite3.connect(self.database)) as connection:

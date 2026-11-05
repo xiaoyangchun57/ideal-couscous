@@ -292,7 +292,8 @@ class WechatApprovalSubscriptionTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['page'], '/pages/plan-detail/plan-detail?id=50&notification_id=2')
         self.assertNotIn('/pages/review/view', results[0]['page'])
-        self.assertEqual([row['event_type'] for row in events], ['submitted', 'submitted'])
+        self.assertEqual([row['event_type'] for row in events],
+                         ['submitted', 'rejected', 'submitted'])
         self.assertTrue(all('target_type=plan_schedule' in row['page'] for row in pending))
         with app_module.get_db() as db:
             change_pending = db.execute("""SELECT payload_json FROM wx_subscription_outbox

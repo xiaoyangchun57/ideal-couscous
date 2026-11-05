@@ -125,7 +125,7 @@ test('getStrict distinguishes a timeout', async () => {
   });
 });
 
-test('monitoring directory encodes scope without losing caller cancellation', async () => {
+test('monitoring directory encodes permission and service scopes without losing caller cancellation', async () => {
   for (const scope of ['all', 'mine', 'scope & injected=all']) {
     const controller = new AbortController();
     let requested;
@@ -137,11 +137,14 @@ test('monitoring directory encodes scope without losing caller cancellation', as
         reject(error);
       }));
     };
-    const pending = api.stationMonitoringSites({ scope, signal: controller.signal });
+    const pending = api.stationMonitoringSites({
+      scope, serviceScope: 'all & injected=current', signal: controller.signal,
+    });
     controller.abort();
     await assert.rejects(pending, (error) => error.code === 'REQUEST_ABORTED');
     const query = new URL(requested, 'http://web-test.invalid').searchParams;
     assert.equal(query.get('scope'), scope);
+    assert.equal(query.get('service_scope'), 'all & injected=current');
     assert.equal(query.has('injected'), false);
   }
 });
@@ -154,8 +157,18 @@ test('monitoring services propagate scope denial and missing sites without a fal
       return response({ error: '站点不可访问', code: `MONITORING_${status}` }, { status });
     };
     await assert.rejects(api.stationMonitoringOverview(7), (error) => error.status === status);
-    assert.deepEqual(urls, ['/api/station-monitoring/sites/7/overview']);
+    assert.deepEqual(urls, ['/api/station-monitoring/sites/7/overview?detail=summary']);
   }
+});
+
+test('monitoring diagnostics use a separate on-demand endpoint', async () => {
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    return response({ site_id: 7, axes: {} });
+  };
+  assert.deepEqual(await api.stationMonitoringDiagnostics(7), { site_id: 7, axes: {} });
+  assert.deepEqual(urls, ['/api/station-monitoring/sites/7/diagnostics']);
 });
 
 test('monitoring trend encodes the opaque metric and preserves caller cancellation', async () => {
@@ -169,13 +182,21 @@ test('monitoring trend encodes the opaque metric and preserves caller cancellati
       reject(error);
     }));
   };
-  const pending = api.stationMonitoringTrend(7, 'ph & injected=other', { signal: controller.signal });
+  const pending = api.stationMonitoringTrend(7, 'ph & injected=other', {
+    range: '30d', start: '2026-09-01T00:00:00+08:00', end: '2026-10-01T00:00:00+08:00',
+    cursor: 'opaque cursor', limit: 100, signal: controller.signal,
+  });
   controller.abort();
   await assert.rejects(pending, (error) => error.code === 'REQUEST_ABORTED');
   const url = new URL(requested, 'http://web-test.invalid');
   assert.equal(url.pathname, '/api/station-monitoring/sites/7/trend');
   assert.equal(url.searchParams.get('metric'), 'ph & injected=other');
   assert.equal(url.searchParams.has('injected'), false);
+  assert.equal(url.searchParams.get('range'), '30d');
+  assert.equal(url.searchParams.get('start'), '2026-09-01T00:00:00+08:00');
+  assert.equal(url.searchParams.get('end'), '2026-10-01T00:00:00+08:00');
+  assert.equal(url.searchParams.get('cursor'), 'opaque cursor');
+  assert.equal(url.searchParams.get('limit'), '100');
 });
 
 test('getStrict distinguishes caller cancellation from timeout', async () => {
@@ -217,6 +238,24 @@ test('downloadStrict returns the blob and server filename after an authenticated
   const result = await api.downloadStrict('/export/report');
   assert.equal(result.filename, '运维报告.xlsx');
   assert.equal(await result.blob.text(), 'xlsx-data');
+});
+
+test('downloadPostStrict sends an authenticated JSON body and returns the generated archive', async () => {
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, '/api/attachments/download/zip');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.Authorization, 'Bearer test-token');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(options.body), { attachment_ids: [7, 8] });
+    return response('zip-data', {
+      contentType: 'application/zip',
+      headers: { 'content-disposition': "attachment; filename*=UTF-8''archive.zip" },
+    });
+  };
+  const result = await api.downloadPostStrict(
+    '/attachments/download/zip', { attachment_ids: [7, 8] });
+  assert.equal(result.filename, 'archive.zip');
+  assert.equal(await result.blob.text(), 'zip-data');
 });
 
 test('downloadStrict rejects an error response instead of creating a file', async () => {

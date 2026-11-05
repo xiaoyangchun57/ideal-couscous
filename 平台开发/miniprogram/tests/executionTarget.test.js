@@ -6,6 +6,7 @@ const {
   itemBelongsToCategories,
   resolveExecutionTarget,
   shouldApplyAsyncResult,
+  uniqueActiveFieldTarget,
   uniqueExecutableTarget,
 } = require('../utils/executionTarget.js');
 
@@ -83,6 +84,31 @@ assert.deepEqual(uniqueExecutableTarget(mixedDefault.packages, 'home'), {
 });
 assert.equal(uniqueExecutableTarget(packages, 'home'), null,
   'multiple executable packages or stations require explicit selection');
+
+const activeFieldPackages = [
+  buildPackageOption({
+    plan_id: 220, schedule_id: 40, work_date: '2026-08-28', site_order: [41, 42],
+    sites: [
+      { site_id: 41, checked_in: true, checked_out: false, total: 2, completed: 1 },
+      { site_id: 42, checked_in: false, checked_out: false, total: 2, completed: 0 },
+    ],
+  }),
+  buildPackageOption({
+    plan_id: 221, schedule_id: 41, work_date: '2026-08-28', site_order: [43],
+    sites: [{ site_id: 43, checked_in: false, checked_out: false, total: 1, completed: 0 }],
+  }),
+];
+assert.deepEqual(uniqueActiveFieldTarget(activeFieldPackages, 'home'), {
+  executionPlanId: 220, scheduleId: 40, workDate: '2026-08-28',
+  siteId: 41, itemId: null, source: 'home',
+}, 'one checked-in and not checked-out site takes priority across multiple packages');
+activeFieldPackages[0].sites[1].checkedIn = true;
+assert.equal(uniqueActiveFieldTarget(activeFieldPackages, 'home'), null,
+  'multiple active field sites still require explicit selection');
+activeFieldPackages[0].sites[0].checkedOut = true;
+activeFieldPackages[0].sites[1].checkedIn = false;
+assert.equal(uniqueActiveFieldTarget(activeFieldPackages, 'home'), null,
+  'a checked-out site is never treated as the current field site');
 
 assert.equal(buildPackageOption({
   plan_id: 230, schedule_id: 77, package_label: '八月补测路线', plan_name: '不应优先显示',

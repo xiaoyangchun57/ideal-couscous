@@ -22,6 +22,7 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.upload_dir = tempfile.mkdtemp()
         self.original_get_db = app_module.get_db
         self.original_upload_dir = app_module.UPLOAD_DIR
+        self.original_private_upload_dir = os.environ.get('PRIVATE_UPLOAD_DIR')
         self.original_tokens = dict(app_module._tokens)
         self.original_cache = dict(app_module._site_ids_cache)
 
@@ -40,6 +41,7 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
 
         app_module.get_db = temporary_db
         app_module.UPLOAD_DIR = self.upload_dir
+        os.environ['PRIVATE_UPLOAD_DIR'] = os.path.join(self.upload_dir, 'private')
         app_module._tokens.clear()
         app_module._site_ids_cache.clear()
         app_module._tokens.update({
@@ -48,6 +50,7 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             'operator-token': {'id': 2, 'role': 'operator', 'real_name': '现场运维', 'username': 'operator'},
             'operator-username-token': {'id': 2, 'role': 'operator', 'username': 'operator'},
             'other-operator-token': {'id': 4, 'role': 'operator', 'real_name': '其他运维'},
+            'reviewer-token': {'id': 6, 'role': 'reviewer', 'real_name': '审核人员'},
         })
         with temporary_db() as db:
             db.executescript('''
@@ -58,15 +61,15 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 CREATE TABLE user_roles (user_id INTEGER, role TEXT);
                 CREATE TABLE user_sites (user_id INTEGER, site_id INTEGER);
                 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, gps_lat REAL, gps_lng REAL);
-                CREATE TABLE photo_requirements (
-                    id INTEGER PRIMARY KEY, site_type TEXT, period TEXT, item_name TEXT,
-                    category TEXT, watermark_keyword TEXT, review_required INTEGER, seq INTEGER
-                );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER, title TEXT,
                     description TEXT, source TEXT DEFAULT 'manual', event_type TEXT, level TEXT, status TEXT, images TEXT,
                     assignee TEXT, created_at TEXT, related_alert_id INTEGER, used_parts TEXT,
-                    resolved_at TEXT, check_in_time TEXT, remark TEXT, review_submitted_at TEXT
+                    resolved_at TEXT, check_in_time TEXT, check_in_lat REAL, check_in_lng REAL,
+                    check_in_user TEXT, check_in_user_id INTEGER, remark TEXT, review_submitted_at TEXT,
+                    service_mode TEXT DEFAULT 'onsite', remote_contact TEXT DEFAULT '',
+                    remote_process TEXT DEFAULT '', remote_result TEXT DEFAULT '',
+                    remote_started_at TEXT, remote_submitted_at TEXT
                 );
                 CREATE TABLE operation_attachments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, stored_path TEXT,
@@ -82,11 +85,57 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     perceptual_hash TEXT DEFAULT '', evidence_qualification TEXT DEFAULT 'review',
                     evidence_basis TEXT DEFAULT 'unknown', evidence_reason TEXT DEFAULT '',
                     evidence_next_action TEXT DEFAULT '', evidence_evaluated_at TEXT,
-                    evidence_evaluation_id INTEGER
+                    evidence_evaluation_id INTEGER, watermark_code TEXT DEFAULT '',
+                    extra_json TEXT DEFAULT '', created_at TEXT
+                );
+                CREATE TABLE attachment_evidence_evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attachment_id INTEGER NOT NULL,
+                    qualification TEXT NOT NULL,
+                    basis TEXT NOT NULL DEFAULT 'unknown',
+                    verified_taken_at TEXT,
+                    reason TEXT NOT NULL DEFAULT '',
+                    next_action TEXT NOT NULL DEFAULT '',
+                    facts_json TEXT NOT NULL DEFAULT '{}',
+                    evaluation_type TEXT NOT NULL DEFAULT 'automatic',
+                    rule_version TEXT NOT NULL DEFAULT 'evidence-v1',
+                    actor_id INTEGER,
+                    actor_name TEXT DEFAULT '',
+                    replaces_evaluation_id INTEGER,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
                 CREATE TABLE inspection_checkins (
-                    site_id INTEGER, user_id INTEGER, check_time TEXT
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, user_id INTEGER,
+                    check_time TEXT, plan_id INTEGER, lat REAL, lng REAL
+                );
+                CREATE TABLE insp_plans (
+                    id INTEGER PRIMARY KEY, plan_name TEXT, assignee_id INTEGER,
+                    completion_rate REAL, status TEXT, plan_schedule_id INTEGER,
+                    generate_date TEXT
+                );
+                CREATE TABLE insp_plan_items (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, item_name TEXT,
+                    actual_photos INTEGER, required_photos INTEGER, remark TEXT, result TEXT,
+                    check_time TEXT, photo_urls TEXT, review_status INTEGER,
+                    execution_status TEXT, need_review INTEGER
+                );
+                CREATE TABLE parts_requests (
+                    id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER,
+                    work_order_no TEXT, request_no TEXT, reason TEXT,
+                    fulfillment_type TEXT, requested_part_name TEXT, specification TEXT,
+                    estimated_amount REAL, requester_id INTEGER, created_at TEXT, status TEXT
+                );
+                CREATE TABLE parts_request_items (
+                    request_id INTEGER, part_sku TEXT, quantity REAL
+                );
+                CREATE TABLE vehicle_applications (
+                    id INTEGER PRIMARY KEY, vehicle_id INTEGER, applicant_id INTEGER,
+                    start_at TEXT, end_at TEXT, site_id INTEGER, destination TEXT,
+                    reason TEXT, created_at TEXT, status TEXT
+                );
+                CREATE TABLE vehicles (
+                    id INTEGER PRIMARY KEY, plate_no TEXT, model TEXT
                 );
                 CREATE TABLE notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, source_type TEXT,
@@ -100,20 +149,26 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                     site_id INTEGER, metric TEXT, related_order_no TEXT
                 );
                 CREATE TABLE data_reviews (id INTEGER PRIMARY KEY, status TEXT, site_id INTEGER, metric TEXT);
-                CREATE TABLE spare_parts_inventory (id INTEGER PRIMARY KEY, quantity REAL, updated_at TEXT);
+                CREATE TABLE spare_parts_inventory (
+                    id INTEGER PRIMARY KEY, part_code TEXT, part_name TEXT,
+                    manufacturer TEXT, model TEXT, quantity REAL, updated_at TEXT
+                );
                 CREATE TABLE inventory_logs (part_id INTEGER, type TEXT, quantity REAL, ref_type TEXT, ref_id INTEGER, operator TEXT, remark TEXT);
                 INSERT INTO users (id, real_name, username, role) VALUES (1, '管理员', 'admin', 'admin');
                 INSERT INTO users (id, real_name, username, role) VALUES (2, '现场运维', 'operator', 'operator');
                 INSERT INTO users (id, real_name, username, role) VALUES (3, '运维主管', 'manager', 'manager');
                 INSERT INTO users (id, real_name, username, role) VALUES (4, '其他运维', 'other', 'operator');
                 INSERT INTO users (id, real_name, username, role) VALUES (5, '未授权运维', 'unauthorized', 'operator');
+                INSERT INTO users (id, real_name, username, role) VALUES (6, '审核人员', 'reviewer', 'reviewer');
                 INSERT INTO user_roles VALUES (1, 'admin');
                 INSERT INTO user_roles VALUES (2, 'operator');
                 INSERT INTO user_roles VALUES (3, 'admin');
                 INSERT INTO user_roles VALUES (4, 'operator');
                 INSERT INTO user_roles VALUES (5, 'operator');
+                INSERT INTO user_roles VALUES (6, 'reviewer');
                 INSERT INTO user_sites VALUES (2, 1);
                 INSERT INTO user_sites VALUES (4, 1);
+                INSERT INTO user_sites VALUES (6, 1);
                 INSERT INTO sites VALUES (1, '测试站', 28.68, 115.73);
                 INSERT INTO sites VALUES (2, '其他站', 28.69, 115.74);
                 INSERT INTO work_orders
@@ -127,6 +182,10 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
     def tearDown(self):
         app_module.get_db = self.original_get_db
         app_module.UPLOAD_DIR = self.original_upload_dir
+        if self.original_private_upload_dir is None:
+            os.environ.pop('PRIVATE_UPLOAD_DIR', None)
+        else:
+            os.environ['PRIVATE_UPLOAD_DIR'] = self.original_private_upload_dir
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
         app_module._site_ids_cache.clear()
@@ -138,6 +197,54 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
     @staticmethod
     def headers(token):
         return {'Authorization': f'Bearer {token}'}
+
+    @staticmethod
+    def jpeg_bytes(size=(1600, 900), color=(42, 96, 138)):
+        from PIL import Image
+        image = Image.new('RGB', size, color)
+        output = io.BytesIO()
+        image.save(output, format='JPEG', quality=92)
+        return output.getvalue()
+
+    def seed_trusted_workorder_session(self, token='fixture-token'):
+        with app_module.get_db() as db:
+            db.executescript('''
+                CREATE TABLE IF NOT EXISTS photo_capture_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE,
+                    user_id INTEGER, site_id INTEGER, plan_id INTEGER, item_id INTEGER,
+                    work_order_id INTEGER, issued_at TEXT, expires_at TEXT, used_at TEXT,
+                    attachment_id INTEGER, capture_source TEXT, rework_required_at TEXT,
+                    gps_lat REAL, gps_lng REAL, distance_m REAL,
+                    nonce TEXT, anti_counterfeit_code TEXT,
+                    location_source TEXT DEFAULT '', location_fact_id INTEGER,
+                    checkin_time TEXT
+                );
+                CREATE TABLE IF NOT EXISTS mobile_idempotency (
+                    idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT
+                );
+            ''')
+            db.execute('''INSERT INTO photo_capture_sessions
+                (token_hash,user_id,site_id,work_order_id,issued_at,expires_at,capture_source,
+                 gps_lat,gps_lng,nonce,anti_counterfeit_code)
+                VALUES (?,2,1,1,datetime('now','localtime'),datetime('now','localtime','+15 minute'),
+                        'camera',28.68,115.73,'fixture-nonce','WQ-WO-FIXTURE')''',
+                (app_module._hash_token(token),))
+        return token
+
+    def trusted_workorder_payload(self, image_bytes, key, token='fixture-token'):
+        return {
+            'image': base64.b64encode(image_bytes).decode('ascii'),
+            '_idempotency_key': key,
+            'capture_source': 'camera',
+            'capture_session': token,
+            'capture_client': 'trusted_camera_v1',
+            'capture_frame_orientation': 'portrait',
+            'capture_frame_ratio': '3:4',
+            'capture_frame_mode': 'center_cover',
+            'taken_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'gps_lat': 0,
+            'gps_lng': 0,
+        }
 
     def seed_workorder_review_notifications(self, with_evidence=False):
         with app_module.get_db() as db:
@@ -186,10 +293,11 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assert_other_reviewer_has_history_only()
 
     def test_evidence_append_delete_reject_resubmit_and_approve(self):
-        # 同一秒内连续上传的三张影像必须保留三条附件和三条 images 缓存记录。
+        # 同一秒内连续追加八张影像必须全部保留，并可继续添加、重进和完成审核。
+        suffixes = tuple('abcdefgh')
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
-            for suffix in ('a', 'b', 'c'):
+            for suffix in suffixes:
                 db.execute("""INSERT INTO operation_attachments
                     (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
                      review_status,evidence_qualification,evidence_basis)
@@ -199,29 +307,35 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         with app_module.app.test_request_context('/', headers=self.headers('operator-token')):
             from flask import g
             g.current_user = app_module._tokens['operator-token']
-            for suffix in ('a', 'b', 'c'):
+            for suffix in suffixes:
                 result = app_module._batch_link_wo_photos('WO-TEST-001', [f'/uploads/workorder_photos/{suffix}.jpg'])
                 self.assertEqual(result['count'], 1)
         with app_module.get_db() as db:
             image_urls = json.loads(db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'])
-            self.assertEqual(len(image_urls), 3)
-            self.assertEqual(db.execute("SELECT COUNT(*) AS c FROM operation_attachments WHERE is_deleted=0").fetchone()['c'], 3)
+            self.assertEqual(len(image_urls), 8)
+            self.assertEqual(db.execute("SELECT COUNT(*) AS c FROM operation_attachments WHERE is_deleted=0").fetchone()['c'], 8)
             self.assertTrue(all(row['taken_at'] is None for row in db.execute(
                 "SELECT taken_at FROM operation_attachments WHERE is_deleted=0"
             )))
+        detail = self.client.get('/api/workorders/WO-TEST-001',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(len(json.loads(detail.json['images'])), 8)
 
         # 删除仅删除指定照片，其他证据仍保留。
         response = self.client.post('/api/mobile/workorder/WO-TEST-001/image/delete', headers=self.headers('operator-token'), json={'url': image_urls[1]})
         self.assertEqual(response.status_code, 200, response.json)
         with app_module.get_db() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) AS c FROM operation_attachments WHERE is_deleted=0").fetchone()['c'], 2)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) AS c FROM operation_attachments WHERE is_deleted=0"
+            ).fetchone()['c'], 7)
 
         # 网页/API 兼容的 base64 分支也必须能上传并同步 images 缓存。
         base64_upload = self.client.post('/api/workorders/WO-TEST-001/photos', headers=self.headers('operator-token'), json={
             'image': base64.b64encode(b'x' * 256).decode('ascii'),
         })
         self.assertEqual(base64_upload.status_code, 200, base64_upload.json)
-        self.assertEqual(len(base64_upload.json['images']), 3)
+        self.assertEqual(len(base64_upload.json['images']), 8)
         cleanup_upload = self.client.post('/api/mobile/workorder/WO-TEST-001/image/delete', headers=self.headers('operator-token'), json={
             'url': base64_upload.json['url'],
         })
@@ -252,8 +366,9 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(approved.status_code, 200, approved.json)
         with app_module.get_db() as db:
             self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'closed')
-            statuses = [r['review_status'] for r in db.execute("SELECT review_status FROM operation_attachments WHERE is_deleted=0")]
-            self.assertEqual(statuses, ['rejected', 'rejected', 'approved'])
+            statuses = [r['review_status'] for r in db.execute(
+                "SELECT review_status FROM operation_attachments WHERE is_deleted=0 ORDER BY id")]
+            self.assertEqual(statuses, ['rejected'] * 7 + ['approved'])
             intents = db.execute("""SELECT purpose,cycle_key,recipient_user_id,page,status,attempts
                 FROM wx_subscription_outbox WHERE business_type='workorder'
                 ORDER BY purpose,cycle_key,recipient_user_id""").fetchall()
@@ -307,7 +422,50 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
             self.assertIsNone(reused['taken_at'])
             self.assertEqual(reused['duplicate_of_id'], first.json['id'])
             self.assertEqual(reused['is_flagged'], 1)
-            self.assertIn('重复', reused['flag_reason'])
+            self.assertIn('同一文件', reused['flag_reason'])
+
+    def test_perceptually_similar_workorder_photos_are_not_exact_duplicates_or_review_blocks(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+        first_token = self.seed_trusted_workorder_session('similar-photo-a')
+        first = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'),
+            json=self.trusted_workorder_payload(
+                self.jpeg_bytes(color=(40, 90, 130)), 'similar-photo-a', first_token),
+        )
+        self.assertEqual(first.status_code, 200, first.json)
+        second_token = self.seed_trusted_workorder_session('similar-photo-b')
+        second = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'),
+            json=self.trusted_workorder_payload(
+                self.jpeg_bytes(color=(41, 91, 131)), 'similar-photo-b', second_token),
+        )
+        self.assertEqual(second.status_code, 200, second.json)
+        with app_module.get_db() as db:
+            rows = db.execute("""SELECT id,sha256_hash,duplicate_of_id,review_required,
+                                      evidence_qualification,extra_json
+                               FROM operation_attachments ORDER BY id""").fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertNotEqual(rows[0]['sha256_hash'], rows[1]['sha256_hash'])
+            self.assertIsNone(rows[1]['duplicate_of_id'])
+            self.assertEqual(rows[1]['review_required'], 0)
+            self.assertEqual(rows[1]['evidence_qualification'], 'qualified')
+            similar = json.loads(rows[1]['extra_json'])
+            self.assertEqual(similar['similar_attachment_id'], rows[0]['id'])
+            db.execute("""UPDATE operation_attachments
+                          SET is_flagged=1,flag_reason='画面相似',flag_rule='near_duplicate',
+                              review_required=0
+                          WHERE id=?""", (rows[1]['id'],))
+
+        submitted = self.client.post(
+            '/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'),
+            json={'client': 'mobile', 'resolution_note': '两张不同文件均为本次处置记录'},
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'reviewing')
 
     def test_web_upload_uses_workorder_site_for_base64_and_multipart(self):
         base64_response = self.client.post(
@@ -346,24 +504,37 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         self.assertEqual(submitted.status_code, 400, submitted.json)
         self.assertIn('提交审核', submitted.json['error'])
 
-    def test_review_cannot_be_submitted_or_approved_without_evidence(self):
+    def test_photo_shortage_warns_without_blocking_submission_or_approval(self):
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
         submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
                                      headers=self.headers('operator-token'), json={'client': 'web', 'resolution_note': '现场处置完成'})
-        self.assertEqual(submitted.status_code, 409, submitted.json)
-        self.assertEqual(submitted.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertFalse(submitted.json['photo_quality_warning']['blocking'])
 
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET status='reviewing' WHERE order_no='WO-TEST-001'")
         approved = self.client.post('/api/workorders/WO-TEST-001/approve',
                                     headers=self.headers('manager-token'), json={})
-        self.assertEqual(approved.status_code, 409, approved.json)
-        self.assertEqual(approved.json['code'], 'QUALIFIED_EVIDENCE_REQUIRED')
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['status'], 'closed')
+
+    def test_photo_risk_is_preserved_without_blocking_workorder_approval(self):
+        self.seed_workorder_review_notifications(with_evidence=True)
+        with app_module.get_db() as db:
+            db.execute("UPDATE operation_attachments SET is_flagged=1,flag_reason='画面相似'")
+        approved = self.client.post('/api/workorders/WO-TEST-001/approve',
+            headers=self.headers('manager-token'), json={})
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['evidence_risks'][0]['flag_reason'], '画面相似')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT is_flagged FROM operation_attachments').fetchone()[0], 1)
 
     def test_site_checkin_satisfies_workorder_gate_and_replay_is_idempotent(self):
         with app_module.get_db() as db:
-            db.execute("INSERT INTO inspection_checkins VALUES (1,2,datetime('now','localtime'))")
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,lat,lng)
+                VALUES (1,2,datetime('now','localtime'),28.68,115.73)""")
             db.execute("""INSERT INTO operation_attachments
                 (filename,stored_path,file_type,source_type,source_id,site_id,uploader_id,
                  taken_at,review_status,evidence_qualification,evidence_basis)
@@ -478,14 +649,18 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
                 headers=self.headers('operator-token'),
                 json={'image': base64.b64encode(b'web-failure' * 32).decode('ascii')})
         self.assertEqual(web.status_code, 500)
+        self.assertEqual(web.json['code'], 'WORKORDER_PHOTO_SAVE_FAILED')
+        self.assertTrue(web.json['retryable'])
 
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+        token = self.seed_trusted_workorder_session()
+        mobile_payload = self.trusted_workorder_payload(
+            self.jpeg_bytes((800, 600), (110, 55, 35)), 'mobile-failure', token)
         with mock.patch.object(app_module, '_record_attachment_evaluation', side_effect=RuntimeError('injected evaluation failure')):
             mobile = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
                 headers=self.headers('operator-token'),
-                json={'image': base64.b64encode(b'mobile-failure' * 32).decode('ascii'),
-                      '_idempotency_key': 'mobile-failure'})
+                json=mobile_payload)
         self.assertEqual(mobile.status_code, 500, mobile.json)
 
         with app_module.get_db() as db:
@@ -504,44 +679,193 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
     def test_mobile_photo_replay_is_idempotent_and_key_cannot_change_payload(self):
         with app_module.get_db() as db:
             db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
-            db.execute("""CREATE TABLE photo_capture_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE, user_id INTEGER,
-                site_id INTEGER, plan_id INTEGER, item_id INTEGER, work_order_id INTEGER,
-                issued_at TEXT, expires_at TEXT, used_at TEXT, attachment_id INTEGER,
-                capture_source TEXT, rework_required_at TEXT)""")
-            db.execute("""CREATE TABLE mobile_idempotency (
-                idempotency_key TEXT PRIMARY KEY, endpoint TEXT, response_json TEXT)""")
-            db.execute("""INSERT INTO photo_capture_sessions
-                (token_hash,user_id,site_id,work_order_id,issued_at,expires_at,capture_source)
-                VALUES (hex(randomblob(16)),2,1,1,datetime('now','localtime'),
-                        datetime('now','localtime','+15 minute'),'camera')""")
-            session = db.execute('SELECT id,token_hash FROM photo_capture_sessions').fetchone()
-        # Patch token lookup only to avoid deriving the one-way token hash in this unit fixture.
-        original = app_module._capture_session_row
-        def session_row(db, token, **kwargs):
-            row = db.execute('SELECT * FROM photo_capture_sessions WHERE id=?', (session['id'],)).fetchone()
-            return dict(row) if row and not row['used_at'] else None
-        payload = {
-            'image': base64.b64encode(b'idempotent-mobile-photo' * 32).decode('ascii'),
-            '_idempotency_key': 'stable-photo-1', 'capture_source': 'camera',
-            'capture_session': 'fixture-token', 'taken_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'gps_lat': 28.68, 'gps_lng': 115.73,
-        }
-        with mock.patch.object(app_module, '_capture_session_row', side_effect=session_row):
-            first = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
-                                     headers=self.headers('operator-token'), json=payload)
-            second = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
-                                      headers=self.headers('operator-token'), json=payload)
+        token = self.seed_trusted_workorder_session()
+        payload = self.trusted_workorder_payload(
+            self.jpeg_bytes((1200, 900), (70, 100, 135)), 'stable-photo-1', token)
+        first = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                 headers=self.headers('operator-token'), json=payload)
+        second = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                                  headers=self.headers('operator-token'), json=payload)
         self.assertEqual(first.status_code, 200, first.json)
         self.assertEqual(second.status_code, 200, second.json)
         self.assertEqual(first.json['url'], second.json['url'])
         with app_module.get_db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM operation_attachments WHERE source_type='workorder'").fetchone()[0], 1)
             self.assertEqual(len(json.loads(db.execute("SELECT images FROM work_orders WHERE id=1").fetchone()['images'])), 1)
-        changed = dict(payload, image=base64.b64encode(b'different-photo' * 32).decode('ascii'))
+        changed = dict(payload, image=base64.b64encode(
+            self.jpeg_bytes((1200, 900), (135, 80, 65))).decode('ascii'))
         reused = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
                                   headers=self.headers('operator-token'), json=changed)
         self.assertEqual((reused.status_code, reused.json['code']), (409, 'IDEMPOTENCY_KEY_REUSED'))
+
+    def test_mobile_trusted_photo_creates_watermarked_portrait_and_keeps_original(self):
+        from PIL import Image
+
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+        token = self.seed_trusted_workorder_session('watermark-token')
+        original = self.jpeg_bytes((1600, 900), (28, 112, 154))
+        payload = self.trusted_workorder_payload(original, 'watermarked-workorder-photo', token)
+
+        with mock.patch.object(
+                app_module, '_create_site_photo_display_copy',
+                wraps=app_module._create_site_photo_display_copy) as render:
+            response = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+                headers=self.headers('operator-token'), json=payload)
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(render.call_count, 1)
+        display_path = os.path.join(
+            self.upload_dir, response.json['url'][len('/uploads/'):].replace('/', os.sep))
+        with open(display_path, 'rb') as handle:
+            display_bytes = handle.read()
+        self.assertNotEqual(display_bytes, original)
+        with Image.open(io.BytesIO(display_bytes)) as image:
+            self.assertEqual(image.size[0] * 4, image.size[1] * 3)
+
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT * FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1""").fetchone()
+            images = json.loads(db.execute(
+                "SELECT images FROM work_orders WHERE id=1").fetchone()['images'])
+        self.assertEqual(images, [response.json['url']])
+        self.assertEqual(attachment['stored_path'], response.json['url'])
+        self.assertEqual(attachment['mime_type'], 'image/jpeg')
+        self.assertEqual((attachment['gps_lat'], attachment['gps_lng']), (28.68, 115.73))
+        self.assertEqual(attachment['watermark_code'], 'WQ-WO-FIXTURE')
+        self.assertEqual(attachment['evidence_qualification'], 'qualified')
+        expected_category = app_module.get_workorder_photo_template('')[0]['item_name']
+        self.assertEqual(attachment['requirement_id'], None)
+        self.assertEqual(attachment['recognized_category'], expected_category)
+        self.assertEqual(attachment['match_status'], 'business_bound')
+        self.assertEqual(attachment['review_required'], 0)
+        extra = json.loads(attachment['extra_json'])
+        self.assertEqual(extra['original_file']['width'], 1600)
+        self.assertEqual(extra['original_file']['height'], 900)
+        self.assertEqual(extra['display_copy']['capture_frame']['ratio'], '3:4')
+        self.assertEqual(extra['display_copy']['server_watermark']['item_label'], '工单')
+        self.assertIn('WO-TEST-001', extra['display_copy']['server_watermark']['item_name'])
+        self.assertTrue(extra['display_watermark'])
+        self.assertTrue(extra['display_copy']['server_watermark']['rendered'])
+        original_path = app_module._private_site_photo_target(
+            extra['original_file']['stored_path'])
+        with open(original_path, 'rb') as handle:
+            self.assertEqual(handle.read(), original)
+
+        detail = self.client.get('/api/workorders/WO-TEST-001',
+                                 headers=self.headers('operator-token'))
+        photos = self.client.get('/api/workorders/WO-TEST-001/photos',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(json.loads(detail.json['images']), [response.json['url']])
+        self.assertEqual(photos.status_code, 200, photos.json)
+        self.assertEqual(photos.json['total_uploaded'], 1)
+        downstream = [photo for group in photos.json['item_progress']
+                      for photo in group['photos']]
+        self.assertEqual(downstream[0]['stored_path'], response.json['url'])
+
+    def test_workorder_photo_never_binds_a_patrol_keyword_rule(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+            db.executescript('''
+                CREATE TABLE photo_requirements (
+                    id INTEGER PRIMARY KEY, site_type TEXT, period TEXT, item_name TEXT,
+                    category TEXT, watermark_keyword TEXT, review_required INTEGER, seq INTEGER
+                );
+                INSERT INTO photo_requirements
+                    (id,site_type,period,item_name,category,watermark_keyword,review_required,seq)
+                VALUES (99,'','','巡检工单关键词','巡检照片','工单',1,1);
+            ''')
+        token = self.seed_trusted_workorder_session('patrol-rule-token')
+        payload = self.trusted_workorder_payload(
+            self.jpeg_bytes(), 'patrol-rule-workorder-photo', token)
+        response = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT requirement_id,recognized_category,
+                match_status,review_required FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1""").fetchone()
+        self.assertEqual(dict(attachment), {
+            'requirement_id': None,
+            'recognized_category': app_module.get_workorder_photo_template('')[0]['item_name'],
+            'match_status': 'business_bound',
+            'review_required': 0,
+        })
+
+    def test_workorder_photo_can_hide_visible_watermark_without_losing_trusted_facts(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE id=1")
+        token = self.seed_trusted_workorder_session('hidden-watermark-token')
+        payload = self.trusted_workorder_payload(
+            self.jpeg_bytes(), 'hidden-watermark-workorder-photo', token)
+        payload['display_watermark'] = False
+        response = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT watermark_text,watermark_code,
+                evidence_qualification,extra_json FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1""").fetchone()
+        extra = json.loads(attachment['extra_json'])
+        watermark = extra['display_copy']['server_watermark']
+        self.assertEqual(attachment['watermark_text'], '')
+        self.assertEqual(attachment['watermark_code'], 'WQ-WO-FIXTURE')
+        self.assertEqual(attachment['evidence_qualification'], 'qualified')
+        self.assertFalse(extra['display_watermark'])
+        self.assertFalse(watermark['rendered'])
+        self.assertEqual(watermark['rendered_lines'], [])
+        self.assertEqual(watermark['anti_counterfeit_code'], 'WQ-WO-FIXTURE')
+        detail = self.client.get('/api/workorders/WO-TEST-001',
+                                 headers=self.headers('operator-token'))
+        photos = self.client.get('/api/workorders/WO-TEST-001/photos',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(photos.status_code, 200, photos.json)
+        self.assertEqual(photos.json['total_uploaded'], 1)
+
+    def test_mobile_trusted_photo_rejects_invalid_frame_or_session_without_residue(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET check_in_time=datetime('now','localtime') WHERE order_no='WO-TEST-001'")
+        token = self.seed_trusted_workorder_session('negative-token')
+        original = self.jpeg_bytes((1600, 900), (91, 73, 141))
+
+        invalid_frame = self.trusted_workorder_payload(
+            original, 'invalid-frame-workorder-photo', token)
+        invalid_frame['capture_frame_ratio'] = '16:9'
+        frame_response = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=invalid_frame)
+        self.assertEqual(
+            (frame_response.status_code, frame_response.json['code']),
+            (400, 'CAPTURE_FRAME_INVALID'))
+
+        invalid_session = self.trusted_workorder_payload(
+            original, 'invalid-session-workorder-photo', 'wrong-token')
+        session_response = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=invalid_session)
+        self.assertEqual(
+            (session_response.status_code, session_response.json['code']),
+            (409, 'CAPTURE_SESSION_REQUIRED'))
+
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments WHERE source_type='workorder'"
+            ).fetchone()[0], 0)
+            self.assertEqual(json.loads(db.execute(
+                "SELECT images FROM work_orders WHERE id=1").fetchone()['images']), [])
+            session = db.execute(
+                "SELECT used_at, attachment_id FROM photo_capture_sessions"
+            ).fetchone()
+            self.assertIsNone(session['used_at'])
+            self.assertIsNone(session['attachment_id'])
+        stored_files = [
+            os.path.join(root, name)
+            for root, _dirs, names in os.walk(self.upload_dir)
+            for name in names
+        ]
+        self.assertEqual(stored_files, [])
 
     def test_batch_link_rejects_mixed_ownership_without_partial_write(self):
         with app_module.get_db() as db:
@@ -746,6 +1070,449 @@ class WorkorderEvidenceFlowTest(unittest.TestCase):
         with app_module.get_db() as db:
             self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'], 'in_progress')
             self.assertEqual(db.execute("SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 0)
+
+    def test_workorder_camera_reuses_server_checkin_for_session_watermark_and_evidence(self):
+        self.seed_trusted_workorder_session('table-bootstrap')
+        checked_in = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'order_no': 'WO-TEST-001', 'lat': 28.68, 'lng': 115.73,
+                '_idempotency_key': 'workorder-camera-checkin',
+            })
+        self.assertEqual(checked_in.status_code, 200, checked_in.json)
+        with app_module.get_db() as db:
+            db.execute('DELETE FROM photo_capture_sessions')
+            db.execute("""UPDATE work_orders
+                SET check_in_time=datetime('now','localtime','-5 minutes')
+                WHERE id=1""")
+            checkin = db.execute('''SELECT check_in_user,check_in_user_id
+                FROM work_orders WHERE id=1''').fetchone()
+        self.assertEqual((checkin['check_in_user'], checkin['check_in_user_id']),
+                         ('现场运维', 2))
+        session = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001', 'capture_source': 'camera',
+                'prepare_only': True, 'gps_lat': 0, 'gps_lng': 0,
+            })
+        self.assertEqual(session.status_code, 200, session.json)
+        self.assertTrue(session.json['location_verified'])
+        self.assertEqual(session.json['location_source'], 'workorder_checkin')
+        self.assertAlmostEqual(session.json['gps_lat'], 28.68)
+        self.assertAlmostEqual(session.json['gps_lng'], 115.73)
+
+        rebound = self.client.post('/api/mobile/photo-capture-session/location',
+            headers=self.headers('operator-token'), json={
+                'capture_session': session.json['capture_session'],
+                'gps_lat': 30.0, 'gps_lng': 116.0,
+            })
+        self.assertEqual(rebound.status_code, 200, rebound.json)
+        self.assertEqual(rebound.json['location_source'], 'workorder_checkin')
+        self.assertAlmostEqual(rebound.json['gps_lat'], 28.68)
+        self.assertAlmostEqual(rebound.json['gps_lng'], 115.73)
+
+        payload = self.trusted_workorder_payload(
+            self.jpeg_bytes(), 'checkin-location-workorder-photo',
+            session.json['capture_session'])
+        payload['gps_lat'] = 0
+        payload['gps_lng'] = 0
+        uploaded = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=payload)
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        with app_module.get_db() as db:
+            attachment = db.execute("""SELECT gps_lat,gps_lng,taken_at,extra_json,
+                evidence_evaluation_id FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1""").fetchone()
+            evaluation = db.execute('''SELECT facts_json FROM attachment_evidence_evaluations
+                WHERE id=?''', (attachment['evidence_evaluation_id'],)).fetchone()
+        self.assertAlmostEqual(attachment['gps_lat'], 28.68)
+        self.assertAlmostEqual(attachment['gps_lng'], 115.73)
+        self.assertTrue(attachment['taken_at'])
+        extra = json.loads(attachment['extra_json'])
+        self.assertEqual(extra['watermark_fields']['location_label'], '签到位置')
+        self.assertEqual(extra['display_copy']['server_watermark']['location_label'], '签到位置')
+        facts = json.loads(evaluation['facts_json'])
+        self.assertEqual(facts['location_source'], 'workorder_checkin')
+        self.assertEqual(facts['location_fact_id'], 1)
+        self.assertTrue(facts['checkin_time'])
+        self.assertNotEqual(facts['checkin_time'], attachment['taken_at'],
+                            'the actual capture time remains independent from check-in time')
+
+    def test_workorder_camera_never_treats_ambiguous_legacy_name_as_current_user(self):
+        self.seed_trusted_workorder_session('ambiguous-legacy-bootstrap')
+        cases = (
+            ('same-real-name', "UPDATE users SET real_name='现场运维',username='otherop' WHERE id=4"),
+            ('name-matches-other-username',
+             "UPDATE users SET real_name='其他运维',username='现场运维' WHERE id=4"),
+        )
+        for suffix, identity_update in cases:
+            with self.subTest(case=suffix), app_module.get_db() as db:
+                db.execute(identity_update)
+                db.execute("""UPDATE work_orders
+                    SET assignee='现场运维',check_in_time=datetime('now','localtime','-5 minutes'),
+                        check_in_lat=28.68,check_in_lng=115.73,
+                        check_in_user='现场运维',check_in_user_id=NULL WHERE id=1""")
+            response = self.client.post('/api/mobile/photo-capture-session',
+                headers=self.headers('operator-token'), json={
+                    'site_id': 1, 'order_no': 'WO-TEST-001',
+                    'capture_source': 'camera', 'prepare_only': True,
+                })
+            self.assertEqual((response.status_code, response.json['code']),
+                             (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+            with app_module.get_db() as db:
+                db.execute("UPDATE users SET real_name='其他运维',username='other' WHERE id=4")
+
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                SET check_in_user='operator',check_in_user_id=NULL WHERE id=1""")
+        compatible = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual(compatible.status_code, 200, compatible.json)
+        self.assertEqual(compatible.json['location_source'], 'workorder_checkin')
+
+    def test_workorder_camera_stable_checkin_user_id_survives_same_name_reassignment(self):
+        self.seed_trusted_workorder_session('stable-checkin-identity-bootstrap')
+        checked_in = self.client.post('/api/mobile/check-in',
+            headers=self.headers('operator-token'), json={
+                'order_no': 'WO-TEST-001', 'lat': 28.68, 'lng': 115.73,
+                '_idempotency_key': 'stable-checkin-identity',
+            })
+        self.assertEqual(checked_in.status_code, 200, checked_in.json)
+        with app_module.get_db() as db:
+            db.execute("UPDATE users SET real_name='现场运维',username='otherop' WHERE id=4")
+            db.execute("UPDATE work_orders SET assignee='otherop' WHERE id=1")
+            stored = db.execute('''SELECT check_in_user,check_in_user_id
+                FROM work_orders WHERE id=1''').fetchone()
+        self.assertEqual((stored['check_in_user'], stored['check_in_user_id']),
+                         ('现场运维', 2))
+        app_module._tokens['other-operator-token'] = {
+            'id': 4, 'role': 'operator', 'real_name': '现场运维', 'username': 'otherop',
+        }
+        response = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('other-operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual((response.status_code, response.json['code']),
+                         (409, 'EVIDENCE_CHECKIN_REQUIRED'))
+
+    def test_workorder_camera_ignores_other_users_direct_checkin_and_reuses_current_inspection(self):
+        self.seed_trusted_workorder_session('inspection-fallback-bootstrap')
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                SET check_in_time=datetime('now','localtime','-10 minutes'),
+                    check_in_lat=28.68,check_in_lng=115.73,
+                    check_in_user='其他运维',check_in_user_id=4 WHERE id=1""")
+            db.execute("""INSERT INTO inspection_checkins
+                (site_id,user_id,check_time,plan_id,lat,lng)
+                VALUES (1,2,datetime('now','localtime','-2 minutes'),NULL,28.681,115.731)""")
+            inspection = db.execute('''SELECT id,check_time FROM inspection_checkins
+                WHERE user_id=2 ORDER BY id DESC LIMIT 1''').fetchone()
+        session = self.client.post('/api/mobile/photo-capture-session',
+            headers=self.headers('operator-token'), json={
+                'site_id': 1, 'order_no': 'WO-TEST-001',
+                'capture_source': 'camera', 'prepare_only': True,
+            })
+        self.assertEqual(session.status_code, 200, session.json)
+        self.assertEqual(session.json['location_source'], 'inspection_checkin_for_workorder')
+        self.assertAlmostEqual(session.json['gps_lat'], 28.681)
+        self.assertAlmostEqual(session.json['gps_lng'], 115.731)
+
+        uploaded = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'), json=self.trusted_workorder_payload(
+                self.jpeg_bytes(), 'inspection-fallback-workorder-photo',
+                session.json['capture_session']))
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        with app_module.get_db() as db:
+            attachment = db.execute('''SELECT gps_lat,gps_lng,extra_json,evidence_evaluation_id
+                FROM operation_attachments
+                WHERE source_type='workorder' AND source_id=1
+                ORDER BY id DESC LIMIT 1''').fetchone()
+            evaluation = db.execute('''SELECT facts_json FROM attachment_evidence_evaluations
+                WHERE id=?''', (attachment['evidence_evaluation_id'],)).fetchone()
+        self.assertAlmostEqual(attachment['gps_lat'], 28.681)
+        self.assertAlmostEqual(attachment['gps_lng'], 115.731)
+        self.assertEqual(json.loads(attachment['extra_json'])['watermark_fields']['location_label'],
+                         '签到位置')
+        facts = json.loads(evaluation['facts_json'])
+        self.assertEqual(facts['location_source'], 'inspection_checkin_for_workorder')
+        self.assertEqual(facts['location_fact_id'], inspection['id'])
+        self.assertEqual(facts['checkin_time'], inspection['check_time'])
+
+    def test_remote_assistance_runs_without_checkin_or_photo_and_is_idempotent(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='accepted',check_in_time=NULL WHERE id=1")
+
+        forbidden = self.client.put('/api/workorders/WO-TEST-001/service-mode',
+            headers=self.headers('other-operator-token'), json={'service_mode': 'remote'})
+        self.assertEqual((forbidden.status_code, forbidden.json['code']),
+                         (403, 'WORKORDER_SERVICE_MODE_FORBIDDEN'))
+
+        switched = self.client.put('/api/workorders/WO-TEST-001/service-mode',
+            headers=self.headers('operator-token'), json={'service_mode': 'remote'})
+        self.assertEqual(switched.status_code, 200, switched.json)
+        self.assertEqual(switched.json['service_mode'], 'remote')
+
+        detail = self.client.get('/api/workorders/WO-TEST-001',
+                                 headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(detail.json['actions']['primary'], 'start')
+        self.assertFalse(detail.json['checked_in'])
+
+        started = self.client.put('/api/workorders/WO-TEST-001/status',
+            headers=self.headers('operator-token'), json={'status': 'in_progress', 'client': 'mobile'})
+        self.assertEqual(started.status_code, 200, started.json)
+
+        incomplete = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={
+                'client': 'mobile', 'remote_contact': '站点值守人员',
+                'remote_process': '', 'remote_result': '恢复运行',
+            })
+        self.assertEqual((incomplete.status_code, incomplete.json['code']),
+                         (400, 'WORKORDER_REMOTE_FIELDS_REQUIRED'))
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT status FROM work_orders WHERE id=1").fetchone()['status'],
+                             'in_progress')
+
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={
+                'client': 'mobile', 'remote_contact': '站点值守人员',
+                'remote_process': '视频确认采样管路并指导复位',
+                'remote_result': '设备恢复运行，后续观察两个采集周期',
+            })
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'reviewing')
+        replay = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={})
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['already_submitted'])
+
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT service_mode,remote_contact,remote_process,remote_result,
+                                        remote_started_at,remote_submitted_at
+                                 FROM work_orders WHERE id=1""").fetchone()
+            self.assertEqual(row['service_mode'], 'remote')
+            self.assertEqual(row['remote_contact'], '站点值守人员')
+            self.assertTrue(row['remote_started_at'])
+            self.assertTrue(row['remote_submitted_at'])
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 0)
+
+        approved = self.client.post('/api/workorders/WO-TEST-001/approve',
+                                    headers=self.headers('admin-token'), json={})
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['status'], 'closed')
+
+    def test_admin_can_switch_remote_mode_without_gaining_shared_field_permissions(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET status='accepted',check_in_time=NULL WHERE id=1")
+
+        switched = self.client.put('/api/workorders/WO-TEST-001/service-mode',
+            headers=self.headers('admin-token'), json={'service_mode': 'remote'})
+        self.assertEqual(switched.status_code, 200, switched.json)
+
+        started = self.client.put('/api/workorders/WO-TEST-001/status',
+            headers=self.headers('admin-token'), json={'status': 'in_progress', 'client': 'mobile'})
+        self.assertEqual(started.status_code, 403, started.json)
+        self.assertIn('只能操作分配给自己的工单', started.json['error'])
+        uploaded = self.client.post('/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('admin-token'), json={
+                'image': base64.b64encode(self.jpeg_bytes()).decode('ascii'),
+                '_idempotency_key': 'admin-remote-upload-forbidden',
+                'capture_source': 'supplement',
+            })
+        self.assertEqual((uploaded.status_code, uploaded.json['code']),
+                         (403, 'WORKORDER_FORBIDDEN'))
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('other-operator-token'), json={
+                'client': 'mobile', 'remote_contact': '不应写入',
+                'remote_process': '不应写入', 'remote_result': '不应写入',
+            })
+        self.assertEqual(submitted.status_code, 403, submitted.json)
+        self.assertIn('只能提交分配给自己的工单核验', submitted.json['error'])
+        with app_module.get_db() as db:
+            row = db.execute("SELECT status,service_mode,remote_contact FROM work_orders WHERE id=1").fetchone()
+            self.assertEqual(tuple(row), ('accepted', 'remote', ''))
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+
+    def test_remote_schema_upgrade_is_startup_idempotent_and_failure_is_visible(self):
+        legacy = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+        legacy.close()
+
+        @contextmanager
+        def legacy_db():
+            db = sqlite3.connect(legacy.name)
+            db.row_factory = sqlite3.Row
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        try:
+            with legacy_db() as db:
+                db.executescript('''
+                    CREATE TABLE work_orders (id INTEGER PRIMARY KEY, order_no TEXT);
+                    INSERT INTO work_orders (id,order_no) VALUES (1,'WO-LEGACY');
+                    CREATE TABLE vehicle_applications (id INTEGER PRIMARY KEY);
+                    CREATE TABLE spare_part_requests (id INTEGER PRIMARY KEY);
+                    CREATE TABLE device_recycle (id INTEGER PRIMARY KEY);
+                ''')
+            with mock.patch.object(app_module, 'get_db', legacy_db):
+                app_module.migrate_workorder_flow_columns()
+                app_module.migrate_workorder_flow_columns()
+            with legacy_db() as db:
+                columns = {row['name'] for row in db.execute(
+                    'PRAGMA table_info(work_orders)').fetchall()}
+                self.assertTrue({
+                    'service_mode', 'remote_contact', 'remote_process', 'remote_result',
+                    'remote_started_at', 'remote_submitted_at',
+                }.issubset(columns))
+                row = db.execute('''SELECT service_mode,remote_contact,remote_process,
+                                           remote_result,remote_started_at,remote_submitted_at
+                                    FROM work_orders WHERE id=1''').fetchone()
+                self.assertEqual(tuple(row), ('onsite', '', '', '', None, None))
+        finally:
+            os.unlink(legacy.name)
+
+        @contextmanager
+        def broken_db():
+            db = mock.Mock()
+            db.execute.side_effect = sqlite3.OperationalError('disk I/O error')
+            yield db
+
+        with mock.patch.object(app_module, 'get_db', broken_db):
+            with self.assertRaisesRegex(RuntimeError, '工单流程字段迁移失败'):
+                app_module.migrate_workorder_flow_columns()
+
+    def test_remote_assistance_accepts_untrusted_supplement_without_checkin(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE work_orders SET service_mode='remote' WHERE id=1")
+        image_bytes = self.jpeg_bytes(size=(900, 1600), color=(35, 95, 145))
+        response = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'),
+            json={
+                'image': base64.b64encode(image_bytes).decode('ascii'),
+                '_idempotency_key': 'remote-supplement-1',
+                'capture_source': 'supplement',
+                'capture_client': 'remote_assistance_v1',
+                'taken_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'display_watermark': False,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT capture_source,evidence_qualification,evidence_basis,
+                                gps_lat,gps_lng,watermark_code,extra_json
+                                FROM operation_attachments WHERE source_type='workorder'""").fetchone()
+            self.assertEqual(row['capture_source'], 'supplement')
+            self.assertEqual(row['evidence_qualification'], 'ineligible')
+            self.assertEqual(row['evidence_basis'], 'unknown')
+            self.assertIsNone(row['gps_lat'])
+            self.assertIsNone(row['gps_lng'])
+            self.assertEqual(row['watermark_code'], '')
+            extra = json.loads(row['extra_json'])
+            self.assertEqual(extra['metadata_source'], 'remote_supplement')
+            self.assertEqual(extra['material_role'], 'supplement')
+            self.assertFalse(extra['display_watermark'])
+
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={
+                'client': 'mobile', 'remote_contact': '站点值守人员',
+                'remote_process': '视频核对设备状态并指导复位',
+                'remote_result': '设备恢复，继续观察运行数据',
+            })
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        pending = self.client.get('/api/audit/pending', headers=self.headers('reviewer-token'))
+        self.assertEqual(pending.status_code, 200, pending.json)
+        card = next(item for item in pending.json if item['id'] == 'wo_1')
+        self.assertEqual((card['service_mode'], card['service_mode_label']),
+                         ('remote', '远程协助'))
+        self.assertEqual((card['remote_contact'], card['remote_process'], card['remote_result']),
+                         ('站点值守人员', '视频核对设备状态并指导复位',
+                          '设备恢复，继续观察运行数据'))
+        self.assertEqual((card['actual_photos'], card['required_photos']), (0, 0))
+        self.assertEqual(len(card['attachment_details']), 1)
+        supplement = card['attachment_details'][0]
+        self.assertTrue(supplement['supplemental'])
+        self.assertEqual(supplement['material_role'], 'supplement')
+        self.assertEqual(supplement['is_effective_evidence'], 0)
+        self.assertIn('不计现场合格照片', supplement['evidence_qualification_label'])
+        self.assertTrue(supplement['display_url'])
+
+    def test_onsite_workorder_cannot_use_remote_supplement_to_bypass_checkin(self):
+        response = self.client.post(
+            '/api/mobile/workorder/WO-TEST-001/image',
+            headers=self.headers('operator-token'),
+            json={
+                'image': base64.b64encode(self.jpeg_bytes()).decode('ascii'),
+                '_idempotency_key': 'onsite-supplement-bypass',
+                'capture_source': 'supplement',
+            },
+        )
+        self.assertEqual(
+            (response.status_code, response.json['code']),
+            (409, 'WORKORDER_REMOTE_SUPPLEMENT_REQUIRED'),
+        )
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM operation_attachments").fetchone()[0], 0)
+            self.assertEqual(json.loads(db.execute(
+                "SELECT images FROM work_orders WHERE id=1").fetchone()['images']), [])
+
+    def test_switching_remote_work_back_to_onsite_preserves_records_and_restores_gates(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                          SET status='in_progress',service_mode='remote',check_in_time=NULL,
+                              remote_contact='值守人员',remote_process='已远程排查',
+                              remote_result='未解决，需到场',remote_started_at=datetime('now','localtime')
+                          WHERE id=1""")
+
+        switched = self.client.put('/api/workorders/WO-TEST-001/service-mode',
+            headers=self.headers('admin-token'), json={
+                'service_mode': 'onsite',
+                'remote_contact': '值守人员',
+                'remote_process': '已远程排查并指导复位',
+                'remote_result': '复位后仍无数据，需到场检查线路',
+            })
+        self.assertEqual(switched.status_code, 200, switched.json)
+        self.assertEqual(switched.json['service_mode'], 'onsite')
+
+        submitted = self.client.post('/api/workorders/WO-TEST-001/submit-review',
+            headers=self.headers('operator-token'), json={'resolution_note': '不应绕过签到'})
+        self.assertEqual((submitted.status_code, submitted.json['code']),
+                         (409, 'WORKORDER_CHECKIN_REQUIRED'))
+        with app_module.get_db() as db:
+            row = db.execute("""SELECT status,service_mode,remote_contact,remote_process,remote_result
+                                 FROM work_orders WHERE id=1""").fetchone()
+            self.assertEqual((row['status'], row['service_mode']), ('in_progress', 'onsite'))
+            self.assertEqual((row['remote_contact'], row['remote_process'], row['remote_result']),
+                             ('值守人员', '已远程排查并指导复位', '复位后仍无数据，需到场检查线路'))
+
+    def test_remote_to_onsite_requires_complete_handoff_and_keeps_mode_on_failure(self):
+        with app_module.get_db() as db:
+            db.execute("""UPDATE work_orders
+                          SET status='in_progress',service_mode='remote',check_in_time=NULL,
+                              remote_contact='',remote_process='',remote_result='',
+                              remote_started_at=datetime('now','localtime')
+                          WHERE id=1""")
+
+        blocked = self.client.put('/api/workorders/WO-TEST-001/service-mode',
+            headers=self.headers('operator-token'), json={
+                'service_mode': 'onsite', 'remote_contact': '值守人员',
+                'remote_process': '已指导复位', 'remote_result': '',
+            })
+        self.assertEqual((blocked.status_code, blocked.json['code']),
+                         (400, 'WORKORDER_REMOTE_HANDOFF_DETAILS_REQUIRED'))
+        with app_module.get_db() as db:
+            row = db.execute("SELECT service_mode,remote_contact FROM work_orders WHERE id=1").fetchone()
+            self.assertEqual(tuple(row), ('remote', ''))
 
 
 if __name__ == '__main__':

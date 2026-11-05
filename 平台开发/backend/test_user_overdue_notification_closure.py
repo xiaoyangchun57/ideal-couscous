@@ -18,12 +18,16 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         handle.close()
         self.db_path = handle.name
         self.original_get_db = app_module.get_db
+        self.original_db_path = app_module.DB_PATH
         self.original_tokens = dict(app_module._tokens)
+        self.query_only = False
 
         @contextmanager
         def temporary_db():
             db = sqlite3.connect(self.db_path)
             db.row_factory = sqlite3.Row
+            if self.query_only:
+                db.execute('PRAGMA query_only=ON')
             try:
                 yield db
                 db.commit()
@@ -31,6 +35,7 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 db.close()
 
         app_module.get_db = temporary_db
+        app_module.DB_PATH = self.db_path
         app_module._tokens.clear()
         app_module._tokens.update({
             'admin-token': {'id': 1, 'username': 'admin', 'real_name': '管理员', 'role': 'admin', 'roles': ['admin']},
@@ -116,8 +121,12 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
 
     def tearDown(self):
         app_module.get_db = self.original_get_db
+        app_module.DB_PATH = self.original_db_path
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
+        lock_path = f'{self.db_path}.notification-maintenance.lock'
+        if os.path.exists(lock_path):
+            os.unlink(lock_path)
         os.unlink(self.db_path)
 
     @staticmethod
@@ -335,17 +344,35 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], before['notifications'])
             self.assertEqual(db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0], before['events'])
 
-    def test_stale_plan_notification_is_removed_from_unread_count(self):
+    def test_notification_gets_are_read_only_and_background_maintenance_is_idempotent(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO notifications
                 (user_id,source_type,source_id,title,content,payload_json)
                 VALUES (1,'plan_schedule',20,'计划状态更新','明确审核通知',
                         '{"notification_target":"review","review_type":"plan_schedule"}')""")
+        self.query_only = True
         count = self.client.get('/api/notifications/unread-count', headers=self.headers())
-        self.assertEqual(count.status_code, 200, count.json)
-        self.assertEqual(count.json['count'], 0)
         response = self.client.get('/api/notifications', headers=self.headers())
+        self.query_only = False
+        self.assertEqual(count.status_code, 200, count.json)
         self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(count.json['count'], 2)
+        self.assertEqual(response.json['unread_count'], 2)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM notifications WHERE is_read=0"
+            ).fetchone()[0], 2)
+
+        first = app_module.notification_maintenance_job()
+        second = app_module.notification_maintenance_job()
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(first['stale_plan_rows'], 2)
+        self.assertEqual(second['status'], 'completed')
+        self.assertEqual(second['stale_plan_rows'], 0)
+
+        count = self.client.get('/api/notifications/unread-count', headers=self.headers())
+        response = self.client.get('/api/notifications', headers=self.headers())
+        self.assertEqual(count.json['count'], 0)
         self.assertEqual(response.json['unread_count'], 0)
         notices = response.json['notifications']
         self.assertEqual(len(notices), 2)
@@ -362,6 +389,8 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             db.execute("""INSERT INTO notifications
                 (user_id,source_type,source_id,title,content,is_read)
                 VALUES (1,'alert',2,'历史消息','已查看',1)""")
+        maintained = app_module.notification_maintenance_job()
+        self.assertEqual(maintained['status'], 'completed')
         current = self.client.get('/api/notifications?status=unread', headers=self.headers())
         history = self.client.get('/api/notifications?status=read', headers=self.headers())
         self.assertEqual(current.status_code, 200, current.json)
@@ -382,6 +411,10 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
                 (user_id,source_type,source_id,title,content,is_read,created_at)
                 VALUES (1,'plan_schedule',20,'有新的巡检计划待审批','已不需要处理',0,'2026-08-10 10:00:00')""")
 
+        maintained = app_module.notification_maintenance_job()
+        self.assertEqual(maintained['status'], 'completed')
+        self.assertEqual(maintained['stale_plan_rows'], 2)
+
         first = self.client.get('/api/notifications?status=unread&page=1&limit=1', headers=self.headers())
         second = self.client.get('/api/notifications?status=unread&page=2&limit=1', headers=self.headers())
         self.assertEqual(first.status_code, 200, first.json)
@@ -399,6 +432,30 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
         self.assertEqual(invalid.status_code, 400, invalid.json)
         self.assertEqual(capped.status_code, 200, capped.json)
         self.assertEqual(capped.json['limit'], 100)
+
+    def test_notification_maintenance_failure_rolls_back_and_retries(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO notifications
+                (user_id,source_type,source_id,title,content,is_read)
+                VALUES (1,'attachment_review_batch',1,'旧影像待审','',0)""")
+        original = app_module._retire_redundant_inspection_photo_notifications
+        try:
+            app_module._retire_redundant_inspection_photo_notifications = (
+                lambda db, user_id=None: (_ for _ in ()).throw(RuntimeError('forced')))
+            failed = app_module.notification_maintenance_job()
+        finally:
+            app_module._retire_redundant_inspection_photo_notifications = original
+        self.assertEqual(failed['status'], 'failed')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT is_read FROM notifications WHERE source_type='attachment_review_batch'"
+            ).fetchone()[0], 0)
+        retried = app_module.notification_maintenance_job()
+        self.assertEqual(retried['status'], 'completed')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute(
+                "SELECT is_read FROM notifications WHERE source_type='attachment_review_batch'"
+            ).fetchone()[0], 1)
 
     def test_legacy_photo_batch_is_archived_and_never_reappears(self):
         with app_module.get_db() as db:

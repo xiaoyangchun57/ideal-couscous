@@ -39,30 +39,42 @@ test('all miniprogram workorder surfaces consume the server display title', () =
   assert.doesNotMatch(workorderView, /class="(?:wo-title|wos-title)">\{\{(?:item|sheet\.item)\.title\}\}/);
 });
 
-test('today actions expose at most one exact workorder and one independent alert', () => {
+test('today actions expose every actionable exact workorder and one independent alert', () => {
   const actions = homeActions(
-    [{ order_no: 'WO-1', status: 'pending', title: '[自动] 泵站处置', display_title: '泵站处置' }, { order_no: 'WO-2' }],
+    [
+      { order_no: 'WO-1', status: 'pending', title: '[自动] 泵站处置', display_title: '泵站处置' },
+      { order_no: 'MR-2', status: 'accepted', source: 'manual_report', display_title: '感官异常' },
+      { order_no: 'WO-3', status: 'reviewing', display_title: '核验中事项' },
+      { order_no: 'WO-4', status: 'closed', display_title: '已完成事项' },
+    ],
     [{ id: 8, level: 'red', metric: 'ph' }, { id: 9 }]
   );
-  assert.equal(actions.length, 2);
+  assert.equal(actions.length, 3);
   assert.equal(actions[0].kind, 'workorder');
   assert.equal(actions[0].target.objectId, 'WO-1');
   assert.equal(actions[0].statusLabel, '待受理');
   assert.equal(actions[0].statusTone, 'info');
   assert.equal(actions[0].title, '泵站处置');
-  assert.equal(actions[1].kind, 'alert');
-  assert.equal(actions[1].target.objectId, 8);
-  assert.equal(actions[1].statusCls, 'red');
-  assert.equal(actions[1].statusLabel, 'I级');
-  assert.equal(actions[1].statusTone, 'danger');
+  assert.equal(actions[1].kind, 'workorder');
+  assert.equal(actions[1].target.objectId, 'MR-2');
+  assert.equal(actions[1].title, '感官异常');
+  assert.equal(actions[2].kind, 'alert');
+  assert.equal(actions[2].target.objectId, 8);
+  assert.equal(actions[2].statusCls, 'red');
+  assert.equal(actions[2].statusLabel, 'I级');
+  assert.equal(actions[2].statusTone, 'danger');
+  assert.equal(actions.some(action => action.target.objectId === 'WO-3'), false);
+  assert.equal(actions.some(action => action.target.objectId === 'WO-4'), false);
   assert.deepEqual(homeActions([], []), []);
 
   const levels = ['red', 'orange', 'yellow', 'blue'].map((level, index) => homeActions([], [{ id: index + 1, level }])[0].statusLabel);
   assert.deepEqual(levels, ['I级', 'II级', 'III级', 'IV级']);
   const alertTones = ['red', 'orange', 'yellow', 'blue'].map((level, index) => homeActions([], [{ id: index + 1, level }])[0].statusTone);
   assert.deepEqual(alertTones, ['danger', 'warning', 'warning', 'info']);
-  const workorderTones = ['pending', 'in_progress', 'reviewing', 'closed', 'unknown'].map(status => homeActions([{ order_no: status, status }], [])[0].statusTone);
-  assert.deepEqual(workorderTones, ['info', 'warning', 'warning', 'success', 'neutral']);
+  const workorderTones = ['pending', 'accepted', 'dispatched', 'in_progress']
+    .map(status => homeActions([{ order_no: status, status }], [])[0].statusTone);
+  assert.deepEqual(workorderTones, ['info', 'info', 'info', 'warning']);
+  assert.deepEqual(homeActions([{ order_no: 'done', status: 'resolved' }], []), []);
 });
 
 test('today package has an explicit empty state and no future-plan projection', () => {
@@ -89,9 +101,12 @@ test('home overview projects mine-scope monitoring states and authoritative reag
   } }), { total: 8, normal: 3, attention: 2, unavailable: 3 });
 
   assert.deepEqual(projectReagentSummary({ concern_count: 0, items: [] }), {
-    concernCount: 0, display: '暂无需处理', items: [], remainingCount: 0,
+    concernCount: 0, expiredCount: null, expiringCount: null, lowVolumeCount: null,
+    pendingQcCount: null, failedQcCount: null, display: '暂无需处理', items: [], remainingCount: 0,
   });
-  const projected = projectReagentSummary({ concern_count: 3, items: [
+  const projected = projectReagentSummary({ concern_count: 3, status_counts: {
+    expired: 1, expiring: 1, low_volume: 2, pending_qc: 1, failed_qc: 0,
+  }, items: [
     { id: 1, site_id: 10, site_name: '南昌青云水厂', reagent_name: '余氯试剂', status: '临期' },
     { id: 2, site_id: 10, site_name: '南昌青云水厂', reagent_name: 'pH 标液', status: '低余量' },
     { id: 3, site_id: 11, site_name: '昌南站', reagent_name: '氨氮试剂', status: '已过期' },
@@ -102,6 +117,10 @@ test('home overview projects mine-scope monitoring states and authoritative reag
     '南昌青云水厂 · pH 标液 · 低余量',
   ]);
   assert.equal(projected.remainingCount, 1);
+  assert.deepEqual([
+    projected.expiredCount, projected.expiringCount, projected.lowVolumeCount,
+    projected.pendingQcCount, projected.failedQcCount,
+  ], [1, 1, 2, 1, 0]);
 });
 
 test('rework sites remain discoverable as independent today actions without a work package', () => {
@@ -185,13 +204,14 @@ test('identity, auxiliary counts and errors use centralized non-fabricating proj
 test('homepage keeps the approved structure while binding only projected status fields', () => {
   const page = fs.readFileSync(path.join(__dirname, '../pages/index/index.js'), 'utf8');
   const view = fs.readFileSync(path.join(__dirname, '../pages/index/index.wxml'), 'utf8');
-  assert.match(view, /今日任务[\s\S]*今日行动[\s\S]*今日作业包/);
+  // S5.1 单一待办区域：今日待办 + 今日巡检标识 + 其他待办
+  assert.match(view, /今日待办[\s\S]*今日巡检/);
   assert.match(view, /workPackage\.resources\.vehicleText/);
   assert.match(view, /workPackage\.resources\.departureText/);
   assert.doesNotMatch(view, /vehicleAssigned|departurePendingCount/);
   assert.doesNotMatch(page, /res\.workorders|res\.alerts|res\.work_package|res\.summary|buildMainViewModel/);
   assert.match(page, /projectHome\(res\)/);
-  assert.doesNotMatch(view, /wx:if="\{\{false\}\}"|我的计划|即将执行|待办站点|今日进度/);
+  assert.doesNotMatch(view, /wx:if="\{\{false\}\}"|我的计划|即将执行|待办站点|今日进度|今日行动|今日作业包/);
 });
 
 const apiPath = require.resolve('../services/api.js');
@@ -598,6 +618,25 @@ test('home inspection navigation carries a unique executable package and station
     await page.goInspection();
     assert.equal(app.globalData.executionTarget, null,
       'ambiguous packages enter the existing selection page without inventing a target');
+    navigationCalls.at(-1).options.complete();
+
+    api.todayExecution = () => Promise.resolve({ packages: [
+      {
+        plan_id: 71, schedule_id: 7, work_date: '2026-08-28', site_order: [8],
+        sites: [{ site_id: 8, checked_in: true, checked_out: false,
+          total: 1, completed: 1, abnormal: 0 }],
+      },
+      {
+        plan_id: 72, schedule_id: 8, work_date: '2026-08-28', site_order: [9],
+        sites: [{ site_id: 9, checked_in: false, checked_out: false,
+          total: 1, completed: 0, abnormal: 0 }],
+      },
+    ] });
+    await page.goInspection();
+    assert.deepEqual(app.globalData.executionTarget, {
+      executionPlanId: 71, scheduleId: 7, workDate: '2026-08-28',
+      siteId: 8, itemId: null, source: 'home',
+    }, 'one checked-in, not-checked-out site takes priority across multiple packages');
     navigationCalls.at(-1).options.complete();
 
     api.todayExecution = () => Promise.resolve({ packages: [{

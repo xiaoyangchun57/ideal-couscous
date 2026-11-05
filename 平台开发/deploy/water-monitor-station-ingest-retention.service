@@ -1,0 +1,18 @@
+[Unit]
+Description=Water monitor station-ingestion bounded retention
+After=docker.service
+Requires=docker.service
+OnFailure=water-monitor-station-ingest-retention-alert@%n.service
+StartLimitIntervalSec=40min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/run-station-ingest-retention
+Restart=on-failure
+RestartSec=10min
+TimeoutStartSec=50min
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

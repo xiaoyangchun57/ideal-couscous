@@ -163,12 +163,21 @@ function strictGetOptions(timeoutOrOptions) {
     : { timeout: timeoutOrOptions };
 }
 
-async function strictDownload(url, timeout = 60000) {
+async function strictDownload(url, timeoutOrOptions = 60000) {
+  const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
+    ? timeoutOrOptions : { timeout: timeoutOrOptions };
+  const { method = 'GET', body, timeout = 60000 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
+    const headers = authHeaders();
+    if (body && typeof body === 'object' && !(body instanceof FormData)) {
+      headers['Content-Type'] = 'application/json';
+    }
     const res = await fetch(`${API_BASE}${url}`, {
-      headers: authHeaders(),
+      method,
+      headers,
+      body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
       signal: controller.signal,
     });
     const requestId = res.headers.get('x-request-id') || res.headers.get('x-correlation-id') || '';
@@ -227,6 +236,9 @@ export const api = {
     timeout: typeof data === 'number' ? data : timeout,
   }),
   downloadStrict: (url, timeout) => strictDownload(url, timeout),
+  downloadPostStrict: (url, data, timeout) => strictDownload(url, {
+    method: 'POST', body: data, timeout,
+  }),
   track: (eventName, context = {}, eventId = null) => request('/telemetry/events', {
     method: 'POST',
     body: {
@@ -237,16 +249,37 @@ export const api = {
     },
   }),
   trackEvent: (eventName, context) => api.track(eventName, context),
-  stationMonitoringSites: ({ scope, ...options } = {}) => {
+  stationMonitoringSites: ({ scope, serviceScope, ...options } = {}) => {
     const params = new URLSearchParams();
     if (scope !== undefined) params.set('scope', scope);
+    if (serviceScope !== undefined) params.set('service_scope', serviceScope);
     const query = params.toString();
     return strictRequest(`/station-monitoring/sites${query ? `?${query}` : ''}`, options);
   },
-  stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview`, options),
-  stationMonitoringTrend: (siteId, metric, options = {}) => {
+  stationMonitoringOverview: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/overview?detail=summary`, options),
+  stationMonitoringDiagnostics: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/diagnostics`, options),
+  stationExpectedFactors: (siteId, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, options),
+  updateStationExpectedFactors: (siteId, data, options = {}) => strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/expected-factors`, {
+    ...options,
+    method: 'PUT',
+    body: data,
+  }),
+  stationMonitoringTrend: (siteId, metric, {
+    range, start, end, cursor, limit, ...options
+  } = {}) => {
     const params = new URLSearchParams({ metric });
+    if (range !== undefined) params.set('range', range);
+    if (start !== undefined) params.set('start', start);
+    if (end !== undefined) params.set('end', end);
+    if (cursor !== undefined) params.set('cursor', cursor);
+    if (limit !== undefined) params.set('limit', String(limit));
     return strictRequest(`/station-monitoring/sites/${encodeURIComponent(siteId)}/trend?${params}`, options);
   },
   stationMonitoringAccessSummary: (options = {}) => strictRequest('/station-monitoring/access-summary', options),
+  stationServicePolicy: (siteId, options = {}) => strictRequest(`/sites/${encodeURIComponent(siteId)}/service-policy`, options),
+  updateStationServicePolicy: (siteId, data, options = {}) => strictRequest(`/sites/${encodeURIComponent(siteId)}/service-policy`, {
+    ...options,
+    method: 'PUT',
+    body: data,
+  }),
 };

@@ -21,7 +21,8 @@ function payload(url, total = 205) {
     items: Array.from({ length: Math.max(0, Math.min(100, total - start)) }, (_, offset) => {
       const id = start + offset + 1;
       return {
-        id, item_name: `${history ? '历史' : '当前'}档案记录${id}`, stored_path: image,
+        id, item_name: `${history ? '历史' : '当前'}档案记录${id}`,
+        stored_path: image, display_url: image,
         site_name: '隔离档案测试站', source_type: 'inspection', review_status: history ? 'rejected' : 'approved',
         taken_at: '2026-09-15 08:00:00', original_filename: `isolated-archive-${id}.png`,
       };
@@ -101,7 +102,7 @@ test('image archive grid and table behavior with isolated server pagination', {
         const loaded = await region.locator('img').first().evaluate((element) => element.complete && element.naturalWidth > 0);
         assert.equal(loaded, true, 'fixture bitmap renders');
         await scrollToLast(page, region, region.locator('.ant-card').last(), 'grid');
-        await visible(page.getByText('共 205 条', { exact: true }));
+        await visible(page.getByText('当前页 100 条，共 205 条筛选结果', { exact: true }));
         await screenshot(page, `archive-grid-${name}-bottom`);
         await page.getByTitle('2', { exact: true }).click();
         await visible(region.getByText('历史档案记录101', { exact: true }));
@@ -146,7 +147,7 @@ test('image archive grid and table behavior with isolated server pagination', {
       await visible(page.getByText('历史档案记录51', { exact: true }));
       assert.deepEqual(requests.map((url) => url.searchParams.get('page')), ['3', '1']);
       assert.equal(new URL(page.url()).searchParams.has('page'), false);
-      await visible(page.getByText('共 51 条', { exact: true }));
+      await visible(page.getByText('当前页 51 条，共 51 条筛选结果', { exact: true }));
     } finally { await close(); }
   });
 
@@ -336,4 +337,5 @@ test('image archive grid and table behavior with isolated server pagination', {
       assert.equal(new URL(page.url()).searchParams.has('scope'), false);
     } finally { release(); await close(); }
   });
+
 });

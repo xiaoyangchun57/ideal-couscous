@@ -1,4 +1,6 @@
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 
 function deferred() {
   let resolve;
@@ -24,11 +26,23 @@ function setPath(target, key, value) {
 
 const app = { globalData: { token: 'test', executionTarget: null, sites: [] } };
 let definition;
+let previewCalls = [];
+let downloadedFiles = 0;
 global.getApp = () => app;
 global.Page = page => { definition = page; };
 global.wx = {
   getStorageSync: () => [], setStorageSync: () => {}, removeStorageSync: () => {},
   showToast: () => {}, switchTab: () => {}, reLaunch: () => {}, stopPullDownRefresh: () => {},
+  previewImage: options => { previewCalls.push(options); },
+  downloadFile: options => {
+    const task = { abort() {} };
+    setImmediate(() => options.success({
+      statusCode: 200,
+      tempFilePath: `wxfile://tmp/result-${++downloadedFiles}.jpg`,
+    }));
+    return task;
+  },
+  getFileSystemManager: () => ({ unlink: () => {} }),
   setNavigationBarTitle: () => {},
   getNetworkType: ({ success }) => success({ networkType: 'wifi' }),
 };
@@ -108,7 +122,7 @@ function preparedResponse() {
   const originalReagents = api.executionSiteReagents;
   const writeMethods = [
     'confirmDepartureResources', 'issueExecutionParts', 'submitVehicleInspection',
-    'checkOutVehicle', 'checkIn',
+    'checkOutVehicle', 'checkIn', 'submitItem',
   ];
   const originalWrites = Object.fromEntries(writeMethods.map(name => [name, api[name]]));
   try {
@@ -198,6 +212,23 @@ function preparedResponse() {
     assert.equal(entered.data.viewPhase, 'departure');
     assert.equal(entered.data.currentPackage.plan_id, 7);
     assert.equal(todayCalls, 1, 'entry validation opens departure preparation without refetching the package');
+
+    const resumed = createPage();
+    const resumedResponse = response(8, 80, 1);
+    resumedResponse.packages[0].sites[0].checked_in = true;
+    api.todayExecution = () => Promise.resolve(resumedResponse);
+    api.executionSiteTasks = () => Promise.resolve({
+      site: { site_id: 80, checked_in: true, checked_out: false },
+      categories: [{ items: [{ item_id: 81 }] }],
+      arrival_gate: { allowed: true, code: null, message: null },
+    });
+    resumed._entryTarget = { executionPlanId: 8, siteId: 80, source: 'home' };
+    resumed.loadExecution();
+    await flush();
+    await flush();
+    assert.equal(resumed.data.viewPhase, 'inspection',
+      'a checked-in task resumes the field page without repeating departure preparation');
+    assert.equal(resumed.data.selSiteId, 80);
 
     const homeRework = createPage();
     app.globalData.executionTarget = {
@@ -298,6 +329,37 @@ function preparedResponse() {
     assert.equal(prepared.data.selSiteId, 362);
     assert.equal(businessWrites, 0,
       'skipping the completed preparation view never confirms resources, checks out, or checks in');
+
+    const planDirect = createPage();
+    app.globalData.executionTarget = { scheduleId: 46, source: 'plan_detail_execution' };
+    planDirect._entryTarget = undefined;
+    const planWithOngoingSite = response(46, 362, 1);
+    Object.assign(planWithOngoingSite.packages[0].sites[0], { checked_in: true, checked_out: false });
+    planWithOngoingSite.packages[0].sites.push({ site_id: 363, name: '下一站', total: 1, completed: 0 });
+    planWithOngoingSite.packages[0].site_order.push(363);
+    api.todayExecution = () => Promise.resolve(planWithOngoingSite);
+    api.executionSiteTasks = () => Promise.resolve({
+      site: { site_id: 362, checked_in: true, checked_out: false },
+      categories: [{ items: [{ item_id: 7001 }] }],
+      arrival_gate: { allowed: true },
+    });
+    planDirect.loadExecution();
+    await flush(); await flush();
+    assert.equal(planDirect.data.viewPhase, 'inspection');
+    assert.equal(planDirect.data.selSiteId, 362, 'selected plan resumes its single checked-in site');
+    assert.equal(businessWrites, 0, 'resuming a plan never creates another check-in');
+
+    const planBeforeCheckin = createPage();
+    app.globalData.executionTarget = { scheduleId: 48, executionPlanId: 48, siteId: 364, source: 'plan_detail_execution' };
+    planBeforeCheckin._entryTarget = undefined;
+    api.todayExecution = () => Promise.resolve(response(48, 364, 1));
+    api.executionSiteTasks = () => Promise.resolve({ site: { site_id: 364, checked_in: false },
+      categories: [{ items: [{ item_id: 7002 }] }], arrival_gate: { allowed: true } });
+    planBeforeCheckin.loadExecution();
+    await flush(); await flush();
+    assert.equal(planBeforeCheckin.data.viewPhase, 'inspection');
+    assert.equal(planBeforeCheckin.hasSiteCheckIn(364), false, 'direct entry does not invent arrival');
+    assert.equal(businessWrites, 0);
 
     const unavailablePreparation = createPage();
     app.globalData.executionTarget = {
@@ -437,11 +499,144 @@ function preparedResponse() {
       'closed result browsing bypasses the arrival gate without enabling a new check-in');
     assert.equal(closedReadOnly._closedResult.siteId, 110);
     assert.equal(closedReadOnly._closedResult.verified.site.checked_out, true);
+
+    app.globalData.executionTarget = {
+      executionPlanId: 140, siteId: 361, readOnly: true, source: 'completed_plan_detail',
+    };
+    const resultPage = createPage();
+    let taskRequest = null;
+    const taskRequests = [];
+    let reagentCalls = 0;
+    let writeCalls = 0;
+    api.executionSiteTasks = (planId, siteId, options) => {
+      taskRequest = { planId, siteId, options };
+      taskRequests.push(taskRequest);
+      return Promise.resolve({
+        plan_name: '青云周检',
+        site: { id: siteId, site_id: siteId, name: '青云水站', checked_out: true },
+        total: 1,
+        completed: 1,
+        categories: [{
+          category: 'equipment', category_cn: '设备检查', total: 1, completed: 1,
+          items: [{
+            item_id: 7095, plan_id: planId, item_name: '分析仪状态', result: 'normal',
+            remark: '运行正常', check_time: '2026-10-10 09:30:00', review_status: 2,
+            photo_urls: '["/uploads/site_photos/display.jpg"]', required_photos: 1,
+            evidence_attachments: [{
+              id: 140, display_url: 'http://127.0.0.1:5000/uploads/site_photos/display.jpg?ticket=fresh',
+              stored_path: '/uploads/site_photos/display.jpg', review_status: 'approved',
+              evidence_qualification: 'qualified', extra_json: '{"material_role":"formal"}',
+            }],
+          }],
+        }],
+      });
+    };
+    api.executionSiteReagents = () => { reagentCalls += 1; return Promise.resolve({ items: [] }); };
+    writeMethods.forEach(name => {
+      api[name] = () => { writeCalls += 1; return Promise.resolve({}); };
+    });
+    resultPage.loadExecution();
+    await flush();
+    await flush();
+    assert.deepEqual(taskRequest, {
+      planId: 140, siteId: 361, options: { resultOnly: true },
+    });
+    assert.equal(resultPage.data.viewMode, 'readonly');
+    assert.equal(resultPage.data.viewPhase, 'inspection');
+    assert.equal(resultPage.data.completed, 1);
+    assert.equal(resultPage.data.categories[0].items[0].review_status_cn, '已审核');
+    assert.equal(reagentCalls, 0, 'read-only history must not load execution-only reagent actions');
+    resultPage.onOpenItem({ currentTarget: { dataset: { id: 7095 } } });
+    await flush();
+    assert.equal(resultPage.data.sheet.open, true);
+    assert.equal(resultPage.data.sheet.remark, '运行正常');
+    assert.equal(resultPage.data.sheet.photos.length, 1);
+    assert.equal(resultPage.data.sheet.photoMedia[0].status, 'ready');
+    resultPage.onPreview({
+      currentTarget: { dataset: { src: resultPage.data.sheet.photoMedia[0].localPath } },
+    });
+    assert.equal(previewCalls.length, 1);
+    assert.equal(previewCalls[0].urls[0], resultPage.data.sheet.photoMedia[0].localPath);
+    assert.equal(writeCalls, 0, 'opening and previewing a completed item must not call write APIs');
+
+    resultPage.setData({
+      viewPhase: 'departure',
+      departureTarget: { executionPlanId: 140, siteId: 361 },
+      executionError: '旧目标错误',
+      'sheet.open': true,
+    });
+    resultPage.onHide();
+    app.globalData.executionTarget = {
+      executionPlanId: 141, siteId: 362, readOnly: true, source: 'completed_plan_detail',
+    };
+    resultPage.onShow();
+    await flush();
+    await flush();
+    assert.deepEqual(taskRequests[taskRequests.length - 1], {
+      planId: 141, siteId: 362, options: { resultOnly: true },
+    });
+    assert.equal(taskRequests.filter(request => request.planId === 140).length, 1,
+      'reused tab must not reload the old execution target');
+    assert.equal(resultPage.data.viewMode, 'readonly');
+    assert.equal(resultPage.data.viewPhase, 'inspection',
+      'new result target must be consumed before the stale departure refresh branch');
+    assert.equal(resultPage.data.selSiteId, 362);
+    assert.equal(resultPage.data.sheet.open, false, 'target changes close stale item panels');
+    assert.equal(resultPage.data.executionError, '');
+    assert.equal(app.globalData.executionTarget, null, 'navigation target must be consumed atomically');
+
+    resultPage.setData({ entryError: '保留当前页面', 'sheet.open': true });
+    resultPage.onHide();
+    resultPage.onShow();
+    await flush();
+    await flush();
+    assert.equal(resultPage.data.entryError, '保留当前页面',
+      'ordinary tab return without a target must not reset the current page');
+    assert.equal(resultPage.data.sheet.open, true,
+      'ordinary tab return without a target must not close the current panel');
+    assert.deepEqual(taskRequests[taskRequests.length - 1], {
+      planId: 141, siteId: 362, options: { resultOnly: true },
+    });
+
+    resultPage.setData({ entryError: '来源变化不重置', 'sheet.open': true });
+    resultPage.onHide();
+    app.globalData.executionTarget = {
+      executionPlanId: 141, siteId: 362, readOnly: true, source: 'another_entry',
+    };
+    resultPage.onShow();
+    await flush();
+    await flush();
+    assert.equal(resultPage.data.entryError, '来源变化不重置',
+      'source alone is not a business target change');
+    assert.equal(resultPage.data.sheet.open, true,
+      'source-only navigation must not reset the current page');
+    assert.equal(app.globalData.executionTarget, null);
+
+    app.globalData.executionTarget = {
+      executionPlanId: 999, siteId: 888, readOnly: true, source: 'completed_plan_detail',
+    };
+    const deniedResult = createPage();
+    api.executionSiteTasks = () => Promise.reject({ status: 404, error: 'not found' });
+    deniedResult.loadExecution();
+    await flush();
+    assert.equal(deniedResult.data.viewMode, 'no_permission');
+    assert.equal(deniedResult.data.executionError, '暂无该现场记录的查看权限');
+
+    const template = fs.readFileSync(
+      path.resolve(__dirname, '../pages/inspection/inspection.wxml'), 'utf8');
+    assert.match(template, /viewMode !== 'execute' \|\| completed < total/,
+      'completed read-only results must keep the item list visible');
+    assert.match(template, /sheet\.open && viewMode === 'execute'/,
+      'the editable item panel must only render in execute mode');
+    assert.match(template, /viewMode === 'review' \|\| viewMode === 'readonly'/,
+      'reviewer and executor history must share the read-only result panel');
+    assert.match(template, /提交时间[\s\S]*审核状态[\s\S]*bindtap="onPreview"/);
   } finally {
     api.todayExecution = originalToday;
     api.executionSiteTasks = originalTasks;
     api.executionSiteReagents = originalReagents;
     Object.assign(api, originalWrites);
+    previewCalls = [];
   }
   console.log('inspectionExecutionEntry tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

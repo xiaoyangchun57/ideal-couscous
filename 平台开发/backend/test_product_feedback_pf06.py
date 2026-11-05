@@ -179,7 +179,9 @@ class ProductFeedbackPf06Test(unittest.TestCase):
             self.assertEqual(app_module._apply_inspection_photo_requirements(db),0)
         self.assertIsNotNone(app_module.validate_submission_photos('normal',4,json.dumps(['/uploads/a.jpg'] * 3)))
         self.assertIsNone(app_module.validate_submission_photos('normal',4,json.dumps(['/uploads/a.jpg'] * 4)))
-        self.assertIsNotNone(app_module.validate_submission_photos('normal',1,json.dumps(['/uploads/a.jpg'] * 7)))
+        self.assertIsNone(app_module.validate_submission_photos(
+            'normal', 4, json.dumps([f'/uploads/{index}.jpg' for index in range(8)])))
+        self.assertIsNotNone(app_module.validate_submission_photos('abnormal', 0, '[]'))
 
     def test_template_config_and_item_history_are_delete_protected(self):
         self._insert_template()

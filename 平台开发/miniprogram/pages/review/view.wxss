@@ -31,6 +31,15 @@
   color: var(--color-text-primary);
 }
 
+/* ---------- 无权限空态图标 ---------- */
+
+.rv-empty-lock-ico {
+  width: 96rpx;
+  height: 96rpx;
+  opacity: 0.6;
+  margin-bottom: 24rpx;
+}
+
 /* ---------- 空态 / 加载 ---------- */
 
 .rv-empty {
@@ -498,6 +507,26 @@
   display: block;
 }
 
+.rv-photo-media-state {
+  width: 100%;
+  height: 300rpx;
+  padding: 24rpx;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 24rpx;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+  background: var(--color-muted);
+}
+
+.rv-photo-media-error {
+  color: var(--color-error);
+  background: var(--color-error-surface);
+}
+
 .rv-photo-simple {
   width: calc(50% - 8rpx);
   height: 200rpx;
@@ -552,6 +581,48 @@
   font-size: 22rpx;
   color: var(--color-error);
   line-height: 1.4;
+}
+
+/* ---------- 查看现场记录入口 ---------- */
+
+.rv-view-site-link {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin: 20rpx 0 4rpx;
+  padding: 20rpx 24rpx;
+  background: var(--color-type-bg);
+  border-radius: var(--radius-md);
+}
+.rv-view-site-icon {
+  width: 24rpx;
+  height: 24rpx;
+  border: 2rpx solid var(--color-primary);
+  border-radius: 50%;
+  position: relative;
+  flex: none;
+}
+.rv-view-site-icon::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8rpx;
+  height: 8rpx;
+  background: var(--color-primary);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+.rv-view-site-text {
+  flex: 1;
+  font-size: 26rpx;
+  color: var(--color-primary);
+  font-weight: 500;
+}
+.rv-view-site-arrow {
+  font-size: 28rpx;
+  color: var(--color-primary);
+  font-weight: 300;
 }
 
 /* ---------- 决策区按钮 ---------- */

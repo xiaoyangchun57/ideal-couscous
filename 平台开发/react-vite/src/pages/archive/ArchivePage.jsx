@@ -10,7 +10,7 @@ import {
 import dayjs from 'dayjs';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import WorkspacePage, {
-  FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar, formatTablePaginationTotal,
 } from '../../components/WorkspacePage';
 import { api } from '../../services/api';
 import { useAuth } from '../../hooks/useAuth';
@@ -18,8 +18,15 @@ import {
   archiveHistoryStatus, archivePrimaryTitle, archivePurgeEligibility, hasAdminRole,
   normalizeDeleteReason,
 } from './attachmentDeletion';
-import { ARCHIVE_PAGE_SIZE, archiveLastPage, archiveNavigationState } from './archivePagination';
-import { archiveCaptureLabel, archiveSourceLabel, hasArchiveFilters } from './archivePresentation';
+import { ARCHIVE_PAGE_SIZE, ARCHIVE_PAGE_SIZES, archiveLastPage, archiveNavigationState } from './archivePagination';
+import {
+  archiveCaptureLabel, archiveMaterialNature, archiveSourceLabel, hasArchiveFilters,
+} from './archivePresentation';
+import {
+  archiveDownloadFailureSummary, archiveDownloadFilterSelection, archiveDownloadScopeKey,
+  isCurrentArchiveDownloadSelectionRequest, nextArchiveDownloadSelectionRequest,
+  toggleArchiveDownloadItem, toggleArchiveDownloadPage,
+} from './archiveDownloadSelection';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import './ArchivePage.css';
 
@@ -76,16 +83,27 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function saveDownloadedBlob(download, fallbackName = '影像文件') {
+  const url = URL.createObjectURL(download.blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = download.filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function historyStatus(item) {
   return archiveHistoryStatus(item, HISTORY_STATUS);
 }
 
 export default function ArchivePage() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { page, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
+  const { page, pageSize, archiveMode, view, filterQuery, requestQuery } = useMemo(() => archiveNavigationState(searchParams), [searchParams]);
   const applied = useMemo(() => filtersFromParams(new URLSearchParams(filterQuery)), [filterQuery]);
   const hasAppliedFilters = useMemo(() => hasArchiveFilters(applied), [applied]);
   const [filters, setFilters] = useState(() => filtersFromParams(searchParams));
@@ -108,6 +126,9 @@ export default function ArchivePage() {
   const [batchError, setBatchError] = useState('');
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchResultUnknown, setBatchResultUnknown] = useState(false);
+  const [downloadIds, setDownloadIds] = useState([]);
+  const [downloadSelectionLoading, setDownloadSelectionLoading] = useState(false);
+  const [downloadLoading, setDownloadLoading] = useState(false);
   const batchKeyRef = useRef('');
   const batchRequestRef = useRef(null);
   const purgeRef = useRef(false);
@@ -116,6 +137,8 @@ export default function ArchivePage() {
   const gridRef = useRef(null);
   const mountedRef = useRef(true);
   const searchParamsWriterRef = useRef(setSearchParams);
+  const downloadScopeRef = useRef(archiveDownloadScopeKey(archiveMode, filterQuery));
+  const downloadSelectionRequestRef = useRef({ id: 0, scopeKey: downloadScopeRef.current });
 
   useEffect(() => { searchParamsWriterRef.current = setSearchParams; }, [setSearchParams]);
 
@@ -126,6 +149,8 @@ export default function ArchivePage() {
       clearTimeout(keywordTimerRef.current);
       requestRef.current.id += 1;
       requestRef.current.controller?.abort();
+      downloadSelectionRequestRef.current = nextArchiveDownloadSelectionRequest(
+        downloadSelectionRequestRef.current, downloadScopeRef.current);
     };
   }, []);
 
@@ -144,9 +169,22 @@ export default function ArchivePage() {
 
   useEffect(() => {
     setSelectedIds([]);
-  }, [archiveMode, filterQuery, page, view]);
+  }, [archiveMode, filterQuery, page, pageSize, view]);
 
-  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1) => {
+  useEffect(() => {
+    const nextScope = archiveDownloadScopeKey(archiveMode, filterQuery);
+    if (downloadScopeRef.current === nextScope) return;
+    downloadScopeRef.current = nextScope;
+    downloadSelectionRequestRef.current = nextArchiveDownloadSelectionRequest(
+      downloadSelectionRequestRef.current, nextScope);
+    setDownloadSelectionLoading(false);
+    setDownloadIds(current => {
+      if (current.length) message.info('档案类别或筛选条件已变化，原保存选择已清空');
+      return [];
+    });
+  }, [archiveMode, filterQuery, message]);
+
+  const writeUrl = useCallback((nextFilters, nextView = view, nextMode = archiveMode, nextPage = 1, nextPageSize = pageSize) => {
     const params = new URLSearchParams();
     if (nextFilters.keyword) params.set('keyword', nextFilters.keyword);
     if (nextFilters.site_id) params.set('site_id', nextFilters.site_id);
@@ -158,8 +196,9 @@ export default function ArchivePage() {
     if (nextView === 'grid') params.set('view', 'grid');
     if (nextMode === 'history') params.set('scope', 'history');
     if (nextPage > 1) params.set('page', String(nextPage));
+    if (nextPageSize !== ARCHIVE_PAGE_SIZE) params.set('page_size', String(nextPageSize));
     setSearchParams(params, { replace: true });
-  }, [archiveMode, setSearchParams, view]);
+  }, [archiveMode, pageSize, setSearchParams, view]);
 
   const load = useCallback(async () => {
     requestRef.current.controller?.abort();
@@ -175,7 +214,7 @@ export default function ArchivePage() {
         throw new Error('影像档案分页数据格式异常，请重试');
       }
       const requestedPage = Number(new URLSearchParams(requestQuery).get('page'));
-      const lastPage = archiveLastPage(data.total);
+      const lastPage = archiveLastPage(data.total, pageSize);
       if (requestedPage > lastPage) {
         correctingPage = true;
         searchParamsWriterRef.current((current) => {
@@ -197,7 +236,7 @@ export default function ArchivePage() {
     } finally {
       if (mountedRef.current && requestId === requestRef.current.id && !correctingPage) setLoading(false);
     }
-  }, [requestQuery]);
+  }, [pageSize, requestQuery]);
 
   useEffect(() => {
     load();
@@ -345,6 +384,113 @@ export default function ArchivePage() {
     }
   };
 
+  const resolveDownloadSelection = useCallback(async (selection) => {
+    const result = await api.postStrict('/attachments/download/resolve', { selection }, 60000);
+    return {
+      items: Array.isArray(result?.items) ? result.items : [],
+      failures: Array.isArray(result?.failures) ? result.failures : [],
+    };
+  }, []);
+
+  const showDownloadFailures = useCallback((failures) => {
+    const summary = archiveDownloadFailureSummary(failures);
+    if (summary) message.warning(`有 ${failures.length} 条未进入下载：${summary}`);
+  }, [message]);
+
+  const selectFilteredDownloads = useCallback(async () => {
+    if (downloadSelectionLoading || downloadLoading) return;
+    const requestScope = archiveDownloadScopeKey(archiveMode, filterQuery);
+    const requestState = nextArchiveDownloadSelectionRequest(
+      downloadSelectionRequestRef.current, requestScope);
+    downloadSelectionRequestRef.current = requestState;
+    setDownloadSelectionLoading(true);
+    try {
+      const resolved = await resolveDownloadSelection(
+        archiveDownloadFilterSelection(applied, archiveMode));
+      if (!isCurrentArchiveDownloadSelectionRequest(
+        requestState, downloadSelectionRequestRef.current,
+        downloadScopeRef.current, mountedRef.current)) return;
+      setDownloadIds(resolved.items.map(item => item.attachment_id));
+      showDownloadFailures(resolved.failures);
+      if (resolved.items.length) message.success(`已固定选择当前筛选结果 ${resolved.items.length} 条`);
+    } catch (requestError) {
+      if (!isCurrentArchiveDownloadSelectionRequest(
+        requestState, downloadSelectionRequestRef.current,
+        downloadScopeRef.current, mountedRef.current)) return;
+      message.error(requestError?.message || '筛选结果选择失败，请缩小范围后重试');
+    } finally {
+      if (isCurrentArchiveDownloadSelectionRequest(
+        requestState, downloadSelectionRequestRef.current,
+        downloadScopeRef.current, mountedRef.current)) {
+        setDownloadSelectionLoading(false);
+      }
+    }
+  }, [applied, archiveMode, downloadLoading, downloadSelectionLoading, filterQuery,
+    message, resolveDownloadSelection, showDownloadFailures]);
+
+  const performDirectDownload = useCallback(async (ids) => {
+    if (!ids?.length || downloadLoading) return;
+    setDownloadLoading(true);
+    let saved = 0;
+    const failed = [];
+    try {
+      const resolved = await resolveDownloadSelection({ mode: 'ids', attachment_ids: ids });
+      showDownloadFailures(resolved.failures);
+      for (const item of resolved.items) {
+        try {
+          const download = await api.downloadStrict(`/attachments/${item.attachment_id}/download`, 120000);
+          saveDownloadedBlob(download, item.filename);
+          saved += 1;
+        } catch (requestError) {
+          failed.push({ attachment_id: item.attachment_id, reason: requestError?.message || '保存失败' });
+        }
+      }
+      if (saved) message.success(`已发起保存 ${saved} 个文件`);
+      if (failed.length) message.error(`另有 ${failed.length} 个文件保存失败：${archiveDownloadFailureSummary(failed)}`);
+    } catch (requestError) {
+      message.error(requestError?.message || '影像保存失败，请刷新后重试');
+    } finally {
+      if (mountedRef.current) setDownloadLoading(false);
+    }
+  }, [downloadLoading, message, resolveDownloadSelection, showDownloadFailures]);
+
+  const performZipDownload = useCallback(async (ids) => {
+    if (!ids?.length || downloadLoading) return;
+    setDownloadLoading(true);
+    try {
+      const resolved = await resolveDownloadSelection({ mode: 'ids', attachment_ids: ids });
+      showDownloadFailures(resolved.failures);
+      const eligibleIds = resolved.items.map(item => item.attachment_id);
+      if (!eligibleIds.length) return;
+      const download = await api.downloadPostStrict(
+        '/attachments/download/zip', { attachment_ids: eligibleIds }, 300000);
+      saveDownloadedBlob(download, '影像档案.zip');
+      message.success(`压缩包已生成，共 ${eligibleIds.length} 个文件`);
+    } catch (requestError) {
+      message.error(requestError?.message || '压缩包生成失败，请刷新选择后重试');
+    } finally {
+      if (mountedRef.current) setDownloadLoading(false);
+    }
+  }, [downloadLoading, message, resolveDownloadSelection, showDownloadFailures]);
+
+  const requestDirectDownload = useCallback((ids) => {
+    if (!ids?.length || downloadLoading) return;
+    if (ids.length === 1) {
+      performDirectDownload(ids);
+      return;
+    }
+    modal.confirm({
+      title: `直接保存 ${ids.length} 个文件？`,
+      content: '浏览器可能阻止连续保存或逐个弹出下载提示。继续可逐张保存；取消后可点击“保存压缩包”改用一个文件。',
+      okText: '继续直接保存',
+      cancelText: '取消',
+      closable: false,
+      maskClosable: false,
+      keyboard: false,
+      onOk: () => performDirectDownload(ids),
+    });
+  }, [downloadLoading, modal, performDirectDownload]);
+
   useEffect(() => {
     setPurgePreview(null);
     setPurgeError('');
@@ -365,7 +511,16 @@ export default function ArchivePage() {
 
   const columns = useMemo(() => [
     {
-      title: '影像', dataIndex: 'stored_path', width: 68,
+      title: '保存', width: 58, align: 'center',
+      render: (_, item) => <Checkbox
+        aria-label={`选择保存影像 ${displayTitle(item)}`}
+        checked={downloadIds.includes(item.id)}
+        disabled={downloadLoading || downloadSelectionLoading}
+        onChange={event => setDownloadIds(current => toggleArchiveDownloadItem(
+          current, item.id, event.target.checked))} />,
+    },
+    {
+      title: '影像', dataIndex: 'display_url', width: 68,
       render: (path, item) => <Image src={path} width={44} height={44}
         alt={displayTitle(item)} style={{ objectFit: 'cover', borderRadius: 4 }} />,
     },
@@ -385,7 +540,10 @@ export default function ArchivePage() {
     },
     {
       title: '来源', width: 150,
-      render: (_, item) => archiveCaptureLabel(item.capture_source),
+      render: (_, item) => <Space direction="vertical" size={2}>
+        <Text>{archiveCaptureLabel(item.capture_source)}</Text>
+        {item.is_archive_material === 1 && <Tag color="blue" style={{ marginInlineEnd: 0 }}>归档材料</Tag>}
+      </Space>,
     },
     ...(archiveMode === 'history' ? [{
       title: '记录状态', width: 130,
@@ -394,9 +552,10 @@ export default function ArchivePage() {
     {
       title: '操作', width: 120,
       render: (_, item) => <Space><Button type="link" size="small" onClick={() => setDetail(item)}>详情</Button>
-        <Button type="link" size="small" onClick={() => window.open(item.stored_path, '_blank')}>下载</Button></Space>,
+        <Button type="link" size="small" disabled={!item.display_url}
+          onClick={() => requestDirectDownload([item.id])}>保存</Button></Space>,
     },
-  ], [archiveMode]);
+  ], [archiveMode, downloadIds, downloadLoading, downloadSelectionLoading, requestDirectDownload]);
 
   const emptyActions = <Space wrap>
     {hasAppliedFilters && <Button type="primary" icon={<ReloadOutlined />} onClick={resetFilters}>重置筛选</Button>}
@@ -406,6 +565,8 @@ export default function ArchivePage() {
   const currentPageIds = items.map(item => item.id);
   const currentPageSelected = currentPageIds.length > 0
     && currentPageIds.every(id => selectedIds.includes(id));
+  const currentPageDownloadSelected = currentPageIds.length > 0
+    && currentPageIds.every(id => downloadIds.includes(id));
   const currentAttachmentById = new Map(items.map(item => [item.id, item]));
   const batchPreviewBlocked = Boolean(batchPreview && !batchPreview.can_purge);
   const batchHasSubmitAction = batchResultUnknown || Boolean(batchPreview?.can_purge);
@@ -420,6 +581,25 @@ export default function ArchivePage() {
         </Button>}
         {archiveMode === 'history' && hasAdminRole(user) && <Button danger disabled={!selectedIds.length}
           onClick={openBatchPurge}>批量清理 ({selectedIds.length})</Button>}
+        <Button disabled={!currentPageIds.length || downloadLoading || downloadSelectionLoading}
+          onClick={() => setDownloadIds(current => toggleArchiveDownloadPage(
+            current, currentPageIds, !currentPageDownloadSelected))}>
+          {currentPageDownloadSelected ? '取消本页保存选择' : '选择本页保存'}
+        </Button>
+        <Button disabled={!total || downloadLoading || downloadSelectionLoading}
+          loading={downloadSelectionLoading} onClick={selectFilteredDownloads}>
+          选择筛选结果全部 ({total})
+        </Button>
+        {downloadIds.length > 0 && <Button disabled={downloadLoading || downloadSelectionLoading}
+          onClick={() => setDownloadIds([])}>清空保存选择</Button>}
+        <Button icon={<DownloadOutlined />} disabled={!downloadIds.length || downloadLoading || downloadSelectionLoading}
+          loading={downloadLoading} onClick={() => requestDirectDownload([...downloadIds])}>
+          直接保存 ({downloadIds.length})
+        </Button>
+        <Button type="primary" icon={<DownloadOutlined />} disabled={!downloadIds.length || downloadLoading || downloadSelectionLoading}
+          loading={downloadLoading} onClick={() => performZipDownload([...downloadIds])}>
+          保存压缩包 ({downloadIds.length})
+        </Button>
         <Segmented value={archiveMode} onChange={(nextMode) => {
           clearTimeout(keywordTimerRef.current);
           const committed = { ...filters, keyword: filters.keyword.trim() };
@@ -454,28 +634,35 @@ export default function ArchivePage() {
             : '当前没有驳回、作废、替换、待审或补充材料记录。'}
           onRefresh={load}>{emptyActions}</WorkspaceEmpty> : view === 'table' ? <WorkspaceTable rowKey="id" dataSource={items} columns={columns}
           loading={loading} fillHeight emptyType={hasAppliedFilters ? 'filtered' : 'empty'}
-          onRefresh={load} scroll={{ x: 900, y: 'calc(100vh - 330px)' }}
+          onRefresh={load} scroll={{ x: 900 }}
           rowSelection={archiveMode === 'history' && hasAdminRole(user) ? {
             selectedRowKeys: selectedIds,
             onChange: setSelectedIds,
           } : undefined}
-          pagination={total > ARCHIVE_PAGE_SIZE ? { current: page, pageSize: ARCHIVE_PAGE_SIZE, total, showSizeChanger: false, disabled: loading,
-            showTotal: value => `共 ${value} 条`, onChange: (next) => writeUrl(applied, view, archiveMode, next) } : false} /> :
+          pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: ARCHIVE_PAGE_SIZES, disabled: loading,
+            onChange: (next, nextPageSize) => writeUrl(applied, view, archiveMode, nextPageSize !== pageSize ? 1 : next, nextPageSize) }} /> :
           <div className="archive-grid-view">
           <div className="archive-grid-scroll" ref={gridRef} role="region" aria-label="影像档案网格" tabIndex={0}>
           <div className="archive-grid-items">{items.map(item =>
             <Card key={item.id} size="small" hoverable
-              extra={archiveMode === 'history' && hasAdminRole(user) ? <Checkbox
-                aria-label={`选择历史影像 ${displayTitle(item)}`}
-                checked={selectedIds.includes(item.id)}
-                onChange={(event) => setSelectedIds(current => event.target.checked
-                  ? [...current, item.id] : current.filter(id => id !== item.id))} /> : null}
+              extra={<Space size={8}>
+                <Checkbox aria-label={`选择保存影像 ${displayTitle(item)}`}
+                  checked={downloadIds.includes(item.id)} disabled={downloadLoading || downloadSelectionLoading}
+                  onChange={event => setDownloadIds(current => toggleArchiveDownloadItem(
+                    current, item.id, event.target.checked))} />
+                {archiveMode === 'history' && hasAdminRole(user) && <Checkbox
+                  aria-label={`选择历史影像用于清理 ${displayTitle(item)}`}
+                  checked={selectedIds.includes(item.id)}
+                  onChange={(event) => setSelectedIds(current => event.target.checked
+                    ? [...current, item.id] : current.filter(id => id !== item.id))} />}
+              </Space>}
               cover={<button type="button" onClick={() => setDetail(item)}
               style={{ width: '100%', height: 170, padding: 0, border: 0, overflow: 'hidden', cursor: 'pointer' }}>
-              <img src={item.stored_path} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <img src={item.display_url} alt={displayTitle(item)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </button>} actions={[
               <Button key="detail" type="text" icon={<PictureOutlined />} onClick={() => setDetail(item)}>详情</Button>,
-              <Button key="download" type="text" icon={<DownloadOutlined />} onClick={() => window.open(item.stored_path, '_blank')}>下载</Button>,
+              <Button key="download" type="text" icon={<DownloadOutlined />} disabled={!item.display_url}
+                onClick={() => requestDirectDownload([item.id])}>保存</Button>,
             ]}>
               <Card.Meta title={displayTitle(item)} description={<Space direction="vertical" size={2}>
                 <span>{item.site_name || '未关联站点'} · {item.taken_at || '-'}</span>
@@ -484,10 +671,10 @@ export default function ArchivePage() {
             </Card>
           )}</div></div>
           <div className="archive-grid-footer">
-            <Text type="secondary">共 {total} 条</Text>
-            {total > ARCHIVE_PAGE_SIZE && <Pagination current={page} pageSize={ARCHIVE_PAGE_SIZE} total={total}
-              showSizeChanger={false} showLessItems responsive size="small" disabled={loading}
-              onChange={(next) => writeUrl(applied, view, archiveMode, next)} />}
+            <Text type="secondary">{formatTablePaginationTotal(total, [items.length ? ((page - 1) * pageSize) + 1 : 0, items.length ? ((page - 1) * pageSize) + items.length : 0])}</Text>
+            <Pagination current={page} pageSize={pageSize} total={total}
+              showSizeChanger pageSizeOptions={ARCHIVE_PAGE_SIZES} showLessItems responsive size="small" disabled={loading}
+              onChange={(next, nextPageSize) => writeUrl(applied, view, archiveMode, nextPageSize !== pageSize ? 1 : next, nextPageSize)} />
           </div></div>}
       </Spin></div>}
 
@@ -497,19 +684,23 @@ export default function ArchivePage() {
           <Button danger onClick={openRejectedPurge}>彻底清理历史影像</Button>}
           <Button onClick={() => setDetail(null)}>关闭</Button>
           <Button type="primary" icon={<DownloadOutlined />} onClick={() => {
-            if (!detail?.stored_path) return message.error('文件地址不可用');
-            window.open(detail.stored_path, '_blank');
-          }}>下载文件</Button></Space>}>
+            if (!detail?.id) return message.error('影像记录已失效，请刷新后重试');
+            requestDirectDownload([detail.id]);
+          }}>保存展示副本</Button></Space>}>
         {detail && <>
-          <div style={{ textAlign: 'center', marginBottom: 16 }}><Image src={detail.stored_path}
-            alt={displayTitle(detail)} style={{ maxHeight: 420, maxWidth: '100%' }} /></div>
+          <div style={{ textAlign: 'center', marginBottom: 16 }}><Image src={detail.display_url}
+            alt={displayTitle(detail)} width="100%"
+            style={{ maxHeight: 420, width: '100%', objectFit: 'contain' }} /></div>
           <Descriptions bordered size="small" column={2}>
             <Descriptions.Item label="拍摄时间">{detail.taken_at || '-'}</Descriptions.Item>
             <Descriptions.Item label="上传时间">{detail.created_at || '-'}</Descriptions.Item>
             <Descriptions.Item label="采集来源">{archiveCaptureLabel(detail.capture_source)}</Descriptions.Item>
             <Descriptions.Item label="站点">{detail.site_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="业务来源">{sourceLabel(detail)}</Descriptions.Item>
-            <Descriptions.Item label="检查项">{itemLabel(detail)}</Descriptions.Item>
+            <Descriptions.Item label={detail.is_archive_material === 1 ? '关联业务' : '检查项'}>{itemLabel(detail)}</Descriptions.Item>
+            <Descriptions.Item label="材料性质">
+              {archiveMaterialNature(detail)}
+            </Descriptions.Item>
             <Descriptions.Item label="关联计划">{detail.plan_name || (detail.plan_id ? `#${detail.plan_id}` : '-')}</Descriptions.Item>
             <Descriptions.Item label="上传人">{detail.uploader_name || detail.uploader_real_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="记录状态">{archiveMode === 'current' ? '当前有效' : historyStatus(detail).label}</Descriptions.Item>
@@ -522,7 +713,7 @@ export default function ArchivePage() {
                 ? `${purgePreview.qualification_reason || '服务端已确认可清理'}；${purgePreview.impact || '删除前仍会重新核验'}`
                 : purgePreview?.block_reason || '当前记录不可彻底清理')}
             </Descriptions.Item>}
-            <Descriptions.Item label="原始文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
+            <Descriptions.Item label="展示副本文件" span={2}>{detail.original_filename || detail.filename || '-'}</Descriptions.Item>
           </Descriptions>
         </>}
       </Modal>

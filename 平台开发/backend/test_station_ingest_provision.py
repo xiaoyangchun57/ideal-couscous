@@ -79,7 +79,8 @@ class StationIngestProvisionTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             return tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
                 "trusted_endpoints", "monitoring_endpoint_profiles", "monitoring_factor_mappings",
-                "ingest_raw_frames", "observation_batches", "observation_values",
+                "monitoring_business_schedules", "ingest_raw_frames", "observation_batches",
+                "observation_values", "monitoring_business_observations",
             ))
 
     def apply(self, configuration, credential=b"\x12\x34"):
@@ -111,6 +112,92 @@ class StationIngestProvisionTest(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             value = connection.execute("SELECT standard_value FROM observation_values").fetchone()[0]
         self.assertEqual(value, 12.3)
+
+    def test_existing_endpoint_only_adds_profile_mapping_and_schedule_without_credentials(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,1,'bound')""",
+                ("0012345678", credential_hmac(b"\x12\x34", self.pepper)),
+            )
+            connection.commit()
+        configuration = self.write_configuration(self.configuration(
+            existing_endpoint_only=True,
+            business_schedule={
+                "interval_seconds": 3600,
+                "anchor_local_time": "00:00:00",
+                "tolerance_seconds": 15,
+                "result_delay_seconds": 0,
+            },
+        ))
+        before = self.counts()
+        self.assertEqual(execute("plan", self.database, configuration)["result"], "ready")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(execute(
+            "apply", self.database, configuration, offline_confirmed=True)["result"], "applied")
+        after_apply = self.counts()
+        self.assertEqual(execute("verify", self.database, configuration)["result"], "verified")
+        self.assertEqual(execute(
+            "apply", self.database, configuration, offline_confirmed=True)["result"], "applied")
+        self.assertEqual(self.counts(), after_apply)
+
+        storage = IngestionStorage(self.database, self.pepper)
+        frame = parse_frame(make_32h(bytes.fromhex("0311") + bcd_number(12.3, 3, 1)))
+        authentication = storage.authenticate(frame)
+        self.assertEqual(authentication.status, "authenticated")
+        raw_id, duplicate = storage.persist_parsed(
+            frame, authentication, "2020-06-11T18:00:05+00:00")
+        self.assertFalse(duplicate)
+        self.assertEqual(normalize_raw_frame(self.database, raw_id), "accepted")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM monitoring_business_observations"
+            ).fetchone()[0], 1)
+
+    def test_existing_endpoint_only_rejects_missing_identity_with_zero_writes(self):
+        configuration = self.write_configuration(self.configuration(
+            existing_endpoint_only=True,
+            business_schedule={
+                "interval_seconds": 14400,
+                "anchor_local_time": "00:00:00",
+                "tolerance_seconds": 600,
+                "result_delay_seconds": 7200,
+            },
+        ))
+        before = self.counts()
+        with self.assertRaisesRegex(ProvisionError, "existing endpoint does not exist"):
+            execute("apply", self.database, configuration, offline_confirmed=True)
+        self.assertEqual(self.counts(), before)
+
+    def test_existing_endpoint_only_cli_apply_needs_no_private_credential(self):
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,1,'bound')""",
+                ("0012345678", credential_hmac(b"\x12\x34", self.pepper)),
+            )
+            connection.commit()
+        self.write_configuration(self.configuration(
+            existing_endpoint_only=True,
+            business_schedule={
+                "interval_seconds": 3600,
+                "anchor_local_time": "00:00:00",
+                "tolerance_seconds": 15,
+                "result_delay_seconds": 0,
+            },
+        ))
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = main([
+                "apply", "--database", str(self.database), "--config", str(self.config_path),
+                "--offline-confirmation",
+            ])
+        self.assertEqual(result, 0, errors.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["result"], "applied")
+        self.assertNotIn("0012345678", output.getvalue() + errors.getvalue())
 
     def test_hex_stdin_credential_decodes_to_the_protocol_two_byte_password(self):
         self.write_configuration()

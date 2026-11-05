@@ -160,7 +160,7 @@ class StationIngestB2BatchTest(unittest.TestCase):
         self.assertGreater(result["hard_error_count"], 0)
         self.assertEqual(self.configuration_rows(), before)
 
-    def test_real_published_factor_set_is_eligible_and_unknown_legacy_codes_are_soft(self):
+    def test_real_published_factor_set_and_approved_numeric_code_are_eligible(self):
         published = [
             "HJ212:005", "HJ212:022", "HJ212:027", "HJ212:029", "HJ212:030",
             "HJ212:w01001", "HJ212:w01003", "HJ212:w01009", "HJ212:w01010",
@@ -171,10 +171,10 @@ class StationIngestB2BatchTest(unittest.TestCase):
         ])
         plan = provision.preview_b2_batch(self.database, self.matrix, now=self.NOW)
         self.assertEqual(plan["result"], "ready", plan)
-        self.assertEqual(plan["eligible_factor_count"], len(published))
+        self.assertEqual(plan["eligible_factor_count"], len(published) + 1)
         self.assertEqual(
             {item.get("protocol_code") for item in plan["soft_differences"]},
-            {"HJ212:001", "HJ212:274"},
+            {"HJ212:274"},
         )
 
     def test_changed_matrix_and_expired_boundary_are_rejected_without_writes(self):

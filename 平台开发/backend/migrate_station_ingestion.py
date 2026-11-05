@@ -24,6 +24,16 @@ MIGRATIONS = (
     ("20260918_006_hj212_legacy_005_dissolved_oxygen", Path(__file__).with_name("migrations") / "20260918_006_hj212_legacy_005_dissolved_oxygen.sql"),
     ("20260921_007_monitoring_result_window", Path(__file__).with_name("migrations") / "20260921_007_monitoring_result_window.sql"),
     ("20260922_008_station_master_refresh", Path(__file__).with_name("migrations") / "20260922_008_station_master_refresh.sql"),
+    ("20261011_009_station_monitoring_read_indexes", Path(__file__).with_name("migrations") / "20261011_009_station_monitoring_read_indexes.sql"),
+    ("20261012_010_pending_normalization_index", Path(__file__).with_name("migrations") / "20261012_010_pending_normalization_index.sql"),
+    ("20261013_011_station_expected_factors", Path(__file__).with_name("migrations") / "20261013_011_station_expected_factors.sql"),
+    ("20261013_012_hj212_numeric_factor_definitions", Path(__file__).with_name("migrations") / "20261013_012_hj212_numeric_factor_definitions.sql"),
+    ("20261013_013_station_service_policy", Path(__file__).with_name("migrations") / "20261013_013_station_service_policy.sql"),
+    ("20261016_014_station_ingest_retention_windows", Path(__file__).with_name("migrations") / "20261016_014_station_ingest_retention_windows.sql"),
+    ("20261020_015_station_factor_display_precision", Path(__file__).with_name("migrations") / "20261020_015_station_factor_display_precision.sql"),
+    ("20261021_016_station_raw_value_text", Path(__file__).with_name("migrations") / "20261021_016_station_raw_value_text.sql"),
+    ("20261103_017_station_retention_partial_status", Path(__file__).with_name("migrations") / "20261103_017_station_retention_partial_status.sql"),
+    ("20261103_018_station_hourly_last_values", Path(__file__).with_name("migrations") / "20261103_018_station_hourly_last_values.sql"),
 )
 MONITORING_MIGRATION_VERSION = "20260909_002_station_monitoring_normalization"
 HJ212_MIGRATION_VERSION = "20260911_003_hj212_protocol"
@@ -32,6 +42,36 @@ RETENTION_RECOVERY_MIGRATION_VERSION = "20260912_005_retention_recovery"
 HJ212_LEGACY_005_MIGRATION_VERSION = "20260918_006_hj212_legacy_005_dissolved_oxygen"
 MONITORING_RESULT_WINDOW_MIGRATION_VERSION = "20260921_007_monitoring_result_window"
 STATION_MASTER_REFRESH_MIGRATION_VERSION = "20260922_008_station_master_refresh"
+STATION_MONITORING_READ_INDEX_MIGRATION_VERSION = "20261011_009_station_monitoring_read_indexes"
+PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION = "20261012_010_pending_normalization_index"
+STATION_EXPECTED_FACTORS_MIGRATION_VERSION = "20261013_011_station_expected_factors"
+HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION = "20261013_012_hj212_numeric_factor_definitions"
+STATION_SERVICE_POLICY_MIGRATION_VERSION = "20261013_013_station_service_policy"
+STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION = "20261016_014_station_ingest_retention_windows"
+STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION = "20261020_015_station_factor_display_precision"
+STATION_RAW_VALUE_TEXT_MIGRATION_VERSION = "20261021_016_station_raw_value_text"
+STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION = "20261103_017_station_retention_partial_status"
+STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION = "20261103_018_station_hourly_last_values"
+STATION_NON_RELATIONAL_INCREMENTAL_MIGRATIONS = frozenset({
+    STATION_FACTOR_DISPLAY_PRECISION_MIGRATION_VERSION,
+    STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,
+    STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION,
+    STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION,
+})
+STATION_INGEST_RETENTION_WINDOW_TABLES = frozenset({
+    "station_ingest_current_state",
+    "station_ingest_recent_receipts",
+    "station_ingest_receipt_hourly",
+    "station_ingest_slot_summaries",
+    "monitoring_raw_archive_part_metadata",
+    "monitoring_archive_evidence_refs",
+    "station_ingest_dedup_keys",
+    "station_ingest_duplicate_links",
+    "station_ingest_error_hourly",
+    "station_ingest_detail_archive_parts",
+    "station_ingest_retention_runs",
+    "station_ingest_cutover_state",
+})
 CONTROLLED_EXISTING_SCHEMA_CHANGES = {
     MONITORING_RESULT_WINDOW_MIGRATION_VERSION: {
         "monitoring_business_schedules": """ALTER TABLE monitoring_business_schedules
@@ -42,6 +82,25 @@ CONTROLLED_EXISTING_SCHEMA_CHANGES = {
         "sites": """ALTER TABLE sites
             ADD COLUMN master_status TEXT NOT NULL DEFAULT 'active'
             CHECK (master_status IN ('active', 'retired'))""",
+    },
+    STATION_RAW_VALUE_TEXT_MIGRATION_VERSION: {
+        "observation_values": "ALTER TABLE observation_values ADD COLUMN raw_value_text TEXT",
+    },
+}
+CONTROLLED_EXISTING_SCHEMA_TARGETS = {
+    STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION: {
+        "station_ingest_retention_runs": """CREATE TABLE "station_ingest_retention_runs" (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cutoff_time TEXT NOT NULL,
+            archived_parse_attempts INTEGER NOT NULL DEFAULT 0,
+            archived_errors INTEGER NOT NULL DEFAULT 0,
+            archived_error_summaries INTEGER NOT NULL DEFAULT 0,
+            deleted_raw_frames INTEGER NOT NULL DEFAULT 0,
+            retained_protected_frames INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK (status IN ('completed', 'partial', 'failed')),
+            detail TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""",
     },
 }
 REQUIRED_BUSINESS_IDENTITY_TABLES = frozenset({"sites"})
@@ -66,11 +125,26 @@ STATION_INGESTION_TABLES = frozenset({
     "monitoring_raw_archive_parts",
     "monitoring_raw_archive_part_frames",
     "monitoring_hourly_value_series",
+    "monitoring_hourly_last_values",
     "monitoring_storage_health",
     "monitoring_business_schedules",
     "monitoring_business_observations",
     "site_name_aliases",
     "station_master_refresh_audits",
+    "station_expected_factor_configs",
+    "station_expected_factors",
+    "station_service_policy_events",
+    "station_ingest_current_state",
+    "station_ingest_recent_receipts",
+    "station_ingest_receipt_hourly",
+    "station_ingest_slot_summaries",
+    "monitoring_raw_archive_part_metadata",
+    "monitoring_archive_evidence_refs",
+    "station_ingest_dedup_keys",
+    "station_ingest_duplicate_links",
+    "station_ingest_error_hourly",
+    "station_ingest_detail_archive_parts",
+    "station_ingest_retention_runs",
 })
 
 
@@ -91,7 +165,7 @@ def _utc_now() -> str:
 
 def backup_database(database: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = backup_dir / f"{database.stem}-{MIGRATION_VERSION}-{stamp}.db"
     source = sqlite3.connect(str(database))
     destination = sqlite3.connect(str(target))
@@ -192,6 +266,11 @@ def _verify_existing_schema_changes(
             expected_changes[object_name] = _expected_controlled_schema_sql(
                 before_sql, object_name, ddl,
             )
+        expected_changes.update({
+            name: sql
+            for name, sql in CONTROLLED_EXISTING_SCHEMA_TARGETS.get(version, {}).items()
+            if name in before_schema
+        })
     if changed_existing != set(expected_changes):
         raise MigrationError("migration modified pre-existing schema objects")
     if any(
@@ -216,13 +295,20 @@ def verify_station_ingestion_contract(connection: sqlite3.Connection) -> None:
         raise MigrationError(f"missing required tables: {', '.join(sorted(missing))}")
     required_indexes = {
         "idx_ingest_raw_received",
-        "idx_ingest_raw_endpoint_received",
-        "idx_ingest_raw_frame_hash",
-        "idx_ingest_raw_disposition_received",
-        "idx_ingest_raw_logical_key",
-        "idx_ingest_parse_pending",
         "idx_ingest_errors_open",
         "idx_ingest_protocol_family_raw",
+        "idx_station_ingest_current_endpoint",
+        "idx_station_ingest_current_station",
+        "idx_station_ingest_recent_received",
+        "idx_station_ingest_recent_endpoint_auth",
+        "idx_station_ingest_recent_station_auth",
+        "idx_station_ingest_receipt_hour",
+        "idx_station_ingest_slot_summary_retention",
+        "idx_monitoring_evidence_archive_record",
+        "idx_monitoring_evidence_received",
+        "idx_station_ingest_dedup_expiry",
+        "idx_station_ingest_error_hour",
+        "idx_station_ingest_detail_range",
     }
     indexes = {
         row[0]
@@ -264,6 +350,17 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     missing = required - existing
     if missing:
         raise MigrationError(f"missing monitoring tables: {', '.join(sorted(missing))}")
+    hourly_last = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION,),
+    ).fetchone()
+    if hourly_last:
+        if hourly_last[0] != migration_checksum(
+                STATION_HOURLY_LAST_VALUES_MIGRATION_VERSION):
+            raise MigrationError(
+                "station hourly-last-value migration is missing or incompatible")
+        if "monitoring_hourly_last_values" not in existing:
+            raise MigrationError("station hourly-last-value table is missing")
     applied = connection.execute(
         "SELECT checksum FROM schema_migrations WHERE version=?", (MONITORING_MIGRATION_VERSION,)
     ).fetchone()
@@ -299,6 +396,153 @@ def _verify_monitoring_contract(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if not station_master or station_master[0] != migration_checksum(STATION_MASTER_REFRESH_MIGRATION_VERSION):
         raise MigrationError("station master refresh migration is missing or incompatible")
+    read_indexes = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_MONITORING_READ_INDEX_MIGRATION_VERSION,),
+    ).fetchone()
+    if not read_indexes or read_indexes[0] != migration_checksum(
+            STATION_MONITORING_READ_INDEX_MIGRATION_VERSION):
+        raise MigrationError("station monitoring read-index migration is missing or incompatible")
+    pending_index_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION,),
+    ).fetchone()
+    if not pending_index_migration or pending_index_migration[0] != migration_checksum(
+            PENDING_NORMALIZATION_INDEX_MIGRATION_VERSION):
+        raise MigrationError("pending normalization index migration is missing or incompatible")
+    expected_factors_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_EXPECTED_FACTORS_MIGRATION_VERSION,),
+    ).fetchone()
+    if not expected_factors_migration or expected_factors_migration[0] != migration_checksum(
+            STATION_EXPECTED_FACTORS_MIGRATION_VERSION):
+        raise MigrationError("station expected-factor migration is missing or incompatible")
+    numeric_factor_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION,),
+    ).fetchone()
+    if not numeric_factor_migration or numeric_factor_migration[0] != migration_checksum(
+            HJ212_NUMERIC_FACTOR_DEFINITIONS_MIGRATION_VERSION):
+        raise MigrationError("HJ212 numeric-factor migration is missing or incompatible")
+    service_policy_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_SERVICE_POLICY_MIGRATION_VERSION,),
+    ).fetchone()
+    if not service_policy_migration or service_policy_migration[0] != migration_checksum(
+            STATION_SERVICE_POLICY_MIGRATION_VERSION):
+        raise MigrationError("station service-policy migration is missing or incompatible")
+    retention_windows_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION,),
+    ).fetchone()
+    if (not retention_windows_migration
+            or retention_windows_migration[0] != migration_checksum(
+                STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)):
+        raise MigrationError("station ingest retention-window migration is missing or incompatible")
+    raw_value_text_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_RAW_VALUE_TEXT_MIGRATION_VERSION,),
+    ).fetchone()
+    if raw_value_text_migration:
+        if raw_value_text_migration[0] != migration_checksum(
+                STATION_RAW_VALUE_TEXT_MIGRATION_VERSION):
+            raise MigrationError("station raw-value-text migration is incompatible")
+        observation_value_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(observation_values)")
+        }
+        if "raw_value_text" not in observation_value_columns:
+            raise MigrationError("station raw-value-text column is missing")
+    partial_status_migration = connection.execute(
+        "SELECT checksum FROM schema_migrations WHERE version=?",
+        (STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION,),
+    ).fetchone()
+    if partial_status_migration:
+        if partial_status_migration[0] != migration_checksum(
+                STATION_RETENTION_PARTIAL_STATUS_MIGRATION_VERSION):
+            raise MigrationError("station retention partial-status migration is incompatible")
+        retention_run_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='station_ingest_retention_runs'"
+        ).fetchone()
+        normalized_retention_run_sql = "".join(
+            str(retention_run_sql[0] if retention_run_sql else "").lower().split())
+        if "statusin('completed','partial','failed')" not in normalized_retention_run_sql:
+            raise MigrationError("station retention partial status is missing")
+    required_read_indexes = {
+        "idx_ingest_raw_logical_key",
+        "idx_ingest_raw_authenticated_endpoint_received",
+        "idx_station_ingest_current_endpoint",
+        "idx_station_ingest_recent_received",
+        "idx_station_ingest_recent_endpoint_auth",
+        "idx_station_ingest_recent_station_auth",
+        "idx_station_ingest_receipt_hour",
+        "idx_station_ingest_slot_summary_retention",
+        "idx_monitoring_business_current_site_scheduled",
+        "idx_monitoring_business_valid_endpoint_factor",
+    }
+    existing_indexes = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    missing_read_indexes = required_read_indexes - existing_indexes
+    if missing_read_indexes:
+        raise MigrationError(
+            "station monitoring read indexes are missing: "
+            + ", ".join(sorted(missing_read_indexes)))
+    pending_index_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+        ("idx_ingest_raw_pending_normalization",),
+    ).fetchone()
+    normalized_pending_index_sql = "".join(
+        str(pending_index_sql[0] if pending_index_sql else "").lower().split())
+    expected_pending_index_clause = (
+        "oningest_raw_frames(id)wherepersistence_statein"
+        "('pending_parse','pending_reparse')"
+    )
+    if expected_pending_index_clause not in normalized_pending_index_sql:
+        raise MigrationError("pending normalization partial index is missing or incompatible")
+    expected_factor_tables = {"station_expected_factor_configs", "station_expected_factors"}
+    if expected_factor_tables - existing:
+        raise MigrationError("station expected-factor tables are missing")
+    _require_unique_columns(connection, "station_expected_factor_configs", ("site_id", "version"))
+    _require_unique_columns(connection, "station_expected_factor_configs", ("site_id", "idempotency_key"))
+    _require_unique_columns(connection, "station_expected_factors", ("config_id", "business_metric"))
+    expected_factor_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_expected_factors)")
+    }
+    if {"site_id", "business_metric", "display_order", "effective_from"} - expected_factor_columns:
+        raise MigrationError("station expected-factor item contract is missing or incompatible")
+    current_expected_index = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_station_expected_factor_current'"
+    ).fetchone()
+    normalized_current_expected_sql = "".join(
+        str(current_expected_index[0] if current_expected_index else "").upper().split())
+    if ("CREATEUNIQUEINDEX" not in normalized_current_expected_sql or
+            "ONSTATION_EXPECTED_FACTOR_CONFIGS(SITE_ID)" not in normalized_current_expected_sql or
+            "WHEREEFFECTIVE_TOISNULL" not in normalized_current_expected_sql):
+        raise MigrationError("station expected-factor current-version index is missing or incompatible")
+    if "station_service_policy_events" not in existing:
+        raise MigrationError("station service-policy table is missing")
+    service_policy_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_service_policy_events)")
+    }
+    required_service_policy_columns = {
+        "site_id", "version", "previous_service_status", "service_status",
+        "previous_reporting_condition", "reporting_condition", "effective_from",
+        "reason", "changed_by_user_id", "idempotency_key", "request_fingerprint",
+        "created_at",
+    }
+    if required_service_policy_columns - service_policy_columns:
+        raise MigrationError("station service-policy contract is missing or incompatible")
+    _require_unique_columns(connection, "station_service_policy_events", ("site_id", "version"))
+    _require_unique_columns(
+        connection, "station_service_policy_events", ("site_id", "idempotency_key"))
+    required_service_policy_indexes = {
+        "idx_station_service_policy_site_version",
+        "idx_station_service_policy_site_effective",
+    }
+    if required_service_policy_indexes - existing_indexes:
+        raise MigrationError("station service-policy indexes are missing")
     required_master_tables = {"site_name_aliases", "station_master_refresh_audits"}
     if required_master_tables - existing:
         raise MigrationError("station master refresh tables are missing")
@@ -382,13 +626,15 @@ def _execute_migration_sql(connection: sqlite3.Connection, script: str) -> None:
 
 def apply_migration(
     database: Path,
-    backup_dir: Path,
+    backup_dir: Path | None,
     *,
     app_version: str = "station-ingestion-v1",
     isolated_test: bool = False,
+    external_recovery_confirmed: bool = False,
+    require_014_only: bool = False,
 ) -> tuple[bool, Path | None]:
     database = Path(database)
-    backup_dir = Path(backup_dir)
+    backup_dir = Path(backup_dir) if backup_dir is not None else None
     _require_existing_business_database(database, isolated_test=isolated_test)
     with closing(sqlite3.connect(str(database))) as connection:
         existing_versions = {}
@@ -398,33 +644,67 @@ def apply_migration(
             existing = existing_versions.get(version)
             if existing is not None and existing != migration_checksum(version):
                 raise MigrationError("migration checksum conflict")
+        known_versions = tuple(version for version, _ in MIGRATIONS)
         pending = [(version, path) for version, path in MIGRATIONS if version not in existing_versions]
+        pending_versions = tuple(version for version, _ in pending)
+        fast_014_only = False
+        if require_014_only:
+            unknown_versions = set(existing_versions) - set(known_versions)
+            if unknown_versions:
+                raise MigrationError(
+                    "startup migration found unknown schema migration versions: "
+                    + ", ".join(sorted(unknown_versions)))
+            migration_014_index = known_versions.index(
+                STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION)
+            missing_prior = [
+                version for version in known_versions[:migration_014_index]
+                if version not in existing_versions
+            ]
+            if missing_prior:
+                raise MigrationError(
+                    "startup migration requires complete migrations 001 through 013; missing: "
+                    + ", ".join(missing_prior))
+            pending = [
+                item for item in pending
+                if item[0] == STATION_INGEST_RETENTION_WINDOWS_MIGRATION_VERSION
+            ]
+            pending_versions = tuple(version for version, _ in pending)
+            fast_014_only = bool(pending_versions)
         if not pending:
-            verify_station_monitoring_schema(connection)
+            verify_station_monitoring_contract(connection)
             return False, None
         before_schema = _schema_snapshot(connection)
 
-    backup_path = backup_database(database, backup_dir)
+    if backup_dir is None and not external_recovery_confirmed:
+        raise MigrationError(
+            "migration requires either a local backup directory or a verified external recovery set")
+    backup_path = backup_database(database, backup_dir) if backup_dir is not None else None
     connection: sqlite3.Connection | None = None
     before_foreign_rows: frozenset[tuple[object, ...]] | None = None
+    if fast_014_only:
+        foreign_key_tables = STATION_INGEST_RETENTION_WINDOW_TABLES
+    elif set(pending_versions) <= STATION_NON_RELATIONAL_INCREMENTAL_MIGRATIONS:
+        foreign_key_tables = frozenset()
+    else:
+        foreign_key_tables = None
     try:
         connection = sqlite3.connect(str(database), isolation_level=None)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
-        before_foreign_rows = _foreign_key_violations(connection)
+        before_foreign_rows = _foreign_key_violations(connection, foreign_key_tables)
         for version, path in pending:
             _execute_migration_sql(connection, path.read_text(encoding="utf-8"))
             connection.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at, app_version) VALUES (?, ?, ?, ?)",
                 (version, migration_checksum(version), _utc_now(), app_version),
             )
-        verify_station_monitoring_schema(connection)
+        verify_station_monitoring_contract(connection)
         after_schema = _schema_snapshot(connection)
         _verify_existing_schema_changes(
             before_schema, after_schema, tuple(version for version, _ in pending),
         )
-        after_foreign_rows = _foreign_key_violations(connection)
+        after_foreign_rows = _foreign_key_violations(connection, foreign_key_tables)
         if after_foreign_rows != before_foreign_rows:
             raise MigrationError("migration changed foreign key violations")
         connection.commit()
@@ -438,12 +718,23 @@ def apply_migration(
             connection = None
         # SQLite PRAGMA changes and DDL can survive a failed run on some versions. Restore
         # the verified pre-migration backup so a failed migration has zero target side effect.
-        restore_backup(database, backup_path)
-        with closing(sqlite3.connect(str(database))) as restored:
-            if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise MigrationError("migration failed and automatic restore verification failed")
-            if before_foreign_rows is not None and _foreign_key_violations(restored) != before_foreign_rows:
-                raise MigrationError("migration failed and automatic restore verification failed")
+        if backup_path is not None:
+            restore_backup(database, backup_path)
+            with closing(sqlite3.connect(str(database))) as restored:
+                if restored.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise MigrationError("migration failed and automatic restore verification failed")
+                if (before_foreign_rows is not None
+                        and _foreign_key_violations(restored, foreign_key_tables) != before_foreign_rows):
+                    raise MigrationError("migration failed and automatic restore verification failed")
+        else:
+            with closing(sqlite3.connect(str(database))) as rolled_back:
+                unchanged = _schema_snapshot(rolled_back) == before_schema
+                foreign_unchanged = (before_foreign_rows is None
+                                     or _foreign_key_violations(
+                                         rolled_back, foreign_key_tables) == before_foreign_rows)
+            if not unchanged or not foreign_unchanged:
+                raise MigrationError(
+                    "migration failed after external recovery was selected; restore the verified recovery set")
         raise
     finally:
         if connection is not None:

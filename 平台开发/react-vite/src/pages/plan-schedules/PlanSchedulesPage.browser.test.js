@@ -37,7 +37,7 @@ test('plan cancellation and purge audit Web behavior with isolated contract fixt
   t.after(() => browser.close());
   if (evidenceDir) await mkdir(evidenceDir, { recursive: true });
 
-  async function session(roles, { cancellation = null, auditResponse } = {}) {
+  async function session(roles, { cancellation = null, auditResponse, risk = false } = {}) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     await context.addInitScript(() => localStorage.setItem('water_ops_token', 'isolated-plan-audit-token'));
     const page = await context.newPage();
@@ -45,13 +45,16 @@ test('plan cancellation and purge audit Web behavior with isolated contract fixt
     const errors = [];
     const auditRequests = [];
     const writes = [];
+    const retiredRequests = [];
+    const suggestionRequests = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.route('**/api/**', async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      if (url.pathname.endsWith('/follow-up-recommendations')) retiredRequests.push(request.method());
       if (request.method() === 'POST' && url.pathname === '/api/plan-schedules/validate') {
         writes.push(`${request.method()} ${url.pathname}`);
-        await route.fulfill({ json: { errors: [], warnings: [] } });
+        await route.fulfill({ json: { errors: [], warnings: risk ? ['已有工单待处理'] : [] } });
         return;
       }
       if (request.method() !== 'GET') {
@@ -66,9 +69,15 @@ test('plan cancellation and purge audit Web behavior with isolated contract fixt
       } else if (url.pathname === '/api/plan-schedules/overview') {
         await route.fulfill({ json: { date: '2026-09-16', summary: {}, people: [] } });
       } else if (url.pathname === '/api/plan-schedules/follow-up-recommendations') {
-        await route.fulfill({ json: { recommendations: [] } });
+        await route.fulfill({ status: 404, json: { error: 'Retired endpoint' } });
+      } else if (url.pathname === '/api/plan-schedule-favorites') {
+        await route.fulfill({ json: [] });
       } else if (url.pathname === '/api/plan-schedules/42') {
-        await route.fulfill({ json: scheduleDetail(cancellation) });
+        await route.fulfill({ json: risk ? { ...scheduleDetail(cancellation), status: 'draft',
+          site_map: { 7: { name: '风险验收站' } } } : scheduleDetail(cancellation) });
+      } else if (url.pathname === '/api/plan-schedules/suggestions') {
+        suggestionRequests.push(url.search);
+        await route.fulfill({ json: { site_scores: { 7: 30 }, site_reasons: { 7: ['已有告警'] } } });
       } else if (url.pathname === '/api/plan-schedules/purge-audits') {
         auditRequests.push(url.search);
         await auditResponse(route, url);
@@ -77,15 +86,45 @@ test('plan cancellation and purge audit Web behavior with isolated contract fixt
       }
     });
     return {
-      page, auditRequests, writes,
+      page, auditRequests, writes, suggestionRequests,
       async close(name) {
         if (evidenceDir) await page.screenshot({ path: path.join(evidenceDir, `${name}.png`), fullPage: true });
         await context.close();
         assert.deepEqual(errors, [], 'no React runtime errors');
+        assert.deepEqual(retiredRequests, [], 'retired endpoint is never requested');
         assert.deepEqual(writes.filter((item) => item !== 'POST /api/plan-schedules/validate'), [], 'no business write requests');
       },
     };
   }
+
+  for (const role of ['admin', 'operator', 'reviewer']) {
+    await t.test(`${role} opens and refreshes plans without retired recommendations`, async () => {
+      const { page, close } = await session([role]);
+      try {
+        await page.goto(`${baseURL}/plan-schedules`);
+        await page.getByRole('heading', { name: '巡检计划' }).waitFor();
+        await page.getByRole('button', { name: /刷新/ }).click();
+        await page.getByText('运维甲', { exact: true }).first().waitFor();
+        assert.equal(await page.getByText(/系统性异常复查|生成复查草稿|通知负责人/).count(), 0);
+        assert.equal(await page.getByRole('button', { name: /从常用计划生成草稿/ }).count(), role === 'operator' ? 1 : 0);
+        assert.equal(await page.getByRole('button', { name: /删除记录/ }).count(), role === 'admin' ? 1 : 0);
+        if (role === 'operator') {
+          await page.getByRole('button', { name: /从常用计划生成草稿/ }).click();
+          await page.getByText('暂无常用计划，可在计划列表中点击“收藏”保存').waitFor();
+        }
+      } finally { await close(`retired-followup-${role}`); }
+    });
+  }
+
+  await t.test('existing suggestions and work-order risk remain available', async () => {
+    const { page, close, suggestionRequests } = await session(['admin'], { risk: true });
+    try {
+      await page.goto(`${baseURL}/plan-schedules`);
+      await page.getByRole('button', { name: /查看运维甲的周巡检计划/ }).click();
+      await page.getByText('已有工单待处理', { exact: true }).waitFor();
+      assert.deepEqual(suggestionRequests, ['?site_ids=7']);
+    } finally { await close('existing-plan-risk'); }
+  });
 
   await t.test('admin sees read-only purge records with failure retry, empty, and populated states', async () => {
     let auditMode = 'failure';

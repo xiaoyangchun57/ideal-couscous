@@ -1,28 +1,247 @@
-.site-monitoring-page {
-  flex: 1;
-  min-height: 0;
+.station-monitoring-drawer .ant-drawer-content-wrapper {
+  max-width: 100vw;
+}
+
+.station-monitoring-drawer .ant-drawer-header {
+  padding: 22px 24px;
+}
+
+.station-monitoring-drawer .ant-drawer-title {
+  min-width: 0;
+}
+
+.station-monitoring-drawer .ant-drawer-body {
+  padding: 0;
+}
+
+.station-monitoring-drawer__title {
   display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
 }
 
-.site-monitoring-page__scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  padding-right: 4px;
+.station-monitoring-drawer__title h3.ant-typography {
+  margin: 2px 0 8px;
+  letter-spacing: 0;
 }
 
-.site-monitoring-trend__loading {
-  min-height: 280px;
+.station-monitoring-drawer__code {
+  display: block;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.station-monitoring-drawer__body,
+.station-monitoring-settings {
+  padding: 26px 28px 36px;
+}
+
+.station-monitoring-drawer__loading {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+}
+
+.station-monitoring-section + .station-monitoring-section {
+  margin-top: 34px;
+  padding-top: 30px;
+  border-top: 1px solid rgba(127, 127, 127, 0.18);
+}
+
+.station-monitoring-section__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.station-monitoring-section__heading h4.ant-typography {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.station-monitoring-fact {
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.station-monitoring-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.station-monitoring-metric {
+  min-width: 0;
+  min-height: 126px;
+  padding: 16px;
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.station-monitoring-metric:hover,
+.station-monitoring-metric:focus-visible {
+  border-color: #1677ff;
+  outline: none;
+}
+
+.station-monitoring-metric.is-selected {
+  border-color: #1677ff;
+  background: rgba(22, 119, 255, 0.08);
+  box-shadow: inset 3px 0 #1677ff;
+}
+
+.station-monitoring-metric__name,
+.station-monitoring-metric__value,
+.station-monitoring-metric__unit {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.station-monitoring-metric__name,
+.station-monitoring-metric__unit {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.station-monitoring-metric__value {
+  margin: 8px 0 2px;
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.station-monitoring-metric__value.is-missing {
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.station-monitoring-trend__controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.station-monitoring-trend__loading {
+  min-height: 320px;
   display: grid;
   place-items: center;
 }
 
 .site-monitoring-trend__chart {
   width: 100%;
-  height: 300px;
-  min-height: 300px;
+  height: 340px;
+  min-height: 340px;
+}
+
+.station-monitoring-trend--expanded .site-monitoring-trend__chart {
+  height: min(560px, 62vh);
+  min-height: 420px;
+}
+
+.station-monitoring-trend__footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.station-monitoring-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.station-monitoring-settings__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.station-monitoring-settings__grid .ant-checkbox-wrapper {
+  min-height: 58px;
+  margin-inline-start: 0;
+  padding: 14px;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 6px;
+  font-size: 16px;
+}
+
+.station-monitoring-settings__grid .ant-tag {
+  margin-left: 8px;
+}
+
+.station-monitoring-selected-row > td {
+  background: rgba(22, 119, 255, 0.08) !important;
+}
+
+.station-monitoring-selected-row > td:first-child {
+  box-shadow: inset 3px 0 #1677ff;
+}
+
+@media (max-width: 1000px) {
+  .station-monitoring-drawer .ant-drawer-content-wrapper {
+    width: calc(100vw - 48px) !important;
+  }
+
+  .station-monitoring-metrics,
+  .station-monitoring-settings__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .station-monitoring-drawer .ant-drawer-content-wrapper {
+    width: 100vw !important;
+  }
+
+  .station-monitoring-drawer .ant-drawer-header {
+    padding: 16px 18px;
+  }
+
+  .station-monitoring-drawer__title {
+    flex-direction: column;
+  }
+
+  .station-monitoring-drawer__body,
+  .station-monitoring-settings {
+    padding: 22px 18px 30px;
+  }
+
+  .station-monitoring-section__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .station-monitoring-trend__controls > .ant-radio-group {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .station-monitoring-trend__controls > .ant-radio-group .ant-radio-button-wrapper {
+    text-align: center;
+  }
+
+  .station-monitoring-trend__controls > .ant-picker,
+  .station-monitoring-trend__controls > .ant-select {
+    width: 100%;
+  }
+
+  .site-monitoring-trend__chart {
+    height: 300px;
+    min-height: 300px;
+  }
 }

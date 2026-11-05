@@ -17,7 +17,6 @@ const antdZhCN = zhCN?.default || zhCN;
 
 const CockpitPage = lazy(() => import('./pages/cockpit/CockpitPage'));
 const SitesPage = lazy(() => import('./pages/sites/SitesPage'));
-const SiteMonitoringPage = lazy(() => import('./pages/sites/SiteMonitoringPage'));
 const StationAccessPage = lazy(() => import('./pages/sites/StationAccessPage'));
 const AlertsPage = lazy(() => import('./pages/alerts/AlertsPage'));
 const WorkOrdersPage = lazy(() => import('./pages/workorders/WorkOrdersPage'));
@@ -92,6 +91,13 @@ function CapabilityRoute({ capability, fallback = '/sites', children }) {
   return children;
 }
 
+function BatchReviewRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  if (!params.has('tab')) params.set('tab', 'inspection');
+  return <Navigate to={`/audit?${params.toString()}`} replace />;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -106,7 +112,7 @@ function AppRoutes() {
           <PageRoute path="/sites/data-access"><CapabilityRoute capability="station_monitoring_public"><Deferred><StationAccessPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="sites/:siteId" element={(
-          <PageRoute path="/sites"><CapabilityRoute capability="station_monitoring_public"><Deferred><SiteMonitoringPage /></Deferred></CapabilityRoute></PageRoute>
+          <PageRoute path="/sites"><CapabilityRoute capability="station_monitoring_public"><Deferred><SitesPage /></Deferred></CapabilityRoute></PageRoute>
         )} />
         <Route path="alerts" element={(
           <PageRoute path="/alerts"><Deferred><AlertsPage /></Deferred></PageRoute>
@@ -128,7 +134,7 @@ function AppRoutes() {
         <Route path="audit" element={(
           <PageRoute path="/audit"><Deferred><AuditPage /></Deferred></PageRoute>
         )} />
-        <Route path="batch-review" element={<Navigate to="/audit?tab=photo" replace />} />
+        <Route path="batch-review" element={<BatchReviewRedirect />} />
         <Route path="equipment" element={(
           <PageRoute path="/equipment"><Deferred><EquipmentPage /></Deferred></PageRoute>
         )} />

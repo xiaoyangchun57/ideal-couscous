@@ -267,15 +267,40 @@ def sync_devices_and_reagents(db, payload, site_ids):
                 inventory_rows[(site_id, reagent_name)] = (device, manufacturer)
 
     if table_exists(db, 'reagent_inventory') and table_exists(db, 'reagents'):
+        imported_site_ids = set(site_ids.values())
+        missing_unit_names = {
+            reagent_name for (_, reagent_name), (device, _) in inventory_rows.items()
+            if not str(device.get('unit') or '').strip()
+        }
+        legacy_default_ids = set()
+        for reagent_name in missing_unit_names:
+            reagent = db.execute("SELECT id, unit FROM reagents WHERE name=?", (reagent_name,)).fetchone()
+            if not reagent or str(reagent['unit'] or '').strip() != '套':
+                continue
+            inventories = db.execute(
+                'SELECT site_id, current_qty FROM reagent_inventory WHERE reagent_id=?',
+                (reagent['id'],)).fetchall()
+            if (inventories
+                    and all(row['site_id'] in imported_site_ids for row in inventories)
+                    and all(float(row['current_qty'] or 0) == 1 for row in inventories)):
+                legacy_default_ids.add(reagent['id'])
         placeholders = ','.join('?' * len(site_ids))
         db.execute(f'DELETE FROM reagent_inventory WHERE site_id IN ({placeholders})', tuple(site_ids.values()))
+        corrected_legacy_units = set()
         for (site_id, reagent_name), (device, manufacturer) in inventory_rows.items():
             reagent = db.execute('SELECT id FROM reagents WHERE name=?', (reagent_name,)).fetchone()
-            unit = device.get('unit') or '套'
+            source_unit = str(device.get('unit') or '').strip()
+            unit = source_unit or '瓶'
             if reagent:
                 reagent_id = reagent['id']
-                db.execute('UPDATE reagents SET manufacturer=?, unit=? WHERE id=?',
-                           (manufacturer if manufacturer != '外接设备' else '', unit, reagent_id))
+                if source_unit or reagent_id in legacy_default_ids:
+                    db.execute('UPDATE reagents SET manufacturer=?, unit=? WHERE id=?',
+                               (manufacturer if manufacturer != '外接设备' else '', unit, reagent_id))
+                    if not source_unit and reagent_id in legacy_default_ids:
+                        corrected_legacy_units.add(reagent_id)
+                else:
+                    db.execute('UPDATE reagents SET manufacturer=? WHERE id=?',
+                               (manufacturer if manufacturer != '外接设备' else '', reagent_id))
             else:
                 reagent_id = db.execute('''INSERT INTO reagents
                     (name, manufacturer, spec, unit, shelf_life_days) VALUES (?,?, '', ?,365)''',
@@ -289,9 +314,10 @@ def sync_devices_and_reagents(db, payload, site_ids):
                     expected += max((date.today() - replaced).days, 0)
             db.execute('''INSERT INTO reagent_inventory
                 (site_id, reagent_id, current_qty, last_replaced_at, expected_duration_days, qc_status)
-                VALUES (?,?,?,?,?,'passed')''',
+                VALUES (?,?,?,?,?,'not_required')''',
                 (site_id, reagent_id, 1, replaced.isoformat() if replaced else None, expected))
-    return device_count, len(inventory_rows)
+        return device_count, len(inventory_rows), len(corrected_legacy_units)
+    return device_count, len(inventory_rows), 0
 
 
 def clear_unconfigured_monitoring_artifacts(db, site_ids):
@@ -551,7 +577,7 @@ def main():
         ensure_schema(db)
         site_ids = sync_sites(db, payload)
         sync_users(db, payload, site_ids)
-        device_count, reagent_count = sync_devices_and_reagents(db, payload, site_ids)
+        device_count, reagent_count, corrected_reagent_units = sync_devices_and_reagents(db, payload, site_ids)
         monitoring_cleanup = clear_unconfigured_monitoring_artifacts(db, site_ids)
         sync_inspection_templates(db, payload)
         cleared_parts = clear_spare_parts_if_unreferenced(db)
@@ -566,6 +592,7 @@ def main():
             'after': after,
             'imported': {
                 'devices': device_count, 'reagent_inventory': reagent_count,
+                'corrected_legacy_reagent_units': corrected_reagent_units,
                 'cleared_spare_parts': cleared_parts, 'retired_legacy_vehicles': retired,
                 'orphan_cleanup': orphan_cleanup,
                 'monitoring_cleanup': monitoring_cleanup,

@@ -85,7 +85,7 @@ export default function ActionQueue() {
   const total = Object.values(items).reduce((sum, count) => sum + count, 0);
 
   const rows = [
-    { key: 'businessApprovals', icon: <AuditOutlined />, label: '业务申请待审批', count: items.businessApprovals, to: '/audit?tab=spareparts', color: tokens.colorWarning },
+    { key: 'businessApprovals', icon: <AuditOutlined />, label: '业务申请待审批', count: items.businessApprovals, to: '/audit?tab=parts', color: tokens.colorWarning },
     { key: 'planApprovals', icon: <AuditOutlined />, label: '巡检计划待审批', count: items.planApprovals, to: '/plan-schedules?status=submitted', color: tokens.colorWarning },
     { key: 'photoReviews', icon: <AuditOutlined />, label: '巡检照片待审核', count: items.photoReviews, to: '/batch-review', color: tokens.colorWarning },
     { key: 'incidents', icon: <WarningOutlined />, label: '异常事件（按站点聚合）', count: items.incidents, to: '/alerts?status=pending', color: tokens.colorError },

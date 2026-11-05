@@ -2,7 +2,7 @@ export const ALERT_DATE_RANGE_OPTIONS = [
   { label: '今日', value: 'today' },
   { label: '本周', value: 'week' },
   { label: '本月', value: 'month' },
-  { label: '已加载历史', value: 'all' },
+  { label: '全部历史', value: 'all' },
 ];
 
 function nonNegativeInteger(value) {

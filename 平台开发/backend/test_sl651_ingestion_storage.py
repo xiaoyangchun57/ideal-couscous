@@ -14,7 +14,11 @@ from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_time, encode_station_code
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, credential_hmac
 import station_ingest_retention as retention
-from station_ingest_retention import StoragePolicy, storage_policy_for_mode
+from station_ingest_retention import (
+    StoragePolicy,
+    storage_policy_for_governance,
+    storage_policy_for_mode,
+)
 
 
 def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=None):
@@ -70,6 +74,32 @@ class IngestionStorageTest(unittest.TestCase):
         rows = self.rows("ingest_raw_frames")
         self.assertEqual([row[9] for row in rows], ["unknown_endpoint", "credential_failed"])
 
+    def test_repeated_transport_limits_are_aggregated_without_detail_growth(self):
+        for error_type in (
+            "source_cooling", "source_connection_limit", "source_connection_burst",
+        ):
+            self.storage.record_connection_error(error_type)
+            self.storage.record_connection_error(error_type)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors"
+            ).fetchone()[0], 0)
+            rows = connection.execute(
+                """SELECT error_type,SUM(occurrence_count)
+                     FROM station_ingest_error_hourly
+                    GROUP BY error_type ORDER BY error_type"""
+            ).fetchall()
+            state = connection.execute(
+                """SELECT latest_error_type FROM station_ingest_current_state
+                    WHERE source_key='transport:unidentified'"""
+            ).fetchone()
+        self.assertEqual(rows, [
+            ("source_connection_burst", 2),
+            ("source_connection_limit", 2),
+            ("source_cooling", 2),
+        ])
+        self.assertEqual(state[0], "source_connection_burst")
+
     def test_duplicates_keep_raw_receipts_without_duplicate_canonical_record(self):
         self.add_endpoint()
         server = StationIngestServer(self.storage)
@@ -81,6 +111,36 @@ class IngestionStorageTest(unittest.TestCase):
         self.assertEqual(rows[0][10], "pending_parse")
         self.assertEqual(rows[1][10], "duplicate")
         self.assertEqual(rows[1][11], rows[0][0])
+        with closing(sqlite3.connect(self.database)) as connection:
+            directory = connection.execute(
+                """SELECT canonical_raw_frame_id,last_received_at,expires_at
+                   FROM station_ingest_dedup_keys"""
+            ).fetchone()
+            self.assertEqual(directory[0], rows[0][0])
+            self.assertEqual(directory[1], "2026-09-08T00:00:01+00:00")
+            self.assertEqual(directory[2], "2026-12-07T00:00:01+00:00")
+            self.assertEqual(connection.execute(
+                """SELECT raw_frame_id,canonical_raw_frame_id
+                   FROM station_ingest_duplicate_links"""
+            ).fetchone(), (rows[1][0], rows[0][0]))
+
+    def test_late_receipt_does_not_move_current_communication_backwards(self):
+        self.add_endpoint()
+        server = StationIngestServer(self.storage)
+        server._process_raw(make_uplink(serial=10), "2026-09-08T10:00:00+00:00")
+        server._process_raw(make_uplink(serial=11), "2026-09-08T09:00:00+00:00")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            state = connection.execute(
+                """SELECT latest_received_at,latest_authenticated_at,latest_raw_frame_id
+                   FROM station_ingest_current_state"""
+            ).fetchone()
+            self.assertEqual(state[0], "2026-09-08T10:00:00+00:00")
+            self.assertEqual(state[1], "2026-09-08T10:00:00+00:00")
+            self.assertEqual(state[2], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM station_ingest_recent_receipts"
+            ).fetchone()[0], 2)
 
     def test_raw_persistence_failure_never_acknowledges(self):
         self.add_endpoint()
@@ -141,6 +201,42 @@ class IngestionStorageTest(unittest.TestCase):
                 retention.check_storage_policy(self.database, policy)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], "degraded")
+
+    def test_governance_mode_uses_separate_explicit_hot_and_archive_budgets(self):
+        archive_root = self.root / "archive"
+        archive_root.mkdir()
+        policy = storage_policy_for_governance(
+            archive_root,
+            archive_minimum_total_bytes=9 * 1024 ** 3,
+            archive_minimum_free_bytes=3 * 1024 ** 3,
+            hot_minimum_total_bytes=28 * 1024 ** 3,
+            hot_minimum_free_bytes=6 * 1024 ** 3,
+        )
+
+        class ArchiveUsage:
+            total = 10 * 1024 ** 3
+            free = 4 * 1024 ** 3
+
+        class HotUsage:
+            total = 30 * 1024 ** 3
+            free = 7 * 1024 ** 3
+
+        with mock.patch.object(
+            retention.shutil, "disk_usage",
+            side_effect=lambda path: ArchiveUsage() if Path(path) == archive_root else HotUsage(),
+        ):
+            retention.check_storage_policy(self.database, policy)
+
+        class LowArchiveUsage:
+            total = 10 * 1024 ** 3
+            free = 2 * 1024 ** 3
+
+        with mock.patch.object(
+            retention.shutil, "disk_usage",
+            side_effect=lambda path: LowArchiveUsage() if Path(path) == archive_root else HotUsage(),
+        ):
+            with self.assertRaisesRegex(Exception, "archive storage is below"):
+                retention.check_storage_policy(self.database, policy)
 
     def test_wal_lock_wait_and_restart_recovery_keep_raw_evidence(self):
         self.add_endpoint()

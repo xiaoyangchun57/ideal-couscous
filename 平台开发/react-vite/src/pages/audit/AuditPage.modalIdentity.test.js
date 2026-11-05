@@ -83,13 +83,28 @@ test('review reason feedback keeps a stable slot below the photo section', () =>
 
 test('inspection photo cards prioritize item and trusted capture facts', () => {
   const start = currentSource.indexOf("{item.source_type === 'inspection_batch' && item.attachment_details");
-  const end = currentSource.indexOf("['inspection', 'inspection_batch'].includes", start);
+  const end = currentSource.indexOf("{item.source_type === 'inspection_batch' && !item.attachment_details", start);
   const cardSource = currentSource.slice(start, end);
 
   assert.match(cardSource, /<Text strong[^>]*>\{itemLabel\}<\/Text>/);
   assert.match(cardSource, /拍摄时间：\{photo\.taken_at \|\| '未记录'\}/);
   assert.match(cardSource, /拍摄者：\{photo\.uploader_name \|\| '未记录'\}/);
+  assert.match(cardSource, /src=\{photo\.display_url\}/);
+  assert.match(cardSource, /系统现场取证/);
   assert.doesNotMatch(cardSource, /检查项：|档案名称：|原始文件名：/);
   assert.match(cardSource, /onError=\{\(\) => setFailedReviewPhotoIds/);
   assert.match(cardSource, /<Checkbox checked=\{selected\}/);
+});
+
+test('inspection batches never fall back to persisted ticket or bare path projections', () => {
+  const batchEmpty = currentSource.indexOf(
+    "{item.source_type === 'inspection_batch' && !item.attachment_details");
+  const legacyFallback = currentSource.indexOf(
+    "{item.source_type === 'inspection' && !item.attachment_details", batchEmpty);
+  const fallbackSource = currentSource.slice(batchEmpty, legacyFallback + 120);
+
+  assert.ok(batchEmpty >= 0);
+  assert.ok(legacyFallback > batchEmpty);
+  assert.match(fallbackSource, /本审核单元无正式现场照片/);
+  assert.doesNotMatch(fallbackSource.slice(0, legacyFallback - batchEmpty), /photo_urls|JSON\.parse/);
 });

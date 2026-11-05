@@ -43,6 +43,10 @@ Page({
   },
 
   setAlertTabBarHidden(hidden) {
+    if (hidden === false && this._alertTabBarHidden !== true) {
+      this._alertTabBarHidden = false;
+      return;
+    }
     if (this._alertTabBarHidden === hidden) return;
     const method = hidden ? 'hideTabBar' : 'showTabBar';
     if (typeof wx[method] === 'function') wx[method]({ animation: false });

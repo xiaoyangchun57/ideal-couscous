@@ -1,0 +1,2247 @@
+{
+  "tool_version": "offline-rebuild-water-monitor-v4",
+  "version": "GOV-OFFLINE-REBUILD-20261028-R7-016-TEMPLATE",
+  "as_of": "2026-10-28T12:00:00+08:00",
+  "review_status": "approved",
+  "source_manifest_sha256": null,
+  "source_schema_sha256": "5cf495be1b5cc6d27e8a0526134dcb6f1eda4a2811d754cea8a12cafa9344e4f",
+  "exact_duplicate_policy": null,
+  "tables": {
+    "alert_escalation_config": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "alert_rule_config": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "alerts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "analytics_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "anomaly_codes": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "anomaly_traceability": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "app_migrations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "attachment_deletion_audits": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "attachment_evidence_evaluations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "attachment_link_migration_issues": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "attachment_purge_batches": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "attachment_void_audits": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "auth_login_attempts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "auth_sessions": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "calibration_templates": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "data_arrival": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "data_reviews": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "data_sources": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "device_recycle": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "device_shadows": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "devices": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "evidence_quality_remediations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "files": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "hotline_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "ingest_errors": {
+      "action": "copy_retained_error_rows",
+      "review_status": "approved",
+      "responsibility": "offline_r4_error_selection",
+      "reason": "Keep only open unknown_endpoint rows required by the actual HJ212 reauthentication workflow"
+    },
+    "ingest_frame_protocols": {
+      "action": "copy_rows_for_retained_raw",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_dependent",
+      "reason": "Copy only mappings or receipts whose raw row remains in the rebuilt database",
+      "raw_reference_column": "raw_frame_id"
+    },
+    "ingest_parse_attempts": {
+      "action": "copy_retained_parse_rows",
+      "review_status": "approved",
+      "responsibility": "offline_r4_parse_selection",
+      "reason": "Keep 72h plus result, active retry, and retained reauthentication evidence"
+    },
+    "ingest_raw_frames": {
+      "action": "copy_retained_raw_rows",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_selection",
+      "reason": "Keep 168h, accepted/business/activity/current/dedup/slot/evidence references and canonical closure"
+    },
+    "insp_plan_items": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "insp_plans": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_checkins": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_configs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_photo_types": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_plans": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_reminders": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_schedules": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_scheme_items": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_schemes": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_skip_logs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_tasks": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_template_items": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inspection_templates": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "inventory_logs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "maintenance_plans": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "maintenance_templates": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "manual_reports": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "mobile_idempotency": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_alert_observation_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_archive_evidence_refs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_business_observations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_result_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_business_schedules": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_endpoint_profiles": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_factor_definitions": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_factor_mappings": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_hourly_value_series": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_result_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_hourly_values": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_result_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_normalization_retries": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_quality_issues": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_raw_archive_frames": {
+      "action": "copy_rows_for_retained_raw",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_dependent",
+      "reason": "Copy only mappings or receipts whose raw row remains in the rebuilt database",
+      "raw_reference_column": "raw_frame_id"
+    },
+    "monitoring_raw_archive_part_frames": {
+      "action": "copy_rows_for_retained_raw",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_dependent",
+      "reason": "Copy only mappings or receipts whose raw row remains in the rebuilt database",
+      "raw_reference_column": "raw_frame_id"
+    },
+    "monitoring_raw_archive_part_metadata": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_raw_archive_parts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_raw_archives": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_status_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "monitoring_storage_health": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_configuration_or_evidence",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "notifications": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "observation_batches": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_result_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "observation_values": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "monitoring_result_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "operation_attachments": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "operation_logs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "param_thresholds": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "parts_inventory": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "parts_request_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "parts_request_items": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "parts_request_reservations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "parts_requests": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "photo_capture_sessions": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "photo_requirements": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_creation_intents": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_departure_confirmations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_favorites": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_resource_reservations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_schedule_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_schedule_favorites": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_schedules": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "plan_sites": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagent_alerts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagent_inventory": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagent_qc_records": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagent_records": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagent_usage": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "reagents": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "schema_migrations": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "sensor_data": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "sensor_data_daily": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "sensor_data_hourly": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "sensor_data_raw": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "site_import_batches": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "site_import_rows": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "site_name_aliases": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "sites": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "identity_configuration_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "spare_part_requests": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "spare_parts_inventory": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_expected_factor_configs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_expected_factors": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_current_state": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_cutover_state": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_dedup_keys": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_detail_archive_parts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_duplicate_links": {
+      "action": "copy_rows_for_retained_raw",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_dependent",
+      "reason": "Copy only mappings or receipts whose raw row remains in the rebuilt database",
+      "raw_reference_column": "raw_frame_id"
+    },
+    "station_ingest_error_hourly": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_receipt_hourly": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_recent_receipts": {
+      "action": "copy_rows_for_retained_raw",
+      "review_status": "approved",
+      "responsibility": "offline_r4_raw_dependent",
+      "reason": "Copy only mappings or receipts whose raw row remains in the rebuilt database",
+      "raw_reference_column": "raw_frame_id"
+    },
+    "station_ingest_retention_runs": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_ingest_slot_summaries": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "ingest_state_review_required",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_master_refresh_audits": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "station_service_policy_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "threshold_rules": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "timeline_events": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "trusted_endpoints": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "identity_configuration_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "user_roles": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "identity_configuration_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "user_sites": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "identity_configuration_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "users": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "identity_configuration_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_applications": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_documents": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_extension_conflicts": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_inspections": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_maintenance_records": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_refueling_records": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicle_use_records": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "vehicles": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "water_level_checks": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "weather_data": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "weekly_inspection_plans": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "work_orders": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    },
+    "wx_subscription_outbox": {
+      "action": "copy_all",
+      "review_status": "approved",
+      "responsibility": "business_or_unknown_small_table_full_preserve",
+      "reason": "OFFLINE-R4 full-preserve default for business, identity, configuration, result, audit, or unknown small table"
+    }
+  },
+  "approval_basis": "GOVERNANCE_EXECUTABLE_MINIMAL_PATCH_20261028.md GOV-OFFLINE-REBUILD-20261028-R7; schema-only metadata from the existing 016 rebuild output",
+  "selection_policy": {
+    "review_status": "approved",
+    "raw_received_from": "2026-10-21T04:00:00Z",
+    "parse_created_from": "2026-10-25T04:00:00Z",
+    "error_policy": "active_unknown_endpoint_reauthentication_only",
+    "time_comparison": "sqlite_julianday_normalized",
+    "consumer_evidence": {
+      "ingest_errors": [
+        "backend/station_ingest_discovery.py: unknown HJ212 reauthentication resolves open unknown_endpoint rows"
+      ],
+      "current_error_status": [
+        "backend/sl651_server.py: station_ingest_current_state.latest_error_at/latest_error_type"
+      ],
+      "excluded_from_business_consumers": [
+        "backend/station_ingest_retention.py governance and archive maintenance only"
+      ]
+    }
+  },
+  "target_migrations": [
+    "20261020_015_station_factor_display_precision",
+    "20261021_016_station_raw_value_text"
+  ],
+  "local_rehearsal_minimum_free_bytes": 25769803776,
+  "allowed_source_foreign_key_violations": [
+    {
+      "table": "parts_requests",
+      "rowid": 17,
+      "parent": "insp_plans",
+      "fkid": 0
+    }
+  ],
+  "template_rebinding": [
+    "tool_version",
+    "version",
+    "as_of",
+    "source_manifest_sha256",
+    "source_schema_sha256",
+    "selection_policy.raw_received_from",
+    "selection_policy.parse_created_from"
+  ],
+  "schema_basis": {
+    "migration_shape": "015/016",
+    "schema_sha256": "5cf495be1b5cc6d27e8a0526134dcb6f1eda4a2811d754cea8a12cafa9344e4f",
+    "objects": 227,
+    "tables": 136,
+    "difference_from_014": [
+      "table:observation_values adds raw_value_text TEXT"
+    ],
+    "source": "outputs/governance-offline-rehearsal-20261028/output/water-rebuilt.db sqlite_master schema-only metadata"
+  },
+  "reviewed_schema_objects": [
+    {
+      "type": "table",
+      "name": "alert_escalation_config",
+      "tbl_name": "alert_escalation_config",
+      "sql": "CREATE TABLE alert_escalation_config (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    level TEXT NOT NULL UNIQUE,\n    sla_minutes INTEGER DEFAULT 0,\n    auto_workorder INTEGER DEFAULT 0,\n    notify_type TEXT DEFAULT 'app',\n    notify_targets TEXT DEFAULT '',\n    escalate_to_level TEXT DEFAULT NULL,\n    color TEXT DEFAULT '',\n    description TEXT DEFAULT '',\n    is_active INTEGER DEFAULT 1,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n)"
+    },
+    {
+      "type": "table",
+      "name": "alert_rule_config",
+      "tbl_name": "alert_rule_config",
+      "sql": "CREATE TABLE alert_rule_config (\n                id TEXT PRIMARY KEY,\n                metric TEXT NOT NULL,\n                metric_label TEXT NOT NULL,\n                description TEXT DEFAULT '',\n                enabled INTEGER DEFAULT 1,\n                flow_type TEXT DEFAULT 'auto',\n                unit TEXT DEFAULT '',\n                thresholds TEXT DEFAULT '{}',\n                is_reversed INTEGER DEFAULT 0\n            )"
+    },
+    {
+      "type": "table",
+      "name": "alerts",
+      "tbl_name": "alerts",
+      "sql": "CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, site_id INTEGER, metric TEXT, value REAL, level TEXT, message TEXT, status TEXT DEFAULT 'pending', acknowledged_by TEXT, acknowledged_at TEXT, resolved_by TEXT, resolved_at TEXT, remark TEXT, created_at TEXT DEFAULT (datetime('now','localtime')), urge_count INTEGER DEFAULT 0, last_urged_at TEXT, related_order_no TEXT, response_deadline TEXT, flow_type TEXT DEFAULT 'manual', flow_status TEXT DEFAULT 'pending_review', tracking_count INTEGER DEFAULT 0, review_id INTEGER, resolve_reason TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "analytics_events",
+      "tbl_name": "analytics_events",
+      "sql": "CREATE TABLE analytics_events (\n                event_id TEXT PRIMARY KEY,\n                user_id INTEGER NOT NULL,\n                event_name TEXT NOT NULL,\n                occurred_at TEXT NOT NULL,\n                received_at TEXT DEFAULT (datetime('now','localtime')),\n                app_version TEXT,\n                context_json TEXT NOT NULL\n            )"
+    },
+    {
+      "type": "table",
+      "name": "anomaly_codes",
+      "tbl_name": "anomaly_codes",
+      "sql": "CREATE TABLE anomaly_codes (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    code TEXT UNIQUE NOT NULL,\n    category TEXT NOT NULL,\n    severity TEXT DEFAULT 'warning',\n    title TEXT NOT NULL,\n    description TEXT DEFAULT '',\n    suggestion TEXT DEFAULT '',\n    is_active INTEGER DEFAULT 1,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n)"
+    },
+    {
+      "type": "table",
+      "name": "anomaly_traceability",
+      "tbl_name": "anomaly_traceability",
+      "sql": "CREATE TABLE anomaly_traceability (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    review_id INTEGER,\n    alert_id INTEGER,\n    work_order_id INTEGER,\n    code TEXT NOT NULL DEFAULT '',\n    root_cause TEXT DEFAULT '',\n    symptom TEXT DEFAULT '',\n    treatment TEXT DEFAULT '',\n    impact TEXT DEFAULT '',\n    data_snapshot TEXT DEFAULT '{}',\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    updated_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n)"
+    },
+    {
+      "type": "table",
+      "name": "app_migrations",
+      "tbl_name": "app_migrations",
+      "sql": "CREATE TABLE app_migrations (name TEXT PRIMARY KEY, applied_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "attachment_deletion_audits",
+      "tbl_name": "attachment_deletion_audits",
+      "sql": "CREATE TABLE attachment_deletion_audits (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                attachment_id INTEGER NOT NULL UNIQUE,\n                original_filename TEXT NOT NULL DEFAULT '',\n                original_stored_path TEXT NOT NULL DEFAULT '',\n                source_type TEXT DEFAULT '',\n                source_id INTEGER,\n                site_id INTEGER,\n                operator_id INTEGER,\n                operator_name TEXT DEFAULT '',\n                reason TEXT NOT NULL,\n                deleted_at TEXT NOT NULL,\n                delete_before_state TEXT NOT NULL DEFAULT '{}'\n            )"
+    },
+    {
+      "type": "table",
+      "name": "attachment_evidence_evaluations",
+      "tbl_name": "attachment_evidence_evaluations",
+      "sql": "CREATE TABLE attachment_evidence_evaluations (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                attachment_id INTEGER NOT NULL,\n                qualification TEXT NOT NULL,\n                basis TEXT NOT NULL DEFAULT 'unknown',\n                verified_taken_at TEXT,\n                reason TEXT NOT NULL DEFAULT '',\n                next_action TEXT NOT NULL DEFAULT '',\n                facts_json TEXT NOT NULL DEFAULT '{}',\n                evaluation_type TEXT NOT NULL DEFAULT 'automatic',\n                rule_version TEXT NOT NULL DEFAULT 'evidence-v1',\n                actor_id INTEGER,\n                actor_name TEXT DEFAULT '',\n                replaces_evaluation_id INTEGER,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "attachment_link_migration_issues",
+      "tbl_name": "attachment_link_migration_issues",
+      "sql": "CREATE TABLE attachment_link_migration_issues (\n        attachment_id INTEGER PRIMARY KEY, reason TEXT NOT NULL,\n        candidate_item_ids TEXT DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP,\n        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    },
+    {
+      "type": "table",
+      "name": "attachment_purge_batches",
+      "tbl_name": "attachment_purge_batches",
+      "sql": "CREATE TABLE attachment_purge_batches (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                batch_id TEXT NOT NULL UNIQUE,\n                operator_id INTEGER NOT NULL,\n                idempotency_key TEXT NOT NULL,\n                request_hash TEXT NOT NULL,\n                response_json TEXT NOT NULL,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                UNIQUE(operator_id, idempotency_key)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "attachment_void_audits",
+      "tbl_name": "attachment_void_audits",
+      "sql": "CREATE TABLE attachment_void_audits (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                attachment_id INTEGER NOT NULL UNIQUE,\n                original_source_type TEXT DEFAULT '',\n                original_source_id INTEGER,\n                original_site_id INTEGER,\n                original_plan_id INTEGER,\n                original_item_id INTEGER,\n                original_item_name TEXT DEFAULT '',\n                original_site_name TEXT DEFAULT '',\n                original_uploader_id INTEGER,\n                original_uploader_name TEXT DEFAULT '',\n                original_archive_name TEXT DEFAULT '',\n                original_review_status TEXT DEFAULT '',\n                original_reviewer_id INTEGER,\n                original_reviewed_at TEXT,\n                original_risk_snapshot TEXT DEFAULT '{}',\n                original_state TEXT NOT NULL DEFAULT '{}',\n                replacement_item_id INTEGER,\n                replacement_plan_id INTEGER,\n                replacement_required INTEGER NOT NULL DEFAULT 1,\n                operator_id INTEGER NOT NULL,\n                operator_name TEXT DEFAULT '',\n                reason TEXT NOT NULL,\n                voided_at TEXT NOT NULL,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "auth_login_attempts",
+      "tbl_name": "auth_login_attempts",
+      "sql": "CREATE TABLE auth_login_attempts (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            username TEXT NOT NULL,\n            ip_address TEXT NOT NULL,\n            success INTEGER NOT NULL DEFAULT 0,\n            attempted_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))\n        )"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            token_hash TEXT NOT NULL UNIQUE,\n            user_id INTEGER NOT NULL,\n            auth_version INTEGER NOT NULL,\n            issued_at TEXT NOT NULL,\n            expires_at TEXT NOT NULL,\n            revoked_at TEXT,\n            revoke_reason TEXT DEFAULT '',\n            last_seen_at TEXT,\n            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE\n        )"
+    },
+    {
+      "type": "table",
+      "name": "calibration_templates",
+      "tbl_name": "calibration_templates",
+      "sql": "CREATE TABLE calibration_templates (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                device_type TEXT NOT NULL,\n                template_name TEXT NOT NULL,\n                fields TEXT NOT NULL,\n                calculations TEXT,\n                thresholds TEXT,\n                category TEXT DEFAULT '',\n                sort_order INTEGER DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "data_arrival",
+      "tbl_name": "data_arrival",
+      "sql": "CREATE TABLE data_arrival (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                date TEXT NOT NULL,\n                metric TEXT NOT NULL,\n                expected_count INTEGER DEFAULT 0,\n                actual_count INTEGER DEFAULT 0,\n                arrival_rate REAL DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "data_reviews",
+      "tbl_name": "data_reviews",
+      "sql": "CREATE TABLE data_reviews (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    metric TEXT NOT NULL,\n    value REAL NOT NULL,\n    recorded_at TIMESTAMP NOT NULL,\n    auto_result TEXT DEFAULT NULL,              -- 'pass'/'reject'\n    auto_reason TEXT DEFAULT NULL,\n    smart_result TEXT DEFAULT NULL,             -- 'pass'/'suspicious'\n    smart_score REAL DEFAULT NULL,              -- SPC/孤立森林得分\n    manual_result TEXT DEFAULT NULL,            -- 'approved'/'rejected'\n    manual_reason TEXT DEFAULT NULL,\n    reviewer_id INTEGER DEFAULT NULL,\n    reviewed_at TIMESTAMP DEFAULT NULL,\n    status TEXT DEFAULT 'pending',              -- 'pending'/'auto_reviewed'/'smart_reviewed'/'manual_reviewed'/'archived'\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime')), alert_id INTEGER, resolved_by_order_id INTEGER, sla_deadline TEXT, monitoring_business_observation_id INTEGER,\n    FOREIGN KEY (site_id) REFERENCES sites(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "data_sources",
+      "tbl_name": "data_sources",
+      "sql": "CREATE TABLE data_sources (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                name TEXT NOT NULL,\n                source_type TEXT NOT NULL DEFAULT 'api',\n                protocol TEXT DEFAULT 'HTTP',\n                url TEXT NOT NULL,\n                auth_type TEXT DEFAULT 'none',\n                auth_config TEXT DEFAULT '{}',\n                sync_interval INTEGER DEFAULT 60,\n                status TEXT DEFAULT 'inactive',\n                last_sync TEXT,\n                remark TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "device_recycle",
+      "tbl_name": "device_recycle",
+      "sql": "CREATE TABLE device_recycle (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                device_id INTEGER NOT NULL,\n                device_code TEXT NOT NULL,\n                device_name TEXT NOT NULL,\n                device_type TEXT,\n                site_id INTEGER,\n                site_name TEXT,\n                recycle_date TEXT NOT NULL,\n                reason TEXT DEFAULT '',\n                destination TEXT DEFAULT '',\n                operator TEXT DEFAULT '',\n                remark TEXT DEFAULT '',\n                status TEXT DEFAULT 'recycled',\n                created_at TEXT DEFAULT (datetime('now','localtime')), work_order_no TEXT DEFAULT '', operator_id INTEGER,\n                FOREIGN KEY (device_id) REFERENCES device_shadows(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "device_shadows",
+      "tbl_name": "device_shadows",
+      "sql": "CREATE TABLE device_shadows (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                device_code TEXT UNIQUE NOT NULL,\n                device_name TEXT NOT NULL,\n                device_type TEXT,\n                device_model TEXT DEFAULT '',\n                manufacturer TEXT DEFAULT '',\n                install_date TEXT DEFAULT '',\n                status TEXT DEFAULT 'online',\n                battery REAL,\n                voltage REAL DEFAULT 0,\n                last_data_time TEXT, \"management_scope\" TEXT DEFAULT 'managed', \"monitoring_enabled\" INTEGER DEFAULT 0,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "devices",
+      "tbl_name": "devices",
+      "sql": "CREATE TABLE devices (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT, device_name TEXT, device_type TEXT, device_model TEXT, manufacturer TEXT, site_id INTEGER, status TEXT, voltage REAL, last_data_time TEXT, install_date TEXT, created_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "evidence_quality_remediations",
+      "tbl_name": "evidence_quality_remediations",
+      "sql": "CREATE TABLE evidence_quality_remediations (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                attachment_id INTEGER NOT NULL,\n                business_type TEXT NOT NULL DEFAULT '',\n                business_id TEXT NOT NULL DEFAULT '',\n                status TEXT NOT NULL DEFAULT 'open',\n                reason TEXT NOT NULL,\n                due_at TEXT,\n                resolution TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                resolved_at TEXT,\n                UNIQUE(attachment_id, business_type, business_id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "files",
+      "tbl_name": "files",
+      "sql": "CREATE TABLE files (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                filename TEXT NOT NULL,\n                stored_path TEXT NOT NULL,\n                file_type TEXT DEFAULT '',\n                mime_type TEXT DEFAULT '',\n                file_size INTEGER DEFAULT 0,\n                md5_hash TEXT DEFAULT '',\n                uploader_id INTEGER,\n                source_type TEXT DEFAULT '',\n                source_id INTEGER,\n                is_deleted INTEGER DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "hotline_events",
+      "tbl_name": "hotline_events",
+      "sql": "CREATE TABLE hotline_events (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                caller_name TEXT,\n                caller_phone TEXT,\n                event_type TEXT NOT NULL,\n                description TEXT NOT NULL,\n                location TEXT,\n                status TEXT DEFAULT 'registered',  -- registered/dispatched/closed\n                related_order_no TEXT,\n                operator TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            , site_id INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "ingest_errors",
+      "tbl_name": "ingest_errors",
+      "sql": "CREATE TABLE ingest_errors (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    raw_frame_id INTEGER,\n    error_type TEXT NOT NULL,\n    error_detail TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'suppressed')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "ingest_frame_protocols",
+      "tbl_name": "ingest_frame_protocols",
+      "sql": "CREATE TABLE ingest_frame_protocols (\n    raw_frame_id INTEGER PRIMARY KEY,\n    protocol_family TEXT NOT NULL CHECK (protocol_family IN ('sl651', 'hj212', 'unknown')),\n    parser_version TEXT NOT NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "ingest_parse_attempts",
+      "tbl_name": "ingest_parse_attempts",
+      "sql": "CREATE TABLE ingest_parse_attempts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    raw_frame_id INTEGER NOT NULL,\n    parser_version TEXT NOT NULL,\n    parse_status TEXT NOT NULL CHECK (parse_status IN ('parsed_header', 'failed_header', 'pending_reparse')),\n    error_code TEXT,\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "ingest_raw_frames",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE TABLE ingest_raw_frames (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    received_at TEXT NOT NULL,\n    frame_sha256 TEXT NOT NULL,\n    logical_key_sha256 TEXT,\n    raw_frame BLOB NOT NULL,\n    body_length INTEGER,\n    crc_status TEXT NOT NULL CHECK (crc_status IN ('valid', 'invalid', 'not_checked')),\n    authentication_status TEXT NOT NULL CHECK (authentication_status IN ('authenticated', 'unbound_authenticated', 'unknown_endpoint', 'credential_failed', 'not_checked')),\n    disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'duplicate', 'quarantined', 'pending_parse', 'pending_reparse')),\n    duplicate_of_raw_frame_id INTEGER,\n    persistence_state TEXT NOT NULL DEFAULT 'persisted' CHECK (persistence_state IN ('persisted', 'pending_parse', 'pending_reparse')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (duplicate_of_raw_frame_id) REFERENCES ingest_raw_frames(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "insp_plan_items",
+      "tbl_name": "insp_plan_items",
+      "sql": "CREATE TABLE insp_plan_items (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_id INTEGER NOT NULL,\n                site_id INTEGER NOT NULL,\n                schedule_id INTEGER,\n                template_id INTEGER,\n                item_name TEXT NOT NULL,\n                category TEXT DEFAULT '',\n                frequency TEXT DEFAULT '',\n                result TEXT,\n                photo_urls TEXT,\n                gps_lat REAL, gps_lng REAL,\n                check_time TEXT,\n                remark TEXT DEFAULT '',\n                calibrator TEXT,\n                calibration_values TEXT,\n                completed_at TEXT, required_photos INTEGER DEFAULT 0, actual_photos INTEGER DEFAULT 0, review_status INTEGER DEFAULT 0, review_comment TEXT DEFAULT '', reviewer_id INTEGER DEFAULT NULL, review_time TEXT DEFAULT '', location_address TEXT DEFAULT '', check_in_time TEXT, check_out_time TEXT, part_consumed TEXT DEFAULT '', execution_status TEXT DEFAULT 'active', rework_required_at TEXT DEFAULT '', evidence_status TEXT DEFAULT '', supplement_required_at TEXT DEFAULT '', supplement_source_attachment_id INTEGER, supplement_reason TEXT DEFAULT '', rework_source_item_id INTEGER, need_review INTEGER DEFAULT NULL, inspection_standard TEXT DEFAULT NULL,\n                FOREIGN KEY (plan_id) REFERENCES insp_plans(id) ON DELETE CASCADE,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "insp_plans",
+      "tbl_name": "insp_plans",
+      "sql": "CREATE TABLE insp_plans (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_name TEXT NOT NULL,\n                assignee TEXT NOT NULL,\n                assignee_id INTEGER,\n                period TEXT NOT NULL,\n                generate_date TEXT NOT NULL,\n                status TEXT DEFAULT 'draft',\n                completion_rate REAL DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime')), vehicle_id INTEGER DEFAULT 0, submitted_at TEXT, approver_id INTEGER, approve_comment TEXT, reject_reason TEXT, plan_schedule_id INTEGER, schedule_version INTEGER DEFAULT 1, plan_snapshot TEXT, rework_of_plan_id INTEGER, rework_batch_key TEXT DEFAULT '', resource_state TEXT DEFAULT 'ready',\n                FOREIGN KEY (assignee_id) REFERENCES users(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_checkins",
+      "tbl_name": "inspection_checkins",
+      "sql": "CREATE TABLE inspection_checkins (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                site_name TEXT,\n                user_id INTEGER,\n                user_name TEXT,\n                check_time TEXT NOT NULL,\n                lat REAL, lng REAL,\n                photo_url TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime')), plan_id INTEGER,\n                FOREIGN KEY (site_id) REFERENCES sites(id),\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_configs",
+      "tbl_name": "inspection_configs",
+      "sql": "CREATE TABLE inspection_configs (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_type TEXT NOT NULL,\n                device_types TEXT DEFAULT '',\n                template_id INTEGER NOT NULL,\n                is_active INTEGER DEFAULT 1,\n                remark TEXT DEFAULT '',\n                FOREIGN KEY (template_id) REFERENCES inspection_templates(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_photo_types",
+      "tbl_name": "inspection_photo_types",
+      "sql": "CREATE TABLE inspection_photo_types (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_id INTEGER,\n                site_type TEXT DEFAULT '',\n                photo_type TEXT NOT NULL,\n                label TEXT NOT NULL,\n                min_count INTEGER DEFAULT 1,\n                sort_order INTEGER DEFAULT 0\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_plans",
+      "tbl_name": "inspection_plans",
+      "sql": "CREATE TABLE inspection_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT NOT NULL, site_id INTEGER NOT NULL, type TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now','localtime')), period TEXT DEFAULT 'once', description TEXT DEFAULT '', scheme_id INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "inspection_reminders",
+      "tbl_name": "inspection_reminders",
+      "sql": "CREATE TABLE inspection_reminders (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                remind_days_before INTEGER DEFAULT 1,\n                remind_method TEXT DEFAULT 'notification',\n                overdue_escalation INTEGER DEFAULT 0,\n                escalation_days INTEGER DEFAULT 3,\n                is_active INTEGER DEFAULT 1\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_schedules",
+      "tbl_name": "inspection_schedules",
+      "sql": "CREATE TABLE inspection_schedules (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                template_id INTEGER NOT NULL,\n                template_item_id INTEGER NOT NULL,\n                frequency TEXT NOT NULL,\n                next_due_date TEXT NOT NULL,\n                last_completed_at TEXT,\n                status TEXT DEFAULT 'active',\n                cycle_count INTEGER DEFAULT 0,\n                FOREIGN KEY (site_id) REFERENCES sites(id),\n                FOREIGN KEY (template_id) REFERENCES inspection_templates(id),\n                FOREIGN KEY (template_item_id) REFERENCES inspection_template_items(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_scheme_items",
+      "tbl_name": "inspection_scheme_items",
+      "sql": "CREATE TABLE inspection_scheme_items (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                scheme_id INTEGER NOT NULL,\n                category TEXT DEFAULT '',\n                check_item TEXT NOT NULL,\n                sort_order INTEGER DEFAULT 0,\n                is_required INTEGER DEFAULT 1, frequency_level TEXT DEFAULT 'mid',\n                FOREIGN KEY (scheme_id) REFERENCES inspection_schemes(id) ON DELETE CASCADE\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_schemes",
+      "tbl_name": "inspection_schemes",
+      "sql": "CREATE TABLE inspection_schemes (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                period TEXT NOT NULL,\n                name TEXT NOT NULL,\n                status TEXT DEFAULT 'active',\n                updated_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (site_id) REFERENCES sites(id),\n                UNIQUE(site_id, period)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_skip_logs",
+      "tbl_name": "inspection_skip_logs",
+      "sql": "CREATE TABLE inspection_skip_logs (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_id INTEGER NOT NULL,\n                task_id INTEGER,\n                site_id INTEGER NOT NULL,\n                check_item TEXT NOT NULL,\n                reason TEXT DEFAULT '',\n                skip_type TEXT DEFAULT 'user',\n                skip_count INTEGER DEFAULT 1,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (plan_id) REFERENCES inspection_plans(id),\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_tasks",
+      "tbl_name": "inspection_tasks",
+      "sql": "CREATE TABLE inspection_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER, site_id INTEGER, task_name TEXT, assignee TEXT, status TEXT, result TEXT, photo_urls TEXT, remark TEXT, completed_at TEXT, created_at TEXT DEFAULT (datetime('now','localtime')), calibrator TEXT, calibration_values TEXT, photo_required INTEGER DEFAULT 1)"
+    },
+    {
+      "type": "table",
+      "name": "inspection_template_items",
+      "tbl_name": "inspection_template_items",
+      "sql": "CREATE TABLE inspection_template_items (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                template_id INTEGER NOT NULL,\n                item_name TEXT NOT NULL,\n                category TEXT DEFAULT '',\n                frequency_level TEXT DEFAULT 'mid',\n                photo_required INTEGER DEFAULT 0,\n                sort_order INTEGER DEFAULT 0, need_review INTEGER DEFAULT 0, inspection_standard TEXT DEFAULT '', max_photos INTEGER DEFAULT 1,\n                FOREIGN KEY (template_id) REFERENCES inspection_templates(id) ON DELETE CASCADE\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inspection_templates",
+      "tbl_name": "inspection_templates",
+      "sql": "CREATE TABLE inspection_templates (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                template_name TEXT NOT NULL,\n                category TEXT NOT NULL,\n                frequency TEXT NOT NULL,\n                description TEXT DEFAULT '',\n                status TEXT DEFAULT 'active',\n                sort_order INTEGER DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "inventory_logs",
+      "tbl_name": "inventory_logs",
+      "sql": "CREATE TABLE inventory_logs (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                part_id INTEGER NOT NULL,\n                type TEXT NOT NULL CHECK(type IN ('in','out')),\n                quantity INTEGER NOT NULL,\n                ref_type TEXT DEFAULT '',\n                ref_id INTEGER,\n                operator TEXT DEFAULT '',\n                remark TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime')), work_order_no TEXT DEFAULT \"\", operator_id INTEGER,\n                FOREIGN KEY (part_id) REFERENCES spare_parts_inventory(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "maintenance_plans",
+      "tbl_name": "maintenance_plans",
+      "sql": "CREATE TABLE maintenance_plans (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                plan_name TEXT NOT NULL,\n                category TEXT NOT NULL,\n                frequency TEXT NOT NULL,\n                due_date TEXT,\n                status TEXT DEFAULT 'pending',\n                assignee TEXT,\n                completed_at TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime')), urge_count INTEGER DEFAULT 0, last_urged_at TEXT, review_status TEXT DEFAULT NULL, review_comment TEXT DEFAULT NULL, template_id INTEGER, sub_category TEXT, check_results TEXT, remark TEXT,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "maintenance_templates",
+      "tbl_name": "maintenance_templates",
+      "sql": "CREATE TABLE maintenance_templates (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                category TEXT NOT NULL,\n                sub_category TEXT NOT NULL,\n                title TEXT NOT NULL,\n                frequency TEXT NOT NULL,\n                description TEXT,\n                standard TEXT,\n                check_items TEXT,\n                photo_required INTEGER DEFAULT 0,\n                estimated_hours REAL DEFAULT 1,\n                sort_order INTEGER DEFAULT 0\n            )"
+    },
+    {
+      "type": "table",
+      "name": "manual_reports",
+      "tbl_name": "manual_reports",
+      "sql": "CREATE TABLE manual_reports (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER DEFAULT NULL,\n    report_type TEXT NOT NULL,                  -- 'sensory'/'equipment'/'environment'/'violation'/'pollution'\n    description TEXT DEFAULT NULL,\n    photo_urls TEXT DEFAULT '[]',               -- JSON数组\n    gps_lat REAL DEFAULT NULL,\n    gps_lng REAL DEFAULT NULL,\n    reporter_id INTEGER NOT NULL,\n    reported_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    order_no TEXT DEFAULT NULL,                 -- 关联工单号\n    status TEXT DEFAULT 'open', verification_note TEXT DEFAULT '', verified_by INTEGER, verified_at TEXT, archived_by INTEGER, archived_at TEXT, resolved_at TEXT,                 -- 'open'/'dispatched'/'resolved'/'archived'\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    FOREIGN KEY (reporter_id) REFERENCES users(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "mobile_idempotency",
+      "tbl_name": "mobile_idempotency",
+      "sql": "CREATE TABLE mobile_idempotency (\n        idempotency_key TEXT PRIMARY KEY,\n        endpoint TEXT NOT NULL,\n        response_json TEXT NOT NULL,\n        created_at TEXT DEFAULT (datetime('now','localtime'))\n    )"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_alert_observation_events",
+      "tbl_name": "monitoring_alert_observation_events",
+      "sql": "CREATE TABLE monitoring_alert_observation_events (\n        observation_id INTEGER PRIMARY KEY,\n        alert_id INTEGER,\n        evaluated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))\n    )"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_archive_evidence_refs",
+      "tbl_name": "monitoring_archive_evidence_refs",
+      "sql": "CREATE TABLE monitoring_archive_evidence_refs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    source_raw_frame_id INTEGER NOT NULL UNIQUE,\n    archive_part_id INTEGER NOT NULL,\n    archive_record_index INTEGER NOT NULL CHECK (archive_record_index >= 0),\n    record_sha256 TEXT NOT NULL,\n    frame_sha256 TEXT NOT NULL,\n    received_at TEXT NOT NULL,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    protocol_family TEXT NOT NULL,\n    parser_version TEXT NOT NULL,\n    logical_key_sha256 TEXT,\n    crc_status TEXT NOT NULL,\n    authentication_status TEXT NOT NULL,\n    disposition TEXT NOT NULL,\n    body_length INTEGER,\n    context_json TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    FOREIGN KEY (archive_part_id) REFERENCES monitoring_raw_archive_parts(id),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    UNIQUE(archive_part_id, archive_record_index)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_business_observations",
+      "tbl_name": "monitoring_business_observations",
+      "sql": "CREATE TABLE monitoring_business_observations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    source_observation_value_id INTEGER NOT NULL UNIQUE,\n    observation_batch_id INTEGER NOT NULL,\n    schedule_id INTEGER NOT NULL,\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    protocol_code TEXT NOT NULL,\n    business_metric TEXT NOT NULL,\n    instrument_asset_code TEXT,\n    scheduled_at TEXT NOT NULL,\n    observed_at TEXT NOT NULL,\n    received_at TEXT NOT NULL,\n    standard_value REAL NOT NULL,\n    standard_unit TEXT NOT NULL,\n    quality TEXT NOT NULL CHECK (quality IN ('valid', 'suspect')),\n    timeliness TEXT NOT NULL CHECK (timeliness IN ('on_time', 'late')),\n    slot_state TEXT NOT NULL CHECK (slot_state IN ('selected', 'duplicate', 'conflict')),\n    projection_version TEXT NOT NULL,\n    is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (source_observation_value_id) REFERENCES observation_values(id),\n    FOREIGN KEY (observation_batch_id) REFERENCES observation_batches(id),\n    FOREIGN KEY (schedule_id) REFERENCES monitoring_business_schedules(id),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id),\n    FOREIGN KEY (protocol_code) REFERENCES monitoring_factor_definitions(protocol_code)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_business_schedules",
+      "tbl_name": "monitoring_business_schedules",
+      "sql": "CREATE TABLE monitoring_business_schedules (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    endpoint_id INTEGER NOT NULL,\n    protocol_code TEXT,\n    timezone TEXT NOT NULL,\n    interval_seconds INTEGER NOT NULL CHECK (interval_seconds IN (3600, 14400)),\n    anchor_local_time TEXT NOT NULL CHECK (\n        length(anchor_local_time)=8\n        AND anchor_local_time GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]'\n        AND CAST(substr(anchor_local_time,1,2) AS INTEGER) BETWEEN 0 AND 23\n    ),\n    tolerance_seconds INTEGER NOT NULL DEFAULT 600 CHECK (tolerance_seconds BETWEEN 0 AND 3600),\n    effective_from TEXT NOT NULL CHECK (substr(effective_from, -6) = '+00:00'),\n    effective_to TEXT CHECK (effective_to IS NULL OR substr(effective_to, -6) = '+00:00'),\n    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), result_delay_seconds INTEGER NOT NULL DEFAULT 0\n    CHECK (result_delay_seconds BETWEEN 0 AND interval_seconds),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (protocol_code) REFERENCES monitoring_factor_definitions(protocol_code)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_endpoint_profiles",
+      "tbl_name": "monitoring_endpoint_profiles",
+      "sql": "CREATE TABLE monitoring_endpoint_profiles (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    rtu_asset_code TEXT,\n    instrument_asset_code TEXT,\n    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',\n    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n    expected_granularity TEXT,\n    expected_interval_seconds INTEGER CHECK (expected_interval_seconds IS NULL OR expected_interval_seconds > 0),\n    effective_from TEXT NOT NULL CHECK (substr(effective_from, -6) = '+00:00'),\n    effective_to TEXT CHECK (effective_to IS NULL OR substr(effective_to, -6) = '+00:00'),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id),\n    UNIQUE(endpoint_id, effective_from)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_factor_definitions",
+      "tbl_name": "monitoring_factor_definitions",
+      "sql": "CREATE TABLE monitoring_factor_definitions (\n    protocol_code TEXT PRIMARY KEY,\n    protocol_factor TEXT NOT NULL UNIQUE,\n    raw_unit TEXT,\n    parse_format TEXT NOT NULL,\n    business_metric TEXT,\n    standard_unit TEXT,\n    decimal_precision INTEGER NOT NULL DEFAULT 3 CHECK (decimal_precision BETWEEN 0 AND 8),\n    is_published INTEGER NOT NULL DEFAULT 1 CHECK (is_published IN (0, 1))\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_factor_mappings",
+      "tbl_name": "monitoring_factor_mappings",
+      "sql": "CREATE TABLE monitoring_factor_mappings (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    endpoint_id INTEGER NOT NULL,\n    protocol_code TEXT NOT NULL,\n    business_metric TEXT,\n    instrument_asset_code TEXT,\n    expected_interval_seconds INTEGER CHECK (expected_interval_seconds IS NULL OR expected_interval_seconds > 0),\n    tolerance_seconds INTEGER CHECK (tolerance_seconds IS NULL OR tolerance_seconds >= 0),\n    effective_from TEXT NOT NULL CHECK (substr(effective_from, -6) = '+00:00'),\n    effective_to TEXT CHECK (effective_to IS NULL OR substr(effective_to, -6) = '+00:00'),\n    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (protocol_code) REFERENCES monitoring_factor_definitions(protocol_code)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_hourly_value_series",
+      "tbl_name": "monitoring_hourly_value_series",
+      "sql": "CREATE TABLE monitoring_hourly_value_series (\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    protocol_code TEXT NOT NULL,\n    business_metric TEXT NOT NULL,\n    instrument_asset_code TEXT NOT NULL DEFAULT '',\n    observed_hour TEXT NOT NULL,\n    sample_count INTEGER NOT NULL CHECK (sample_count > 0),\n    minimum_value REAL NOT NULL,\n    maximum_value REAL NOT NULL,\n    average_value REAL NOT NULL,\n    standard_unit TEXT NOT NULL,\n    source_last_batch_id INTEGER NOT NULL,\n    aggregated_at TEXT NOT NULL,\n    PRIMARY KEY (endpoint_id, protocol_code, business_metric, instrument_asset_code, standard_unit, observed_hour),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id),\n    FOREIGN KEY (source_last_batch_id) REFERENCES observation_batches(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_hourly_values",
+      "tbl_name": "monitoring_hourly_values",
+      "sql": "CREATE TABLE monitoring_hourly_values (\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    protocol_code TEXT NOT NULL,\n    business_metric TEXT NOT NULL,\n    observed_hour TEXT NOT NULL,\n    sample_count INTEGER NOT NULL CHECK (sample_count > 0),\n    minimum_value REAL NOT NULL,\n    maximum_value REAL NOT NULL,\n    average_value REAL NOT NULL,\n    standard_unit TEXT NOT NULL,\n    source_last_batch_id INTEGER NOT NULL,\n    aggregated_at TEXT NOT NULL,\n    PRIMARY KEY (endpoint_id, protocol_code, observed_hour),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id),\n    FOREIGN KEY (source_last_batch_id) REFERENCES observation_batches(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_normalization_retries",
+      "tbl_name": "monitoring_normalization_retries",
+      "sql": "CREATE TABLE monitoring_normalization_retries (\n    raw_frame_id INTEGER NOT NULL,\n    normalization_version TEXT NOT NULL,\n    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),\n    next_attempt_at TEXT,\n    last_error TEXT,\n    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'retrying', 'exhausted')),\n    PRIMARY KEY (raw_frame_id, normalization_version),\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_quality_issues",
+      "tbl_name": "monitoring_quality_issues",
+      "sql": "CREATE TABLE monitoring_quality_issues (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    raw_frame_id INTEGER,\n    observation_batch_id INTEGER,\n    business_site_id INTEGER,\n    issue_type TEXT NOT NULL,\n    object_summary TEXT NOT NULL,\n    first_seen_at TEXT NOT NULL,\n    last_seen_at TEXT NOT NULL,\n    occurrence_count INTEGER NOT NULL DEFAULT 1,\n    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'suppressed')),\n    reparse_allowed INTEGER NOT NULL DEFAULT 1 CHECK (reparse_allowed IN (0, 1)),\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id),\n    FOREIGN KEY (observation_batch_id) REFERENCES observation_batches(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_raw_archive_frames",
+      "tbl_name": "monitoring_raw_archive_frames",
+      "sql": "CREATE TABLE monitoring_raw_archive_frames (\n    raw_frame_id INTEGER PRIMARY KEY,\n    archive_id INTEGER NOT NULL,\n    frame_sha256 TEXT NOT NULL,\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id),\n    FOREIGN KEY (archive_id) REFERENCES monitoring_raw_archives(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_raw_archive_part_frames",
+      "tbl_name": "monitoring_raw_archive_part_frames",
+      "sql": "CREATE TABLE monitoring_raw_archive_part_frames (\n    raw_frame_id INTEGER PRIMARY KEY,\n    archive_part_id INTEGER NOT NULL,\n    frame_sha256 TEXT NOT NULL,\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id),\n    FOREIGN KEY (archive_part_id) REFERENCES monitoring_raw_archive_parts(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_raw_archive_part_metadata",
+      "tbl_name": "monitoring_raw_archive_part_metadata",
+      "sql": "CREATE TABLE monitoring_raw_archive_part_metadata (\n    archive_part_id INTEGER PRIMARY KEY,\n    format_version INTEGER NOT NULL CHECK (format_version >= 1),\n    verified_at TEXT NOT NULL,\n    first_raw_frame_id INTEGER NOT NULL,\n    last_raw_frame_id INTEGER NOT NULL,\n    first_received_at TEXT NOT NULL,\n    last_received_at TEXT NOT NULL,\n    record_count INTEGER NOT NULL CHECK (record_count > 0),\n    mirror_path TEXT,\n    mirror_verified_at TEXT,\n    local_deleted_at TEXT,\n    FOREIGN KEY (archive_part_id) REFERENCES monitoring_raw_archive_parts(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_raw_archive_parts",
+      "tbl_name": "monitoring_raw_archive_parts",
+      "sql": "CREATE TABLE monitoring_raw_archive_parts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    archive_date TEXT NOT NULL,\n    archive_path TEXT NOT NULL UNIQUE,\n    content_sha256 TEXT NOT NULL UNIQUE,\n    frame_count INTEGER NOT NULL CHECK (frame_count > 0),\n    created_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_raw_archives",
+      "tbl_name": "monitoring_raw_archives",
+      "sql": "CREATE TABLE monitoring_raw_archives (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    archive_date TEXT NOT NULL UNIQUE,\n    archive_path TEXT NOT NULL UNIQUE,\n    sha256 TEXT NOT NULL,\n    frame_count INTEGER NOT NULL CHECK (frame_count > 0),\n    created_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_status_events",
+      "tbl_name": "monitoring_status_events",
+      "sql": "CREATE TABLE monitoring_status_events (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    observation_batch_id INTEGER,\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    event_axis TEXT NOT NULL CHECK (event_axis IN ('communication', 'rtu', 'power', 'signal', 'instrument')),\n    event_type TEXT NOT NULL,\n    event_value TEXT,\n    occurred_at TEXT NOT NULL,\n    received_at TEXT NOT NULL,\n    source TEXT NOT NULL,\n    FOREIGN KEY (observation_batch_id) REFERENCES observation_batches(id),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "monitoring_storage_health",
+      "tbl_name": "monitoring_storage_health",
+      "sql": "CREATE TABLE monitoring_storage_health (\n    storage_key TEXT PRIMARY KEY,\n    status TEXT NOT NULL CHECK (status IN ('healthy', 'degraded')),\n    detail TEXT NOT NULL,\n    checked_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "notifications",
+      "tbl_name": "notifications",
+      "sql": "CREATE TABLE notifications (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                source_type TEXT NOT NULL,\n                source_id INTEGER NOT NULL,\n                title TEXT NOT NULL,\n                content TEXT DEFAULT '',\n                is_read INTEGER DEFAULT 0,\n                created_at TEXT DEFAULT (datetime('now','localtime')), dedupe_key TEXT DEFAULT '', payload_json TEXT DEFAULT '',\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "observation_batches",
+      "tbl_name": "observation_batches",
+      "sql": "CREATE TABLE observation_batches (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    raw_frame_id INTEGER NOT NULL,\n    endpoint_id INTEGER NOT NULL,\n    business_site_id INTEGER NOT NULL,\n    function_code INTEGER NOT NULL,\n    serial_number INTEGER NOT NULL,\n    reported_at TEXT NOT NULL,\n    observed_at TEXT NOT NULL,\n    received_at TEXT NOT NULL,\n    granularity TEXT NOT NULL,\n    aggregation_source TEXT NOT NULL CHECK (aggregation_source IN ('device_reported', 'server_aggregated')),\n    idempotency_key TEXT NOT NULL,\n    normalization_version TEXT NOT NULL,\n    batch_status TEXT NOT NULL CHECK (batch_status IN ('accepted', 'partial', 'rejected')),\n    projection_state TEXT NOT NULL CHECK (projection_state IN ('completed', 'failed_retryable', 'superseded')),\n    error_code TEXT,\n    replaces_batch_id INTEGER,\n    is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),\n    normalized_at TEXT NOT NULL,\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id),\n    FOREIGN KEY (replaces_batch_id) REFERENCES observation_batches(id),\n    UNIQUE(raw_frame_id, normalization_version),\n    UNIQUE(endpoint_id, idempotency_key, normalization_version)\n)"
+    },
+    {
+      "type": "table",
+      "name": "observation_values",
+      "tbl_name": "observation_values",
+      "sql": "CREATE TABLE observation_values (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    observation_batch_id INTEGER NOT NULL,\n    protocol_code TEXT NOT NULL,\n    business_metric TEXT,\n    raw_value REAL,\n    raw_unit TEXT,\n    standard_value REAL,\n    standard_unit TEXT,\n    quality TEXT NOT NULL CHECK (quality IN ('valid', 'suspect', 'invalid', 'fault', 'unmapped')),\n    instrument_asset_code TEXT,\n    parser_version TEXT NOT NULL,\n    is_published INTEGER NOT NULL DEFAULT 1 CHECK (is_published IN (0, 1)),\n    is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)), raw_value_text TEXT,\n    FOREIGN KEY (observation_batch_id) REFERENCES observation_batches(id),\n    FOREIGN KEY (protocol_code) REFERENCES monitoring_factor_definitions(protocol_code),\n    UNIQUE(observation_batch_id, protocol_code)\n)"
+    },
+    {
+      "type": "table",
+      "name": "operation_attachments",
+      "tbl_name": "operation_attachments",
+      "sql": "CREATE TABLE operation_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL, stored_path TEXT NOT NULL, thumbnail_path TEXT DEFAULT '', file_type TEXT DEFAULT 'image', mime_type TEXT DEFAULT '', file_size INTEGER DEFAULT 0, description TEXT DEFAULT '', source_type TEXT DEFAULT '', source_id INTEGER DEFAULT 0, site_id INTEGER, uploader_id INTEGER, uploader_name TEXT DEFAULT '', gps_lat REAL, gps_lng REAL, taken_at TEXT, category TEXT DEFAULT '', is_deleted INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now','localtime')), requirement_id INTEGER DEFAULT NULL, review_status TEXT DEFAULT 'pending', reviewer_id INTEGER DEFAULT NULL, reviewed_at TIMESTAMP DEFAULT NULL, reject_reason TEXT DEFAULT NULL, archived INTEGER DEFAULT 0, archived_at TEXT, archived_by INTEGER, archive_reason TEXT DEFAULT '', watermark_text TEXT DEFAULT '', recognized_category TEXT DEFAULT '', match_status TEXT DEFAULT 'auto', match_confidence REAL DEFAULT NULL, review_required INTEGER DEFAULT 0, extra_json TEXT DEFAULT '', is_flagged INTEGER DEFAULT 0, flag_reason TEXT DEFAULT '', flag_rule TEXT DEFAULT '', review_action TEXT DEFAULT '', capture_source TEXT DEFAULT '', sha256_hash TEXT DEFAULT '', duplicate_of_id INTEGER DEFAULT NULL, perceptual_hash TEXT DEFAULT '', watermark_code TEXT DEFAULT '', deleted_at TEXT, deleted_by INTEGER, delete_reason TEXT DEFAULT '', archive_name TEXT DEFAULT '', voided_at TEXT, voided_by INTEGER, void_reason TEXT DEFAULT '', plan_id INTEGER, item_id INTEGER, item_name TEXT DEFAULT '', evidence_qualification TEXT DEFAULT 'review', evidence_basis TEXT DEFAULT 'unknown', evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT '', evidence_evaluated_at TEXT, evidence_evaluation_id INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "operation_logs",
+      "tbl_name": "operation_logs",
+      "sql": "CREATE TABLE operation_logs (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                module TEXT NOT NULL DEFAULT '',\n                action TEXT NOT NULL DEFAULT '',\n                target_type TEXT NOT NULL DEFAULT '',\n                target_id    INTEGER DEFAULT 0,\n                operator TEXT DEFAULT '',\n                operator_id  INTEGER DEFAULT 0,\n                details TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "param_thresholds",
+      "tbl_name": "param_thresholds",
+      "sql": "CREATE TABLE param_thresholds (\n    metric TEXT PRIMARY KEY, label TEXT, unit TEXT,\n    low REAL, high REAL, critical_low REAL, critical_high REAL)"
+    },
+    {
+      "type": "table",
+      "name": "parts_inventory",
+      "tbl_name": "parts_inventory",
+      "sql": "CREATE TABLE parts_inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, part_code TEXT, part_name TEXT, category TEXT, spec TEXT, quantity REAL DEFAULT 0, min_quantity REAL DEFAULT 5, unit TEXT DEFAULT \"个\", location TEXT, site_id INTEGER, remark TEXT, updated_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "parts_request_events",
+      "tbl_name": "parts_request_events",
+      "sql": "CREATE TABLE parts_request_events (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            request_id INTEGER NOT NULL,\n            event_type TEXT NOT NULL,\n            operator_id INTEGER,\n            operator TEXT DEFAULT '',\n            details TEXT DEFAULT '{}',\n            created_at TEXT DEFAULT (datetime('now','localtime'))\n        )"
+    },
+    {
+      "type": "table",
+      "name": "parts_request_items",
+      "tbl_name": "parts_request_items",
+      "sql": "CREATE TABLE parts_request_items (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                request_id INTEGER NOT NULL,\n                part_sku TEXT NOT NULL,\n                quantity INTEGER NOT NULL DEFAULT 1,\n                created_at TEXT DEFAULT (datetime('now','localtime')), part_id INTEGER,\n                FOREIGN KEY (request_id) REFERENCES parts_requests(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "parts_request_reservations",
+      "tbl_name": "parts_request_reservations",
+      "sql": "CREATE TABLE parts_request_reservations (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            request_id INTEGER NOT NULL,\n            part_id INTEGER NOT NULL,\n            requested_quantity INTEGER NOT NULL DEFAULT 0,\n            reserved_quantity INTEGER NOT NULL DEFAULT 0,\n            issued_quantity INTEGER NOT NULL DEFAULT 0,\n            status TEXT NOT NULL DEFAULT 'reserved',\n            created_at TEXT DEFAULT (datetime('now','localtime')),\n            updated_at TEXT DEFAULT (datetime('now','localtime')),\n            UNIQUE(request_id, part_id)\n        )"
+    },
+    {
+      "type": "table",
+      "name": "parts_requests",
+      "tbl_name": "parts_requests",
+      "sql": "CREATE TABLE parts_requests (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_id INTEGER NOT NULL,\n                requester_id INTEGER DEFAULT 0,\n                status TEXT DEFAULT 'pending',\n                created_at TEXT DEFAULT (datetime('now','localtime')), approver_id INTEGER, approve_comment TEXT, site_id INTEGER, work_order_no TEXT DEFAULT '', request_no TEXT DEFAULT '', source TEXT DEFAULT 'inspection', reason TEXT DEFAULT '', approved_at TEXT, fulfillment_type TEXT DEFAULT 'stock', requested_part_name TEXT DEFAULT '', specification TEXT DEFAULT '', estimated_amount REAL, actual_amount REAL, supplier TEXT DEFAULT '', approval_channel TEXT DEFAULT 'system', receipt_no TEXT DEFAULT '', tracking_no TEXT DEFAULT '', evidence_urls TEXT DEFAULT '[]', destination TEXT DEFAULT '', old_part_disposition TEXT DEFAULT '', ordered_at TEXT, received_at TEXT, completed_at TEXT,\n                FOREIGN KEY (plan_id) REFERENCES insp_plans(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "photo_capture_sessions",
+      "tbl_name": "photo_capture_sessions",
+      "sql": "CREATE TABLE photo_capture_sessions (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                token_hash TEXT NOT NULL UNIQUE,\n                user_id INTEGER NOT NULL,\n                site_id INTEGER NOT NULL,\n                plan_id INTEGER,\n                item_id INTEGER,\n                work_order_id INTEGER,\n                issued_at TEXT NOT NULL,\n                expires_at TEXT NOT NULL,\n                used_at TEXT,\n                attachment_id INTEGER,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            , gps_lat REAL, gps_lng REAL, distance_m REAL, rework_required_at TEXT, capture_source TEXT DEFAULT '', nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "photo_requirements",
+      "tbl_name": "photo_requirements",
+      "sql": "CREATE TABLE photo_requirements (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_type TEXT NOT NULL DEFAULT 'water_quality',  -- 站点类型\n    period TEXT NOT NULL,                              -- 'weekly' / 'monthly'\n    seq INTEGER NOT NULL,                              -- 周检1~12 / 月检1~2\n    item_name TEXT NOT NULL,                           -- \"高锰酸盐指数仪器质控\"\n    photo_count INTEGER NOT NULL DEFAULT 1,            -- 需拍照张数\n    review_required INTEGER NOT NULL DEFAULT 0,        -- 是否需要主管审核 1=是\n    review_role TEXT DEFAULT NULL,                     -- 审核角色: 'supervisor'/'admin'\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n, category TEXT DEFAULT '', watermark_keyword TEXT DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "plan_creation_intents",
+      "tbl_name": "plan_creation_intents",
+      "sql": "CREATE TABLE plan_creation_intents (\n                intent_key TEXT PRIMARY KEY, actor_id INTEGER NOT NULL,\n                endpoint TEXT NOT NULL, payload_hash TEXT NOT NULL,\n                schedule_id INTEGER NOT NULL, response_json TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "plan_departure_confirmations",
+      "tbl_name": "plan_departure_confirmations",
+      "sql": "CREATE TABLE plan_departure_confirmations (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            schedule_id INTEGER NOT NULL,\n            user_id INTEGER NOT NULL,\n            work_date TEXT NOT NULL,\n            vehicle_confirmed INTEGER NOT NULL DEFAULT 0,\n            parts_confirmed INTEGER NOT NULL DEFAULT 0,\n            note TEXT DEFAULT '',\n            confirmed_at TEXT DEFAULT (datetime('now','localtime')),\n            UNIQUE(schedule_id, user_id, work_date),\n            FOREIGN KEY (schedule_id) REFERENCES plan_schedules(id),\n            FOREIGN KEY (user_id) REFERENCES users(id)\n        )"
+    },
+    {
+      "type": "table",
+      "name": "plan_favorites",
+      "tbl_name": "plan_favorites",
+      "sql": "CREATE TABLE plan_favorites (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                plan_id INTEGER,\n                name TEXT NOT NULL,\n                snapshot TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "plan_resource_reservations",
+      "tbl_name": "plan_resource_reservations",
+      "sql": "CREATE TABLE plan_resource_reservations (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            schedule_id INTEGER NOT NULL,\n            part_id INTEGER NOT NULL,\n            planned_quantity INTEGER NOT NULL DEFAULT 0,\n            reserved_quantity INTEGER NOT NULL DEFAULT 0,\n            issued_quantity INTEGER NOT NULL DEFAULT 0,\n            used_quantity INTEGER NOT NULL DEFAULT 0,\n            returned_quantity INTEGER NOT NULL DEFAULT 0,\n            status TEXT NOT NULL DEFAULT 'reserved',\n            created_at TEXT DEFAULT (datetime('now','localtime')),\n            updated_at TEXT DEFAULT (datetime('now','localtime'))\n        )"
+    },
+    {
+      "type": "table",
+      "name": "plan_schedule_events",
+      "tbl_name": "plan_schedule_events",
+      "sql": "CREATE TABLE plan_schedule_events (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            schedule_id INTEGER NOT NULL,\n            version INTEGER NOT NULL,\n            event_type TEXT NOT NULL,\n            operator_id INTEGER,\n            payload TEXT DEFAULT '{}',\n            created_at TEXT DEFAULT (datetime('now','localtime'))\n        )"
+    },
+    {
+      "type": "table",
+      "name": "plan_schedule_favorites",
+      "tbl_name": "plan_schedule_favorites",
+      "sql": "CREATE TABLE plan_schedule_favorites (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            user_id INTEGER NOT NULL,\n            source_schedule_id INTEGER,\n            name TEXT NOT NULL,\n            snapshot TEXT NOT NULL DEFAULT '{}',\n            created_at TEXT DEFAULT (datetime('now','localtime')),\n            FOREIGN KEY (user_id) REFERENCES users(id)\n        )"
+    },
+    {
+      "type": "table",
+      "name": "plan_schedules",
+      "tbl_name": "plan_schedules",
+      "sql": "CREATE TABLE plan_schedules (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                user_id INTEGER NOT NULL,\n                schedule_type TEXT NOT NULL DEFAULT 'weekly',\n                period_start DATE NOT NULL,\n                period_end DATE NOT NULL,\n                plan_data TEXT NOT NULL DEFAULT '{}',\n                vehicle_days TEXT DEFAULT '{}',\n                spare_parts TEXT DEFAULT '[]',\n                work_order_ids TEXT DEFAULT '[]',\n                status TEXT DEFAULT 'draft',\n                approver_id INTEGER,\n                submitted_at TIMESTAMP,\n                approved_at TIMESTAMP,\n                reject_reason TEXT,\n                version INTEGER DEFAULT 1,\n                change_reason TEXT,\n                previous_plan_data TEXT,\n                remarks TEXT,\n                tasks_generated INTEGER DEFAULT 0,\n                created_at TIMESTAMP DEFAULT (datetime('now','localtime')), previous_vehicle_days TEXT, coverage_exception_reason TEXT, validation_snapshot TEXT, previous_spare_parts TEXT, previous_work_order_ids TEXT, previous_remarks TEXT, vehicle_exception_reason TEXT DEFAULT '', field_status TEXT NOT NULL DEFAULT 'active', field_completed_at TIMESTAMP, previous_vehicle_id INTEGER, previous_period_start TEXT, previous_period_end TEXT, previous_coverage_exception_reason TEXT, previous_vehicle_exception_reason TEXT, vehicle_id INTEGER, no_vehicle_required INTEGER NOT NULL DEFAULT 0, previous_no_vehicle_required INTEGER, vehicle_adjustment_required INTEGER NOT NULL DEFAULT 0, vehicle_adjustment_detail TEXT DEFAULT '',\n                FOREIGN KEY (user_id) REFERENCES users(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "plan_sites",
+      "tbl_name": "plan_sites",
+      "sql": "CREATE TABLE plan_sites (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                plan_id INTEGER NOT NULL,\n                site_id INTEGER NOT NULL,\n                FOREIGN KEY (plan_id) REFERENCES inspection_plans(id),\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "reagent_alerts",
+      "tbl_name": "reagent_alerts",
+      "sql": "CREATE TABLE reagent_alerts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    reagent_id INTEGER NOT NULL,\n    alert_type TEXT NOT NULL,                   -- 'low_stock'/'near_expiry'/'expired'\n    current_qty REAL DEFAULT NULL,\n    threshold_qty REAL DEFAULT NULL,\n    alert_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    handled INTEGER DEFAULT 0,\n    handled_at TIMESTAMP DEFAULT NULL,\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    FOREIGN KEY (reagent_id) REFERENCES reagents(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "reagent_inventory",
+      "tbl_name": "reagent_inventory",
+      "sql": "CREATE TABLE reagent_inventory (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    reagent_id INTEGER NOT NULL,\n    current_qty REAL NOT NULL DEFAULT 0,       -- 当前余量（升/瓶）\n    low_stock_threshold REAL DEFAULT 0.2,       -- 低库存阈值\n    last_replaced_at TIMESTAMP DEFAULT NULL,\n    updated_at TIMESTAMP DEFAULT (datetime('now','localtime')), expected_duration_days INTEGER DEFAULT NULL, warning_days INTEGER DEFAULT 7, qc_status TEXT DEFAULT 'passed',\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    FOREIGN KEY (reagent_id) REFERENCES reagents(id),\n    UNIQUE(site_id, reagent_id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "reagent_qc_records",
+      "tbl_name": "reagent_qc_records",
+      "sql": "CREATE TABLE reagent_qc_records (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                reagent_id INTEGER NOT NULL,\n                standard_value REAL,\n                measured_value REAL,\n                deviation REAL,\n                passed INTEGER NOT NULL DEFAULT 0,\n                fail_action TEXT DEFAULT '',\n                operator TEXT DEFAULT '',\n                operator_id INTEGER,\n                qc_time TEXT,\n                remark TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime')), plan_id INTEGER,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "reagent_records",
+      "tbl_name": "reagent_records",
+      "sql": "CREATE TABLE reagent_records (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                reagent_name TEXT NOT NULL,\n                reagent_type TEXT DEFAULT '',\n                usage_date TEXT,\n                replacement_date TEXT,\n                operator TEXT DEFAULT '',\n                notes TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime')), old_batch_no TEXT DEFAULT NULL, new_batch_no TEXT DEFAULT NULL, old_qty REAL DEFAULT NULL, new_qty REAL DEFAULT NULL, plan_id INTEGER, operator_id INTEGER,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "reagent_usage",
+      "tbl_name": "reagent_usage",
+      "sql": "CREATE TABLE reagent_usage (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    reagent_id INTEGER NOT NULL,\n    used_qty REAL NOT NULL,                    -- 本次用量\n    expected_duration_days INTEGER DEFAULT NULL, -- 预估可用天数\n    operator_id INTEGER DEFAULT NULL,\n    used_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    remark TEXT DEFAULT NULL,\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    FOREIGN KEY (reagent_id) REFERENCES reagents(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "reagents",
+      "tbl_name": "reagents",
+      "sql": "CREATE TABLE reagents (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL,                 -- \"氨氮标液\"\n    manufacturer TEXT DEFAULT NULL,     -- 厂家\n    spec TEXT DEFAULT NULL,             -- 规格 \"500mL/瓶\"\n    unit TEXT NOT NULL DEFAULT '瓶',\n    shelf_life_days INTEGER DEFAULT 365, -- 保质期天数\n    image_url TEXT DEFAULT NULL,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n)"
+    },
+    {
+      "type": "table",
+      "name": "schema_migrations",
+      "tbl_name": "schema_migrations",
+      "sql": "CREATE TABLE schema_migrations (\n    version TEXT PRIMARY KEY,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL,\n    app_version TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "sensor_data",
+      "tbl_name": "sensor_data",
+      "sql": "CREATE TABLE sensor_data (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                metric TEXT NOT NULL,\n                value REAL NOT NULL,\n                unit TEXT,\n                threshold_low REAL,\n                threshold_high REAL,\n                threshold_critical REAL,\n                recorded_at TEXT NOT NULL,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "sensor_data_daily",
+      "tbl_name": "sensor_data_daily",
+      "sql": "CREATE TABLE sensor_data_daily (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                metric TEXT NOT NULL,\n                date TEXT NOT NULL,\n                avg_value REAL, min_value REAL, max_value REAL,\n                sample_count INTEGER DEFAULT 0\n            )"
+    },
+    {
+      "type": "table",
+      "name": "sensor_data_hourly",
+      "tbl_name": "sensor_data_hourly",
+      "sql": "CREATE TABLE sensor_data_hourly (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                metric TEXT NOT NULL,\n                hour TEXT NOT NULL,\n                avg_value REAL, min_value REAL, max_value REAL,\n                sample_count INTEGER DEFAULT 0\n            )"
+    },
+    {
+      "type": "table",
+      "name": "sensor_data_raw",
+      "tbl_name": "sensor_data_raw",
+      "sql": "CREATE TABLE sensor_data_raw (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                metric TEXT NOT NULL,\n                value REAL,\n                recorded_at TEXT NOT NULL\n            )"
+    },
+    {
+      "type": "table",
+      "name": "site_import_batches",
+      "tbl_name": "site_import_batches",
+      "sql": "CREATE TABLE site_import_batches (\n                batch_id TEXT PRIMARY KEY,\n                filename TEXT NOT NULL,\n                total_rows INTEGER NOT NULL DEFAULT 0,\n                imported_count INTEGER NOT NULL DEFAULT 0,\n                created_by INTEGER,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "site_import_rows",
+      "tbl_name": "site_import_rows",
+      "sql": "CREATE TABLE site_import_rows (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                batch_id TEXT NOT NULL,\n                row_number INTEGER NOT NULL,\n                site_id INTEGER,\n                site_code TEXT NOT NULL,\n                status TEXT NOT NULL,\n                message TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "site_name_aliases",
+      "tbl_name": "site_name_aliases",
+      "sql": "CREATE TABLE site_name_aliases (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    alias_name TEXT NOT NULL,\n    normalized_alias TEXT NOT NULL,\n    source TEXT NOT NULL DEFAULT 'station_master_refresh',\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    UNIQUE(site_id, normalized_alias)\n)"
+    },
+    {
+      "type": "table",
+      "name": "sites",
+      "tbl_name": "sites",
+      "sql": "CREATE TABLE sites (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT, type TEXT DEFAULT '', province TEXT DEFAULT '', city TEXT DEFAULT '', district TEXT DEFAULT '', address TEXT DEFAULT '', gps_lat REAL, gps_lng REAL, status TEXT DEFAULT 'offline', description TEXT DEFAULT '', last_heartbeat TEXT, created_at TEXT DEFAULT (datetime('now','localtime')), basin TEXT DEFAULT '', elevation REAL, build_date TEXT DEFAULT '', river TEXT DEFAULT \"\", manager TEXT DEFAULT \"\", phone TEXT DEFAULT \"\", equipments TEXT DEFAULT \"\", \"is_pilot\" INTEGER DEFAULT 0, \"operation_frequency\" TEXT DEFAULT '', master_status TEXT NOT NULL DEFAULT 'active'\n    CHECK (master_status IN ('active', 'retired')))"
+    },
+    {
+      "type": "table",
+      "name": "spare_part_requests",
+      "tbl_name": "spare_part_requests",
+      "sql": "CREATE TABLE spare_part_requests (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                request_no TEXT UNIQUE NOT NULL,\n                site_id INTEGER NOT NULL,\n                applicant TEXT NOT NULL,\n                part_name TEXT NOT NULL,\n                quantity INTEGER NOT NULL DEFAULT 1,\n                reason TEXT DEFAULT '',\n                status TEXT DEFAULT 'pending',\n                approver TEXT DEFAULT '',\n                approval_comment TEXT DEFAULT '',\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                updated_at TEXT DEFAULT (datetime('now','localtime')), work_order_no TEXT DEFAULT '', spare_part_id INTEGER,\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "spare_parts_inventory",
+      "tbl_name": "spare_parts_inventory",
+      "sql": "CREATE TABLE spare_parts_inventory (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                part_code TEXT UNIQUE NOT NULL,\n                part_name TEXT NOT NULL,\n                category TEXT DEFAULT '其他',\n                unit TEXT DEFAULT '个',\n                quantity INTEGER DEFAULT 0,\n                min_quantity INTEGER DEFAULT 5,\n                site_id INTEGER,\n                remark TEXT DEFAULT '',\n                updated_at TEXT DEFAULT (datetime('now','localtime')), manufacturer TEXT DEFAULT '', model TEXT DEFAULT '',\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "station_expected_factor_configs",
+      "tbl_name": "station_expected_factor_configs",
+      "sql": "CREATE TABLE station_expected_factor_configs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL REFERENCES sites(id),\n    version INTEGER NOT NULL CHECK (version > 0),\n    effective_from TEXT NOT NULL,\n    effective_to TEXT,\n    previous_metrics_json TEXT NOT NULL DEFAULT '[]',\n    selected_metrics_json TEXT NOT NULL,\n    changed_by_user_id INTEGER NOT NULL,\n    idempotency_key TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    CHECK (effective_to IS NULL OR effective_to > effective_from),\n    UNIQUE (site_id, version),\n    UNIQUE (site_id, idempotency_key)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_expected_factors",
+      "tbl_name": "station_expected_factors",
+      "sql": "CREATE TABLE station_expected_factors (\n    config_id INTEGER NOT NULL REFERENCES station_expected_factor_configs(id),\n    site_id INTEGER NOT NULL REFERENCES sites(id),\n    business_metric TEXT NOT NULL,\n    display_order INTEGER NOT NULL CHECK (display_order >= 0),\n    effective_from TEXT NOT NULL,\n    PRIMARY KEY (config_id, business_metric)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_current_state",
+      "tbl_name": "station_ingest_current_state",
+      "sql": "CREATE TABLE station_ingest_current_state (\n    source_key TEXT PRIMARY KEY,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    latest_received_at TEXT,\n    latest_raw_frame_id INTEGER,\n    latest_authenticated_at TEXT,\n    latest_authenticated_raw_frame_id INTEGER,\n    latest_credential_failed_at TEXT,\n    latest_credential_failed_raw_frame_id INTEGER,\n    latest_error_at TEXT,\n    latest_error_type TEXT,\n    updated_at TEXT NOT NULL,\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_cutover_state",
+      "tbl_name": "station_ingest_cutover_state",
+      "sql": "CREATE TABLE station_ingest_cutover_state (\n    cutover_name TEXT PRIMARY KEY,\n    migration_version TEXT NOT NULL,\n    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),\n    raw_frame_count INTEGER,\n    raw_max_id INTEGER,\n    current_state_count INTEGER,\n    authenticated_source_count INTEGER,\n    recent_receipt_count INTEGER,\n    receipt_hour_count INTEGER,\n    detail TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_dedup_keys",
+      "tbl_name": "station_ingest_dedup_keys",
+      "sql": "CREATE TABLE station_ingest_dedup_keys (\n    endpoint_id INTEGER NOT NULL,\n    logical_key_sha256 TEXT NOT NULL,\n    canonical_raw_frame_id INTEGER NOT NULL,\n    canonical_evidence_ref_id INTEGER,\n    first_received_at TEXT NOT NULL,\n    last_received_at TEXT NOT NULL,\n    expires_at TEXT,\n    protected INTEGER NOT NULL DEFAULT 0 CHECK (protected IN (0, 1)),\n    updated_at TEXT NOT NULL,\n    PRIMARY KEY (endpoint_id, logical_key_sha256),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id),\n    FOREIGN KEY (canonical_evidence_ref_id) REFERENCES monitoring_archive_evidence_refs(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_detail_archive_parts",
+      "tbl_name": "station_ingest_detail_archive_parts",
+      "sql": "CREATE TABLE station_ingest_detail_archive_parts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    detail_kind TEXT NOT NULL CHECK (detail_kind IN ('parse_attempt', 'ingest_error', 'error_summary')),\n    archive_path TEXT NOT NULL UNIQUE,\n    content_sha256 TEXT NOT NULL UNIQUE,\n    first_source_id INTEGER NOT NULL,\n    last_source_id INTEGER NOT NULL,\n    record_count INTEGER NOT NULL CHECK (record_count > 0),\n    range_start TEXT NOT NULL,\n    range_end TEXT NOT NULL,\n    verified_at TEXT NOT NULL,\n    mirror_path TEXT,\n    mirror_verified_at TEXT,\n    local_deleted_at TEXT,\n    created_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_duplicate_links",
+      "tbl_name": "station_ingest_duplicate_links",
+      "sql": "CREATE TABLE station_ingest_duplicate_links (\n    raw_frame_id INTEGER PRIMARY KEY,\n    canonical_raw_frame_id INTEGER NOT NULL,\n    canonical_evidence_ref_id INTEGER,\n    created_at TEXT NOT NULL,\n    FOREIGN KEY (raw_frame_id) REFERENCES ingest_raw_frames(id),\n    FOREIGN KEY (canonical_evidence_ref_id) REFERENCES monitoring_archive_evidence_refs(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_error_hourly",
+      "tbl_name": "station_ingest_error_hourly",
+      "sql": "CREATE TABLE station_ingest_error_hourly (\n    source_key TEXT NOT NULL,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    error_type TEXT NOT NULL,\n    bucket_hour TEXT NOT NULL,\n    occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),\n    first_seen_at TEXT NOT NULL,\n    last_seen_at TEXT NOT NULL,\n    last_raw_frame_id INTEGER,\n    PRIMARY KEY (source_key, error_type, bucket_hour),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_receipt_hourly",
+      "tbl_name": "station_ingest_receipt_hourly",
+      "sql": "CREATE TABLE station_ingest_receipt_hourly (\n    source_key TEXT NOT NULL,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    authentication_status TEXT NOT NULL,\n    bucket_hour TEXT NOT NULL,\n    receipt_count INTEGER NOT NULL CHECK (receipt_count > 0),\n    first_received_at TEXT NOT NULL,\n    last_received_at TEXT NOT NULL,\n    last_complete_raw_frame_id INTEGER,\n    updated_at TEXT NOT NULL,\n    PRIMARY KEY (source_key, authentication_status, bucket_hour),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_recent_receipts",
+      "tbl_name": "station_ingest_recent_receipts",
+      "sql": "CREATE TABLE station_ingest_recent_receipts (\n    raw_frame_id INTEGER PRIMARY KEY,\n    source_key TEXT NOT NULL,\n    endpoint_id INTEGER,\n    station_code TEXT,\n    received_at TEXT NOT NULL,\n    authentication_status TEXT NOT NULL,\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_retention_runs",
+      "tbl_name": "station_ingest_retention_runs",
+      "sql": "CREATE TABLE station_ingest_retention_runs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    cutoff_time TEXT NOT NULL,\n    archived_parse_attempts INTEGER NOT NULL DEFAULT 0,\n    archived_errors INTEGER NOT NULL DEFAULT 0,\n    archived_error_summaries INTEGER NOT NULL DEFAULT 0,\n    deleted_raw_frames INTEGER NOT NULL DEFAULT 0,\n    retained_protected_frames INTEGER NOT NULL DEFAULT 0,\n    status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),\n    detail TEXT NOT NULL,\n    created_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_ingest_slot_summaries",
+      "tbl_name": "station_ingest_slot_summaries",
+      "sql": "CREATE TABLE station_ingest_slot_summaries (\n    endpoint_id INTEGER NOT NULL,\n    station_code TEXT NOT NULL,\n    command TEXT NOT NULL,\n    slot_started_at TEXT NOT NULL,\n    content_sha256 TEXT NOT NULL,\n    canonical_raw_frame_id INTEGER NOT NULL,\n    canonical_frame_sha256 TEXT NOT NULL,\n    receipt_count INTEGER NOT NULL CHECK (receipt_count > 0),\n    first_received_at TEXT NOT NULL,\n    last_received_at TEXT NOT NULL,\n    last_authentication_status TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    PRIMARY KEY (endpoint_id, command, slot_started_at, content_sha256),\n    FOREIGN KEY (endpoint_id) REFERENCES trusted_endpoints(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_master_refresh_audits",
+      "tbl_name": "station_master_refresh_audits",
+      "sql": "CREATE TABLE station_master_refresh_audits (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    source_fingerprint TEXT NOT NULL UNIQUE,\n    preview_fingerprint TEXT NOT NULL UNIQUE,\n    accepted_rows INTEGER NOT NULL,\n    exact_mn_count INTEGER NOT NULL,\n    alias_match_count INTEGER NOT NULL,\n    created_count INTEGER NOT NULL,\n    retired_count INTEGER NOT NULL,\n    rebound_endpoint_count INTEGER NOT NULL,\n    disabled_endpoint_count INTEGER NOT NULL,\n    applied_at TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "station_service_policy_events",
+      "tbl_name": "station_service_policy_events",
+      "sql": "CREATE TABLE station_service_policy_events (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    site_id INTEGER NOT NULL,\n    version INTEGER NOT NULL CHECK (version > 0),\n    previous_service_status TEXT NOT NULL\n        CHECK (previous_service_status IN ('active', 'ended')),\n    service_status TEXT NOT NULL\n        CHECK (service_status IN ('active', 'ended')),\n    previous_reporting_condition TEXT NOT NULL\n        CHECK (previous_reporting_condition IN ('normal', 'temporary_stop', 'no_upload_condition')),\n    reporting_condition TEXT NOT NULL\n        CHECK (reporting_condition IN ('normal', 'temporary_stop', 'no_upload_condition')),\n    effective_from TEXT NOT NULL,\n    reason TEXT NOT NULL DEFAULT '',\n    changed_by_user_id INTEGER NOT NULL,\n    idempotency_key TEXT NOT NULL,\n    request_fingerprint TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    FOREIGN KEY (site_id) REFERENCES sites(id),\n    FOREIGN KEY (changed_by_user_id) REFERENCES users(id),\n    UNIQUE (site_id, version),\n    UNIQUE (site_id, idempotency_key)\n)"
+    },
+    {
+      "type": "table",
+      "name": "threshold_rules",
+      "tbl_name": "threshold_rules",
+      "sql": "CREATE TABLE threshold_rules (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL,                         -- \"GB3838 III类 pH\"\n    scope TEXT NOT NULL DEFAULT 'metric',       -- 'global'/'site'/'metric'\n    site_id INTEGER DEFAULT NULL,\n    metric TEXT DEFAULT NULL,                   -- 'pH'/'CODMn'/'氨氮'...\n    rule_type TEXT NOT NULL,                    -- 'static'/'spc'/'historical'/'correlated'\n    conditions TEXT NOT NULL DEFAULT '{}',       -- JSON 规则参数\n    severity TEXT DEFAULT 'warning',            -- 'info'/'warning'/'critical'\n    enabled INTEGER DEFAULT 1,\n    created_by INTEGER DEFAULT NULL,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    FOREIGN KEY (site_id) REFERENCES sites(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "timeline_events",
+      "tbl_name": "timeline_events",
+      "sql": "CREATE TABLE timeline_events (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                source_type TEXT NOT NULL,\n                source_id INTEGER NOT NULL,\n                event_type TEXT NOT NULL,\n                operator TEXT,\n                remark TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "trusted_endpoints",
+      "tbl_name": "trusted_endpoints",
+      "sql": "CREATE TABLE trusted_endpoints (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    station_code TEXT NOT NULL UNIQUE,\n    credential_hmac TEXT NOT NULL,\n    business_site_id INTEGER,\n    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n    endpoint_state TEXT NOT NULL DEFAULT 'unbound' CHECK (endpoint_state IN ('unbound', 'bound', 'disabled')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n    updated_at TEXT NOT NULL DEFAULT (datetime('now')),\n    FOREIGN KEY (business_site_id) REFERENCES sites(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "user_roles",
+      "tbl_name": "user_roles",
+      "sql": "CREATE TABLE user_roles (\n            user_id INTEGER NOT NULL,\n            role TEXT NOT NULL,\n            PRIMARY KEY (user_id, role),\n            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE\n        )"
+    },
+    {
+      "type": "table",
+      "name": "user_sites",
+      "tbl_name": "user_sites",
+      "sql": "CREATE TABLE user_sites (\n                user_id INTEGER NOT NULL,\n                site_id INTEGER NOT NULL,\n                PRIMARY KEY (user_id, site_id),\n                FOREIGN KEY (user_id) REFERENCES users(id),\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "users",
+      "tbl_name": "users",
+      "sql": "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'user', display_name TEXT, site_ids TEXT, created_at TEXT DEFAULT (datetime('now','localtime')), real_name TEXT DEFAULT '', phone TEXT DEFAULT '', status TEXT DEFAULT 'active', openid TEXT DEFAULT '', login_name TEXT DEFAULT '', auth_version INTEGER NOT NULL DEFAULT 1, must_change_password INTEGER NOT NULL DEFAULT 0, deleted_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_applications",
+      "tbl_name": "vehicle_applications",
+      "sql": "CREATE TABLE \"vehicle_applications\" (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                vehicle_id INTEGER,\n                applicant_id INTEGER,\n                start_at TIMESTAMP,\n                end_at TIMESTAMP,\n                destination TEXT DEFAULT NULL,\n                reason TEXT DEFAULT NULL,\n                status TEXT DEFAULT 'pending',\n                approver_id INTEGER,\n                approved_at TIMESTAMP,\n                reject_reason TEXT,\n                created_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n                site_id TEXT,\n                work_order_no TEXT\n            , rework_plan_id INTEGER, no_vehicle_required INTEGER DEFAULT 0, vehicle_exception_reason TEXT DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_documents",
+      "tbl_name": "vehicle_documents",
+      "sql": "CREATE TABLE vehicle_documents (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                vehicle_id INTEGER NOT NULL,\n                document_type TEXT NOT NULL,\n                document_no TEXT DEFAULT '',\n                valid_until TEXT,\n                attachment TEXT DEFAULT '',\n                remark TEXT DEFAULT '',\n                created_by INTEGER,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_extension_conflicts",
+      "tbl_name": "vehicle_extension_conflicts",
+      "sql": "CREATE TABLE vehicle_extension_conflicts (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,source_application_id INTEGER NOT NULL,\n            target_application_id INTEGER NOT NULL,target_schedule_id INTEGER,\n            conflict_start TEXT,conflict_end TEXT,confirmed_by INTEGER,\n            created_at TEXT DEFAULT (datetime('now','localtime')),\n            UNIQUE(source_application_id,target_application_id,conflict_end)\n        )"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_inspections",
+      "tbl_name": "vehicle_inspections",
+      "sql": "CREATE TABLE vehicle_inspections (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                vehicle_id INTEGER NOT NULL,\n                inspection_type TEXT NOT NULL DEFAULT 'routine',\n                inspection_date TEXT DEFAULT (datetime('now','localtime')),\n                inspector_id INTEGER,\n                inspector_name TEXT DEFAULT '',\n                overall_status TEXT NOT NULL DEFAULT 'normal',\n                odometer REAL,\n                items_json TEXT NOT NULL DEFAULT '[]',\n                remarks TEXT DEFAULT '',\n                photos TEXT DEFAULT '[]',\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_maintenance_records",
+      "tbl_name": "vehicle_maintenance_records",
+      "sql": "CREATE TABLE vehicle_maintenance_records (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    vehicle_id INTEGER NOT NULL,\n    maint_type TEXT NOT NULL,                   -- 'routine'/'repair'/'inspection'\n    maint_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    mileage_at REAL DEFAULT NULL,\n    next_maint_mileage REAL DEFAULT NULL,\n    items TEXT DEFAULT NULL,\n    cost REAL DEFAULT NULL,\n    remark TEXT DEFAULT NULL, maint_status TEXT DEFAULT 'completed', vendor TEXT, expected_return_at TEXT, actual_return_at TEXT, fault_description TEXT, evidence_expected_count INTEGER DEFAULT 0, evidence_status TEXT DEFAULT 'not_required', affects_safe_operation INTEGER,\n    FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_refueling_records",
+      "tbl_name": "vehicle_refueling_records",
+      "sql": "CREATE TABLE vehicle_refueling_records (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    vehicle_id INTEGER NOT NULL,\n    refuel_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    liters REAL NOT NULL,\n    amount REAL DEFAULT NULL,\n    mileage_at REAL DEFAULT NULL,\n    remark TEXT DEFAULT NULL, unit_price REAL, operator_id INTEGER, operator_name TEXT, fuel_type TEXT, energy_quantity REAL, energy_unit TEXT DEFAULT 'L', evidence_expected_count INTEGER DEFAULT 0, evidence_status TEXT DEFAULT 'not_required',\n    FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "vehicle_use_records",
+      "tbl_name": "vehicle_use_records",
+      "sql": "CREATE TABLE vehicle_use_records (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    application_id INTEGER NOT NULL,\n    start_mileage REAL DEFAULT NULL,\n    end_mileage REAL DEFAULT NULL,\n    returned_at TIMESTAMP DEFAULT NULL, checked_out_at TEXT, status TEXT DEFAULT 'checked_out', out_inspection_id INTEGER, return_inspection_id INTEGER, checkout_operator_id INTEGER, return_operator_id INTEGER,\n    FOREIGN KEY (application_id) REFERENCES vehicle_applications(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "vehicles",
+      "tbl_name": "vehicles",
+      "sql": "CREATE TABLE vehicles (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    plate_no TEXT NOT NULL UNIQUE,             -- 车牌号\n    model TEXT DEFAULT NULL,                    -- 车型\n    seats INTEGER DEFAULT 5,\n    status TEXT DEFAULT 'idle',                 -- 'idle'/'in_use'/'maintenance'\n    current_mileage REAL DEFAULT 0,\n    last_maintenance_at TIMESTAMP DEFAULT NULL,\n    next_maintenance_mileage REAL DEFAULT 5000,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))\n, vehicle_name TEXT DEFAULT '', department TEXT DEFAULT '', fuel_type TEXT DEFAULT '', purchase_date TEXT, insurance_expiry TEXT, annual_inspection_expiry TEXT, registration_expiry TEXT, last_inspection_at TEXT, last_inspection_status TEXT DEFAULT 'normal')"
+    },
+    {
+      "type": "table",
+      "name": "water_level_checks",
+      "tbl_name": "water_level_checks",
+      "sql": "CREATE TABLE water_level_checks (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                site_id INTEGER NOT NULL,\n                manual_level REAL,\n                telemetry_level REAL,\n                diff REAL,\n                status TEXT DEFAULT 'normal',\n                adjust_action TEXT,\n                operator TEXT,\n                created_at TEXT DEFAULT (datetime('now','localtime')),\n                FOREIGN KEY (site_id) REFERENCES sites(id)\n            )"
+    },
+    {
+      "type": "table",
+      "name": "weather_data",
+      "tbl_name": "weather_data",
+      "sql": "CREATE TABLE weather_data (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                temperature REAL,\n                humidity REAL,\n                wind_speed REAL,\n                wind_direction TEXT,\n                precipitation REAL,\n                pressure REAL,\n                weather_type TEXT,\n                warning_info TEXT,\n                recorded_at TEXT DEFAULT (datetime('now','localtime'))\n            )"
+    },
+    {
+      "type": "table",
+      "name": "weekly_inspection_plans",
+      "tbl_name": "weekly_inspection_plans",
+      "sql": "CREATE TABLE weekly_inspection_plans (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id INTEGER NOT NULL,                   -- 巡检人\n    week_start DATE NOT NULL,                   -- 周一日期\n    plan_data TEXT NOT NULL DEFAULT '{}',       -- JSON: {\"周一\":[\"site_id\"],\"周二\":[],...}\n    vehicle_id INTEGER DEFAULT NULL,\n    status TEXT DEFAULT 'draft',                -- 'draft'/'submitted'/'approved'/'archived'\n    approver_id INTEGER DEFAULT NULL,\n    submitted_at TIMESTAMP DEFAULT NULL,\n    approved_at TIMESTAMP DEFAULT NULL,\n    remarks TEXT DEFAULT NULL,\n    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),\n    FOREIGN KEY (user_id) REFERENCES users(id),\n    FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "work_orders",
+      "tbl_name": "work_orders",
+      "sql": "CREATE TABLE work_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_no TEXT UNIQUE NOT NULL, site_id INTEGER, source TEXT NOT NULL, event_type TEXT NOT NULL, level TEXT NOT NULL, title TEXT NOT NULL, description TEXT, images TEXT, assignee TEXT, status TEXT DEFAULT 'pending', sla_deadline TEXT, resolved_at TEXT, remark TEXT, satisfaction INTEGER, created_at TEXT DEFAULT (datetime('now','localtime')), related_alert_id INTEGER, used_parts TEXT DEFAULT '', flow_type TEXT DEFAULT \"\", flow_status TEXT DEFAULT \"\", conclusion TEXT, check_in_lat REAL, check_in_lng REAL, check_in_time TEXT, check_in_user TEXT, metric TEXT DEFAULT '', review_submitted_at TEXT, review_submitter_id INTEGER, review_cycle INTEGER DEFAULT 0, service_mode TEXT DEFAULT 'onsite', remote_contact TEXT DEFAULT '', remote_process TEXT DEFAULT '', remote_result TEXT DEFAULT '', remote_started_at TEXT, remote_submitted_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "wx_subscription_outbox",
+      "tbl_name": "wx_subscription_outbox",
+      "sql": "CREATE TABLE wx_subscription_outbox (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        dedupe_key TEXT NOT NULL UNIQUE,\n        purpose TEXT NOT NULL,\n        business_type TEXT NOT NULL,\n        business_id TEXT NOT NULL,\n        business_status TEXT NOT NULL,\n        recipient_user_id INTEGER NOT NULL,\n        template_id TEXT NOT NULL,\n        payload_json TEXT NOT NULL,\n        context_json TEXT DEFAULT '{}',\n        cycle_key TEXT NOT NULL DEFAULT '',\n        page TEXT NOT NULL DEFAULT '',\n        status TEXT NOT NULL DEFAULT 'pending',\n        attempts INTEGER NOT NULL DEFAULT 0,\n        claim_token TEXT DEFAULT '',\n        claimed_at TEXT,\n        next_attempt_at TEXT,\n        last_errcode TEXT DEFAULT '',\n        last_error TEXT DEFAULT '',\n        created_at TEXT DEFAULT (datetime('now','localtime')),\n        updated_at TEXT DEFAULT (datetime('now','localtime')),\n        sent_at TEXT\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_al_site_status",
+      "tbl_name": "alerts",
+      "sql": "CREATE INDEX idx_al_site_status ON alerts(site_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "idx_al_status_time",
+      "tbl_name": "alerts",
+      "sql": "CREATE INDEX idx_al_status_time ON alerts(status, created_at DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_at_alert",
+      "tbl_name": "anomaly_traceability",
+      "sql": "CREATE INDEX idx_at_alert ON anomaly_traceability(alert_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_at_review",
+      "tbl_name": "anomaly_traceability",
+      "sql": "CREATE INDEX idx_at_review ON anomaly_traceability(review_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_attachment_delete_audit_attachment",
+      "tbl_name": "attachment_deletion_audits",
+      "sql": "CREATE INDEX idx_attachment_delete_audit_attachment ON attachment_deletion_audits(attachment_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_attachment_evidence_eval_attachment",
+      "tbl_name": "attachment_evidence_evaluations",
+      "sql": "CREATE INDEX idx_attachment_evidence_eval_attachment\n                ON attachment_evidence_evaluations(attachment_id, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_attachment_void_audit_item",
+      "tbl_name": "attachment_void_audits",
+      "sql": "CREATE INDEX idx_attachment_void_audit_item ON attachment_void_audits(replacement_item_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_attachment_void_audit_site",
+      "tbl_name": "attachment_void_audits",
+      "sql": "CREATE INDEX idx_attachment_void_audit_site ON attachment_void_audits(original_site_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_auth_sessions_expiry",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE INDEX idx_auth_sessions_expiry ON auth_sessions(expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_auth_sessions_user",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE INDEX idx_auth_sessions_user ON auth_sessions(user_id, revoked_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_errors_open",
+      "tbl_name": "ingest_errors",
+      "sql": "CREATE INDEX idx_ingest_errors_open ON ingest_errors(error_type, status, created_at, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_parse_pending",
+      "tbl_name": "ingest_parse_attempts",
+      "sql": "CREATE INDEX idx_ingest_parse_pending ON ingest_parse_attempts(parse_status, parser_version, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_protocol_family_raw",
+      "tbl_name": "ingest_frame_protocols",
+      "sql": "CREATE INDEX idx_ingest_protocol_family_raw\n    ON ingest_frame_protocols(protocol_family, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_authenticated_endpoint_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_authenticated_endpoint_received\n    ON ingest_raw_frames(endpoint_id, received_at DESC, id)\n    WHERE authentication_status='authenticated'"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_authenticated_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_authenticated_received\n    ON ingest_raw_frames(received_at DESC, id)\n    WHERE authentication_status='authenticated'"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_disposition_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_disposition_received ON ingest_raw_frames(disposition, received_at, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_endpoint_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_endpoint_received ON ingest_raw_frames(endpoint_id, received_at DESC, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_frame_hash",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_frame_hash ON ingest_raw_frames(frame_sha256, received_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_logical_key",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_logical_key ON ingest_raw_frames(endpoint_id, logical_key_sha256, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_pending_normalization",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_pending_normalization\nON ingest_raw_frames(id)\nWHERE persistence_state IN ('pending_parse', 'pending_reparse')"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_received ON ingest_raw_frames(received_at, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_ingest_raw_station_auth_received",
+      "tbl_name": "ingest_raw_frames",
+      "sql": "CREATE INDEX idx_ingest_raw_station_auth_received\n    ON ingest_raw_frames(station_code, received_at DESC, id)\n    WHERE authentication_status='credential_failed'"
+    },
+    {
+      "type": "index",
+      "name": "idx_insp_cfg_type",
+      "tbl_name": "inspection_configs",
+      "sql": "CREATE INDEX idx_insp_cfg_type ON inspection_configs(site_type)"
+    },
+    {
+      "type": "index",
+      "name": "idx_insp_pi_plan",
+      "tbl_name": "insp_plan_items",
+      "sql": "CREATE INDEX idx_insp_pi_plan ON insp_plan_items(plan_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_insp_pi_site",
+      "tbl_name": "insp_plan_items",
+      "sql": "CREATE INDEX idx_insp_pi_site ON insp_plan_items(site_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_insp_sch_site_due",
+      "tbl_name": "inspection_schedules",
+      "sql": "CREATE INDEX idx_insp_sch_site_due ON inspection_schedules(site_id, next_due_date)"
+    },
+    {
+      "type": "index",
+      "name": "idx_insp_sch_tpl_item",
+      "tbl_name": "inspection_schedules",
+      "sql": "CREATE INDEX idx_insp_sch_tpl_item ON inspection_schedules(template_id, template_item_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_login_attempts_ip_time",
+      "tbl_name": "auth_login_attempts",
+      "sql": "CREATE INDEX idx_login_attempts_ip_time ON auth_login_attempts(ip_address, attempted_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_login_attempts_user_time",
+      "tbl_name": "auth_login_attempts",
+      "sql": "CREATE INDEX idx_login_attempts_user_time ON auth_login_attempts(username, attempted_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_archive_frame_archive",
+      "tbl_name": "monitoring_raw_archive_frames",
+      "sql": "CREATE INDEX idx_monitoring_archive_frame_archive\n    ON monitoring_raw_archive_frames(archive_id, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_archive_part_day",
+      "tbl_name": "monitoring_raw_archive_parts",
+      "sql": "CREATE INDEX idx_monitoring_archive_part_day\n    ON monitoring_raw_archive_parts(archive_date, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_archive_part_frame",
+      "tbl_name": "monitoring_raw_archive_part_frames",
+      "sql": "CREATE INDEX idx_monitoring_archive_part_frame\n    ON monitoring_raw_archive_part_frames(archive_part_id, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_business_current_site_scheduled",
+      "tbl_name": "monitoring_business_observations",
+      "sql": "CREATE INDEX idx_monitoring_business_current_site_scheduled\n    ON monitoring_business_observations(\n        business_site_id, scheduled_at DESC, endpoint_id, business_metric,\n        instrument_asset_code, protocol_code, id\n    ) WHERE is_current=1"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_business_latest",
+      "tbl_name": "monitoring_business_observations",
+      "sql": "CREATE INDEX idx_monitoring_business_latest\n    ON monitoring_business_observations(\n        business_site_id, endpoint_id, business_metric, slot_state, is_current, scheduled_at DESC\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_business_schedule_lookup",
+      "tbl_name": "monitoring_business_schedules",
+      "sql": "CREATE INDEX idx_monitoring_business_schedule_lookup\n    ON monitoring_business_schedules(endpoint_id, protocol_code, enabled, effective_from, effective_to)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_business_slot",
+      "tbl_name": "monitoring_business_observations",
+      "sql": "CREATE INDEX idx_monitoring_business_slot\n    ON monitoring_business_observations(\n        endpoint_id, protocol_code, scheduled_at, instrument_asset_code, is_current\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_business_valid_endpoint_factor",
+      "tbl_name": "monitoring_business_observations",
+      "sql": "CREATE INDEX idx_monitoring_business_valid_endpoint_factor\n    ON monitoring_business_observations(\n        endpoint_id, business_site_id, protocol_code, business_metric,\n        instrument_asset_code, projection_version, observation_batch_id\n    ) WHERE is_current=1 AND quality='valid'"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_evidence_archive_record",
+      "tbl_name": "monitoring_archive_evidence_refs",
+      "sql": "CREATE INDEX idx_monitoring_evidence_archive_record\n    ON monitoring_archive_evidence_refs(archive_part_id, archive_record_index)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_evidence_received",
+      "tbl_name": "monitoring_archive_evidence_refs",
+      "sql": "CREATE INDEX idx_monitoring_evidence_received\n    ON monitoring_archive_evidence_refs(received_at, source_raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_hourly_series_site_metric_time",
+      "tbl_name": "monitoring_hourly_value_series",
+      "sql": "CREATE INDEX idx_monitoring_hourly_series_site_metric_time\n    ON monitoring_hourly_value_series(business_site_id, business_metric, observed_hour DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_hourly_site_metric_time",
+      "tbl_name": "monitoring_hourly_values",
+      "sql": "CREATE INDEX idx_monitoring_hourly_site_metric_time\n    ON monitoring_hourly_values(business_site_id, business_metric, observed_hour DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_mapping_effective",
+      "tbl_name": "monitoring_factor_mappings",
+      "sql": "CREATE INDEX idx_monitoring_mapping_effective\n    ON monitoring_factor_mappings(endpoint_id, protocol_code, effective_from, effective_to, enabled)"
+    },
+    {
+      "type": "index",
+      "name": "idx_monitoring_profile_effective",
+      "tbl_name": "monitoring_endpoint_profiles",
+      "sql": "CREATE INDEX idx_monitoring_profile_effective\n    ON monitoring_endpoint_profiles(endpoint_id, effective_from, effective_to, enabled)"
+    },
+    {
+      "type": "index",
+      "name": "idx_normalization_retries_due",
+      "tbl_name": "monitoring_normalization_retries",
+      "sql": "CREATE INDEX idx_normalization_retries_due\n    ON monitoring_normalization_retries(state, next_attempt_at, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_notifications_user_read_created",
+      "tbl_name": "notifications",
+      "sql": "CREATE INDEX idx_notifications_user_read_created ON notifications(user_id, is_read, created_at DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_observation_batch_site_observed",
+      "tbl_name": "observation_batches",
+      "sql": "CREATE INDEX idx_observation_batch_site_observed\n    ON observation_batches(business_site_id, observed_at DESC, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_observation_values_metric_current",
+      "tbl_name": "observation_values",
+      "sql": "CREATE INDEX idx_observation_values_metric_current\n    ON observation_values(business_metric, is_current, observation_batch_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_parts_request_items_request_id",
+      "tbl_name": "parts_request_items",
+      "sql": "CREATE INDEX idx_parts_request_items_request_id\n            ON parts_request_items(request_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_quality_site_status_recent",
+      "tbl_name": "monitoring_quality_issues",
+      "sql": "CREATE INDEX idx_quality_site_status_recent\n    ON monitoring_quality_issues(business_site_id, status, last_seen_at DESC, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sd_metric_time",
+      "tbl_name": "sensor_data",
+      "sql": "CREATE INDEX idx_sd_metric_time ON sensor_data(metric, recorded_at DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sd_site_time",
+      "tbl_name": "sensor_data",
+      "sql": "CREATE INDEX idx_sd_site_time ON sensor_data(site_id, recorded_at DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sdd_site_metric_date",
+      "tbl_name": "sensor_data_daily",
+      "sql": "CREATE UNIQUE INDEX idx_sdd_site_metric_date ON sensor_data_daily(site_id, metric, date)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sdh_site_metric_hour",
+      "tbl_name": "sensor_data_hourly",
+      "sql": "CREATE UNIQUE INDEX idx_sdh_site_metric_hour ON sensor_data_hourly(site_id, metric, hour)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sdr_recorded_at",
+      "tbl_name": "sensor_data_raw",
+      "sql": "CREATE INDEX idx_sdr_recorded_at ON sensor_data_raw(recorded_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sdr_site_metric_time",
+      "tbl_name": "sensor_data_raw",
+      "sql": "CREATE INDEX idx_sdr_site_metric_time ON sensor_data_raw(site_id, metric, recorded_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_site_name_aliases_normalized",
+      "tbl_name": "site_name_aliases",
+      "sql": "CREATE INDEX idx_site_name_aliases_normalized\n    ON site_name_aliases(normalized_alias, site_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_expected_factor_effective",
+      "tbl_name": "station_expected_factor_configs",
+      "sql": "CREATE INDEX idx_station_expected_factor_effective\n    ON station_expected_factor_configs(site_id, effective_from DESC, effective_to, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_expected_factor_metric",
+      "tbl_name": "station_expected_factors",
+      "sql": "CREATE INDEX idx_station_expected_factor_metric\n    ON station_expected_factors(site_id, business_metric, config_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_current_endpoint",
+      "tbl_name": "station_ingest_current_state",
+      "sql": "CREATE INDEX idx_station_ingest_current_endpoint\n    ON station_ingest_current_state(endpoint_id, source_key)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_current_station",
+      "tbl_name": "station_ingest_current_state",
+      "sql": "CREATE INDEX idx_station_ingest_current_station\n    ON station_ingest_current_state(station_code, source_key)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_dedup_expiry",
+      "tbl_name": "station_ingest_dedup_keys",
+      "sql": "CREATE INDEX idx_station_ingest_dedup_expiry\n    ON station_ingest_dedup_keys(protected, expires_at, endpoint_id, logical_key_sha256)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_detail_range",
+      "tbl_name": "station_ingest_detail_archive_parts",
+      "sql": "CREATE INDEX idx_station_ingest_detail_range\n    ON station_ingest_detail_archive_parts(detail_kind, range_end, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_error_hour",
+      "tbl_name": "station_ingest_error_hourly",
+      "sql": "CREATE INDEX idx_station_ingest_error_hour\n    ON station_ingest_error_hourly(bucket_hour, error_type, source_key)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_receipt_hour",
+      "tbl_name": "station_ingest_receipt_hourly",
+      "sql": "CREATE INDEX idx_station_ingest_receipt_hour\n    ON station_ingest_receipt_hourly(bucket_hour, authentication_status, source_key)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_recent_endpoint_auth",
+      "tbl_name": "station_ingest_recent_receipts",
+      "sql": "CREATE INDEX idx_station_ingest_recent_endpoint_auth\n    ON station_ingest_recent_receipts(endpoint_id, authentication_status, received_at DESC, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_recent_received",
+      "tbl_name": "station_ingest_recent_receipts",
+      "sql": "CREATE INDEX idx_station_ingest_recent_received\n    ON station_ingest_recent_receipts(received_at, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_recent_station_auth",
+      "tbl_name": "station_ingest_recent_receipts",
+      "sql": "CREATE INDEX idx_station_ingest_recent_station_auth\n    ON station_ingest_recent_receipts(station_code, authentication_status, received_at DESC, raw_frame_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_ingest_slot_summary_retention",
+      "tbl_name": "station_ingest_slot_summaries",
+      "sql": "CREATE INDEX idx_station_ingest_slot_summary_retention\n    ON station_ingest_slot_summaries(last_received_at, endpoint_id, slot_started_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_service_policy_site_effective",
+      "tbl_name": "station_service_policy_events",
+      "sql": "CREATE INDEX idx_station_service_policy_site_effective\n    ON station_service_policy_events(site_id, effective_from, version)"
+    },
+    {
+      "type": "index",
+      "name": "idx_station_service_policy_site_version",
+      "tbl_name": "station_service_policy_events",
+      "sql": "CREATE INDEX idx_station_service_policy_site_version\n    ON station_service_policy_events(site_id, version DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_status_site_axis_occurred",
+      "tbl_name": "monitoring_status_events",
+      "sql": "CREATE INDEX idx_status_site_axis_occurred\n    ON monitoring_status_events(business_site_id, event_axis, occurred_at DESC, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_users_login_name",
+      "tbl_name": "users",
+      "sql": "CREATE UNIQUE INDEX idx_users_login_name ON users(login_name) WHERE login_name != ''"
+    },
+    {
+      "type": "index",
+      "name": "idx_vehicle_applicant_status_created",
+      "tbl_name": "vehicle_applications",
+      "sql": "CREATE INDEX idx_vehicle_applicant_status_created ON vehicle_applications(applicant_id, status, created_at DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_vehicle_documents_vehicle",
+      "tbl_name": "vehicle_documents",
+      "sql": "CREATE INDEX idx_vehicle_documents_vehicle ON vehicle_documents(vehicle_id, valid_until)"
+    },
+    {
+      "type": "index",
+      "name": "idx_vehicle_inspections_vehicle",
+      "tbl_name": "vehicle_inspections",
+      "sql": "CREATE INDEX idx_vehicle_inspections_vehicle ON vehicle_inspections(vehicle_id, inspection_date DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_vehicle_use_application_returned",
+      "tbl_name": "vehicle_use_records",
+      "sql": "CREATE INDEX idx_vehicle_use_application_returned ON vehicle_use_records(application_id, returned_at, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_vehicle_vehicle_status_end",
+      "tbl_name": "vehicle_applications",
+      "sql": "CREATE INDEX idx_vehicle_vehicle_status_end ON vehicle_applications(vehicle_id, status, end_at, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_wx_outbox_delivery",
+      "tbl_name": "wx_subscription_outbox",
+      "sql": "CREATE INDEX idx_wx_outbox_delivery\n        ON wx_subscription_outbox(status,next_attempt_at,id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_data_reviews_business_observation",
+      "tbl_name": "data_reviews",
+      "sql": "CREATE UNIQUE INDEX uq_data_reviews_business_observation ON data_reviews(monitoring_business_observation_id) WHERE monitoring_business_observation_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "uq_insp_rework_source_item",
+      "tbl_name": "insp_plan_items",
+      "sql": "CREATE UNIQUE INDEX uq_insp_rework_source_item ON insp_plan_items(rework_source_item_id) WHERE rework_source_item_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "uq_monitoring_business_schedule_period",
+      "tbl_name": "monitoring_business_schedules",
+      "sql": "CREATE UNIQUE INDEX uq_monitoring_business_schedule_period\n    ON monitoring_business_schedules(endpoint_id, COALESCE(protocol_code, ''), effective_from)"
+    },
+    {
+      "type": "index",
+      "name": "uq_notifications_unread_dedupe",
+      "tbl_name": "notifications",
+      "sql": "CREATE UNIQUE INDEX uq_notifications_unread_dedupe\n        ON notifications(user_id,dedupe_key)\n        WHERE is_read=0 AND COALESCE(dedupe_key,'')!=''"
+    },
+    {
+      "type": "index",
+      "name": "uq_observation_current_raw",
+      "tbl_name": "observation_batches",
+      "sql": "CREATE UNIQUE INDEX uq_observation_current_raw\n    ON observation_batches(raw_frame_id) WHERE is_current = 1"
+    },
+    {
+      "type": "index",
+      "name": "uq_station_expected_factor_current",
+      "tbl_name": "station_expected_factor_configs",
+      "sql": "CREATE UNIQUE INDEX uq_station_expected_factor_current\n    ON station_expected_factor_configs(site_id)\n    WHERE effective_to IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "uq_threshold_rules_semantic",
+      "tbl_name": "threshold_rules",
+      "sql": "CREATE UNIQUE INDEX uq_threshold_rules_semantic\n            ON threshold_rules(\n                lower(trim(name)), scope, ifnull(site_id,-1), ifnull(metric,''),\n                rule_type, conditions, severity\n            )"
+    },
+    {
+      "type": "index",
+      "name": "uq_vehicle_maintenance_vehicle_mileage",
+      "tbl_name": "vehicle_maintenance_records",
+      "sql": "CREATE UNIQUE INDEX uq_vehicle_maintenance_vehicle_mileage\n                            ON vehicle_maintenance_records(vehicle_id, mileage_at) WHERE mileage_at IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "uq_vehicle_refueling_vehicle_mileage",
+      "tbl_name": "vehicle_refueling_records",
+      "sql": "CREATE UNIQUE INDEX uq_vehicle_refueling_vehicle_mileage\n                            ON vehicle_refueling_records(vehicle_id, mileage_at) WHERE mileage_at IS NOT NULL"
+    },
+    {
+      "type": "trigger",
+      "name": "reject_overlapping_business_schedule_insert",
+      "tbl_name": "monitoring_business_schedules",
+      "sql": "CREATE TRIGGER reject_overlapping_business_schedule_insert\nBEFORE INSERT ON monitoring_business_schedules WHEN NEW.enabled=1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM monitoring_business_schedules existing\n        WHERE existing.endpoint_id=NEW.endpoint_id\n          AND COALESCE(existing.protocol_code, '')=COALESCE(NEW.protocol_code, '')\n          AND existing.enabled=1\n          AND (existing.effective_to IS NULL OR existing.effective_to>NEW.effective_from)\n          AND (NEW.effective_to IS NULL OR NEW.effective_to>existing.effective_from)\n    ) THEN RAISE(ABORT, 'overlapping business schedule') END;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "reject_overlapping_business_schedule_update",
+      "tbl_name": "monitoring_business_schedules",
+      "sql": "CREATE TRIGGER reject_overlapping_business_schedule_update\nBEFORE UPDATE OF endpoint_id, protocol_code, effective_from, effective_to, enabled\nON monitoring_business_schedules WHEN NEW.enabled=1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM monitoring_business_schedules existing\n        WHERE existing.id!=OLD.id AND existing.endpoint_id=NEW.endpoint_id\n          AND COALESCE(existing.protocol_code, '')=COALESCE(NEW.protocol_code, '')\n          AND existing.enabled=1\n          AND (existing.effective_to IS NULL OR existing.effective_to>NEW.effective_from)\n          AND (NEW.effective_to IS NULL OR NEW.effective_to>existing.effective_from)\n    ) THEN RAISE(ABORT, 'overlapping business schedule') END;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "reject_overlapping_monitoring_factor_mapping_insert",
+      "tbl_name": "monitoring_factor_mappings",
+      "sql": "CREATE TRIGGER reject_overlapping_monitoring_factor_mapping_insert\nBEFORE INSERT ON monitoring_factor_mappings\nWHEN NEW.enabled = 1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM monitoring_factor_mappings existing\n        WHERE existing.endpoint_id = NEW.endpoint_id\n          AND existing.protocol_code = NEW.protocol_code\n          AND existing.enabled = 1\n          AND NEW.effective_from < COALESCE(existing.effective_to, '9999-12-31T23:59:59+00:00')\n          AND existing.effective_from < COALESCE(NEW.effective_to, '9999-12-31T23:59:59+00:00')\n    ) THEN RAISE(ABORT, 'overlapping factor mapping') END;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "reject_overlapping_monitoring_factor_mapping_update",
+      "tbl_name": "monitoring_factor_mappings",
+      "sql": "CREATE TRIGGER reject_overlapping_monitoring_factor_mapping_update\nBEFORE UPDATE OF endpoint_id, protocol_code, effective_from, effective_to, enabled ON monitoring_factor_mappings\nWHEN NEW.enabled = 1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM monitoring_factor_mappings existing\n        WHERE existing.id <> NEW.id\n          AND existing.endpoint_id = NEW.endpoint_id\n          AND existing.protocol_code = NEW.protocol_code\n          AND existing.enabled = 1\n          AND NEW.effective_from < COALESCE(existing.effective_to, '9999-12-31T23:59:59+00:00')\n          AND existing.effective_from < COALESCE(NEW.effective_to, '9999-12-31T23:59:59+00:00')\n    ) THEN RAISE(ABORT, 'overlapping factor mapping') END;\nEND"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
@@ -7,12 +7,12 @@ import {
   Row, Col, Descriptions, Drawer, Divider, DatePicker, Upload,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, PlusOutlined, EyeOutlined,
-  EditOutlined, DeleteOutlined,
+  SearchOutlined, ReloadOutlined, PlusOutlined,
   InboxOutlined, SwapOutlined,
   ArrowUpOutlined, ArrowDownOutlined, MoreOutlined,
   DownloadOutlined, UploadOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
@@ -20,9 +20,10 @@ import AttachmentUpload from '../../components/AttachmentUpload';
 import { deviceTypeMap } from '../../services/constants';
 import { statusColors } from '../../theme/tokens';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { StatusStrip, TableLongText, ToolbarMeta, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, { StatusStrip, TableLongText, ToolbarMeta, WorkspaceTable, WorkspaceToolbar, standardListPagination } from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
+import { listLastPage } from '../../utils/listPagination';
 
 const { Title, Text } = Typography;
 
@@ -380,7 +381,20 @@ function DeviceLedgerTab() {
   }, [form, editingDevice, fetchDevices]);
 
   const typeOptions = Object.entries(deviceTypeMap).map(([value, label]) => ({ value, label }));
-  const siteOptions = sites.map(s => ({ value: s.id, label: s.name || s.code }));
+  const siteOptions = useMemo(
+    () => sites.map(s => ({ value: s.id, label: s.name || s.code })),
+    [sites],
+  );
+  const deviceFormSiteOptions = useMemo(() => {
+    if (!editingDevice?.site_id
+        || siteOptions.some(option => Number(option.value) === Number(editingDevice.site_id))) {
+      return siteOptions;
+    }
+    return [...siteOptions, {
+      value: editingDevice.site_id,
+      label: editingDevice.site_name || `站点 #${editingDevice.site_id}`,
+    }];
+  }, [editingDevice, siteOptions]);
 
   const columns = [
     {
@@ -441,11 +455,11 @@ function DeviceLedgerTab() {
       render: (_, record) => {
         const retired = isRetired(record);
         const managementItems = canWrite ? [
-          { key: 'edit', label: '移站/编辑', icon: <EditOutlined />, disabled: retired, onClick: () => handleEdit(record) },
+          { key: 'edit', label: '移站/编辑', icon: <HoverGifIcon name="pencil" size={14} />, disabled: retired, onClick: () => handleEdit(record) },
           { key: 'recycle', label: retired ? '已登记回收' : '登记回收处置', icon: <SwapOutlined />, disabled: retired, onClick: () => handleRecycleOpen(record) },
           { type: 'divider' },
           {
-            key: 'delete', label: retired ? '退役档案不可删除' : '删除设备', danger: true, disabled: retired, icon: <DeleteOutlined />,
+            key: 'delete', label: retired ? '退役档案不可删除' : '删除设备', danger: true, disabled: retired, icon: <HoverGifIcon name="trash-bin" size={14} />,
             onClick: () => {
               Modal.confirm({ title: '确定删除该设备吗？', content: `设备「${record.device_name || record.device_code}」将被永久删除。`, okText: '删除', okButtonProps: { danger: true }, cancelText: '取消', onOk: async () => {
                 const result = await api.delete(`/devices/${record.id}`);
@@ -457,7 +471,7 @@ function DeviceLedgerTab() {
         ] : [];
         return (
         <Space size={2}>
-          <Button type="link" size="small" icon={<EyeOutlined />} aria-label={`查看 ${record.device_name || record.device_code} 的设备详情`} onClick={() => handleView(record)}>
+          <Button type="link" size="small" icon={<HoverGifIcon name="eye" size={14} />} aria-label={`查看 ${record.device_name || record.device_code} 的设备详情`} onClick={() => handleView(record)}>
             详情
           </Button>
           {managementItems.length > 0 && <Dropdown menu={{ items: managementItems }}><Button type="link" size="small" icon={<MoreOutlined />} aria-label={`管理 ${record.device_name || record.device_code}`}>管理</Button></Dropdown>}
@@ -523,7 +537,7 @@ function DeviceLedgerTab() {
         loading={loading}
         emptyType={search || typeFilter || siteFilter ? 'filtered' : 'empty'}
         onRefresh={fetchDevices}
-        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (total) => `共 ${total} 台设备` }}
+        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100] }}
       />
 
       {/* ===== View Drawer ===== */}
@@ -666,7 +680,7 @@ function DeviceLedgerTab() {
           </Form.Item>
           <Form.Item name="site_id" label="所属站点" rules={[{ required: true, message: '请选择所属站点' }]}
             tooltip={editingDevice ? '可调整设备所属站点' : undefined}>
-            <Select placeholder="请选择站点" options={siteOptions} showSearch
+            <Select placeholder="请选择站点" options={deviceFormSiteOptions} showSearch
               filterOption={(input, option) => option.label.toLowerCase().includes(input.toLowerCase())} />
           </Form.Item>
           <Form.Item name="device_model" label="设备型号">
@@ -1037,13 +1051,13 @@ function SparePartsTab() {
     { title: '操作', key: 'actions', width: 210,
       render: (_, r) => (
         <Space size={0}>
-          <Button type="link" size="small" icon={<EyeOutlined />} aria-label={`查看 ${r.part_name || r.part_code} 的备件详情`} onClick={() => handleView(r)}>详情</Button>
+          <Button type="link" size="small" icon={<HoverGifIcon name="eye" size={14} />} aria-label={`查看 ${r.part_name || r.part_code} 的备件详情`} onClick={() => handleView(r)}>详情</Button>
           {canWrite && <Button type="link" size="small" style={{ color: successColor }} icon={<ArrowUpOutlined />} onClick={() => handleStockOpen(r, 'in')}>入库</Button>}
           {canWrite && <Button type="link" size="small" style={{ color: warningColor }} icon={<ArrowDownOutlined />} onClick={() => handleStockOpen(r, 'out')}>出库</Button>}
           {canWrite && <Dropdown
             trigger={['click']}
             menu={{ items: [
-              { key: 'edit', label: '编辑备件', icon: <EditOutlined />, onClick: () => handleEdit(r) },
+              { key: 'edit', label: '编辑备件', icon: <HoverGifIcon name="pencil" size={14} />, onClick: () => handleEdit(r) },
               { key: 'recover', label: '旧件回收', icon: <SwapOutlined />, onClick: () => handleRecoverOpen(r) },
             ] }}
           >
@@ -1125,6 +1139,7 @@ function SparePartsTab() {
             dataSource={parts}
             rowKey={(r) => r.id || r.part_code}
             loading={loading}
+            pagination={standardListPagination()}
             emptyType={search ? 'filtered' : 'empty'}
             onRefresh={fetchParts}
           />
@@ -1138,7 +1153,7 @@ function SparePartsTab() {
           columns={requestColumns}
           dataSource={partRequests}
           scroll={{ x: 1700 }}
-          pagination={{ pageSize: 12, hideOnSinglePage: true }}
+          pagination={standardListPagination()}
           locale={{ emptyText: <Empty description="暂无备件需求" /> }}
         />
       </Drawer>
@@ -1450,6 +1465,7 @@ function DeviceRecyclingTab() {
             dataSource={records}
             rowKey={(r) => r.id || r.device_code}
             loading={loading}
+            pagination={standardListPagination()}
             onRefresh={fetchRecords}
           />
     </div>
@@ -1458,45 +1474,48 @@ function DeviceRecyclingTab() {
 
 // ---------- Operation Logs Tab ----------
 function OperationLogsTab() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [logs, setLogs] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState('');
+  const requestRef = useRef(0);
+  const page = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1);
+  const requestedPageSize = Number.parseInt(searchParams.get('page_size') || '20', 10) || 20;
+  const pageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
 
   const fetchLogs = useCallback(async () => {
+    const requestId = ++requestRef.current;
+    let correctingPage = false;
     setLoading(true);
     setFetchError('');
     try {
-      const [opLogs, dash] = await Promise.all([
-        api.getStrict('/operation-logs?module=device&limit=50'),
-        api.getStrict('/parts/dashboard'),
-      ]);
-      const opRows = Array.isArray(opLogs) ? opLogs : [];
-      const invRows = (dash?.latest_operations || []).map(o => ({
-        id: `inv-${o.id}`,
-        created_at: o.created_at,
-        operator: o.operator || '系统',
-        action: o.type === 'in' ? '入库' : '出库',
-        target_type: '备件',
-        details: `${o.part_name || o.part_code || '备件'} ${o.type === 'in' ? '+' : '-'}${o.quantity}`,
-        _type: 'inventory',
-      }));
-      const mergedByKey = new Map();
-      [...opRows.map(r => ({...r, _type: 'operation'})), ...invRows].forEach((row) => {
-        const key = `${row._type}:${row.id}`;
-        if (!mergedByKey.has(key)) mergedByKey.set(key, row);
-      });
-      const merged = [...mergedByKey.values()];
-      merged.sort((a, b) => (
-        (b.created_at || '').localeCompare(a.created_at || '')
-        || String(b.id).localeCompare(String(a.id))
-      ));
-      setLogs(merged.slice(0, 100));
+      const response = await api.getStrict(
+        `/operation-logs?module=device&include_inventory=1&paginated=1&page=${page}&page_size=${pageSize}`,
+      );
+      if (requestId !== requestRef.current) return;
+      const items = Array.isArray(response?.items) ? response.items : [];
+      const responseTotal = Number(response?.total || 0);
+      const lastPage = listLastPage(responseTotal, pageSize);
+      if (responseTotal > 0 && page > lastPage) {
+        correctingPage = true;
+        setSearchParams((current) => {
+          const next = new URLSearchParams(current);
+          if (lastPage > 1) next.set('page', String(lastPage));
+          else next.delete('page');
+          return next;
+        }, { replace: true });
+        return;
+      }
+      setLogs(items);
+      setTotal(responseTotal);
     } catch (error) {
+      if (requestId !== requestRef.current) return;
       setFetchError(error?.message || '操作日志加载失败');
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current && !correctingPage) setLoading(false);
     }
-  }, []);
+  }, [page, pageSize, setSearchParams]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
@@ -1529,7 +1548,28 @@ function OperationLogsTab() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
-      <WorkspaceTable columns={columns} dataSource={logs} rowKey="id" loading={loading} onRefresh={fetchLogs} />
+      <WorkspaceTable
+        columns={columns}
+        dataSource={logs}
+        rowKey="id"
+        loading={loading}
+        onRefresh={fetchLogs}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          pageSizeOptions: [20, 50, 100],
+          disabled: loading,
+          onChange: (nextPage, nextPageSize) => {
+            const next = new URLSearchParams(searchParams);
+            const sizeChanged = nextPageSize !== pageSize;
+            next.set('page', String(sizeChanged ? 1 : nextPage));
+            next.set('page_size', String(nextPageSize));
+            setSearchParams(next, { replace: true });
+          },
+        }}
+      />
     </>
   );
 }
@@ -1588,7 +1628,7 @@ export default function EquipmentPage() {
         { label: '低库存预警', value: dashData ? (dashData.low_stock || 0) : '—', color: statusColors.danger[isDark ? 'dark' : 'light'] },
       ]} />
       {dashError ? <Alert type="warning" showIcon message="库存统计暂未加载" description={dashError} style={{ marginBottom: 12 }} /> : null}
-      <Tabs type="line" items={tabItems} activeKey={activeTab} onChange={changeTab} />
+      <Tabs className="workspace-tabs" type="line" items={tabItems} activeKey={activeTab} onChange={changeTab} />
     </WorkspacePage>
   );
 }

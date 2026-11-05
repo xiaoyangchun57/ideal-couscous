@@ -1,6 +1,9 @@
 /* components/custom-navbar/custom-navbar.wxss */
 .custom-nav {
-  background: #ffffff;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--color-card);
   width: 100%;
 }
 
@@ -43,5 +46,5 @@
 
 .nav-border {
   height: 1rpx;
-  background: rgba(60, 60, 67, 0.12);
+  background: var(--color-border);
 }

@@ -247,6 +247,25 @@ function uniqueExecutableTarget(packages, source) {
   });
 }
 
+function uniqueActiveFieldTarget(packages, source) {
+  const candidates = [];
+  (Array.isArray(packages) ? packages : []).forEach(pkg => {
+    (Array.isArray(pkg && pkg.sites) ? pkg.sites : []).forEach(site => {
+      if (!site || site.checkedIn !== true || site.checkedOut === true) return;
+      candidates.push({ pkg, site });
+    });
+  });
+  if (candidates.length !== 1) return null;
+  const candidate = candidates[0];
+  return normalizeExecutionTarget({
+    executionPlanId: candidate.pkg.executionPlanId,
+    scheduleId: candidate.pkg.scheduleId,
+    workDate: candidate.pkg.workDate,
+    siteId: candidate.site.siteId,
+    source: source || 'generic',
+  });
+}
+
 function closedResultPackages(packages, target) {
   const list = Array.isArray(packages) ? packages : [];
   const scoped = hasExactTarget(target)
@@ -326,6 +345,7 @@ module.exports = {
   matchesExecutionTarget,
   packageIsFullyClosed,
   uniqueExecutableTarget,
+  uniqueActiveFieldTarget,
   buildScheduleExecutionTarget,
   itemBelongsToCategories,
   shouldApplyAsyncResult,

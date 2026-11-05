@@ -1,11 +1,13 @@
 <view class="page">
-  <!-- 自定义导航栏：标题 + 范围切换 -->
-  <custom-navbar showBorder="{{true}}">
+  <!-- 自定义导航栏：标题（左）+ 范围切换（右贴胶囊，全局 .nav-scope 规范） -->
+  <custom-navbar showBorder="{{false}}">
     <view slot="left" class="nav-plan-left">
       <text class="nav-plan-title">巡检计划</text>
-      <view class="scope-toggle" bindtap="onToggleScope" wx:if="{{canSwitchTeam}}">
-        <text>{{scope === 'team' ? '团队计划' : '我的计划'}}</text>
-        <text class="scope-arrow">▾</text>
+    </view>
+    <view slot="right" class="nav-scope {{pendingScope ? 'is-pending' : ''}}" wx:if="{{canSwitchTeam}}" bindtap="onToggleScope">
+      <view class="nav-scope-pill">
+        <text class="nav-scope-text">{{(pendingScope || scope) === 'team' ? '团队计划' : '我的计划'}}</text>
+        <text class="nav-scope-arrow">▾</text>
       </view>
     </view>
   </custom-navbar>

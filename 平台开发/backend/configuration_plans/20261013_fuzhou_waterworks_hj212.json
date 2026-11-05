@@ -1,0 +1,59 @@
+{
+  "station_code": "62481540",
+  "business_site_id": 325,
+  "existing_endpoint_only": true,
+  "timezone": "Asia/Shanghai",
+  "effective_from": "2026-10-10T01:00:00+00:00",
+  "expected_granularity": "periodic",
+  "expected_interval_seconds": 14400,
+  "mappings": [
+    {
+      "protocol_code": "HJ212:w01001",
+      "business_metric": "ph",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w01003",
+      "business_metric": "turbidity",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w01009",
+      "business_metric": "dissolved_oxygen",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w01010",
+      "business_metric": "water_temp",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w01014",
+      "business_metric": "conductivity",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w01019-Rtd",
+      "business_metric": "codmn",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    },
+    {
+      "protocol_code": "HJ212:w21003",
+      "business_metric": "ammonia",
+      "expected_interval_seconds": 14400,
+      "tolerance_seconds": 600
+    }
+  ],
+  "business_schedule": {
+    "interval_seconds": 14400,
+    "anchor_local_time": "00:00:00",
+    "tolerance_seconds": 600,
+    "result_delay_seconds": 7200
+  }
+}

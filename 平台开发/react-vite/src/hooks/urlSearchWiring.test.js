@@ -45,9 +45,10 @@ test('current concentrated rework keeps list identity columns and vehicle permis
   const vehicles = source('../pages/vehicles/VehiclesPage.jsx');
   const users = source('../pages/users/UsersPage.jsx');
 
-  const identityCell = sites.slice(sites.indexOf("title: '站点身份'"), sites.indexOf("title: '监测状态'"));
-  assert.doesNotMatch(identityCell, /试点|copyable|record\.code/);
+  const identityCell = sites.slice(sites.indexOf("title: '站点'"), sites.indexOf("title: '负责人'"));
+  assert.doesNotMatch(identityCell, /试点|copyable/);
   assert.match(identityCell, /record\.name/);
+  assert.match(identityCell, /record\.code/);
   assert.match(identityCell, /stationTypeMap/);
 
   const ledgerColumns = equipment.slice(equipment.indexOf("title: '设备编码'"), equipment.indexOf("title: '操作'"));
@@ -58,6 +59,11 @@ test('current concentrated rework keeps list identity columns and vehicle permis
   assert.match(vehicles, /_idempotency_key: documentIdempotencyKey\.current/);
   assert.match(vehicles, /sort\(\(left, right\) => Number\(right\.id/);
   assert.match(vehicles, /\{isAdmin && <Form\.Item name="plate_no"/);
-  assert.match(vehicles, /\{isAdmin && <Form\.Item name="status"/);
+  const adminCorrectionStart = vehicles.indexOf('{isAdmin && <>');
+  const adminCorrectionEnd = vehicles.indexOf('</>}', adminCorrectionStart);
+  assert.ok(adminCorrectionStart >= 0 && adminCorrectionEnd > adminCorrectionStart);
+  const adminCorrection = vehicles.slice(adminCorrectionStart, adminCorrectionEnd);
+  assert.match(adminCorrection, /管理员纠错/);
+  assert.match(adminCorrection, /<Form\.Item name="status"/);
   assert.match(users, /users\/\$\{record\.id\}\/permanent/);
 });

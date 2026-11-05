@@ -64,6 +64,36 @@ function flush() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+test('monthly quality ignores old month responses and preserves a visible load error', async () => {
+  const original = api.photoQualityMonthly;
+  const requests = [];
+  api.photoQualityMonthly = month => new Promise((resolve, reject) => requests.push({ month, resolve, reject }));
+  try {
+    const page = eventPage({ qualityMonth: '2026-09' });
+    page._alive = true;
+    const first = page.loadPhotoQuality();
+    page.setData({ qualityMonth: '2026-10' });
+    const second = page.loadPhotoQuality();
+    requests[1].resolve({ deduction: 1, photos: [{ attachment_id: 2, display_url: '/uploads/two.jpg', reason: '模糊' }] });
+    await second;
+    requests[0].resolve({ deduction: 8, photos: [] });
+    await first;
+    assert.equal(page.data.qualityDeduction, 1);
+    assert.equal(page.data.qualityPhotos[0].attachment_id, 2);
+    const failed = page.loadPhotoQuality();
+    requests[2].reject({ error: '网络失败' });
+    await failed;
+    assert.equal(page.data.qualityError, '网络失败');
+    assert.equal(page.data.qualityLoading, false);
+  } finally { api.photoQualityMonthly = original; }
+});
+
+test('monthly quality links the original inspection without changing its facts', () => {
+  const page = eventPage({ qualityPhotos: [{ attachment_id: 2, plan_id: 10, site_id: 1 }] });
+  page.openQualityInspection({ currentTarget: { dataset: { id: 2 } } });
+  assert.equal(navigations.at(-1).url, '/pages/inspection/inspection?plan_id=10&site_id=1&source=photo_quality_history');
+});
+
 test('mine page does not duplicate parts application, issue, order or fulfillment responsibilities', () => {
   const mineJs = source('pages/mine/mine.js');
   const mineWxml = source('pages/mine/mine.wxml');

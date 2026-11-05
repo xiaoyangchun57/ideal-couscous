@@ -7,7 +7,7 @@ services:
     container_name: water-monitor
     restart: unless-stopped
     depends_on:
-      station-ingest-permissions:
+      station-ingest-cutover:
         condition: service_completed_successfully
     command:
       - /bin/sh
@@ -17,7 +17,9 @@ services:
       TZ: Asia/Shanghai
       LD_PRELOAD: /opt/libsqlite-group-mode.so
       APP_RUNTIME_PROFILE: "production"
+      PRIVATE_UPLOAD_DIR: /app/private_uploads
       MINIPROGRAM_STATE: ${MINIPROGRAM_STATE:-formal}
+      STATION_MONITORING_ACCESS_MODE: ${STATION_MONITORING_ACCESS_MODE:-public}
       WX_APPSECRET: ${WX_APPSECRET:-}
       ENABLE_DEMO_SEED: "0"
       SKIP_BACKFILL: "1"
@@ -26,6 +28,10 @@ services:
     volumes:
       - ./backend/data:/app/backend/data
       - ./frontend/uploads:/app/frontend/uploads
+      # Private original evidence is persisted separately from anonymously served uploads.
+      # Pre-create ./private_uploads/site_photo_originals as a readable/writable directory;
+      # production startup fails closed when that directory is absent or unusable.
+      - ./private_uploads:/app/private_uploads
     healthcheck:
       test:
         - CMD
@@ -65,6 +71,26 @@ services:
       - ./backend/data:/app/backend/data
       - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
 
+  station-ingest-cutover:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    restart: "no"
+    depends_on:
+      station-ingest-permissions:
+        condition: service_completed_successfully
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python station_ingest_cutover.py prepare --database /app/backend/data/water.db ${STATION_CUTOVER_RECOVERY_ARGS:-}"
+    environment:
+      TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+    volumes:
+      - ./backend/data:/app/backend/data
+
   station-ingest:
     build:
       context: .
@@ -74,7 +100,7 @@ services:
     profiles: ["station-ingest"]
     restart: unless-stopped
     depends_on:
-      station-ingest-permissions:
+      station-ingest-cutover:
         condition: service_completed_successfully
     user: "10001:10001"
     read_only: true
@@ -89,6 +115,10 @@ services:
       SL651_CREDENTIAL_PEPPER: ${SL651_CREDENTIAL_PEPPER:-}
       SL651_RAW_STORAGE_DIR: /var/lib/station-ingest/raw
       SL651_STORAGE_MODE: ${SL651_STORAGE_MODE:-long_term}
+      SL651_ARCHIVE_MINIMUM_TOTAL_BYTES: ${SL651_ARCHIVE_MINIMUM_TOTAL_BYTES:-}
+      SL651_ARCHIVE_MINIMUM_FREE_BYTES: ${SL651_ARCHIVE_MINIMUM_FREE_BYTES:-}
+      SL651_HOT_MINIMUM_TOTAL_BYTES: ${SL651_HOT_MINIMUM_TOTAL_BYTES:-}
+      SL651_HOT_MINIMUM_FREE_BYTES: ${SL651_HOT_MINIMUM_FREE_BYTES:-}
     ports:
       - "127.0.0.1:${SL651_BIND_PORT:-5505}:5005"
     volumes:
@@ -105,6 +135,33 @@ services:
       timeout: 8s
       retries: 3
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  station-ingest-retention:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: water-monitor-app:latest
+    profiles: ["station-ingest-maintenance"]
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    command:
+      - /bin/sh
+      - -ec
+      - "umask 0007; exec python station_ingest_retention.py maintain-once --database /app/backend/data/water.db --raw-storage-dir /var/lib/station-ingest/raw --lock-file /app/backend/data/.station-ingest-retention.lock --storage-mode ${SL651_STORAGE_MODE:-long_term} --batch-limit 500 --time-budget-seconds 2700"
+    environment:
+      TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw
     logging:
       driver: json-file
       options:

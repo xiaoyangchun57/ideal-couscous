@@ -1,0 +1,265 @@
+page {
+  height: 100%;
+  background: #05070a;
+}
+
+.camera-page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #05070a;
+  color: #fff;
+}
+
+.camera-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 12rpx 24rpx 0;
+}
+
+.camera-frame {
+  position: relative;
+  flex: none;
+  overflow: hidden;
+  background: #11151a;
+}
+
+.camera-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.camera-watermark-preview {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  background: rgba(255, 255, 255, 0.3);
+  color: #000;
+  font-family: "HarmonyOS Sans SC Regular", "HarmonyOS Sans SC", "PingFang SC", sans-serif;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.watermark-left {
+  width: 43%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: center;
+}
+
+.watermark-site,
+.watermark-time {
+  width: 100%;
+  max-width: 100%;
+  font-family: "HarmonyOS Sans SC Bold", "HarmonyOS Sans SC", "PingFang SC", sans-serif;
+  font-weight: 700;
+  text-align: center;
+}
+
+.watermark-time {
+  white-space: nowrap;
+}
+
+.watermark-right {
+  width: 57%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  font-weight: 400;
+  text-align: right;
+}
+
+.watermark-detail {
+  width: 100%;
+  max-width: 100%;
+}
+
+.watermark-line {
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.camera-controls {
+  position: relative;
+  flex-shrink: 0;
+  padding: 10rpx 32rpx calc(24rpx + env(safe-area-inset-bottom));
+  background: #05070a;
+}
+
+.camera-status {
+  min-height: 42rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 23rpx;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.camera-status.is-error {
+  color: #ffb3ad;
+}
+
+.camera-recovery {
+  min-width: 144rpx;
+  height: 64rpx;
+  margin: 4rpx auto 8rpx;
+  padding: 0 28rpx;
+  border-radius: 8rpx;
+  background: #252a32;
+  color: #fff;
+  font-size: 24rpx;
+  line-height: 64rpx;
+}
+
+.camera-recovery::after,
+.camera-tool::after,
+.camera-shutter::after {
+  border: 0;
+}
+
+.camera-toolbar {
+  min-height: 112rpx;
+  display: flex;
+  align-items: center;
+  gap: 28rpx;
+}
+
+.camera-tool-slot {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-shutter-slot {
+  width: 112rpx;
+  min-width: 112rpx;
+  max-width: 112rpx;
+  height: 112rpx;
+  min-height: 112rpx;
+  max-height: 112rpx;
+  flex: 0 0 112rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-picker {
+  width: 100%;
+  min-width: 0;
+}
+
+.camera-tool {
+  width: 100%;
+  min-width: 0;
+  min-height: 88rpx;
+  margin: 0;
+  padding: 4rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6rpx;
+  background: transparent;
+  color: #fff;
+  font-size: 22rpx;
+  line-height: 1.2;
+}
+
+.camera-tool.is-disabled,
+.camera-tool[disabled] {
+  opacity: 0.42;
+}
+
+.camera-tool-icon {
+  position: relative;
+  width: 36rpx;
+  height: 36rpx;
+  box-sizing: border-box;
+}
+
+.flash-icon::before {
+  content: "";
+  position: absolute;
+  top: 1rpx;
+  left: 10rpx;
+  width: 13rpx;
+  height: 29rpx;
+  border: 3rpx solid #fff;
+  border-top-color: transparent;
+  border-left-color: transparent;
+  transform: skew(-15deg) rotate(34deg);
+}
+
+.watermark-icon {
+  border: 3rpx solid #fff;
+  border-radius: 4rpx;
+}
+
+.watermark-icon view {
+  width: 20rpx;
+  height: 2rpx;
+  margin: 6rpx auto 0;
+  background: #fff;
+}
+
+.camera-shutter {
+  width: 104rpx;
+  min-width: 104rpx;
+  max-width: 104rpx;
+  height: 104rpx;
+  min-height: 104rpx;
+  max-height: 104rpx;
+  box-sizing: border-box;
+  flex: 0 0 104rpx;
+  margin: 0;
+  padding: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 4rpx solid #fff;
+  border-radius: 50%;
+  background: transparent;
+  line-height: 1;
+  overflow: hidden;
+}
+
+.camera-shutter[disabled] {
+  opacity: 0.5;
+}
+
+.shutter-core {
+  width: 76rpx;
+  height: 76rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.camera-shutter.is-ready .shutter-core {
+  background: #fff;
+}

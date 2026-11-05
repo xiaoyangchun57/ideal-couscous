@@ -25,6 +25,7 @@ from migrate_station_ingestion import apply_migration
 from sl651_parser import UP_FLOW_CONTROL, crc16_modbus, encode_bcd_observation_time, encode_bcd_time, encode_station_code, parse_frame
 from hj212_parser import build_hj212_9011_response, hj212_crc, parse_hj212_frame
 import sl651_server as ingest_server
+import station_ingest_retention as retention
 from sl651_server import IngestionStorage, StationIngestServer, StorageError, _listener_healthcheck, credential_hmac
 
 
@@ -41,8 +42,9 @@ def make_uplink(station="0012345678", password=b"\x12\x34", serial=1, sent_at=No
     return prefix + crc16_modbus(prefix).to_bytes(2, "big")
 
 
-def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001"):
-    cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
+def make_hj212(station="TESTHJ01", password="long-ascii-password", command="2011", qn="20260911164900001", cp=None):
+    if cp is None:
+        cp = "DataTime=20260911164900;w01001-Rtd=7.0;w01001-Flag=N" if command == "2011" else ""
     body = f"QN={qn};ST=91;CN={command};PW={password};MN={station};CP=&&{cp}&&".encode("ascii")
     return b"##" + f"{len(body):04d}".encode("ascii") + body + hj212_crc(body).encode("ascii") + b"\r\n"
 
@@ -176,7 +178,147 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
         with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'").fetchone()[0], 3)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='TESTHJ01'"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT receipt_count FROM station_ingest_slot_summaries"
+            ).fetchone()[0], 2)
+
+    async def test_hj212_without_profile_or_schedule_folds_same_value_within_four_hour_slot(self):
+        station = "NOSCHEDULE"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ-NO-SCHEDULE','No schedule','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.commit()
+
+        first = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100100001",
+            cp=("DataTime=20261020080000;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        repeated = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100200001",
+            cp=("DataTime=20261020080000;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        next_minute = parse_hj212_frame(make_hj212(
+            station=station, password=password, qn="20261020100300001",
+            cp=("DataTime=20261020080100;w01001-Rtd=7.1;w01001-Flag=N;"
+                "w01014-Rtd=74.5;w01014-Flag=N"),
+        ))
+        auth = self.storage.authenticate(first)
+        first_id, first_folded = self.storage.persist_parsed(
+            first, auth, "2026-10-20T02:01:00+00:00")
+        repeated_id, repeated_folded = self.storage.persist_parsed(
+            repeated, auth, "2026-10-20T02:02:00+00:00")
+        next_id, next_folded = self.storage.persist_parsed(
+            next_minute, auth, "2026-10-20T02:03:00+00:00")
+        self.assertEqual((first_folded, repeated_folded, next_folded), (False, True, True))
+        self.assertEqual(repeated_id, first_id)
+        self.assertEqual(next_id, first_id)
+        self.assertEqual(ingest_server.normalize_raw_frame(self.database, first_id), "accepted")
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                "ingest_raw_frames", "observation_batches", "observation_values",
+                "monitoring_business_observations", "monitoring_status_events",
+            ))
+            canonical_time = connection.execute(
+                """SELECT batch.observed_at,batch.received_at
+                   FROM observation_batches batch WHERE batch.raw_frame_id=?""",
+                (first_id,),
+            ).fetchone()
+            summary = connection.execute(
+                """SELECT COUNT(*),SUM(receipt_count) FROM station_ingest_slot_summaries
+                   WHERE endpoint_id=?""", (endpoint_id,)
+            ).fetchone()
+        self.assertEqual(counts, (1, 1, 2, 0, 0))
+        self.assertEqual(tuple(canonical_time), (
+            "2026-10-20T00:00:00+00:00", "2026-10-20T02:01:00+00:00"))
+        self.assertEqual(tuple(summary), (1, 3))
+
+    async def test_hj212_explicit_schedule_folds_repeats_and_retains_changes_and_new_cycle(self):
+        station = "SCHEDULED"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ-SCHEDULED','Scheduled','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',1800,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        payloads = (
+            ("20261020100100001", "20261020100000", 74.5),
+            ("20261020100200001", "20261020100100", 74.5),
+            ("20261020100300001", "20261020100200", 75.5),
+            ("20261020140100001", "20261020140000", 75.5),
+        )
+        raw_ids = []
+        folded = []
+        for offset, (qn, data_time, conductivity) in enumerate(payloads):
+            frame = parse_hj212_frame(make_hj212(
+                station=station, password=password, qn=qn,
+                cp=(f"DataTime={data_time};w01001-Rtd=7.1;w01001-Flag=N;"
+                    f"w01014-Rtd={conductivity};w01014-Flag=N"),
+            ))
+            raw_id, was_folded = self.storage.persist_parsed(
+                frame, self.storage.authenticate(frame),
+                f"2026-10-20T{2 + offset:02d}:01:00+00:00",
+            )
+            raw_ids.append(raw_id)
+            folded.append(was_folded)
+            if not was_folded:
+                self.assertEqual(
+                    ingest_server.normalize_raw_frame(self.database, raw_id), "accepted")
+
+        self.assertEqual(folded, [False, True, False, False])
+        self.assertEqual(raw_ids[1], raw_ids[0])
+        with closing(sqlite3.connect(self.database)) as connection:
+            counts = tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in (
+                "ingest_raw_frames", "observation_batches", "observation_values",
+                "monitoring_business_observations", "monitoring_status_events",
+            ))
+            summary = connection.execute(
+                """SELECT COUNT(*),SUM(receipt_count) FROM station_ingest_slot_summaries
+                   WHERE endpoint_id=?""", (endpoint_id,)
+            ).fetchone()
+            values_per_batch = [row[0] for row in connection.execute(
+                """SELECT COUNT(value.id) FROM observation_batches batch
+                   LEFT JOIN observation_values value ON value.observation_batch_id=batch.id
+                   GROUP BY batch.id ORDER BY batch.id"""
+            )]
+        self.assertEqual(counts, (3, 3, 5, 5, 0))
+        self.assertEqual(tuple(summary), (3, 4))
+        self.assertEqual(values_per_batch, [2, 1, 2])
 
     async def test_unbound_hj212_receipts_keep_the_same_connection_without_an_application_reply(self):
         password = "long-ascii-password"
@@ -318,9 +460,9 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             connection.commit()
         original = ingest_server.normalize_raw_frame
 
-        def slow_normalize(database, raw_id):
+        def slow_normalize(database, raw_id, **kwargs):
             time.sleep(0.04)
-            return original(database, raw_id)
+            return original(database, raw_id, **kwargs)
 
         payload = b'\xf1\xf1' + encode_station_code('0012345678') + b'\x51\xf0\xf0' + encode_bcd_observation_time(datetime(2020, 6, 12, 2, 0)) + bytes.fromhex('03110304')
         with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=slow_normalize):
@@ -333,12 +475,143 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                         "SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')"
                     ).fetchone()[0]
                     batches = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
-                if pending == 0 and batches == 7:
+                    hourly = connection.execute("SELECT COUNT(*) FROM monitoring_hourly_last_values").fetchone()[0]
+                    raw_count = connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0]
+                if pending == 0 and batches == 0 and hourly == 1 and raw_count == 0:
                     break
                 await asyncio.sleep(0.05)
         self.assertEqual(pending, 0)
-        self.assertEqual(batches, 7)
+        self.assertEqual((batches, hourly, raw_count), (0, 1, 0))
         self.assertFalse(self.server._normalization_scanner.done())
+
+    async def test_hj212_tcp_auto_normalization_reaches_v3_public_api(self):
+        station = "TESTHJ01"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('HJ212-E2E','HJ212 end to end','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',60,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01001',60,0,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',900,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        frames = (
+            make_hj212(
+                station=station, password=password, command="2061", qn="20260911140200001",
+                cp="DataTime=20260911120000;w01001-Avg=7.1;w01001-Rtd=7.2;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2061", qn="20260911180200001",
+                cp="DataTime=20260911160000;w01001-Rtd=8.8;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2011", qn="20260911180300001",
+                cp="DataTime=20260911160100;w01001-Rtd=9.1;w01001-Flag=N",
+            ),
+            make_hj212(
+                station=station, password=password, command="2091", qn="20260911180400001",
+                cp="DataTime=20260911160200;w01001-Rtd=9.2;w01001-Flag=N",
+            ),
+        )
+        reader, writer = await self.connect()
+        writer.write(b"".join(frames))
+        await writer.drain()
+        self.assertEqual(await asyncio.wait_for(reader.read(), timeout=4), b"")
+        writer.close()
+        await writer.wait_closed()
+
+        for _ in range(100):
+            with closing(sqlite3.connect(self.database)) as connection:
+                raw_count = connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0]
+                pending_count = connection.execute(
+                    """SELECT COUNT(*) FROM ingest_raw_frames
+                       WHERE persistence_state IN ('pending_parse','pending_reparse')"""
+                ).fetchone()[0]
+                batch_count = connection.execute("SELECT COUNT(*) FROM observation_batches").fetchone()[0]
+            if raw_count == 2 and pending_count == 0 and batch_count == 2:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual((raw_count, pending_count, batch_count), (2, 0, 2))
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            batches = connection.execute(
+                "SELECT function_code FROM observation_batches ORDER BY raw_frame_id"
+            ).fetchall()
+            business_rows = connection.execute(
+                """SELECT batch.function_code,business.standard_value,business.projection_version
+                   FROM monitoring_business_observations business
+                   JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                   ORDER BY batch.raw_frame_id"""
+            ).fetchall()
+            non_data_errors = connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors WHERE error_type='hj212_non_data_command'"
+            ).fetchone()[0]
+            non_data_summary = connection.execute(
+                """SELECT SUM(occurrence_count) FROM station_ingest_error_hourly
+                    WHERE error_type='hj212_non_data_command'"""
+            ).fetchone()[0]
+        self.assertEqual(batches, [(2061,), (2011,)])
+        self.assertEqual(business_rows, [
+            (2061, 7.1, "station-monitoring-business-v3"),
+            (2011, 9.1, "station-monitoring-business-v3"),
+        ])
+        self.assertEqual(non_data_errors, 0)
+        self.assertIsNone(non_data_summary)
+        self.assertFalse(self.server._normalizer.done())
+
+        _, token = self._create_l1_web_credentials()
+        headers = {"Authorization": f"Bearer {token}"}
+        client = web_app.app.test_client()
+        with mock.patch.object(web_app, "STATION_MONITORING_ACCESS_MODE", "public"):
+            latest = client.get(f"/api/station-monitoring/sites/{site_id}/latest", headers=headers)
+            self.assertEqual(latest.status_code, 200, latest.get_json())
+            self.assertEqual(len(latest.get_json()["items"]), 1)
+            latest_item = latest.get_json()["items"][0]
+            self.assertEqual(
+                (latest_item["business_metric"], latest_item["standard_value"],
+                 latest_item["function_code"], latest_item["projection_version"]),
+                ("ph", 9.1, 2011, "station-monitoring-normalizer-v4"),
+            )
+            trend = client.get(
+                f"/api/station-monitoring/sites/{site_id}/trend"
+                "?metric=ph&start=2026-09-11T04:00:00%2B00:00&end=2026-09-11T09:00:00%2B00:00",
+                headers=headers,
+            )
+            self.assertEqual(trend.status_code, 200, trend.get_json())
+            self.assertEqual(
+                [point["value"] for point in trend.get_json()["points"] if point["status"] == "value"],
+                [7.1, 9.1],
+            )
+            self.assertEqual(
+                trend.get_json()["points"][-1]["observed_at"],
+                "2026-09-11T08:01:00+00:00",
+            )
 
     def _create_l1_web_credentials(self) -> tuple[int, str]:
         with closing(sqlite3.connect(self.database)) as connection:
@@ -516,6 +789,170 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         await _listener_healthcheck("127.0.0.1", self.server.bound_port)
         self.assertNotIn("integrity_check", inspect.getsource(IngestionStorage.healthcheck))
 
+    async def test_governance_capacity_cli_starts_healthchecks_and_persists_results_on_10gib(self):
+        await self.server.close()
+        raw_root = self.root / "raw-archive"
+        raw_root.mkdir()
+        gib = 1024 ** 3
+        cli_arguments = ingest_server._parser().parse_args([
+            "--database", str(self.database),
+            "--raw-storage-dir", str(raw_root),
+            "--storage-mode", "governance",
+            "--archive-minimum-total-bytes", str(8 * gib),
+            "--archive-minimum-free-bytes", str(1 * gib),
+            "--hot-minimum-total-bytes", str(10 * gib),
+            "--hot-minimum-free-bytes", str(2 * gib),
+        ])
+        policy = ingest_server._storage_policy_from_arguments(cli_arguments)
+        self.assertEqual(policy.mode, "governance")
+        with self.assertRaisesRegex(StorageError, "requires explicit archive and hot"):
+            ingest_server._storage_policy_from_arguments(
+                ingest_server._parser().parse_args([
+                    "--database", str(self.database),
+                    "--raw-storage-dir", str(raw_root),
+                    "--storage-mode", "governance",
+                ])
+            )
+        with self.assertRaisesRegex(StorageError, "require --storage-mode governance"):
+            ingest_server._storage_policy_from_arguments(
+                ingest_server._parser().parse_args([
+                    "--database", str(self.database),
+                    "--raw-storage-dir", str(raw_root),
+                    "--storage-mode", "long_term",
+                    "--archive-minimum-total-bytes", str(8 * gib),
+                ])
+            )
+
+        environment = {
+            "SL651_RAW_STORAGE_DIR": str(raw_root),
+            "SL651_STORAGE_MODE": "governance",
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES": str(8 * gib),
+            "SL651_ARCHIVE_MINIMUM_FREE_BYTES": str(1 * gib),
+            "SL651_HOT_MINIMUM_TOTAL_BYTES": str(10 * gib),
+            "SL651_HOT_MINIMUM_FREE_BYTES": str(2 * gib),
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            health_arguments = ingest_server._parser().parse_args([
+                "--database", str(self.database), "--healthcheck",
+            ])
+        self.assertEqual(ingest_server._storage_policy_from_arguments(health_arguments), policy)
+
+        station = "GOVERNANCE01"
+        password = "long-ascii-password"
+        with closing(sqlite3.connect(self.database)) as connection:
+            site_id = connection.execute(
+                "INSERT INTO sites(code,name,type) VALUES ('GOV-01','Governance','water')"
+            ).lastrowid
+            endpoint_id = connection.execute(
+                """INSERT INTO trusted_endpoints(
+                       station_code,credential_hmac,business_site_id,endpoint_state)
+                   VALUES (?,?,?,'bound')""",
+                (station, credential_hmac(password.encode("ascii"), self.pepper), site_id),
+            ).lastrowid
+            connection.execute(
+                """INSERT INTO monitoring_endpoint_profiles(
+                       endpoint_id,business_site_id,timezone,enabled,expected_granularity,
+                       expected_interval_seconds,effective_from)
+                   VALUES (?,?,'Asia/Shanghai',1,'realtime',14400,'2020-01-01T00:00:00+00:00')""",
+                (endpoint_id, site_id),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_factor_mappings(
+                       endpoint_id,protocol_code,expected_interval_seconds,tolerance_seconds,
+                       effective_from,enabled)
+                   VALUES (?,'HJ212:w01001',14400,900,'2020-01-01T00:00:00+00:00',1)""",
+                (endpoint_id,),
+            )
+            connection.execute(
+                """INSERT INTO monitoring_business_schedules(
+                       endpoint_id,protocol_code,timezone,interval_seconds,anchor_local_time,
+                       tolerance_seconds,result_delay_seconds,effective_from)
+                   VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',900,7200,
+                           '2020-01-01T00:00:00+00:00')""",
+                (endpoint_id,),
+            )
+            connection.commit()
+
+        class Usage:
+            def __init__(self, total: int, free: int):
+                self.total = total
+                self.free = free
+                self.used = total - free
+
+        def available_usage(path):
+            resolved = Path(path).resolve()
+            if resolved == raw_root.resolve():
+                return Usage(10 * gib, 3 * gib)
+            if resolved == self.database.parent.resolve():
+                return Usage(10 * gib, 4 * gib)
+            raise AssertionError(f"unexpected capacity path: {resolved}")
+
+        self.storage = IngestionStorage(self.database, self.pepper, storage_policy=policy)
+        self.server = StationIngestServer(
+            self.storage, host="127.0.0.1", port=0, max_connections=8,
+        )
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=available_usage):
+            self.storage.healthcheck()
+            await self.server.start()
+            reader, writer = await self.connect()
+            writer.write(make_hj212(
+                station=station, password=password, qn="20261028120000001",
+                cp="DataTime=20261028120000;w01001-Rtd=7.25;w01001-Flag=N",
+            ))
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            del reader
+            for _ in range(100):
+                with closing(sqlite3.connect(self.database)) as connection:
+                    row = connection.execute(
+                        """SELECT business.standard_value
+                             FROM monitoring_business_observations business
+                             JOIN observation_batches batch
+                               ON batch.id=business.observation_batch_id
+                            WHERE batch.endpoint_id=?""",
+                        (endpoint_id,),
+                    ).fetchone()
+                if row is not None:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(row, (7.25,))
+            self.storage.healthcheck()
+            await self.server.close()
+
+        def low_archive_usage(path):
+            if Path(path).resolve() == raw_root.resolve():
+                return Usage(10 * gib, gib - 1)
+            return Usage(10 * gib, 4 * gib)
+
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=low_archive_usage):
+            with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+                self.storage.healthcheck()
+
+        def low_hot_usage(path):
+            if Path(path).resolve() == raw_root.resolve():
+                return Usage(10 * gib, 3 * gib)
+            return Usage(10 * gib, 2 * gib - 1)
+
+        with mock.patch.object(retention.shutil, "disk_usage", side_effect=low_hot_usage):
+            with self.assertRaisesRegex(StorageError, "raw archive storage is unavailable"):
+                self.storage.healthcheck()
+
+        long_term = ingest_server._storage_policy_from_arguments(
+            ingest_server._parser().parse_args([
+                "--database", str(self.database), "--raw-storage-dir", str(raw_root),
+                "--storage-mode", "long_term",
+            ])
+        )
+        validation = ingest_server._storage_policy_from_arguments(
+            ingest_server._parser().parse_args([
+                "--database", str(self.database), "--raw-storage-dir", str(raw_root),
+                "--storage-mode", "validation",
+            ])
+        )
+        self.assertEqual((long_term.minimum_total_bytes, long_term.minimum_free_bytes), (100 * gib, 10 * gib))
+        self.assertEqual((validation.minimum_total_bytes, validation.minimum_free_bytes), (20 * gib, 5 * gib))
+
     async def test_full_integrity_check_allows_unrelated_legacy_foreign_key_violation(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("CREATE TABLE legacy_parents (id INTEGER PRIMARY KEY)")
@@ -621,7 +1058,11 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         environment.update({
             "SL651_RAW_STORAGE_HOST_PATH": "/tmp/codex-station-raw-placeholder",
             "SL651_BIND_PORT": "15505",
-            "SL651_STORAGE_MODE": "validation",
+            "SL651_STORAGE_MODE": "governance",
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES": "8589934592",
+            "SL651_ARCHIVE_MINIMUM_FREE_BYTES": "1073741824",
+            "SL651_HOT_MINIMUM_TOTAL_BYTES": "10737418240",
+            "SL651_HOT_MINIMUM_FREE_BYTES": "2147483648",
             "SL651_CREDENTIAL_PEPPER": "test-only-placeholder",
             "MINIPROGRAM_STATE": "formal",
             "WX_APPSECRET": "test-only-placeholder",
@@ -634,6 +1075,16 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
         self.assertNotIn("directory is not set", rendered.stderr.lower())
         rendered_services = json.loads(rendered.stdout)["services"]
+        rendered_receiver_environment = rendered_services["station-ingest"]["environment"]
+        self.assertEqual(rendered_receiver_environment["SL651_STORAGE_MODE"], "governance")
+        self.assertEqual(
+            rendered_receiver_environment["SL651_ARCHIVE_MINIMUM_TOTAL_BYTES"],
+            "8589934592",
+        )
+        self.assertEqual(
+            rendered_receiver_environment["SL651_HOT_MINIMUM_FREE_BYTES"],
+            "2147483648",
+        )
         rendered_command = rendered_services["station-ingest-permissions"]["command"][2]
         self.assertEqual(rendered_command.count('"$$directory"'), 4)
         # Compose's config output preserves the escape; the command delivered to
@@ -646,7 +1097,14 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("umask 0007", web["command"][2])
         self.assertEqual(web["environment"]["LD_PRELOAD"], "/opt/libsqlite-group-mode.so")
         self.assertEqual(
-            web["depends_on"]["station-ingest-permissions"]["condition"],
+            web["depends_on"]["station-ingest-cutover"]["condition"],
+            "service_completed_successfully",
+        )
+
+        cutover = compose["station-ingest-cutover"]
+        self.assertIn("station_ingest_cutover.py prepare", cutover["command"][2])
+        self.assertEqual(
+            cutover["depends_on"]["station-ingest-permissions"]["condition"],
             "service_completed_successfully",
         )
 
@@ -658,13 +1116,25 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--storage-mode ${SL651_STORAGE_MODE:-long_term}", receiver["command"][2])
         self.assertEqual(receiver["environment"]["SL651_RAW_STORAGE_DIR"], "/var/lib/station-ingest/raw")
         self.assertEqual(receiver["environment"]["SL651_STORAGE_MODE"], "${SL651_STORAGE_MODE:-long_term}")
+        for name in (
+            "SL651_ARCHIVE_MINIMUM_TOTAL_BYTES", "SL651_ARCHIVE_MINIMUM_FREE_BYTES",
+            "SL651_HOT_MINIMUM_TOTAL_BYTES", "SL651_HOT_MINIMUM_FREE_BYTES",
+        ):
+            self.assertEqual(receiver["environment"][name], "${" + name + ":-}")
         self.assertIn("${SL651_RAW_STORAGE_HOST_PATH:?set an independent raw storage mount}:/var/lib/station-ingest/raw", receiver["volumes"])
         self.assertIn("umask 0007", receiver["healthcheck"]["test"][1])
         self.assertEqual(
-            receiver["depends_on"]["station-ingest-permissions"]["condition"],
+            receiver["depends_on"]["station-ingest-cutover"]["condition"],
             "service_completed_successfully",
         )
         self.assertEqual(receiver["ports"], ["127.0.0.1:${SL651_BIND_PORT:-5505}:5005"])
+
+        maintenance = compose["station-ingest-retention"]
+        self.assertEqual(maintenance["user"], "10001:10001")
+        self.assertTrue(maintenance["read_only"])
+        self.assertIn("maintain-once", maintenance["command"][2])
+        self.assertIn("--lock-file", maintenance["command"][2])
+        self.assertNotIn("compact-copy", maintenance["command"][2])
 
         probe = compose["station-ingest-permission-check"]
         self.assertEqual(probe["user"], "0:0")

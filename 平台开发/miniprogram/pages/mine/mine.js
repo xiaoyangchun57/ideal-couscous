@@ -1,6 +1,7 @@
 const { getUser, getSites, clear } = require('../../utils/auth.js');
 const maps = require('../../services/maps.js');
 const api = require('../../services/api.js');
+const { resolveUploadUrl } = require('../../utils/url.js');
 const { canReview, loadReviewTodoCount } = require('../../utils/reviewAccess.js');
 const {
   authoritativeUnreadCount,
@@ -16,12 +17,15 @@ function canUseVehicle(user) {
 }
 
 Page({
-  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: null, reviewTodo: 0, canReview: false, canUseVehicle: false },
+  data: { realName: '', roleCn: '', phone: '', sitesCount: 0, unread: null, reviewTodo: 0, canReview: false, canUseVehicle: false,
+    qualityOpen: false, qualityMonth: '', qualityLoading: false, qualityError: '', qualityDeduction: 0, qualityPhotos: [] },
 
   onLoad() {
     this._alive = true;
     this._unreadRequestId = 0;
     this._unreadRevision = currentUnreadRevision();
+    const today = new Date();
+    this.setData({ qualityMonth: today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') });
   },
 
   onShow() {
@@ -40,6 +44,7 @@ Page({
     });
     this._prepareUnreadRefresh();
     this.loadUnreadCount();
+    if (this.data.qualityOpen) this.loadPhotoQuality();
     loadReviewTodoCount(u, api.auditPending)
       .then(count => this.setData({ reviewTodo: count }))
       .catch(() => this.setData({ reviewTodo: 0 }));
@@ -47,6 +52,7 @@ Page({
 
   onUnload() {
     this._alive = false;
+    this._qualityRequest = (this._qualityRequest || 0) + 1;
     this._unreadRequestId = (this._unreadRequestId || 0) + 1;
   },
 
@@ -76,6 +82,34 @@ Page({
       });
   },
 
+  togglePhotoQuality() {
+    this.setData({ qualityOpen: !this.data.qualityOpen });
+    if (this.data.qualityOpen) this.loadPhotoQuality();
+  },
+  changeQualityMonth(event) {
+    this.setData({ qualityMonth: event.detail.value });
+    this.loadPhotoQuality();
+  },
+  loadPhotoQuality() {
+    const requestId = this._qualityRequest = (this._qualityRequest || 0) + 1;
+    this.setData({ qualityLoading: true, qualityError: '', qualityPhotos: [] });
+    return api.photoQualityMonthly(this.data.qualityMonth).then(result => {
+      if (!this._alive || requestId !== this._qualityRequest) return;
+      this.setData({ qualityLoading: false, qualityDeduction: result.deduction || 0,
+        qualityPhotos: (result.photos || []).map(photo => ({ ...photo, display_url: resolveUploadUrl(photo.display_url) })) });
+    }).catch(error => {
+      if (!this._alive || requestId !== this._qualityRequest) return;
+      this.setData({ qualityLoading: false, qualityError: error.error || error.message || '明细加载失败，请重试' });
+    });
+  },
+  previewQualityPhoto(event) {
+    const url = event.currentTarget.dataset.url;
+    if (url) wx.previewImage({ current: url, urls: this.data.qualityPhotos.map(photo => photo.display_url) });
+  },
+  openQualityInspection(event) {
+    const photo = this.data.qualityPhotos.find(row => row.attachment_id === Number(event.currentTarget.dataset.id));
+    if (photo) wx.navigateTo({ url: '/pages/inspection/inspection?plan_id=' + photo.plan_id + '&site_id=' + photo.site_id + '&source=photo_quality_history' });
+  },
   goMessage() { wx.navigateTo({ url: '/pages/message/message' }); },
   goReports() { wx.navigateTo({ url: '/pages/reports/reports' }); },
   goReview() { wx.navigateTo({ url: '/pages/review/view' }); },

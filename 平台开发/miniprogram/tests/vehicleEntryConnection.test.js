@@ -122,6 +122,8 @@ test('vehicle page exposes explicit load states, exact item actions and the prod
   assert.match(view, /loadState === 'initial_error'[\s\S]*bindtap="onRetryLoad"/);
   assert.match(view, /loadState === 'refresh_error'[\s\S]*刷新成功前不可操作/);
   assert.match(view, /activeUseConflict[\s\S]*多条未归还行程/);
+  assert.match(view, /activeUse\.plan_deleted[\s\S]*关联计划已删除，请完成还车以释放车辆/);
+  assert.match(view, /activeUse\.plan_status === 'unknown'[\s\S]*核对异常/);
   assert.match(view, /bindtap="onOpenExtension" data-id="\{\{item\.id\}\}"/);
   assert.match(js, /_writeBlockReason\(\)[\s\S]*authorityFresh[\s\S]*activeUseConflict/);
   assert.match(service, /'application_id'/);
@@ -136,6 +138,40 @@ test('regular entry loads current data without opening a sheet', async () => {
   assert.equal(page.data.authorityFresh, true);
   assert.equal(page.data.extensionSheet.open, false);
   assert.equal(app.globalData.vehicleTarget, null);
+});
+
+test('deleted plan trip becomes a return action while unaudited missing plan stays blocked', async () => {
+  api.vehicleInspectionTemplate = () => Promise.resolve([
+    { key: '轮胎', label: '轮胎', status: 'normal', remark: '' },
+  ]);
+  stubSuccessfulLoad({
+    applications: [application(1)],
+    uses: [use(9, 1, {
+      is_plan_trip: true, plan_status: 'deleted', plan_deleted: true,
+      plan_issue_message: '关联计划已删除，请完成还车以释放车辆', can_return: true,
+    })],
+  });
+  const deleted = pageInstance();
+  deleted.load();
+  await flush();
+  assert.equal(deleted.data.activeUse.plan_deleted, true);
+  deleted.onVehiclePrimaryAction();
+  await flush();
+  assert.equal(deleted.data.returnSheet.open, true);
+
+  stubSuccessfulLoad({
+    applications: [application(2)],
+    uses: [use(10, 2, {
+      is_plan_trip: true, plan_status: 'unknown', can_return: false,
+      plan_issue_message: '关联计划数据异常，请联系管理员核对',
+    })],
+  });
+  const missing = pageInstance();
+  missing.load();
+  await flush();
+  missing.onVehiclePrimaryAction();
+  assert.match(toasts.at(-1).title, /关联计划数据异常/);
+  assert.equal(missing.data.returnSheet.open, false);
 });
 
 test('cold-start approval result restores one exact application without opening an action sheet', async () => {

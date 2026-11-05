@@ -2,16 +2,26 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const api = require('../services/api.js');
+const { presentLatestCycle } = require('../utils/stationMonitoringPresentation.js');
 
 let definition;
 global.getApp = () => ({ globalData: {} });
 global.Page = page => { definition = page; };
 let cachedUser = { capabilities: { station_monitoring_public: true } };
-const navigations = [];
-global.wx = { navigateTo: options => navigations.push(options.url), getStorageSync: key => key === 'user' ? cachedUser : null };
+const navigationUrls = [];
+const scrollPositions = [];
+global.wx = {
+  navigateTo: options => navigationUrls.push(options.url),
+  pageScrollTo: options => scrollPositions.push(options.scrollTop),
+  getStorageSync: key => key === 'user' ? cachedUser : null,
+};
 require('../pages/responsible-sites/responsible-sites.js');
 
-const originals = { stationMonitoringSites: api.stationMonitoringSites, responsibleSites: api.responsibleSites };
+const originals = {
+  stationMonitoringSites: api.stationMonitoringSites,
+  responsibleSites: api.responsibleSites,
+  reagentOverview: api.reagentOverview,
+};
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const makePage = () => {
   const page = Object.assign({}, definition, { data: JSON.parse(JSON.stringify(definition.data)) });
@@ -24,55 +34,54 @@ const makePage = () => {
   try {
     const wxml = fs.readFileSync(path.join(__dirname, '../pages/responsible-sites/responsible-sites.wxml'), 'utf8');
     assert.match(wxml, /最后收到报文/);
+    assert.match(wxml, /接收：/);
+    assert.match(wxml, /结果：/);
+    assert.match(wxml, /最新结果时间/);
+    assert.doesNotMatch(wxml, /latest_cycle\.scheduled_at/);
     assert.match(wxml, /wx:if="\{\{monitoringPublic\}\}"/);
-    assert.match(wxml, /监测能力未启用/);
-    assert.doesNotMatch(wxml, /状态未知/);
     assert.doesNotMatch(wxml, /RTU|仪器状态|最后通信/);
     const calls = [];
     api.stationMonitoringSites = options => {
       calls.push(options);
       return Promise.resolve({
         scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
-        items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
+        items: [{
+          id: 1, site_id: 1, name: '本人站', is_responsible: true,
+          monitoring_status_label: '等待首帧',
+          latest_cycle: { status: 'incomplete', arrived_count: 2, formed_count: 1, expected_count: 3 },
+        }]
       });
     };
     const page = makePage();
-    assert.equal(page.data.activeTab, 'stations', 'the approved station mode is visible by default');
     page.onShow();
     await flush();
-    assert.deepEqual(calls[0], { scope: 'mine', keyword: '' }, 'first request must use mine');
+    assert.deepEqual(calls[0], { scope: 'all', keyword: '' }, 'public monitoring opens the full current-service directory');
     assert.equal(page.data.canViewAll, true, 'scope switch follows server capability');
     assert.equal(page.data.sites[0].is_responsible, true);
-    assert.equal(page.data.monitoringEnabled, true);
-    assert.equal(page.data.sites[0].monitoring_status_label, '等待首帧');
+    assert.equal(page.data.sites[0].latest_cycle.arrived_count_display, 2, 'arrived count takes precedence over legacy formed count');
+    assert.equal(page.data.sites[0].latest_cycle.status_label, '结果缺项');
+    assert.equal(presentLatestCycle({ formed_count: 4, expected_count: 5 }).arrived_count_display, 4);
+    assert.equal(presentLatestCycle({ status: 'complete' }).status_label, '结果完整');
+    assert.equal(presentLatestCycle({ status: 'pending' }).status_label, '结果形成中');
+    assert.equal(presentLatestCycle({ status: 'pending', arrived_count: 1, expected_count: 2 }).status_label, '结果缺项');
+    assert.equal(presentLatestCycle({ status: 'pending', formed_count: 1, expected_count: 2 }).status_label, '结果缺项');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'expected_factors_unconfigured' }).status_label, '应监测因子未设置');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'time_configuration_missing' }).status_label, '时间配置缺失');
+    assert.equal(presentLatestCycle({ status: 'not_configured', reason_code: 'no_evaluable_period' }).status_label, '暂无可评价时段');
 
-    api.stationMonitoringSites = () => Promise.resolve({
-      scope: 'mine', available_scopes: ['mine'], scope_counts: { mine: 1, all: null },
-      items: [{ id: 10, site_id: 10, name: '门禁前成功站点', monitoring_status_label: '等待首帧' }]
-    });
-    const gatedAfterSuccess = makePage();
-    gatedAfterSuccess.onShow();
-    await flush();
-    assert.equal(gatedAfterSuccess.data.monitoringPublic, true);
-
-    let failedGateDirectoryCalls = 0;
-    api.stationMonitoringSites = () => Promise.reject({ status: 403, code: 'STATION_MONITORING_ADMIN_ONLY' });
-    api.responsibleSites = () => {
-      failedGateDirectoryCalls += 1;
-      return new Promise((resolve, reject) => { rejectDirectoryFallback = reject; });
+    const reagentCalls = [];
+    api.reagentOverview = options => {
+      reagentCalls.push(options);
+      return Promise.resolve({
+        scope: options.scope, available_scopes: ['mine'], scope_counts: { mine: 1 }, items: [],
+      });
     };
-    let rejectDirectoryFallback;
-    gatedAfterSuccess.loadSites('mine', '');
+    page.onTabReagent();
     await flush();
-    assert.equal(failedGateDirectoryCalls, 1, 'a monitoring gate response still attempts the authorized directory');
-    assert.equal(gatedAfterSuccess.data.monitoringPublic, false, 'a gate response hides retained monitoring fields before fallback completes');
-    assert.equal(gatedAfterSuccess.data.monitoringEnabled, false);
-    rejectDirectoryFallback(new Error('directory unavailable'));
+    assert.deepEqual(reagentCalls[0], { scope: 'mine' }, 'public monitoring does not widen reagent scope');
+    page.onTabSites();
     await flush();
-    assert.equal(gatedAfterSuccess.data.sites[0].monitoring_status_label, '等待首帧', 'the last successful directory remains available');
-    assert.equal(gatedAfterSuccess.data.error, '站点目录加载失败，请重试');
-    gatedAfterSuccess.openSite({ currentTarget: { dataset: { id: 10 } } });
-    assert.equal(navigations.at(-1), '/pages/site/site?site_id=10&source=responsible_sites_profile');
+    assert.equal(page.data.scope, 'all', 'returning to monitoring restores its full-directory scope');
 
     let staticCalls = 0;
     let closedMonitoringCalls = 0;
@@ -86,48 +95,8 @@ const makePage = () => {
     closed.onShow();
     await flush();
     assert.equal(closed.data.monitoringPublic, false);
-    assert.equal(closed.data.monitoringEnabled, false);
     assert.equal(staticCalls, 1);
     assert.equal(closedMonitoringCalls, 0, 'closed capability must make zero monitoring requests');
-
-    let staleCapabilityMonitoringCalls = 0;
-    let staleCapabilityDirectoryCalls = 0;
-    cachedUser = { capabilities: { station_monitoring_public: true } };
-    api.stationMonitoringSites = () => {
-      staleCapabilityMonitoringCalls += 1;
-      return Promise.reject({ status: 403, code: 'STATION_MONITORING_PUBLIC_DISABLED' });
-    };
-    api.responsibleSites = options => {
-      staleCapabilityDirectoryCalls += 1;
-      return Promise.resolve({
-        scope: options.scope, available_scopes: ['mine'], scope_counts: { mine: 1, all: null },
-        items: [{ site_id: 6, name: '回退站点', monitoring_status_label: '不应展示' }]
-      });
-    };
-    const staleCapability = makePage();
-    staleCapability.onShow();
-    assert.equal(staleCapability.data.monitoringPublic, false, 'monitoring fields stay hidden until the endpoint confirms availability');
-    await flush();
-    await flush();
-    assert.equal(staleCapabilityMonitoringCalls, 1);
-    assert.equal(staleCapabilityDirectoryCalls, 1, 'an explicit monitoring gate response falls back to the authorized directory');
-    assert.equal(staleCapability.data.monitoringPublic, false);
-    assert.equal(staleCapability.data.monitoringEnabled, false);
-    assert.equal(staleCapability.data.sites[0].id, 6, 'site_id is normalized for list keys and navigation');
-    assert.equal(staleCapability.data.sites[0].site_id, 6);
-    staleCapability.openSite({ currentTarget: { dataset: { id: 6 } } });
-    assert.equal(navigations.at(-1), '/pages/site/site?site_id=6&source=responsible_sites_profile');
-
-    let networkFallbackCalls = 0;
-    api.stationMonitoringSites = () => Promise.reject({ status: 0, network: true });
-    api.responsibleSites = () => { networkFallbackCalls += 1; return Promise.resolve({ items: [] }); };
-    const networkFailure = makePage();
-    networkFailure.onShow();
-    await flush();
-    assert.equal(networkFallbackCalls, 0, 'network failures must stay visible instead of silently changing data sources');
-    assert.equal(networkFailure.data.sites.length, 0);
-    assert.equal(networkFailure.data.error, '站点监测信息加载失败，请重试');
-
     cachedUser = { capabilities: { station_monitoring_public: true } };
     api.stationMonitoringSites = options => {
       calls.push(options);
@@ -136,25 +105,61 @@ const makePage = () => {
         items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
       });
     };
-    page.onScopeAll();
-    await flush();
-    assert.deepEqual(calls[1], { scope: 'all', keyword: '' });
     assert.equal(page.data.scope, 'all');
     page.onKeywordInput({ detail: { value: ' 水站 A&B ' } });
     page.onSearch();
     await flush();
-    assert.deepEqual(calls[2], { scope: 'all', keyword: '水站 A&B' });
+    assert.deepEqual(calls[1], { scope: 'all', keyword: '水站 A&B' });
     assert.equal(page.data.keyword, '水站 A&B');
+
+    const returnRefresh = [];
+    api.stationMonitoringSites = options => new Promise(resolve => {
+      returnRefresh.push({ options, resolve });
+    });
+    page.data.activeTab = 'stations';
+    page.data.scope = 'all';
+    page.data.pendingScope = null;
+    page.data.keywordInput = '水站 A&B';
+    page.data.keyword = '水站 A&B';
+    page.data.sites = [{ id: 20, name: '筛选结果' }];
+    page.onPageScroll({ scrollTop: 360 });
+    page.openSite({ currentTarget: { dataset: { id: 20 } } });
+    page.onHide();
+    page.data.scope = 'mine';
+    page.data.keywordInput = '';
+    page.data.keyword = '';
+    page.data.sites = [];
+    page.onShow();
+    assert.equal(page.data.scope, 'all');
+    assert.equal(page.data.keywordInput, '水站 A&B');
+    assert.equal(page.data.keyword, '水站 A&B');
+    assert.equal(page.data.sites[0].id, 20, 'return restores the prior list before refresh completes');
+    assert.equal(scrollPositions.at(-1), 360);
+    assert.deepEqual(returnRefresh[0].options, { scope: 'all', keyword: '水站 A&B' });
+    returnRefresh[0].resolve({
+      scope: 'all', available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 1 },
+      items: [{ id: 20, name: '刷新后的筛选结果' }],
+    });
+    await flush();
+    assert.equal(page.data.sites[0].name, '刷新后的筛选结果');
+    page.openSite({ currentTarget: { dataset: { id: 20 } } });
+    page.onUnload();
+    assert.equal(page._stationReturnSnapshot, null, 'unload clears the one-time return snapshot');
+    const freshEntry = makePage();
+    assert.equal(freshEntry.data.scope, 'mine');
+    assert.equal(freshEntry.data.keyword, '');
+    assert.deepEqual(freshEntry.data.sites, []);
+
+    api.stationMonitoringSites = options => {
+      calls.push(options);
+      return Promise.resolve({
+        scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
+        items: [{ id: 1, site_id: 1, name: '本人站', is_responsible: true, monitoring_status_label: '等待首帧' }]
+      });
+    };
     page.onClearSearch();
     await flush();
-    assert.deepEqual(calls[3], { scope: 'all', keyword: '' });
-
-    const blockedScopeCallCount = calls.length;
-    const blockedScope = makePage();
-    blockedScope.data.canViewAll = false;
-    blockedScope.onScopeAll();
-    await flush();
-    assert.equal(calls.length, blockedScopeCallCount, 'a non-admin view cannot request the all scope');
+    assert.deepEqual(calls[2], { scope: 'all', keyword: '' });
 
     api.stationMonitoringSites = () => Promise.resolve({
       scope: 'mine', available_scopes: ['mine'], scope_counts: { mine: 0, all: null }, items: []
@@ -184,25 +189,6 @@ const makePage = () => {
     await flush();
     assert.equal(retained.data.sites[0].id, 8);
     assert.match(retained.data.error, /重试/);
-
-    api.stationMonitoringSites = options => Promise.resolve({
-      scope: options.scope, available_scopes: ['mine', 'all'], scope_counts: { mine: 1, all: 2 },
-      items: [{ site_id: 12, name: '状态保持站点' }]
-    });
-    const preserved = makePage();
-    preserved.data.scope = 'all';
-    preserved.data.keyword = ' 保留条件 ';
-    preserved.onShow();
-    await flush();
-    assert.equal(preserved.data.scope, 'all');
-    assert.equal(preserved.data.keyword, '保留条件');
-    preserved.onHide();
-    preserved.onShow();
-    await flush();
-    assert.equal(preserved.data.scope, 'all');
-    assert.equal(preserved.data.keyword, '保留条件', 'returning from detail keeps the confirmed scope and search');
-    preserved.openSite({ currentTarget: { dataset: { id: 12 } } });
-    assert.equal(navigations.at(-1), '/pages/site/site?site_id=12&source=responsible_sites_monitoring');
 
     const failedCalls = [];
     api.stationMonitoringSites = options => {

@@ -7,7 +7,8 @@
 
 API 档位只由小程序 `envVersion` 决定：
 
-- `develop`（开发者工具模拟器和真机调试）固定访问 `http://192.168.2.107:5000`，档位为 `local`。
+- `develop`：开发者工具固定访问 `http://127.0.0.1:5000`；真机调试前由上一级
+  `dev_scripts/prepare-miniprogram-local-api.ps1` 临时准备当前私网地址，未准备时失败关闭；档位为 `local`。
 - `trial`、`release` 固定访问 `https://ops.hhyc-tec.cn`，档位为 `online`。
 
 开发 API 不可达时应直接显示网络失败，不使用存储覆盖、过期切换或线上回退。真实 UI 证据格式见

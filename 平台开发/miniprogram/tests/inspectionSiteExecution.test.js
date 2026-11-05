@@ -32,6 +32,9 @@ let modals = [];
 let scrollCalls = [];
 let switchTabs = 0;
 let navigationUrls = [];
+let navigationCalls = [];
+let chosenPaths = [];
+let chosenSourceTypes = [];
 
 global.getApp = () => app;
 global.Page = page => { definition = page; };
@@ -49,7 +52,17 @@ global.wx = {
   authorize: ({ success }) => success(),
   getLocation: ({ success }) => success({ latitude: 28.6, longitude: 115.7 }),
   switchTab: options => { switchTabs += 1; if (options.success) options.success(); },
-  navigateTo: options => { navigationUrls.push(options.url); }, reLaunch: () => {}, stopPullDownRefresh: () => {},
+  navigateTo: options => { navigationUrls.push(options.url); navigationCalls.push(options); },
+  chooseMedia: options => {
+    chosenSourceTypes.push(options.sourceType);
+    options.success({ tempFiles: chosenPaths.map(tempFilePath => ({ tempFilePath })) });
+  },
+  compressImage: options => options.success({ tempFilePath: options.src }),
+  saveFile: options => options.success({
+    savedFilePath: 'wxfile://usr/' + String(options.tempFilePath).split('/').pop(),
+  }),
+  getFileSystemManager: () => ({ readFile: options => options.success({ data: 'image' }) }),
+  previewImage: () => {}, reLaunch: () => {}, stopPullDownRefresh: () => {},
   setNavigationBarTitle: () => {}, pageScrollTo: options => { scrollCalls.push(options); },
   removeSavedFile: () => {},
 };
@@ -77,6 +90,9 @@ function resetStorage() {
   scrollCalls = [];
   switchTabs = 0;
   navigationUrls = [];
+  navigationCalls = [];
+  chosenPaths = [];
+  chosenSourceTypes = [];
 }
 
 function seedStation(page, overrides) {
@@ -102,6 +118,11 @@ const originals = {
   executionSiteTasks: api.executionSiteTasks,
   executionSiteReagents: api.executionSiteReagents,
   submitManualReport: api.submitManualReport,
+  uploadSitePhoto: api.uploadSitePhoto,
+  attachmentDetail: api.attachmentDetail,
+  deletePendingSitePhoto: api.deletePendingSitePhoto,
+  deletePhoto: api.deletePhoto,
+  correctInspectionItemPhotos: api.correctInspectionItemPhotos,
 };
 
 (async () => {
@@ -117,18 +138,198 @@ const originals = {
     }
     assert.equal((wxml.match(/bindtap="onSubmitReport"/g) || []).length, 1,
       'the report sheet has one visible submit action bound only to onSubmitReport');
+    assert.equal((wxml.match(/bindtap="onTakeReportPhoto"/g) || []).length, 1,
+      'the inspection report sheet exposes the trusted camera action');
+    assert.equal((wxml.match(/bindtap="onAddReportPhoto"/g) || []).length, 1,
+      'the inspection report sheet keeps a separate album-material action');
     assert.match(wxml, /wx:elif="\{\{stationStage\.code === 'local_pending'\}\}"[\s\S]{0,180}bindtap="onSyncNow"/);
     assert.doesNotMatch(wxml, /stationStage\.code === 'local_pending'[\s\S]{0,320}bindtap="onCheckOut"/);
     assert.match(wxml, /<!-- 校准信息 -->\s*<view class="ip-fp-section" wx:if="\{\{sheet\.requiresCalibration\}\}">/);
     assert.match(wxml, /本次补拍[\s\S]{0,120}sheet\.photoInfo\.required/);
-    assert.match(wxml, /原照片待审核/);
+    assert.doesNotMatch(wxml, /原照片待审核/);
+    assert.doesNotMatch(wxml, /replacementPhotoStatus\s*!==\s*'pending_review'/);
     assert.doesNotMatch(wxml, /整改要求：\{\{sheet\.item\.supplement_reason/);
+
+    resetStorage();
+    const cameraReportPage = createPage();
+    seedStation(cameraReportPage);
+    cameraReportPage.onOpenReport();
+    const reportUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      reportUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 51, url: '/uploads/site_photos/report-camera.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-camera.jpg?ticket=camera-ticket',
+      });
+    };
+    const cameraTask = cameraReportPage.onTakeReportPhoto();
+    await flush();
+    const cameraNavigation = navigationCalls.at(-1);
+    assert.match(cameraNavigation.url, /capture_context=manual_report/);
+    cameraNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(cameraNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-camera.jpg', captureSession: 'report-camera-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await cameraTask;
+    assert.equal(reportUploads.length, 1);
+    assert.equal(reportUploads[0].siteId, 20);
+    assert.equal(reportUploads[0].metadata.capture_context, 'manual_report');
+    assert.equal(reportUploads[0].metadata.capture_session, 'report-camera-session');
+    assert.equal(reportUploads[0].metadata.capture_frame_ratio, '3:4');
+    assert.equal(reportUploads[0].metadata.display_watermark, true,
+      'older camera results without the field keep the visible watermark default');
+    assert.equal(cameraReportPage.data.reportSheet.photoSiteId, 20);
+    assert.deepEqual(cameraReportPage.data.reportSheet.photos, ['/uploads/site_photos/report-camera.jpg']);
+    assert.match(cameraReportPage.data.reportSheet.photoItems[0].displayUrl, /\?ticket=camera-ticket$/);
+
+    let attachmentReads = 0;
+    api.attachmentDetail = attachmentId => {
+      attachmentReads += 1;
+      assert.equal(attachmentId, 51);
+      return Promise.resolve({
+        id: 51,
+        stored_path: '/uploads/site_photos/report-camera.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-camera.jpg?ticket=refreshed-' + attachmentReads,
+      });
+    };
+    const cameraPhotoKey = cameraReportPage.data.reportSheet.photoItems[0].key;
+    await cameraReportPage.onReportPhotoMediaError({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 1);
+    assert.match(cameraReportPage.data.reportSheet.photoItems[0].displayUrl, /ticket=refreshed-1$/);
+    await cameraReportPage.onReportPhotoMediaError({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 1, 'inspection report media automatically refreshes at most once');
+    assert.equal(cameraReportPage.data.reportSheet.photoItems[0].mediaError, '照片加载失败，点击重试');
+    await cameraReportPage.onRetryReportPhotoMedia({ currentTarget: { dataset: { key: cameraPhotoKey } } });
+    assert.equal(attachmentReads, 2, 'inspection report media exposes an explicit retry');
+
+    const albumReportPage = createPage();
+    seedStation(albumReportPage);
+    albumReportPage.onOpenReport();
+    chosenPaths = ['/tmp/report-album.jpg'];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      reportUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 52, url: '/uploads/site_photos/report-album.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-album.jpg?ticket=album-ticket',
+      });
+    };
+    await albumReportPage.onAddReportPhoto();
+    assert.deepEqual(chosenSourceTypes.at(-1), ['album']);
+    assert.equal(reportUploads.at(-1).metadata.capture_source, 'unknown');
+    assert.equal(reportUploads.at(-1).metadata.capture_context, undefined);
+
+    // Failed trusted-camera uploads retain the capture session and retry identity.
+    resetStorage();
+    const failedUploadPage = createPage();
+    seedStation(failedUploadPage);
+    failedUploadPage.onOpenReport();
+    const retryUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      retryUploads.push({ siteId, image, key, metadata });
+      if (retryUploads.length === 1) return Promise.reject({ error: '网络响应丢失' });
+      return Promise.resolve({
+        id: 53, url: '/uploads/site_photos/report-retry.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-retry.jpg?ticket=retry-ticket',
+      });
+    };
+    const failedCaptureTask = failedUploadPage.onTakeReportPhoto();
+    await flush();
+    const failedNavigation = navigationCalls.at(-1);
+    failedNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(failedNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-retry.jpg', captureSession: 'report-retry-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+      displayWatermark: false,
+    });
+    await failedCaptureTask;
+    const failedPhoto = failedUploadPage.data.reportSheet.photoItems[0];
+    assert.equal(failedPhoto.status, 'failed');
+    assert.equal(failedPhoto.localPath, 'wxfile://usr/report-retry.jpg');
+    assert.equal(failedPhoto.metadata.capture_session, 'report-retry-session');
+    assert.equal(failedPhoto.metadata.display_watermark, false);
+    assert.equal(failedPhoto.metadata._idempotency_key, failedPhoto.idempotencyKey);
+    failedUploadPage.data.reportSheet.description = '泵房异响';
+    let blockedReportWrites = 0;
+    api.submitManualReport = () => { blockedReportWrites += 1; return Promise.resolve({}); };
+    await failedUploadPage.onSubmitReport();
+    assert.equal(blockedReportWrites, 0);
+    await failedUploadPage.onRetryReportPhoto({ currentTarget: { dataset: { key: failedPhoto.key } } });
+    assert.equal(retryUploads[1].key, retryUploads[0].key);
+    assert.equal(retryUploads[1].metadata.capture_session, 'report-retry-session');
+    assert.equal(retryUploads[1].metadata.display_watermark, false,
+      'manual report retry preserves the original photo watermark choice');
+    assert.equal(failedUploadPage.data.reportSheet.photoItems[0].status, 'uploaded');
+    assert.match(failedUploadPage.data.reportSheet.photoItems[0].displayUrl, /\?ticket=retry-ticket$/);
+    assert.deepEqual(failedUploadPage.data.reportSheet.photos, ['/uploads/site_photos/report-retry.jpg']);
+
+    // A capture-session rejection cannot reuse the old upload identity and requires a fresh camera capture.
+    resetStorage();
+    const expiredCapturePage = createPage();
+    seedStation(expiredCapturePage);
+    expiredCapturePage.onOpenReport();
+    const expiredUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      expiredUploads.push({ siteId, image, key, metadata });
+      if (expiredUploads.length === 1) {
+        return Promise.resolve({
+          success: true,
+          accepted_for_review: false,
+          code: 'CAPTURE_SESSION_REQUIRED',
+          reason: '异常上报现场拍摄授权无效、已过期或与当前站点不一致',
+          next_action: '请返回异常上报重新发起现场拍摄',
+        });
+      }
+      return Promise.resolve({
+        id: 54,
+        url: '/uploads/site_photos/report-recaptured.jpg',
+        display_url: 'http://127.0.0.1:5000/uploads/site_photos/report-recaptured.jpg?ticket=recaptured-ticket',
+      });
+    };
+    const expiredTask = expiredCapturePage.onTakeReportPhoto();
+    await flush();
+    const expiredNavigation = navigationCalls.at(-1);
+    expiredNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(expiredNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-expired.jpg', captureSession: 'expired-report-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await expiredTask;
+    const expiredPhoto = expiredCapturePage.data.reportSheet.photoItems[0];
+    assert.equal(expiredPhoto.requiresNewCapture, true);
+    assert.equal(expiredPhoto.failureCode, 'CAPTURE_SESSION_REQUIRED');
+    assert.equal(expiredPhoto.error, '异常上报现场拍摄授权无效、已过期或与当前站点不一致');
+    assert.equal(expiredPhoto.nextAction, '请返回异常上报重新发起现场拍摄');
+    const recaptureTask = expiredCapturePage.onRetryReportPhoto({
+      currentTarget: { dataset: { key: expiredPhoto.key } },
+    });
+    await flush();
+    assert.equal(expiredUploads.length, 1, 'inspection never retries the rejected capture session');
+    assert.match(modals.at(-1).content, /请返回异常上报重新发起现场拍摄/);
+    const recaptureNavigation = navigationCalls.at(-1);
+    recaptureNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(recaptureNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/report-recaptured.jpg', captureSession: 'fresh-report-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+    });
+    await recaptureTask;
+    assert.equal(expiredUploads.length, 2);
+    assert.equal(expiredUploads[1].metadata.capture_session, 'fresh-report-session');
+    assert.notEqual(expiredUploads[1].key, expiredUploads[0].key);
+    assert.equal(expiredCapturePage.data.reportSheet.photoItems.length, 1);
+    assert.equal(expiredCapturePage.data.reportSheet.photoItems[0].status, 'uploaded');
+    assert.deepEqual(expiredCapturePage.data.reportSheet.photos, ['/uploads/site_photos/report-recaptured.jpg']);
 
     resetStorage();
     const reportPage = createPage();
     seedStation(reportPage);
     reportPage.data.reportSheet = {
-      open: true, typeIndex: 1, description: '', photos: [], submitting: false
+      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '',
+      photos: [], photoSiteId: null, uploading: false, submitting: false
     };
     let reportWrites = 0;
     let reportRequest = deferred();
@@ -148,11 +349,18 @@ const originals = {
     reportPage.onSubmitReport();
     assert.equal(reportWrites, 0, 'reports without a ready photo do not call the write API');
     reportPage.data.reportSheet.photos = ['/uploads/site_photos/equipment.jpg'];
+    reportPage.data.reportSheet.photoSiteId = 20;
+    const immediateSetData = reportPage.setData;
+    reportPage.setData = (patch, done) => {
+      if (patch['reportSheet.submitting'] === true) return;
+      immediateSetData(patch, done);
+    };
     reportPage.onSubmitReport();
     reportPage.onSubmitReport();
     await flush();
     await flush();
-    assert.equal(reportWrites, 1, 'double taps issue one report request');
+    assert.equal(reportWrites, 1, 'double taps issue one report request before async setData is visible');
+    reportPage.setData = immediateSetData;
     reportRequest.reject({ error: '网络异常' });
     await flush();
     await flush();
@@ -175,8 +383,9 @@ const originals = {
     assert.equal(reportRefreshes, 1, 'only a confirmed work order refreshes the station data');
 
     reportPage.data.reportSheet = {
-      open: true, typeIndex: 1, description: '水泵异响',
-      photos: ['/uploads/site_photos/equipment.jpg'], submitting: false
+      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '水泵异响',
+      photos: ['/uploads/site_photos/equipment.jpg'], photoSiteId: 20,
+      uploading: false, submitting: false
     };
     api.submitManualReport = () => Promise.resolve({});
     reportPage.onSubmitReport();
@@ -257,14 +466,80 @@ const originals = {
     itemPage.data.sheet.calibrator = '历史脏数据';
     itemPage.data.sheet.calValues = '7.00';
     let normalSubmitWrites = 0;
-    api.submitItem = () => { normalSubmitWrites += 1; return Promise.resolve({ photo_urls: [] }); };
+    let normalSubmitPayload;
+    api.submitItem = payload => { normalSubmitWrites += 1; normalSubmitPayload = payload; return Promise.resolve({ photo_urls: [] }); };
     itemPage.onSubmitItem();
     await flush();
-    assert.equal(normalSubmitWrites, 0, 'hidden calibration values cannot complete a normal item');
-    assert.equal(itemPage.data.sheet.open, true, 'rejected normal submission preserves the item panel');
-    assert.equal(toasts.at(-1).title, '请填写现场说明或拍摄照片');
+    assert.equal(normalSubmitWrites, 1, 'explicit submission is allowed without a photo or remark');
+    assert.equal(normalSubmitPayload.calibrator, undefined, 'hidden calibration data is not submitted for a normal item');
+    assert.equal(normalSubmitPayload.calibration_values, undefined);
     itemPage.onCloseSheet();
     assert.deepEqual(scrollCalls.at(-1), { scrollTop: 187, duration: 0 });
+
+    resetStorage();
+    const submittedAwayPage = createPage();
+    seedStation(submittedAwayPage, { checked_in: false, checked_out: true });
+    submittedAwayPage.data.categories = [{ items: [{
+      item_id: 311, plan_id: 10, item_name: '离站后已提交项', result: 'normal',
+      review_status: 2, evidence_status: 'effective', required_photos: 0,
+      photo_urls: '[]', evidence_attachments: [], requiresCalibration: false,
+    }, {
+      item_id: 312, plan_id: 10, item_name: '未重新签到的整改项', result: 'abnormal',
+      review_status: 3, evidence_status: 'supplement_required', required_photos: 1,
+      current_photo_urls: ['/uploads/original.jpg'], evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    submittedAwayPage.onOpenItem({ currentTarget: { dataset: { id: 311 } } });
+    assert.equal(submittedAwayPage.data.sheet.open, true,
+      'submitted items remain available after checkout');
+    assert.equal(submittedAwayPage.data.sheet.readOnly, true);
+    submittedAwayPage.onCloseSheet();
+    submittedAwayPage.onOpenItem({ currentTarget: { dataset: { id: 312 } } });
+    assert.equal(submittedAwayPage.data.sheet.open, true,
+      'a submitted rework item remains available before the next check-in');
+    assert.equal(submittedAwayPage.data.sheet.readOnly, true,
+      'rework editing still requires an active site check-in');
+    assert.equal(modals.some(item => item.title === '请先到站打卡'), false,
+      'read-only submitted-item review never opens the check-in action modal');
+
+    resetStorage();
+    const cameraItemPage = createPage();
+    seedStation(cameraItemPage);
+    cameraItemPage.data.categories = [{ items: [{
+      item_id: 308, plan_id: 10, item_name: '相机水印契约', result: null,
+      category: 'log_books',
+      required_photos: 1, evidence_attachments: [], requiresCalibration: false,
+    }] }];
+    cameraItemPage.onOpenItem({ currentTarget: { dataset: { id: 308 } } });
+    const inspectionUploads = [];
+    api.uploadSitePhoto = (siteId, image, key, metadata) => {
+      inspectionUploads.push({ siteId, image, key, metadata });
+      return Promise.resolve({
+        id: 61, url: '/uploads/site_photos/inspection-hidden-watermark.jpg',
+        display_url: '/uploads/site_photos/inspection-hidden-watermark.jpg',
+        accepted_for_review: true, supplemental: false,
+      });
+    };
+    const inspectionCaptureTask = cameraItemPage.onAddPhoto({
+      currentTarget: { dataset: { source: 'camera' } },
+    });
+    await flush();
+    const inspectionNavigation = navigationCalls.at(-1);
+    assert.equal(new URLSearchParams(inspectionNavigation.url.split('?')[1]).get('item_category'),
+      'log_books', 'inspection category reaches the trusted camera entry');
+    inspectionNavigation.events.trustedCameraCaptured({
+      requestId: new URLSearchParams(inspectionNavigation.url.split('?')[1]).get('request_id'),
+      path: '/tmp/inspection-hidden-watermark.jpg',
+      captureSession: 'inspection-hidden-watermark-session',
+      gpsLat: 28.6, gpsLng: 115.7,
+      frameOrientation: 'portrait', frameRatio: '3:4', frameMode: 'center_cover',
+      displayWatermark: false,
+    });
+    await inspectionCaptureTask;
+    assert.equal(inspectionUploads.length, 1);
+    assert.equal(inspectionUploads[0].metadata.display_watermark, false);
+    assert.equal(inspectionUploads[0].metadata.capture_session,
+      'inspection-hidden-watermark-session');
 
     resetStorage();
     const supplementPage = createPage();
@@ -284,25 +559,159 @@ const originals = {
       { required: 1, captured: 1, missing: 0, ready: true });
 
     resetStorage();
-    const pendingReviewPage = createPage();
-    seedStation(pendingReviewPage);
-    pendingReviewPage.data.categories = [{ items: [{
+    const legacyPendingReviewPage = createPage();
+    seedStation(legacyPendingReviewPage);
+    legacyPendingReviewPage.data.categories = [{ items: [{
       item_id: 306, plan_id: 10, item_name: '待审核照片', result: 'normal', review_status: 3,
       evidence_status: 'supplement_required', replacement_photo_status: 'pending_review',
+      replacement_submission_allowed: false,
       replacement_block_reason: '原照片待审核，审核完成后才能补拍',
       replacement_required_photos: null, current_photo_urls: [], evidence_attachments: [],
       requiresCalibration: false,
     }] }];
-    pendingReviewPage.onOpenItem({ currentTarget: { dataset: { id: 306 } } });
-    assert.equal(pendingReviewPage.data.sheet.replacementPhotoStatus, 'pending_review');
-    assert.equal(pendingReviewPage.data.sheet.photoInfo.blocked, true);
+    legacyPendingReviewPage.onOpenItem({ currentTarget: { dataset: { id: 306 } } });
+    assert.equal(legacyPendingReviewPage.data.sheet.replacementPhotoStatus, 'pending_review');
+    assert.equal(legacyPendingReviewPage.data.sheet.photoInfo.blocked === true, false,
+      'legacy pending-review data no longer blocks replacement capture');
     let pendingReviewWrites = 0;
     api.submitItem = () => { pendingReviewWrites += 1; return Promise.resolve({}); };
-    pendingReviewPage.onSubmitItem();
-    assert.equal(pendingReviewWrites, 0, 'pending original review cannot submit a replacement');
-    assert.equal(toasts.at(-1).title, '原照片待审核，审核完成后才能补拍');
-    pendingReviewPage.onAddPhoto({ currentTarget: { dataset: { source: 'camera' } } });
-    assert.equal(toasts.at(-1).title, '原照片待审核，审核完成后才能补拍');
+    legacyPendingReviewPage.onSubmitItem();
+    assert.equal(pendingReviewWrites, 0, 'submitted records are viewed without a replacement obligation');
+    assert.equal(legacyPendingReviewPage.data.sheet.supplementOnly, false);
+    assert.equal(legacyPendingReviewPage.data.sheet.readOnly, true);
+    let photoPickerCalls = 0;
+    wx.chooseMedia = options => {
+      photoPickerCalls += 1;
+      options.fail({ errMsg: 'chooseMedia:fail cancel' });
+    };
+    await legacyPendingReviewPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
+    delete wx.chooseMedia;
+    assert.equal(photoPickerCalls, 0, 'viewing a quality opinion does not start replacement capture');
+    assert.equal(toasts.some(item => /原照片待审核/.test(item.title || '')), false);
+
+    resetStorage();
+    const replacementSubmittedPage = createPage();
+    seedStation(replacementSubmittedPage);
+    replacementSubmittedPage.data.categories = [{ items: [{
+      item_id: 307, plan_id: 10, item_name: '补拍已提交', result: 'normal', review_status: 1,
+      evidence_status: 'replacement_submitted', replacement_photo_status: 'replacement_pending_review',
+      replacement_submission_allowed: false,
+      replacement_block_reason: '补拍照片已提交业务审核，审核完成前不能重复编辑',
+      replacement_required_photos: null, current_photo_urls: ['/uploads/replacement.jpg'],
+      pending_photo_urls: ['/uploads/replacement.jpg'], evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    replacementSubmittedPage.onOpenItem({ currentTarget: { dataset: { id: 307 } } });
+    assert.notEqual(replacementSubmittedPage.data.sheet.photoInfo.blocked, true);
+    assert.equal(replacementSubmittedPage.data.sheet.supplementOnly, false);
+    let lockedPickerCalls = 0;
+    wx.chooseMedia = () => { lockedPickerCalls += 1; };
+    replacementSubmittedPage.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
+    delete wx.chooseMedia;
+    assert.equal(lockedPickerCalls, 0, 'submitted replacement cannot start another photo selection');
+    assert.equal(replacementSubmittedPage.data.sheet.readOnly, true);
+    const lockedPhotos = replacementSubmittedPage.data.sheet.photos.slice();
+    replacementSubmittedPage.onDelPhoto({ currentTarget: { dataset: { idx: 0 } } });
+    assert.deepEqual(replacementSubmittedPage.data.sheet.photos, lockedPhotos,
+      'submitted replacement cannot delete photos while business review is pending');
+    let replacementSubmitWrites = 0;
+    api.submitItem = () => { replacementSubmitWrites += 1; return Promise.resolve({}); };
+    replacementSubmittedPage.onSubmitItem();
+    assert.equal(replacementSubmitWrites, 0, 'submitted replacement cannot be submitted twice');
+
+    resetStorage();
+    const correctionPage = createPage();
+    seedStation(correctionPage);
+    correctionPage.data.categories = [{ items: [{
+      item_id: 309, plan_id: 10, item_name: '已提交检查项', result: 'abnormal',
+      remark: '原说明', requiresCalibration: true, calibrator: '原校准人',
+      calibration_values: '7.00', review_status: 1, evidence_status: 'accepted',
+      photo_correction_allowed: true, photo_correction_block_reason: '', required_photos: 1,
+      photo_urls: JSON.stringify(['/uploads/formal-a.jpg', '/uploads/formal-b.jpg']),
+      pending_photo_urls: [], evidence_attachments: [],
+    }] }];
+    correctionPage.onOpenItem({ currentTarget: { dataset: { id: 309 } } });
+    assert.equal(correctionPage.data.sheet.open, true);
+    assert.equal(correctionPage.data.sheet.readOnly, true,
+      'a submitted item always opens in read-only mode');
+    assert.equal(correctionPage.data.sheet.photoCorrection, false);
+    correctionPage.onStartPhotoCorrection();
+    assert.equal(correctionPage.data.sheet.readOnly, false);
+    assert.equal(correctionPage.data.sheet.photoCorrection, true,
+      'the explicit action enters photo-only correction mode');
+    correctionPage.onSetResult({ currentTarget: { dataset: { r: 'normal' } } });
+    correctionPage.onRemark({ detail: { value: '被篡改说明' } });
+    correctionPage.onCalibrator({ detail: { value: '被篡改校准人' } });
+    correctionPage.onCalValues({ detail: { value: '9.99' } });
+    assert.equal(correctionPage.data.sheet.result, 'abnormal');
+    assert.equal(correctionPage.data.sheet.remark, '原说明');
+    assert.equal(correctionPage.data.sheet.calibrator, '原校准人');
+    assert.equal(correctionPage.data.sheet.calValues, '7.00');
+
+    let legacyFormalDeletes = 0;
+    api.deletePhoto = () => { legacyFormalDeletes += 1; return Promise.resolve({}); };
+    const formalDisplayUrl = correctionPage.data.sheet.photos[0];
+    correctionPage.data.sheet.correctionIdempotencyKey = 'stale-formal-key';
+    correctionPage.onDelPhoto({ currentTarget: { dataset: { idx: 1 } } });
+    assert.equal(legacyFormalDeletes, 0,
+      'formal photo correction never calls the legacy immediate-delete endpoint');
+    assert.deepEqual(correctionPage.data.sheet.photos, [formalDisplayUrl]);
+    assert.equal(correctionPage.data.sheet.correctionIdempotencyKey, '',
+      'changing the formal photo selection rotates the correction idempotency key');
+
+    correctionPage.setData({
+      'sheet.photos': [formalDisplayUrl, '/uploads/pending-new.jpg'],
+      'sheet.pendingPhotos': ['/uploads/pending-new.jpg'],
+      'sheet.correctionIdempotencyKey': 'stale-pending-key',
+    });
+    let pendingDeletes = 0;
+    api.deletePendingSitePhoto = path => {
+      pendingDeletes += 1;
+      return Promise.resolve({ success: true, deleted: true, path });
+    };
+    await correctionPage.onDelPhoto({ currentTarget: { dataset: { idx: 1 } } });
+    assert.equal(pendingDeletes, 1);
+    assert.deepEqual(correctionPage.data.sheet.photos, [formalDisplayUrl]);
+    assert.deepEqual(correctionPage.data.sheet.pendingPhotos, []);
+    assert.equal(correctionPage.data.sheet.correctionIdempotencyKey, '',
+      'removing a pending upload also rotates the correction idempotency key');
+
+    let correctionPayload = null;
+    let correctionCalls = 0;
+    api.correctInspectionItemPhotos = (itemId, payload) => {
+      correctionCalls += 1;
+      correctionPayload = { itemId, payload };
+      return Promise.resolve({ photo_urls: ['/uploads/formal-a.jpg'] });
+    };
+    correctionPage.loadTasks = () => {};
+    await correctionPage.onSavePhotoCorrection();
+    assert.equal(correctionCalls, 1);
+    assert.equal(correctionPayload.itemId, 309);
+    assert.deepEqual(correctionPayload.payload.photo_urls, ['/uploads/formal-a.jpg']);
+    assert.match(correctionPayload.payload._idempotency_key,
+      /^inspection-photo-correction-309-/);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'result'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'remark'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'calibrator'), false);
+    assert.equal(Object.hasOwn(correctionPayload.payload, 'calibration_values'), false);
+    assert.equal(correctionPage.data.sheet.open, false);
+
+    resetStorage();
+    const blockedCorrectionPage = createPage();
+    seedStation(blockedCorrectionPage);
+    blockedCorrectionPage.data.categories = [{ items: [{
+      item_id: 310, plan_id: 10, item_name: '人工审核后检查项', result: 'normal',
+      review_status: 2, evidence_status: 'accepted', photo_correction_allowed: false,
+      photo_correction_block_reason: '审核人已形成结论，不能再修改照片',
+      required_photos: 0, photo_urls: '[]', evidence_attachments: [],
+      requiresCalibration: false,
+    }] }];
+    blockedCorrectionPage.onOpenItem({ currentTarget: { dataset: { id: 310 } } });
+    assert.equal(blockedCorrectionPage.data.sheet.readOnly, true);
+    blockedCorrectionPage.onStartPhotoCorrection();
+    assert.equal(blockedCorrectionPage.data.sheet.photoCorrection, false,
+      'the client cannot enter correction mode without server capability');
+    assert.equal(toasts.at(-1).title, '审核人已形成结论，不能再修改照片');
 
     resetStorage();
     const normalWithRemark = createPage();
@@ -328,6 +737,7 @@ const originals = {
     seedStation(calibrationPage);
     const calibration = Object.assign({}, itemPage.data.categories[0].items[0], {
       item_id: 303, item_name: '仪器质控', requiresCalibration: true,
+      result: null, review_status: 0, sync_pending: false,
     });
     calibrationPage.data.categories = [{ items: [calibration] }];
     calibrationPage.onOpenItem({ currentTarget: { dataset: { id: 303 } } });

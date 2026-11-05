@@ -62,7 +62,8 @@ class FreezeSecurityTest(unittest.TestCase):
                     review_status TEXT, reviewer_id INTEGER, reviewed_at TEXT,
                     reject_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     evidence_qualification TEXT DEFAULT 'qualified',
-                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT ''
+                    evidence_reason TEXT DEFAULT '', evidence_next_action TEXT DEFAULT '',
+                    extra_json TEXT DEFAULT ''
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT UNIQUE, site_id INTEGER,
@@ -199,7 +200,7 @@ class FreezeSecurityTest(unittest.TestCase):
             'photo_ids': [10],
         }).status_code, 403)
 
-    def test_operator_and_reviewer_site_scope_and_admin_access(self):
+    def test_operator_stays_site_scoped_while_reviewer_can_review_company_photos(self):
         self.assertEqual(self.status('operator-1', 'get', '/api/inspection/photos/1').status_code, 200)
         self.assertEqual(self.status('operator-1', 'get', '/api/inspection/photos/2').status_code, 403)
         retired = self.status('operator-1', 'post', '/api/inspection/photos/upload', json={
@@ -211,9 +212,8 @@ class FreezeSecurityTest(unittest.TestCase):
             'site_id': 1, 'requirement_id': 100,
         }).status_code, 403)
         self.assertEqual(self.status('reviewer-1', 'post', '/api/inspection/photos/10/review', json={}).status_code, 200)
-        self.assertEqual(self.status('reviewer-1', 'post', '/api/inspection/photos/12/review', json={}).status_code, 403)
+        self.assertEqual(self.status('reviewer-1', 'post', '/api/inspection/photos/12/review', json={}).status_code, 200)
         self.assertEqual(self.status('admin', 'get', '/api/inspection/photos/2').status_code, 200)
-        self.assertEqual(self.status('admin', 'post', '/api/inspection/photos/12/review', json={}).status_code, 200)
 
     def test_batch_validation_is_atomic_for_missing_unauthorized_and_cross_site(self):
         before = self.attachment_statuses()
@@ -223,10 +223,11 @@ class FreezeSecurityTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(self.attachment_statuses(), before)
 
-        unauthorized = self.status('reviewer-1', 'post', '/api/inspection/photos/batch-review', json={
+        mixed_reviewer = self.status('reviewer-1', 'post', '/api/inspection/photos/batch-review', json={
             'photo_ids': [10, 12],
         })
-        self.assertEqual(unauthorized.status_code, 403)
+        self.assertEqual(mixed_reviewer.status_code, 403)
+        self.assertEqual(mixed_reviewer.json['code'], 'CROSS_SITE_BATCH')
         self.assertEqual(self.attachment_statuses(), before)
 
         mixed_admin = self.status('admin', 'post', '/api/inspection/photos/batch-review', json={
@@ -249,6 +250,14 @@ class FreezeSecurityTest(unittest.TestCase):
         })
         self.assertEqual(noninspection.status_code, 404)
         self.assertEqual(self.attachment_statuses()[20], 'pending')
+
+        before_batch = self.attachment_statuses()
+        noninspection_batch = self.status(
+            'admin', 'post', '/api/inspection/photos/batch-review',
+            json={'photo_ids': [20], 'action': 'approve'},
+        )
+        self.assertEqual(noninspection_batch.status_code, 404)
+        self.assertEqual(self.attachment_statuses(), before_batch)
 
     def test_duplicate_batch_ids_update_and_notify_once(self):
         response = self.status('reviewer-1', 'post', '/api/inspection/photos/batch-review', json={
@@ -313,16 +322,17 @@ class FreezeSecurityTest(unittest.TestCase):
                     'SELECT id, review_status FROM insp_plan_items ORDER BY id'
                 ).fetchall())
 
-        before = item_statuses()
         self.assertEqual(self.status('operator-1', 'put',
                                      '/api/inspection-v2/items/100/review',
                                      json={'action': 'approve'}).status_code, 403)
         self.assertEqual(self.status('reviewer-1', 'put',
                                      '/api/inspection-v2/items/101/review',
-                                     json={'action': 'approve'}).status_code, 403)
+                                     json={'action': 'approve'}).status_code, 200)
+        with app_module.get_db() as db:
+            db.execute('UPDATE insp_plan_items SET review_status=1,reviewer_id=NULL,review_time=NULL WHERE id=101')
+        before = item_statuses()
         for payload, expected in [
             ({'approve_ids': [100, 999]}, 404),
-            ({'approve_ids': [100, 101]}, 403),
             ({'approve_ids': [100, 102]}, 409),
         ]:
             response = self.status('reviewer-1', 'post',
@@ -332,9 +342,10 @@ class FreezeSecurityTest(unittest.TestCase):
 
         valid = self.status('reviewer-1', 'post',
                             '/api/inspection-v2/items/batch-review',
-                            json={'approve_ids': [100]})
+                            json={'approve_ids': [100, 101]})
         self.assertEqual(valid.status_code, 200, valid.json)
         self.assertEqual(item_statuses()[100], 2)
+        self.assertEqual(item_statuses()[101], 2)
 
     def test_operation_attachment_batch_prevalidates_every_object_before_writing(self):
         def snapshot():
@@ -350,12 +361,9 @@ class FreezeSecurityTest(unittest.TestCase):
 
         for payload, expected in [
             ({'attachment_ids': [10, 999], 'action': 'approve'}, 404),
-            ({'attachment_ids': [12], 'action': 'approve'}, 403),
-            ({'attachment_ids': [10, 12], 'action': 'approve'}, 403),
             ({'attachment_ids': [10, 13], 'action': 'approve'}, 409),
             ({'attachment_ids': [10, 14], 'action': 'approve'}, 409),
             ({'attachment_ids': [10, 20], 'action': 'approve'}, 400),
-            ({'approve_item_ids': [102, 101]}, 403),
             ({'approve_item_ids': [102]}, 409),
         ]:
             before = snapshot()
@@ -364,7 +372,7 @@ class FreezeSecurityTest(unittest.TestCase):
             self.assertEqual(response.status_code, expected, response.json)
             self.assertEqual(snapshot(), before)
 
-        allowed = self.status('admin', 'post', '/api/operation-attachments/review', json={
+        allowed = self.status('reviewer-1', 'post', '/api/operation-attachments/review', json={
             'attachment_ids': [10, 12], 'action': 'approve',
         })
         self.assertEqual(allowed.status_code, 200, allowed.json)

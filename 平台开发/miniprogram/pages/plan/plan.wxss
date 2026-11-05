@@ -1,40 +1,24 @@
 /* pages/plan/plan.wxss */
 
-/* ===== 导航栏 ===== */
+/* ===== 导航栏（范围切换器样式见全局 .nav-scope） ===== */
 .nav-plan-left {
   display: flex;
   align-items: center;
-  gap: 16rpx;
+  gap: var(--space-4);
   height: 100%;
 }
 
 .nav-plan-title {
-  font-size: 34rpx;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.scope-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6rpx;
-  padding: 8rpx 16rpx;
-  background: var(--muted);
-  border-radius: 12rpx;
-  font-size: 26rpx;
-  color: var(--text-secondary);
-}
-
-.scope-arrow {
-  font-size: 20rpx;
-  color: var(--text-tertiary);
+  font-size: var(--font-title-1);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
 }
 
 /* ===== 范围切换中提示 ===== */
 .scope-pending-bar {
   margin: 16rpx 32rpx 0;
-  background: var(--accent);
-  color: var(--primary);
+  background: var(--color-primary-surface);
+  color: var(--color-primary);
   border-radius: 12rpx;
   padding: 14rpx 20rpx;
   font-size: 24rpx;
@@ -47,7 +31,7 @@
   width: 24rpx;
   height: 24rpx;
   border: 3rpx solid rgba(0, 122, 255, 0.3);
-  border-top-color: var(--primary);
+  border-top-color: var(--color-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -56,40 +40,11 @@
   to { transform: rotate(360deg); }
 }
 
-/* ===== 分段控件（对齐设计系统 segmented-control 规范） ===== */
+/* ===== 分段控件外层（主筛选：导航栏下方第一个控件）
+   控件本身样式消费全局 .segment-control，页面级只调间距 ===== */
 .segment-wrap {
-  padding: 16rpx 32rpx 12rpx;
+  padding: var(--space-4) var(--space-8) var(--space-3);
   box-sizing: border-box;
-}
-
-.segment-control {
-  display: flex;
-  height: 64rpx;
-  background: var(--color-type-bg);
-  border-radius: var(--radius-sm);
-  padding: 4rpx;
-  box-sizing: border-box;
-}
-
-.segment-item {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  font-size: 26rpx;
-  color: var(--color-text-secondary);
-  border-radius: calc(var(--radius-sm) - 2rpx);
-  transition: all 0.2s ease;
-  font-weight: 500;
-  box-sizing: border-box;
-}
-
-.segment-item.active {
-  background: var(--color-card);
-  color: var(--color-text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 /* ===== 工具行 ===== */
@@ -105,35 +60,35 @@
   align-items: center;
   gap: 10rpx;
   padding: 20rpx 20rpx;
-  background: var(--card);
+  background: var(--color-card);
   border-radius: 16rpx;
   font-size: 26rpx;
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
 }
 
 .tool-btn-primary {
-  background: var(--card);
+  background: var(--color-card);
 }
 
 .tool-btn-primary .tool-text {
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   font-weight: 500;
 }
 
 .tool-btn-primary .tool-chevron {
-  color: var(--text-quaternary);
+  color: var(--color-text-quaternary);
 }
 
 .tool-icon-star {
   width: 28rpx;
   height: 28rpx;
-  background: var(--primary);
+  background: var(--color-primary);
   clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
   flex-shrink: 0;
 }
 
 .tool-btn-primary .tool-icon-star {
-  background: var(--primary);
+  background: var(--color-primary);
 }
 
 .tool-icon-plus {
@@ -146,7 +101,7 @@
 .tool-icon-plus::after {
   content: '';
   position: absolute;
-  background: var(--primary);
+  background: var(--color-primary);
   border-radius: 2rpx;
 }
 .tool-icon-plus::before {
@@ -166,19 +121,19 @@
 
 .tool-btn-primary .tool-icon-plus::before,
 .tool-btn-primary .tool-icon-plus::after {
-  background: var(--primary);
+  background: var(--color-primary);
 }
 
 .tool-text {
   flex: 1;
   font-size: 26rpx;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   font-weight: 500;
 }
 
 .tool-chevron {
   font-size: 32rpx;
-  color: var(--text-quaternary);
+  color: var(--color-text-quaternary);
   font-weight: 300;
 }
 
@@ -186,7 +141,7 @@
 .refresh-error-bar {
   margin: 0 32rpx 16rpx;
   background: rgba(255, 59, 48, 0.06);
-  color: var(--destructive);
+  color: var(--color-error);
   border-radius: 12rpx;
   padding: 14rpx 20rpx;
   font-size: 24rpx;
@@ -199,7 +154,7 @@
   width: 12rpx;
   height: 12rpx;
   border-radius: 50%;
-  background: var(--destructive);
+  background: var(--color-error);
   flex-shrink: 0;
 }
 
@@ -233,7 +188,7 @@
   content: '!';
   font-size: 44rpx;
   font-weight: 600;
-  color: var(--destructive);
+  color: var(--color-error);
   position: absolute;
   top: 50%;
   left: 50%;
@@ -243,13 +198,13 @@
 .error-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   margin-bottom: 8rpx;
 }
 
 .error-subtitle {
   font-size: 26rpx;
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
   line-height: 1.5;
 }
 
@@ -257,7 +212,7 @@
   margin-top: 20rpx;
   font-size: 28rpx;
   font-weight: 500;
-  color: var(--primary);
+  color: var(--color-primary);
 }
 
 /* ===== 计划卡片列表 ===== */
@@ -267,7 +222,7 @@
 
 .plan-card-item {
   padding: 28rpx;
-  margin-bottom: 20rpx;
+  margin-bottom: var(--space-4);
 }
 
 .card-tags {
@@ -279,7 +234,7 @@
 .card-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   margin-top: 16rpx;
   display: block;
   line-height: 1.3;
@@ -298,12 +253,12 @@
 
 .meta-item {
   font-size: 24rpx;
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
 }
 
 .meta-dot {
   font-size: 24rpx;
-  color: var(--text-quaternary);
+  color: var(--color-text-quaternary);
 }
 
 .card-status-note {
@@ -316,17 +271,17 @@
   overflow: hidden;
 }
 
-.note-neutral { color: var(--text-tertiary); }
-.note-info { color: var(--primary); }
-.note-warning { color: var(--warning); }
-.note-success { color: var(--success); }
+.note-neutral { color: var(--color-text-tertiary); }
+.note-info { color: var(--color-primary); }
+.note-warning { color: var(--color-warning); }
+.note-success { color: var(--color-success); }
 
 .card-actions {
   display: flex;
   align-items: center;
   margin-top: 20rpx;
   padding-top: 20rpx;
-  border-top: 1rpx solid var(--border);
+  border-top: 1rpx solid var(--color-border);
 }
 
 .action-link {
@@ -334,29 +289,29 @@
   align-items: center;
   gap: 4rpx;
   font-size: 26rpx;
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
 }
 
 .action-link-primary {
-  color: var(--primary);
+  color: var(--color-primary);
   font-weight: 500;
 }
 
 .link-chevron {
   font-size: 28rpx;
   font-weight: 300;
-  color: var(--text-quaternary);
+  color: var(--color-text-quaternary);
 }
 
 .action-link-primary .link-chevron {
-  color: var(--primary);
+  color: var(--color-primary);
   opacity: 0.6;
 }
 
 .action-delete {
   margin-left: auto;
   font-size: 26rpx;
-  color: var(--destructive);
+  color: var(--color-error);
 }
 
 /* ===== 列表空态 ===== */
@@ -389,13 +344,13 @@
 .empty-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   margin-bottom: 12rpx;
 }
 
 .empty-desc {
   font-size: 26rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
   line-height: 1.5;
 }
 
@@ -409,7 +364,7 @@
 
 .skeleton-card {
   height: 200rpx;
-  background: var(--card);
+  background: var(--color-card);
   border-radius: 24rpx;
   animation: shimmer 1.5s ease-in-out infinite;
 }
@@ -436,12 +391,12 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: #ffffff;
+  background: var(--color-card);
   border-radius: 28rpx 28rpx 0 0;
   padding: 12rpx 32rpx calc(36rpx + env(safe-area-inset-bottom));
   z-index: 101;
   animation: slideUp 0.25s ease-out;
-  max-height: 84vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   overflow-y: auto;
 }
 
@@ -453,7 +408,8 @@
 .sheet-handle {
   width: 72rpx;
   height: 8rpx;
-  background: #e5e5ea;
+  background: var(--color-border);
+  opacity: 0.5;
   border-radius: 4rpx;
   margin: 0 auto 24rpx;
 }
@@ -468,12 +424,12 @@
 .sheet-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
 }
 
 .sheet-close {
   font-size: 40rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
   line-height: 1;
   padding: 8rpx;
 }
@@ -484,17 +440,17 @@
 
 .field-label {
   font-size: 24rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
   margin-bottom: 10rpx;
   display: block;
 }
 
 .input-field {
-  background: var(--muted);
+  background: var(--color-muted);
   border-radius: 16rpx;
   padding: 24rpx 28rpx;
   font-size: 28rpx;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -502,7 +458,7 @@
 
 .picker-arrow {
   font-size: 24rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
 }
 
 .form-row {
@@ -521,12 +477,12 @@
 
 .error-text {
   font-size: 24rpx;
-  color: var(--destructive);
+  color: var(--color-error);
 }
 
 .error-retry {
   font-size: 24rpx;
-  color: var(--destructive);
+  color: var(--color-error);
   font-weight: 600;
 }
 
@@ -554,7 +510,7 @@
 
 /* PM-15 favorite-plan sheet: one scroll surface and one safe-area owner. */
 .plan-favorite-sheet {
-  background: #ffffff;
+  background: var(--color-card);
   border-radius: 28rpx 28rpx 0 0;
 }
 .plan-favorite-scroll {
@@ -567,16 +523,16 @@
 }
 .plan-favorite-close .ico-close::before,
 .plan-favorite-close .ico-close::after {
-  background: var(--text-tertiary);
+  background: var(--color-text-tertiary);
 }
 .plan-favorite-sheet .sheet-actions {
   margin: 0;
   padding: 20rpx 32rpx calc(20rpx + env(safe-area-inset-bottom));
-  border-top: 1rpx solid var(--border);
+  border-top: 1rpx solid var(--color-border);
 }
 
 .btn-danger {
-  color: var(--destructive);
+  color: var(--color-error);
   border: 1rpx solid rgba(255, 59, 48, 0.3);
 }
 
@@ -595,7 +551,7 @@
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   z-index: 101;
-  max-height: 85vh;
+  max-height: 75vh; /* 设计系统 bottom-sheet 铁律 */
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -760,10 +716,10 @@
 
 /* ============================================================
  *  覆盖全局 .om-sheet 固定高度：快速选择/轻操作内容驱动紧凑化
- *  产品裁决 8.4：仅常用计划紧凑化，详情/输入类保持 88vh 高弹层
+ *  产品裁决 8.4：仅常用计划紧凑化，详情/输入类保持 75vh 高弹层
  * ============================================================ */
 
-/* 根容器：height:auto + max-height 替代全局固定 88vh，内容少时紧凑
+/* 根容器：height:auto + max-height 替代全局固定 75vh，内容少时紧凑
    选择器：.om-sheet.plan-favorite-sheet 双类（特异性 0,2,0）> 全局单类（0,1,0） */
 .om-sheet.plan-favorite-sheet {
   height: auto;

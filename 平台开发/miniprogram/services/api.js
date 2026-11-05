@@ -48,6 +48,7 @@ function vehicleListQuery(options) {
 }
 
 const api = {
+  photoQualityMonthly: (month) => request('/api/mobile/photo-quality-monthly?month=' + encodeURIComponent(month), 'GET'),
   // 登录（工号密码复用网页端）
   login: (username, password) =>
     request('/api/auth/login', 'POST', { username, password }, { retry: 1, queue: false }),
@@ -79,9 +80,12 @@ const api = {
     return request('/api/station-monitoring/sites' + (pairs.length ? '?' + pairs.join('&') : ''), 'GET', {}, { queue: false });
   },
   stationMonitoringOverview: (siteId) => request('/api/station-monitoring/sites/' + encodeURIComponent(siteId) + '/overview', 'GET', {}, { queue: false }),
-  reagentOverview: () => request('/api/reagent-overview', 'GET', {}, { queue: false }),
-  reagentReplacement: payload => request('/api/reagent-inventory/replacement', 'POST', payload, { queue: false }),
-  reagentCalibration: payload => request('/api/reagent-qc', 'POST', payload, { queue: false }),
+  reagentOverview: (options) => {
+    const scope = options && options.scope ? '?scope=' + encodeURIComponent(options.scope) : '';
+    return request('/api/reagent-overview' + scope, 'GET', {}, { queue: false });
+  },
+  replaceReagentInventory: payload => request('/api/reagent-inventory/replacement', 'POST', payload, { queue: false }),
+  submitReagentQc: payload => request('/api/reagent-qc', 'POST', payload, { queue: false }),
   responsibleSites: (options) => {
     const query = options || {};
     const pairs = [];
@@ -99,9 +103,12 @@ const api = {
 
   // 今日已批准巡检执行包（巡检 Tab 的唯一入口）
   todayExecution: () => request('/api/mobile/today-execution', 'GET'),
-  executionSiteTasks: (planId, siteId, options) =>
-    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId
-      + (options && options.reworkOnly ? '?scope=rework' : ''), 'GET'),
+  executionSiteTasks: (planId, siteId, options) => {
+    const scope = options && options.reviewOnly ? 'review'
+      : (options && options.resultOnly ? 'result' : (options && options.reworkOnly ? 'rework' : ''));
+    return request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId
+      + (scope ? '?scope=' + scope : ''), 'GET');
+  },
   checkOutExecutionSite: (planId, siteId, payload) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}),
   executionSiteReagents: (planId, siteId) =>
@@ -141,6 +148,10 @@ const api = {
 
   // 提交检查项；photo_urls 必须为 JSON 字符串
   submitItem: (payload) => request('/api/mobile/submit-item', 'POST', payload, { queue: false }),
+  correctInspectionItemPhotos: (itemId, payload) => request(
+    '/api/mobile/inspection-items/' + itemId + '/photos/correct', 'POST', payload,
+    { queue: false, retry: 0 }
+  ),
 
   // 到站打卡
   checkIn: (payload, managedByOutbox) =>
@@ -148,7 +159,8 @@ const api = {
 
   // 位置校准
   calibrate: (siteId, lat, lng, extra) =>
-    request('/api/sites/' + siteId + '/calibrate', 'PUT', Object.assign({ lat, lng }, extra || {})),
+    request('/api/sites/' + siteId + '/calibrate', 'PUT',
+      Object.assign({ lat, lng }, extra || {}), { queue: false }),
 
   // 上传站点影像（base64）；弱网失败自动进入失败队列待重传
   uploadSitePhoto: (siteId, image, idempotencyKey, metadata) =>
@@ -158,9 +170,15 @@ const api = {
     }, { queue: false, timeout: 30000, retry: 1 }),
   createPhotoCaptureSession: (payload) =>
     request('/api/mobile/photo-capture-session', 'POST', payload, { queue: false, retry: 0 }),
+  bindPhotoCaptureSessionLocation: (payload) =>
+    request('/api/mobile/photo-capture-session/location', 'POST', payload, { queue: false, retry: 0 }),
   // 删除尚未提交到巡检、工单或异常上报的现场照片
-  deletePendingSitePhoto: (url) => request(
-    '/api/mobile/site-photos/delete', 'POST', { url }, { queue: false }
+  deletePendingSitePhoto: (target) => request(
+    '/api/mobile/site-photos/delete', 'POST',
+    typeof target === 'object' ? target : { url: target }, { queue: false }
+  ),
+  attachmentDetail: (attachmentId) => request(
+    '/api/attachments/' + encodeURIComponent(attachmentId), 'GET', {}, { queue: false }
   ),
   purgeRejectedInspectionPhoto: (attachmentId) => request(
     '/api/attachments/' + attachmentId + '/purge-rejected', 'POST', {}, { queue: false }
@@ -214,6 +232,9 @@ const api = {
     request('/api/workorders' + (status ? '?status=' + status : ''), 'GET'),
   workorderDetail: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo), 'GET', {}, { queue: false }),
   workorderRelated: (orderNo) => request('/api/workorders/' + encodeURIComponent(orderNo) + '/related', 'GET', {}, { queue: false }),
+  endWorkorderWithoutProcessing: (orderNo, reason) =>
+    request('/api/workorders/' + encodeURIComponent(orderNo) + '/end-without-processing',
+      'POST', { reason: reason || '' }, { queue: false }),
 
   // 工单状态流转；closed 仅管理员；extra 透传（移动端强制携带 client:'mobile' 触发流程门禁）
   updateWorkorderStatus: (orderNo, status, extra) =>
@@ -342,6 +363,9 @@ const api = {
   // 发起变更（已通过的计划，approved → modifying）
   requestPlanScheduleChange: (id, changeReason) =>
     request('/api/plan-schedules/' + id + '/request-change', 'POST', { change_reason: changeReason }),
+
+  abandonPlanScheduleChange: (id, version) =>
+    request('/api/plan-schedules/' + id + '/abandon-change', 'POST', { version }, { queue: false }),
 
   cancelPlanSchedule: (id, reason, version) =>
     request('/api/plan-schedules/' + id + '/cancel', 'POST', {

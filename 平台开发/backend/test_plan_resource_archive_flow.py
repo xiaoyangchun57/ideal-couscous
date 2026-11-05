@@ -42,6 +42,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.original_upload_dir = app_module.UPLOAD_DIR
         self.upload_dir = tempfile.mkdtemp()
         app_module.UPLOAD_DIR = self.upload_dir
+        self.original_private_upload_dir = os.environ.get('PRIVATE_UPLOAD_DIR')
+        self.private_upload_dir = tempfile.mkdtemp()
+        os.environ['PRIVATE_UPLOAD_DIR'] = self.private_upload_dir
         app_module.datetime = FrozenBusinessDateTime
         self.original_tokens = dict(app_module._tokens)
 
@@ -217,10 +220,15 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         app_module.get_db = self.original_get_db
         app_module.datetime = self.original_datetime
         app_module.UPLOAD_DIR = self.original_upload_dir
+        if self.original_private_upload_dir is None:
+            os.environ.pop('PRIVATE_UPLOAD_DIR', None)
+        else:
+            os.environ['PRIVATE_UPLOAD_DIR'] = self.original_private_upload_dir
         app_module._tokens.clear()
         app_module._tokens.update(self.original_tokens)
         os.unlink(self.db_path)
         shutil.rmtree(self.upload_dir, ignore_errors=True)
+        shutil.rmtree(self.private_upload_dir, ignore_errors=True)
 
     @staticmethod
     def headers(token):
@@ -248,9 +256,83 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                  vehicle_id, int(vehicle_id is None),
                  json.dumps({'ok': True, 'errors': []})))
 
+    def install_real_service_policy_schema_and_roles(self):
+        migration_path = os.path.join(
+            os.path.dirname(__file__), 'migrations',
+            '20261013_013_station_service_policy.sql')
+        with open(migration_path, 'r', encoding='utf-8') as source:
+            policy_migration = source.read()
+        with self.db() as db:
+            db.executescript(policy_migration)
+            db.execute('CREATE TABLE user_roles (user_id INTEGER, role TEXT)')
+            db.executemany('INSERT INTO user_roles VALUES (?,?)', (
+                (1, 'admin'), (2, 'operator'), (3, 'operator'),
+            ))
+
+    def prepare_real_ended_site_change_with_template_growth(self, schedule_id):
+        self.install_real_service_policy_schema_and_roles()
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+            db.execute("""INSERT INTO spare_parts_inventory
+                (id,quantity,part_name,part_code,unit)
+                VALUES (1,10,'滤芯','PART-1','个')""")
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET spare_parts=? WHERE id=?', (
+                json.dumps([{'part_id': 1, 'part_name': '滤芯', 'quantity': 2}],
+                           ensure_ascii=False), schedule_id))
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,2)')
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (102,10,'New item after approval','常规',0,0,0,2)""")
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '同日增加仍在服务的站点'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
     def schedule_status(self, schedule_id):
         with self.db() as db:
             return db.execute('SELECT status FROM plan_schedules WHERE id=?', (schedule_id,)).fetchone()['status']
+
+    def submit_change_for_review(self, schedule_id):
+        self.add_submitted_schedule(schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules SET status='approved',approver_id=3,
+                approved_at='2026-08-10 09:30:00' WHERE id=?""", (schedule_id,))
+        requested = self.client.post('/api/plan-schedules/{}/request-change'.format(schedule_id),
+                                     headers=self.headers('operator-token'),
+                                     json={'change_reason': '调整巡检说明'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        saved = self.client.put('/api/plan-schedules/{}'.format(schedule_id),
+                                headers=self.headers('operator-token'),
+                                json={'version': 1, 'remarks': '待审核变更'})
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post('/api/plan-schedules/{}/submit'.format(schedule_id),
+                                     headers=self.headers('operator-token'),
+                                     json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        return submitted
 
     def creation_payload(self, key='plan-intent-1', submit=True):
         return {'_idempotency_key': key, 'schedule_type': 'weekly',
@@ -353,6 +435,39 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 "SELECT payload FROM plan_schedule_events WHERE schedule_id=801 AND event_type='cancelled'"
             ).fetchone()['payload'])
             self.assertEqual(payload['reason'], '站点顺序错误')
+
+    def test_submitted_schedule_cancel_is_authoritative_and_keeps_a_single_audit(self):
+        self.add_submitted_schedule(806, vehicle_id=None, no_vehicle_reason='无需用车')
+        detail = self.client.get(
+            '/api/plan-schedules/806', headers=self.headers('operator-token'))
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertTrue(detail.json['can_cancel'], detail.json)
+        self.assertEqual(detail.json['cancel_block_reason'], '')
+
+        response = self.client.post(
+            '/api/plan-schedules/806/cancel',
+            headers=self.headers('operator-token'),
+            json={'reason': '计划窗口调整', 'version': 1})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(
+            (response.json['status'], response.json['version']), ('cancelled', 2))
+
+        repeated = self.client.post(
+            '/api/plan-schedules/806/cancel',
+            headers=self.headers('operator-token'), json={})
+        self.assertEqual(repeated.status_code, 200, repeated.json)
+        self.assertTrue(repeated.json['already_cancelled'])
+        with self.db() as db:
+            schedule = db.execute(
+                'SELECT status,version FROM plan_schedules WHERE id=806').fetchone()
+            events = db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                WHERE schedule_id=806 AND event_type='cancelled'""").fetchone()[0]
+            timeline = db.execute("""SELECT COUNT(*) FROM timeline_events
+                WHERE source_type='plan_schedule' AND source_id=806
+                  AND event_type='cancelled'""").fetchone()[0]
+        self.assertEqual(tuple(schedule), ('cancelled', 2))
+        self.assertEqual(events, 1)
+        self.assertEqual(timeline, 1)
 
     def test_deleted_plan_audit_query_is_admin_only_and_read_only(self):
         summary = {'plan_id': 999, 'owner_id': 2, 'owner_name': 'Operator',
@@ -472,8 +587,21 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.assertTrue(owner.json['can_cancel'], owner.json)
         self.assertTrue(admin.json['can_cancel'], admin.json)
         self.assertEqual(owner.json['cancel_block_reason'], '')
-        self.assertFalse(outsider.json['can_cancel'])
-        self.assertEqual(outsider.json['cancel_block_reason'], '无权取消该计划')
+        self.assertEqual((outsider.status_code, outsider.json['code']),
+                         (403, 'PLAN_SCHEDULE_VIEW_FORBIDDEN'))
+
+        started = self.client.post(
+            '/api/plan-schedules/805/request-change',
+            headers=self.headers('operator-token'), json={'change_reason': '调整巡检日期'})
+        self.assertEqual(started.status_code, 200, started.json)
+        owner_modifying = self.client.get(
+            '/api/plan-schedules/805', headers=self.headers('operator-token'))
+        outsider_modifying = self.client.get(
+            '/api/plan-schedules/805', headers=self.headers('other-token'))
+        self.assertTrue(owner_modifying.json['can_abandon_change'])
+        self.assertEqual(owner_modifying.json['abandon_change_block_reason'], '')
+        self.assertEqual((outsider_modifying.status_code, outsider_modifying.json['code']),
+                         (403, 'PLAN_SCHEDULE_VIEW_FORBIDDEN'))
 
         with self.db() as db:
             application_id = db.execute("""INSERT INTO vehicle_applications
@@ -895,7 +1023,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                          (409, 'PLAN_VERSION_CONFLICT'))
         self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
 
-    def test_change_submit_applies_directly_without_review_notification(self):
+    def test_change_submit_waits_for_review_and_applies_only_after_approval(self):
         schedule_id = 71
         self.add_submitted_schedule(schedule_id)
         with self.db() as db:
@@ -915,60 +1043,894 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                 json={'version': 1, 'remarks': '变更后安排'})
         self.assertEqual(saved.status_code, 200, saved.json)
         with self.db() as db:
-            db.execute("UPDATE users SET status='disabled' WHERE id=1")
+            execution_before = {
+                'plans': [tuple(row) for row in db.execute(
+                    'SELECT * FROM insp_plans WHERE plan_schedule_id=? ORDER BY id',
+                    (schedule_id,)).fetchall()],
+                'items': [tuple(row) for row in db.execute("""SELECT * FROM insp_plan_items
+                    WHERE plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)
+                    ORDER BY id""", (schedule_id,)).fetchall()],
+                'vehicles': [tuple(row) for row in db.execute(
+                    'SELECT * FROM vehicle_applications ORDER BY id').fetchall()],
+                'reservations': [tuple(row) for row in db.execute(
+                    'SELECT * FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id',
+                    (schedule_id,)).fetchall()],
+            }
         submitted = self.client.post('/api/plan-schedules/71/submit',
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        self.assertEqual(submitted.json['status'], 'approved')
-        self.assertTrue(submitted.json['direct_applied'])
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        self.assertNotIn('direct_applied', submitted.json)
         with self.db() as db:
             notices = db.execute(
                 'SELECT source_type,title,payload_json FROM notifications WHERE source_id=?',
                 (schedule_id,)
             ).fetchall()
             self.assertEqual([(row['source_type'], row['title']) for row in notices],
-                             [('plan_schedule', '计划变更已生效')])
-            self.assertFalse(notices[0]['payload_json'])
+                             [('plan_schedule', '有巡检计划变更待审批')])
+            self.assertEqual(json.loads(notices[0]['payload_json']), {
+                'notification_target': 'review', 'review_type': 'plan_schedule',
+            })
             self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
-                WHERE schedule_id=? AND event_type='change_applied'""",
+                WHERE schedule_id=? AND event_type='change_submitted'""",
                                         (schedule_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                WHERE schedule_id=? AND event_type='approved'""",
+                                        (schedule_id,)).fetchone()[0], 0)
             self.assertIsNone(db.execute(
                 'SELECT approver_id FROM plan_schedules WHERE id=?', (schedule_id,)
             ).fetchone()['approver_id'])
+            self.assertIsNotNone(db.execute(
+                'SELECT previous_plan_data FROM plan_schedules WHERE id=?', (schedule_id,)
+            ).fetchone()['previous_plan_data'])
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM wx_subscription_outbox
+                WHERE purpose='approval_pending' AND business_type='plan_schedule'
+                  AND business_id=?""", (str(schedule_id),)).fetchone()[0], 1)
+            execution_after_submit = {
+                'plans': [tuple(row) for row in db.execute(
+                    'SELECT * FROM insp_plans WHERE plan_schedule_id=? ORDER BY id',
+                    (schedule_id,)).fetchall()],
+                'items': [tuple(row) for row in db.execute("""SELECT * FROM insp_plan_items
+                    WHERE plan_id IN (SELECT id FROM insp_plans WHERE plan_schedule_id=?)
+                    ORDER BY id""", (schedule_id,)).fetchall()],
+                'vehicles': [tuple(row) for row in db.execute(
+                    'SELECT * FROM vehicle_applications ORDER BY id').fetchall()],
+                'reservations': [tuple(row) for row in db.execute(
+                    'SELECT * FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id',
+                    (schedule_id,)).fetchall()],
+            }
+        self.assertEqual(execution_after_submit, execution_before)
 
         repeated = self.client.post('/api/plan-schedules/71/submit',
                                     headers=self.headers('operator-token'),
                                     json={'version': saved.json['version']})
         self.assertEqual(repeated.status_code, 200, repeated.json)
-        self.assertEqual(repeated.json['status'], 'approved')
-        self.assertTrue(repeated.json['direct_applied'])
+        self.assertEqual(repeated.json['status'], 'change_submitted')
         self.assertTrue(repeated.json['already_submitted'])
         with self.db() as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
                 (schedule_id,)).fetchone()[0], 1)
             self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
-                WHERE schedule_id=? AND event_type='change_applied'""",
+                WHERE schedule_id=? AND event_type='change_submitted'""",
                                         (schedule_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM wx_subscription_outbox
+                WHERE purpose='approval_pending' AND business_type='plan_schedule'
+                  AND business_id=?""", (str(schedule_id),)).fetchone()[0], 1)
 
-        unauthorized = self.client.post('/api/plan-schedules/71/submit',
-                                        headers=self.headers('other-token'),
-                                        json={'version': saved.json['version']})
+        unauthorized = self.client.post(
+            '/api/plan-schedules/71/approve', headers=self.headers('other-token'))
         self.assertEqual(unauthorized.status_code, 403, unauthorized.json)
-        stale = self.client.post('/api/plan-schedules/71/submit',
-                                 headers=self.headers('operator-token'),
-                                 json={'version': saved.json['version'] - 1})
-        self.assertEqual((stale.status_code, stale.json['code']),
-                         (409, 'PLAN_VERSION_CONFLICT'))
         with self.db() as db:
             self.assertEqual(db.execute(
-                "SELECT COUNT(*) FROM notifications WHERE source_id=?", (schedule_id,)
-            ).fetchone()[0], 1)
-            self.assertEqual(db.execute(
-                "SELECT COUNT(*) FROM plan_schedule_events WHERE schedule_id=?",
-                (schedule_id,)
-            ).fetchone()[0], 3)
+                'SELECT status FROM plan_schedules WHERE id=?', (schedule_id,)
+            ).fetchone()['status'], 'change_submitted')
+
+        approved = self.client.post(
+            '/api/plan-schedules/71/approve', headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['status'], 'approved')
+        self.assertTrue(approved.json['is_change'])
+        self.assertNotIn('direct_applied', approved.json)
+        with self.db() as db:
+            schedule = db.execute(
+                'SELECT status,approver_id,previous_plan_data FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone()
+            self.assertEqual((schedule['status'], schedule['approver_id']), ('approved', 1))
+            self.assertIsNone(schedule['previous_plan_data'])
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                WHERE schedule_id=? AND event_type='approved'""",
+                                        (schedule_id,)).fetchone()[0], 1)
+            self.assertGreater(db.execute(
+                'SELECT COUNT(*) FROM insp_plans WHERE plan_schedule_id=?',
+                (schedule_id,)).fetchone()[0], 0)
+
+    def test_ended_site_remark_change_preserves_existing_execution_packages(self):
+        schedule_id = 77
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute("""INSERT INTO spare_parts_inventory
+                (id,quantity,part_name,part_code,unit)
+                VALUES (1,10,'滤芯','PART-1','个')""")
+            db.execute('UPDATE plan_schedules SET spare_parts=? WHERE id=?', (
+                json.dumps([{'part_id': 1, 'part_name': '滤芯', 'quantity': 2}],
+                           ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        with self.db() as db:
+            before_plans = [tuple(row) for row in db.execute("""SELECT id,status,schedule_version
+                FROM insp_plans WHERE plan_schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            before_items = [tuple(row) for row in db.execute("""SELECT id,plan_id,site_id,item_name,
+                    execution_status FROM insp_plan_items WHERE plan_id IN (
+                        SELECT id FROM insp_plans WHERE plan_schedule_id=?) ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '修正备注'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
+        with mock.patch.object(
+                app_module, '_current_service_site_ids',
+                side_effect=lambda _db, site_ids: [sid for sid in site_ids if int(sid) != 1]):
+            validated = self.client.post(
+                '/api/plan-schedules/validate', headers=self.headers('operator-token'),
+                json={
+                    'user_id': 2, 'schedule_type': 'monthly',
+                    'period_start': self.day(), 'period_end': self.day(),
+                    'plan_data': {self.day(): {'sites': [1]}},
+                    'vehicle_id': 1, 'vehicle_days': {self.day(): 1},
+                    'vehicle_exception_reason': '',
+                    'exclude_schedule_id': schedule_id,
+                })
+            self.assertEqual(validated.status_code, 200, validated.json)
+            saved = self.client.put(
+                f'/api/plan-schedules/{schedule_id}',
+                headers=self.headers('operator-token'),
+                json={'version': 1, 'remarks': '结束站点存量计划备注修正'})
+            self.assertEqual(saved.status_code, 200, saved.json)
+            submitted = self.client.post(
+                f'/api/plan-schedules/{schedule_id}/submit',
+                headers=self.headers('operator-token'),
+                json={'version': saved.json['version']})
+            self.assertEqual(submitted.status_code, 200, submitted.json)
+            approved = self.client.post(
+                f'/api/plan-schedules/{schedule_id}/approve',
+                headers=self.headers('manager-token'))
+            self.assertEqual(approved.status_code, 200, approved.json)
+
+        self.assertEqual(approved.json['cancelled'], 0)
+        self.assertEqual(approved.json['plans_created'], 0)
+        self.assertEqual(approved.json['items_created'], 0)
+        with self.db() as db:
+            after_plans = [tuple(row) for row in db.execute("""SELECT id,status,schedule_version
+                FROM insp_plans WHERE plan_schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            after_items = [tuple(row) for row in db.execute("""SELECT id,plan_id,site_id,item_name,
+                    execution_status FROM insp_plan_items WHERE plan_id IN (
+                        SELECT id FROM insp_plans WHERE plan_schedule_id=?) ORDER BY id""",
+                (schedule_id,)).fetchall()]
+            remarks = db.execute(
+                'SELECT remarks FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone()['remarks']
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual([row[:2] for row in after_plans], [row[:2] for row in before_plans])
+        self.assertEqual(after_items, before_items)
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+        self.assertEqual(remarks, '结束站点存量计划备注修正')
+
+    def test_ended_site_legacy_selection_keeps_approved_items_in_mixed_site_rebuild(self):
+        schedule_id = 80
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            db.execute("""UPDATE inspection_template_items
+                SET item_name='Original renamed after approval' WHERE id=101""")
+            original_item = db.execute("""SELECT pi.id,pi.plan_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(original_item['item_name'], 'Original')
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [101], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual((approved.json['cancelled'], approved.json['plans_created'],
+                          approved.json['items_created']), (0, 0, 2))
+
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name,pi.plan_id
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+            original_history = db.execute(
+                'SELECT item_name,execution_status FROM insp_plan_items WHERE id=?',
+                (original_item['id'],)).fetchone()
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original', original_item['plan_id']),
+            (2, 'Original renamed after approval', original_item['plan_id']),
+            (2, 'New item after approval', original_item['plan_id']),
+        ])
+        self.assertEqual(tuple(original_history), ('Original', 'active'))
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_ended_site_inactive_template_keeps_existing_result_and_evidence(self):
+        schedule_id = 82
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            db.execute("ALTER TABLE inspection_template_items ADD COLUMN status TEXT DEFAULT 'active'")
+            db.execute("UPDATE inspection_template_items SET status='inactive' WHERE id=101")
+            original_item = db.execute("""SELECT pi.id,pi.plan_id
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            db.execute("""UPDATE insp_plan_items
+                SET result='normal',remark='已完成原批准义务',photo_urls='["trusted.jpg"]',
+                    actual_photos=1 WHERE id=?""", (original_item['id'],))
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual((approved.json['cancelled'], approved.json['plans_created'],
+                          approved.json['items_created']), (0, 0, 1))
+
+        with self.db() as db:
+            kept = db.execute("""SELECT id,plan_id,item_name,result,remark,photo_urls,
+                    actual_photos,execution_status
+                FROM insp_plan_items WHERE id=?""", (original_item['id'],)).fetchone()
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(tuple(kept), (
+            original_item['id'], original_item['plan_id'], 'Original', 'normal',
+            '已完成原批准义务', '["trusted.jpg"]', 1, 'active',
+        ))
+        self.assertEqual(active_items, [
+            (1, 'Original'), (2, 'New item after approval'),
+        ])
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_ended_site_unmapped_legacy_facts_never_fall_back_to_current_template(self):
+        schedule_id = 83
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        with self.db() as db:
+            plan = db.execute("""SELECT id,plan_snapshot FROM insp_plans
+                WHERE plan_schedule_id=? AND status!='cancelled'""",
+                (schedule_id,)).fetchone()
+            snapshot = json.loads(plan['plan_snapshot'])
+            snapshot[self.day()].pop('_approved_item_ids', None)
+            db.execute('UPDATE insp_plans SET plan_snapshot=? WHERE id=?', (
+                json.dumps(snapshot, ensure_ascii=False), plan['id']))
+            db.execute("""UPDATE inspection_template_items
+                SET item_name='Original renamed after approval' WHERE id=101""")
+
+        before = self.side_effect_snapshot(schedule_id)
+        rejected = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2], 'inspection_items': {'1': [101]},
+                }},
+            })
+        self.assertEqual(
+            (rejected.status_code, rejected.json.get('code')),
+            (409, 'PLAN_APPROVED_ITEM_SNAPSHOT_UNAVAILABLE'), rejected.json)
+        self.assert_side_effect_snapshot_unchanged(
+            before, self.side_effect_snapshot(schedule_id))
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertNotIn(
+            '1', saved.json['plan_data'][self.day()].get('inspection_items', {}))
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original'),
+            (2, 'Original renamed after approval'),
+            (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_known_empty_approval_stays_empty_without_template_fallback(self):
+        schedule_id = 84
+        self.install_real_service_policy_schema_and_roles()
+        with self.db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (2,2)')
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+        self.add_submitted_schedule(schedule_id)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [], '2': [101]},
+                }}, ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (102,10,'New item after approval','常规',0,0,0,2)""")
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '更新仍在服务站点的检查项'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [1, 2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (2, 'Original'), (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_removal_preserves_factual_items_and_cancels_only_blank_item(self):
+        schedule_id = 93
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        timestamp = self.day() + ' 08:30:00'
+        fact_values = (
+            ('check_out_time', self.day() + ' 09:30:00'),
+            ('check_time', self.day() + ' 08:45:00'),
+            ('completed_at', self.day() + ' 10:00:00'),
+            ('remark', '现场已记录'),
+            ('calibrator', 'Operator'),
+            ('calibration_values', json.dumps({'zero': 0.1})),
+            ('evidence_status', 'accepted'),
+            ('review_comment', '审核意见已记录'),
+            ('review_time', self.day() + ' 10:30:00'),
+            ('review_status', 1),
+            ('reviewer_id', 1),
+            ('result', 'normal'),
+        )
+        with self.db() as db:
+            original = db.execute("""SELECT pi.id,pi.plan_id FROM insp_plan_items pi
+                JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND pi.site_id=1
+                  AND COALESCE(pi.execution_status,'active')='active'""",
+                (schedule_id,)).fetchone()
+            db.execute("""UPDATE insp_plan_items
+                SET actual_photos=1,photo_urls=?,check_in_time=? WHERE id=?""",
+                (json.dumps(['/uploads/onsite-photo.jpg']), timestamp, original['id']))
+            factual_item_ids = [original['id']]
+            for index, (column, value) in enumerate(fact_values, start=1):
+                cur = db.execute("""INSERT INTO insp_plan_items
+                    (plan_id,site_id,template_id,item_name,category,frequency)
+                    VALUES (?,?,?,?,?,?)""", (
+                        original['plan_id'], 1, 101, f'Fact {index}: {column}',
+                        '常规', 'monthly'))
+                db.execute(
+                    f'UPDATE insp_plan_items SET {column}=? WHERE id=?',
+                    (value, cur.lastrowid))
+                factual_item_ids.append(cur.lastrowid)
+            blank_item_id = db.execute("""INSERT INTO insp_plan_items
+                (plan_id,site_id,template_id,item_name,category,frequency)
+                VALUES (?,?,?,?,?,?)""", (
+                    original['plan_id'], 1, 101, 'Blank item', '常规', 'monthly')).lastrowid
+            before_factual = [tuple(row) for row in db.execute(
+                f"SELECT * FROM insp_plan_items WHERE id IN ({','.join('?' * len(factual_item_ids))}) ORDER BY id",
+                factual_item_ids).fetchall()]
+            before_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            before_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {self.day(): {'sites': [2]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        self.assertEqual(approved.json['cancelled'], 1)
+
+        with self.db() as db:
+            after_factual = [tuple(row) for row in db.execute(
+                f"SELECT * FROM insp_plan_items WHERE id IN ({','.join('?' * len(factual_item_ids))}) ORDER BY id",
+                factual_item_ids).fetchall()]
+            blank_status = db.execute(
+                'SELECT execution_status FROM insp_plan_items WHERE id=?',
+                (blank_item_id,)).fetchone()['execution_status']
+            active_sites = [row['site_id'] for row in db.execute("""SELECT site_id
+                FROM insp_plan_items WHERE plan_id=?
+                  AND COALESCE(execution_status,'active')='active' ORDER BY id""",
+                (original['plan_id'],)).fetchall()]
+            after_vehicles = [tuple(row) for row in db.execute(
+                'SELECT * FROM vehicle_applications ORDER BY id').fetchall()]
+            after_reservations = [tuple(row) for row in db.execute("""SELECT *
+                FROM plan_resource_reservations WHERE schedule_id=? ORDER BY id""",
+                (schedule_id,)).fetchall()]
+        self.assertEqual(after_factual, before_factual)
+        self.assertEqual(blank_status, 'cancelled')
+        self.assertEqual(active_sites.count(1), len(factual_item_ids))
+        self.assertEqual(active_sites.count(2), 2)
+        self.assertEqual(after_vehicles, before_vehicles)
+        self.assertEqual(after_reservations, before_reservations)
+
+    def test_removed_dates_preserve_factual_package_and_cancel_unstarted_package(self):
+        schedule_id = 94
+        self.install_real_service_policy_schema_and_roles()
+        first_day = datetime.strptime(self.day(), '%Y-%m-%d')
+        days = [(first_day + timedelta(days=offset)).strftime('%Y-%m-%d')
+                for offset in range(3)]
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.execute("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (101,10,'Original','常规',0,0,0,1)""")
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute("""UPDATE plan_schedules SET period_end=?,plan_data=? WHERE id=?""", (
+                days[-1], json.dumps({day: {'sites': [1]} for day in days}), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        ended = self.client.put('/api/sites/1/service-policy',
+            headers=self.headers('manager-token'), json={
+                'service_status': 'ended', 'reporting_condition': 'normal',
+                'reason': '合同服务结束', 'expected_version': 0,
+                'idempotency_key': f'end-site-1-{schedule_id}', 'confirmed': True,
+            })
+        self.assertEqual(ended.status_code, 200, ended.json)
+        with self.db() as db:
+            packages = {row['generate_date']: dict(row) for row in db.execute("""SELECT
+                    ip.id AS plan_id,ip.generate_date,pi.id AS item_id
+                FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
+                WHERE ip.plan_schedule_id=? ORDER BY ip.generate_date""",
+                (schedule_id,)).fetchall()}
+            db.execute("""UPDATE insp_plan_items
+                SET actual_photos=1,photo_urls=?,check_in_time=? WHERE id=?""", (
+                    json.dumps(['/uploads/date-photo.jpg']), days[0] + ' 08:30:00',
+                    packages[days[0]]['item_id']))
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '移除前两个执行日期'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1, 'plan_data': {days[2]: {'sites': [1]}},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+
+        with self.db() as db:
+            states = {}
+            for day, package in packages.items():
+                states[day] = tuple(db.execute("""SELECT ip.status,pi.execution_status,
+                        pi.actual_photos,pi.photo_urls,pi.check_in_time
+                    FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
+                    WHERE ip.id=? AND pi.id=?""",
+                    (package['plan_id'], package['item_id'])).fetchone())
+        self.assertEqual(states[days[0]], (
+            'active', 'active', 1, json.dumps(['/uploads/date-photo.jpg']),
+            days[0] + ' 08:30:00'))
+        self.assertEqual(states[days[1]][:2], ('cancelled', 'cancelled'))
+        self.assertEqual(states[days[2]][:2], ('active', 'active'))
+
+    def test_ended_site_explicit_selection_rejects_new_item_after_real_policy_update(self):
+        schedule_id = 81
+        self.prepare_real_ended_site_change_with_template_growth(schedule_id)
+        before = self.side_effect_snapshot(schedule_id)
+
+        rejected = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101, 102]},
+                }},
+            })
+        self.assertEqual(
+            (rejected.status_code, rejected.json.get('code')),
+            (409, 'PLAN_SITE_SERVICE_ENDED'), rejected.json)
+        self.assert_side_effect_snapshot_unchanged(
+            before, self.side_effect_snapshot(schedule_id))
+
+        saved = self.client.put(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'), json={
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101]},
+                }},
+            })
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['plan_data'][self.day()]['inspection_items'], {
+            '1': [101], '2': [101, 102],
+        })
+        submitted = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/submit',
+            headers=self.headers('operator-token'),
+            json={'version': saved.json['version']})
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        approved = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            active_items = [tuple(row) for row in db.execute("""SELECT pi.site_id,pi.item_name
+                FROM insp_plan_items pi JOIN insp_plans ip ON ip.id=pi.plan_id
+                WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
+                  AND COALESCE(pi.execution_status,'active')='active'
+                ORDER BY pi.site_id,pi.id""", (schedule_id,)).fetchall()]
+        self.assertEqual(active_items, [
+            (1, 'Original'),
+            (2, 'Original'),
+            (2, 'New item after approval'),
+        ])
+
+    def test_ended_site_change_rejects_new_date_site_and_item_without_side_effects(self):
+        schedule_id = 78
+        with self.db() as db:
+            db.execute("""INSERT INTO inspection_templates
+                (id,status,frequency,template_name,description,sort_order)
+                VALUES (10,'active','monthly','月检模板','',1)""")
+            db.execute("""INSERT INTO inspection_configs(site_type,template_id,is_active)
+                VALUES ('water_quality',10,1)""")
+            db.executemany("""INSERT INTO inspection_template_items
+                (id,template_id,item_name,category,photo_required,max_photos,need_review,sort_order)
+                VALUES (?,10,?,'常规',0,0,0,?)""", (
+                    (101, '批准检查项', 1), (102, '新增检查项', 2),
+                ))
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {
+                    'sites': [1], 'inspection_items': {'1': [101]},
+                }}, ensure_ascii=False), schedule_id))
+        first_approval = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/approve',
+            headers=self.headers('manager-token'))
+        self.assertEqual(first_approval.status_code, 200, first_approval.json)
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '尝试扩大范围'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        before = self.side_effect_snapshot(schedule_id)
+        with self.db() as db:
+            period_before = tuple(db.execute(
+                'SELECT period_start,period_end FROM plan_schedules WHERE id=?',
+                (schedule_id,)).fetchone())
+        next_day = (BUSINESS_NOW + timedelta(days=1)).strftime('%Y-%m-%d')
+        variants = (
+            {
+                'version': 1, 'period_end': next_day,
+                'plan_data': {
+                    self.day(): {'sites': [1], 'inspection_items': {'1': [101]}},
+                    next_day: {'sites': [1], 'inspection_items': {'1': [101]}},
+                },
+            },
+            {
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1, 2],
+                    'inspection_items': {'1': [101], '2': []},
+                }},
+            },
+            {
+                'version': 1,
+                'plan_data': {self.day(): {
+                    'sites': [1], 'inspection_items': {'1': [101, 102]},
+                }},
+            },
+        )
+        with mock.patch.object(
+                app_module, '_current_service_site_ids', return_value=[]):
+            for payload in variants:
+                response = self.client.put(
+                    f'/api/plan-schedules/{schedule_id}',
+                    headers=self.headers('operator-token'), json=payload)
+                self.assertEqual(
+                    (response.status_code, response.json.get('code')),
+                    (409, 'PLAN_SITE_SERVICE_ENDED'), response.json)
+                self.assert_side_effect_snapshot_unchanged(
+                    before, self.side_effect_snapshot(schedule_id))
+                with self.db() as db:
+                    self.assertEqual(tuple(db.execute(
+                        'SELECT period_start,period_end FROM plan_schedules WHERE id=?',
+                        (schedule_id,)).fetchone()), period_before)
+
+    def test_change_detail_keeps_previous_site_name_without_inflating_current_count(self):
+        schedule_id = 79
+        self.add_submitted_schedule(
+            schedule_id, vehicle_id=None, no_vehicle_reason='步行巡检')
+        with self.db() as db:
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=?", (schedule_id,))
+        requested = self.client.post(
+            f'/api/plan-schedules/{schedule_id}/request-change',
+            headers=self.headers('operator-token'),
+            json={'change_reason': '移除原站点'})
+        self.assertEqual(requested.status_code, 200, requested.json)
+        with self.db() as db:
+            db.execute('UPDATE plan_schedules SET plan_data=? WHERE id=?', (
+                json.dumps({self.day(): {'sites': []}}, ensure_ascii=False), schedule_id))
+
+        detail = self.client.get(
+            f'/api/plan-schedules/{schedule_id}',
+            headers=self.headers('operator-token'))
+
+        self.assertEqual(detail.status_code, 200, detail.json)
+        self.assertEqual(detail.json['site_count'], 0)
+        self.assertEqual(detail.json['site_map']['1']['name'], 'Station')
+
+    def test_change_reject_preserves_original_approval_and_duplicate_is_read_only(self):
+        schedule_id = 73
+        self.submit_change_for_review(schedule_id)
+
+        rejected = self.client.post('/api/plan-schedules/73/reject',
+                                    headers=self.headers('manager-token'),
+                                    json={'reason': '继续执行原计划'})
+        self.assertEqual(rejected.status_code, 200, rejected.json)
+        self.assertTrue(rejected.json['rolled_back'])
+        with self.db() as db:
+            schedule = db.execute("""SELECT status,approver_id,approved_at,reject_reason
+                FROM plan_schedules WHERE id=?""", (schedule_id,)).fetchone()
+            event = db.execute("""SELECT operator_id,payload FROM plan_schedule_events
+                WHERE schedule_id=? AND event_type='change_rejected'""",
+                (schedule_id,)).fetchone()
+            before_counts = (
+                db.execute("SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
+                           (schedule_id,)).fetchone()[0],
+                db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                    WHERE schedule_id=? AND event_type='change_rejected'""",
+                    (schedule_id,)).fetchone()[0],
+                db.execute("""SELECT COUNT(*) FROM wx_subscription_outbox
+                    WHERE purpose='approval_result' AND business_type='plan_schedule'
+                      AND business_id=?""", (str(schedule_id),)).fetchone()[0],
+            )
+        self.assertEqual(tuple(schedule),
+                         ('approved', 3, '2026-08-10 09:30:00', '继续执行原计划'))
+        self.assertEqual(event['operator_id'], 1)
+        self.assertEqual(json.loads(event['payload']), {
+            'reason': '继续执行原计划', 'restored_status': 'approved',
+        })
+
+        repeated = self.client.post('/api/plan-schedules/73/reject',
+                                    headers=self.headers('manager-token'),
+                                    json={'reason': '重复退回'})
+        self.assertEqual((repeated.status_code, repeated.json.get('code')),
+                         (409, 'PLAN_REVIEW_STATE_CONFLICT'))
+        with self.db() as db:
+            after_counts = (
+                db.execute("SELECT COUNT(*) FROM notifications WHERE source_type='plan_schedule' AND source_id=?",
+                           (schedule_id,)).fetchone()[0],
+                db.execute("""SELECT COUNT(*) FROM plan_schedule_events
+                    WHERE schedule_id=? AND event_type='change_rejected'""",
+                    (schedule_id,)).fetchone()[0],
+                db.execute("""SELECT COUNT(*) FROM wx_subscription_outbox
+                    WHERE purpose='approval_result' AND business_type='plan_schedule'
+                      AND business_id=?""", (str(schedule_id),)).fetchone()[0],
+            )
+        self.assertEqual(after_counts, before_counts)
+
+    def test_change_reject_notification_failure_rolls_back_every_side_effect(self):
+        schedule_id = 74
+        self.submit_change_for_review(schedule_id)
+        before = self.side_effect_snapshot(schedule_id)
+        with self.db() as db:
+            before_outbox = [tuple(row) for row in db.execute(
+                'SELECT * FROM wx_subscription_outbox ORDER BY id').fetchall()]
+
+        with mock.patch.object(app_module, '_create_notification',
+                               side_effect=sqlite3.OperationalError('notification failed')):
+            rejected = self.client.post('/api/plan-schedules/74/reject',
+                                        headers=self.headers('manager-token'),
+                                        json={'reason': '触发通知失败'})
+        self.assertEqual((rejected.status_code, rejected.json.get('code')),
+                         (500, 'PLAN_REJECT_ROLLED_BACK'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+        with self.db() as db:
+            after_outbox = [tuple(row) for row in db.execute(
+                'SELECT * FROM wx_subscription_outbox ORDER BY id').fetchall()]
+        self.assertEqual(after_outbox, before_outbox)
+        self.assertEqual(self.schedule_status(schedule_id), 'change_submitted')
+
+    def test_change_reject_audit_failure_rolls_back_every_side_effect(self):
+        schedule_id = 75
+        self.submit_change_for_review(schedule_id)
+        before = self.side_effect_snapshot(schedule_id)
+        with self.db() as db:
+            before_outbox = [tuple(row) for row in db.execute(
+                'SELECT * FROM wx_subscription_outbox ORDER BY id').fetchall()]
+
+        with mock.patch.object(app_module, '_ps_record_event',
+                               side_effect=sqlite3.OperationalError('audit failed')):
+            rejected = self.client.post('/api/plan-schedules/75/reject',
+                                        headers=self.headers('manager-token'),
+                                        json={'reason': '触发审计失败'})
+        self.assertEqual((rejected.status_code, rejected.json.get('code')),
+                         (500, 'PLAN_REJECT_ROLLED_BACK'))
+        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+        with self.db() as db:
+            after_outbox = [tuple(row) for row in db.execute(
+                'SELECT * FROM wx_subscription_outbox ORDER BY id').fetchall()]
+        self.assertEqual(after_outbox, before_outbox)
+        self.assertEqual(self.schedule_status(schedule_id), 'change_submitted')
+
+    def test_change_approve_reject_race_has_one_winner_and_one_state_conflict(self):
+        schedule_id = 76
+        self.submit_change_for_review(schedule_id)
+
+        def approve():
+            with app_module.app.test_client() as client:
+                response = client.post('/api/plan-schedules/76/approve',
+                                       headers=self.headers('manager-token'))
+                return response.status_code, response.json
+
+        def reject():
+            with app_module.app.test_client() as client:
+                response = client.post('/api/plan-schedules/76/reject',
+                                       headers=self.headers('manager-token'),
+                                       json={'reason': '竞争退回'})
+                return response.status_code, response.json
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [future.result() for future in (
+                pool.submit(approve), pool.submit(reject),
+            )]
+        self.assertEqual(sorted(status for status, _ in results), [200, 409])
+        conflict = next(payload for status, payload in results if status == 409)
+        self.assertEqual(conflict.get('code'), 'PLAN_REVIEW_STATE_CONFLICT')
+        with self.db() as db:
+            terminal_events = db.execute("""SELECT event_type,operator_id FROM plan_schedule_events
+                WHERE schedule_id=? AND event_type IN ('approved','change_rejected')""",
+                (schedule_id,)).fetchall()
+            result_outbox = db.execute("""SELECT COUNT(*) FROM wx_subscription_outbox
+                WHERE purpose='approval_result' AND business_type='plan_schedule'
+                  AND business_id=?""", (str(schedule_id),)).fetchone()[0]
+        self.assertEqual(len(terminal_events), 1)
+        self.assertEqual(terminal_events[0]['operator_id'], 1)
+        self.assertEqual(result_outbox, 1)
 
     def test_regular_submit_retry_is_read_only_for_the_same_version(self):
         schedule_id = 72
@@ -1149,6 +2111,17 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 db.execute("ALTER TABLE operation_attachments ADD COLUMN filename TEXT DEFAULT ''")
             if 'stored_path' not in attachment_columns:
                 db.execute("ALTER TABLE operation_attachments ADD COLUMN stored_path TEXT DEFAULT ''")
+            for column_name, column_sql in (
+                    ('site_id', 'ALTER TABLE operation_attachments ADD COLUMN site_id INTEGER'),
+                    ('uploader_id', 'ALTER TABLE operation_attachments ADD COLUMN uploader_id INTEGER'),
+                    ('review_status', "ALTER TABLE operation_attachments ADD COLUMN review_status TEXT DEFAULT 'pending'"),
+                    ('thumbnail_path', "ALTER TABLE operation_attachments ADD COLUMN thumbnail_path TEXT DEFAULT ''"),
+                    ('capture_source', "ALTER TABLE operation_attachments ADD COLUMN capture_source TEXT DEFAULT ''"),
+                    ('evidence_qualification', "ALTER TABLE operation_attachments ADD COLUMN evidence_qualification TEXT DEFAULT 'review'"),
+                    ('evidence_basis', "ALTER TABLE operation_attachments ADD COLUMN evidence_basis TEXT DEFAULT 'unknown'"),
+                    ('extra_json', "ALTER TABLE operation_attachments ADD COLUMN extra_json TEXT DEFAULT '{}'")):
+                if column_name not in attachment_columns:
+                    db.execute(column_sql)
             db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=?",
                        (schedule_id,))
             plan_id = db.execute("""INSERT INTO insp_plans
@@ -1170,16 +2143,40 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 handle.write(b'purge-only')
             with open(os.path.join(photo_dir, f'shared-{schedule_id}.jpg'), 'wb') as handle:
                 handle.write(b'shared')
-            db.execute("""INSERT INTO operation_attachments
-                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
-                VALUES ('inspection',?,?,?,'image','image/jpeg',?,?)""",
-                (item_id, plan_id, item_id, f'purge-{schedule_id}.jpg',
-                 f'/uploads/site_photos/purge-{schedule_id}.jpg'))
-            db.execute("""INSERT INTO operation_attachments
-                (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
-                VALUES ('inspection',?,?,?,'image','image/jpeg',?,?)""",
-                (item_id, plan_id, item_id, f'shared-{schedule_id}.jpg',
-                 f'/uploads/site_photos/shared-{schedule_id}.jpg'))
+            with open(os.path.join(photo_dir, f'thumb-{schedule_id}.jpg'), 'wb') as handle:
+                handle.write(b'thumbnail')
+            private_locator = app_module._private_site_photo_locator(
+                f'original-{schedule_id}.jpg')
+            private_target = app_module._private_site_photo_target(private_locator)
+            os.makedirs(os.path.dirname(private_target), exist_ok=True)
+            with open(private_target, 'wb') as handle:
+                handle.write(b'private-original')
+            exclusive_attachment_id = db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,site_id,uploader_id,file_type,mime_type,
+                 filename,stored_path,thumbnail_path,capture_source,review_status,
+                 evidence_qualification,evidence_basis,extra_json)
+                VALUES ('inspection',?,?,?,?,2,'image','image/jpeg',?,?,?,'camera','approved',
+                        'qualified','server_capture_session',?)""",
+                (item_id, plan_id, item_id, 1, f'purge-{schedule_id}.jpg',
+                 f'/uploads/site_photos/purge-{schedule_id}.jpg',
+                 f'/uploads/site_photos/thumb-{schedule_id}.jpg',
+                 json.dumps({
+                     'material_role': 'formal',
+                     'original_file': {'stored_path': private_locator},
+                 }))).lastrowid
+            shared_attachment_id = db.execute("""INSERT INTO operation_attachments
+                (source_type,source_id,plan_id,item_id,site_id,uploader_id,file_type,mime_type,
+                 filename,stored_path,capture_source,review_status,evidence_qualification,
+                 evidence_basis,extra_json)
+                VALUES ('inspection',?,?,?,?,2,'image','image/jpeg',?,?,'album','pending','review',
+                        'supplement','{"material_role":"supplement"}')""",
+                (item_id, plan_id, item_id, 1, f'shared-{schedule_id}.jpg',
+                 f'/uploads/site_photos/shared-{schedule_id}.jpg')).lastrowid
+            db.execute("""CREATE TABLE IF NOT EXISTS attachment_evidence_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, attachment_id INTEGER, outcome TEXT)""")
+            db.executemany("""INSERT INTO attachment_evidence_evaluations
+                (attachment_id,outcome) VALUES (?,'fixture')""",
+                ((exclusive_attachment_id,), (shared_attachment_id,)))
             db.execute("""INSERT INTO operation_attachments
                 (source_type,source_id,plan_id,item_id,file_type,mime_type,filename,stored_path)
                 VALUES ('workorder',13058,NULL,NULL,'image','image/jpeg',?,?)""",
@@ -1238,6 +2235,9 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         with self.db() as db:
             self.assertIsNotNone(app_module._ps_period_overlap(
                 db, 2, 'monthly', self.day(), self.day()))
+            purge_attachment_ids = [row['id'] for row in db.execute(
+                'SELECT id FROM operation_attachments WHERE plan_id=? ORDER BY id',
+                (plan_id,)).fetchall()]
 
         response = self.client.post('/api/plan-schedules/990/purge',
                                     headers=self.headers('manager-token'),
@@ -1251,6 +2251,14 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                     ('plan_resource_reservations', 'schedule_id', 990)):
                 self.assertEqual(db.execute(
                     f'SELECT COUNT(*) FROM {table} WHERE {column}=?', (value,)).fetchone()[0], 0)
+            placeholders = ','.join('?' for _ in purge_attachment_ids)
+            self.assertEqual(db.execute(
+                f'SELECT COUNT(*) FROM operation_attachments WHERE id IN ({placeholders})',
+                purge_attachment_ids).fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                f'SELECT COUNT(*) FROM attachment_evidence_evaluations '
+                f'WHERE attachment_id IN ({placeholders})',
+                purge_attachment_ids).fetchone()[0], 0)
             self.assertIsNone(app_module._ps_period_overlap(
                 db, 2, 'monthly', self.day(), self.day()))
             self.assertEqual(db.execute(
@@ -1281,10 +2289,73 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             self.assertEqual(summary['retained_vehicle_applications'], 2)
             self.assertEqual(summary['retained_vehicle_uses'], 2)
             self.assertEqual(summary['retained_parts_requests'], 1)
+            attachment_summaries = summary['attachment_summaries']
+            self.assertEqual(len(attachment_summaries), 2)
+            summaries_by_filename = {
+                item['filename']: item for item in attachment_summaries
+            }
+            exclusive_summary = summaries_by_filename['purge-990.jpg']
+            shared_summary = summaries_by_filename['shared-990.jpg']
+            for item in attachment_summaries:
+                self.assertEqual(item['plan_schedule_id'], 990)
+                self.assertEqual(item['plan_id'], plan_id)
+                self.assertEqual(item['item_id'], item_id)
+                self.assertEqual(item['site_id'], 1)
+                self.assertEqual(item['uploader_id'], 2)
+                self.assertEqual(item['source_type'], 'inspection')
+                self.assertEqual(item['source_id'], item_id)
+                self.assertEqual(item['reason'], '主链测试误建')
+                self.assertEqual(item['operator_id'], 1)
+                self.assertEqual(item['operator_name'], 'Manager')
+            self.assertEqual(
+                (exclusive_summary['capture_source'], exclusive_summary['material_role'],
+                 exclusive_summary['review_status'],
+                 exclusive_summary['evidence_qualification'], exclusive_summary['evidence_basis'],
+                 exclusive_summary['shared_file_retained']),
+                ('camera', 'formal', 'approved', 'qualified', 'server_capture_session', False))
+            self.assertEqual(
+                (shared_summary['capture_source'], shared_summary['material_role'],
+                 shared_summary['review_status'],
+                 shared_summary['evidence_qualification'], shared_summary['evidence_basis'],
+                 shared_summary['shared_file_retained']),
+                ('album', 'supplement', 'pending', 'review', 'supplement', True))
+            exclusive_files = {
+                item['kind']: item for item in exclusive_summary['physical_files']
+            }
+            self.assertEqual(exclusive_files, {
+                'display': {
+                    'kind': 'display',
+                    'locator': '/uploads/site_photos/purge-990.jpg',
+                    'action': 'deleted',
+                    'shared_file_retained': False,
+                },
+                'thumbnail': {
+                    'kind': 'thumbnail',
+                    'locator': '/uploads/site_photos/thumb-990.jpg',
+                    'action': 'deleted',
+                    'shared_file_retained': False,
+                },
+                'private_original': {
+                    'kind': 'private_original',
+                    'locator': app_module._private_site_photo_locator('original-990.jpg'),
+                    'action': 'deleted',
+                    'shared_file_retained': False,
+                },
+            })
+            self.assertEqual(shared_summary['physical_files'], [{
+                'kind': 'display',
+                'locator': '/uploads/site_photos/shared-990.jpg',
+                'action': 'retained_shared_reference',
+                'shared_file_retained': True,
+            }])
             self.assertEqual(db.execute(
                 'SELECT plan_id FROM parts_requests WHERE id=1').fetchone()['plan_id'], 0)
         self.assertFalse(os.path.exists(os.path.join(
             self.upload_dir, 'site_photos', 'purge-990.jpg')))
+        self.assertFalse(os.path.exists(os.path.join(
+            self.upload_dir, 'site_photos', 'thumb-990.jpg')))
+        self.assertFalse(os.path.exists(app_module._private_site_photo_target(
+            app_module._private_site_photo_locator('original-990.jpg'))))
         self.assertTrue(os.path.exists(os.path.join(
             self.upload_dir, 'site_photos', 'shared-990.jpg')))
 
@@ -1296,6 +2367,32 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         with self.db() as db:
             self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
                 WHERE source_type='plan_schedule_purge' AND source_id=990""").fetchone()[0], 1)
+
+    def test_plan_purge_does_not_report_missing_shared_file_as_retained(self):
+        self.add_purge_fixture(994)
+        shared_target = os.path.join(self.upload_dir, 'site_photos', 'shared-994.jpg')
+        os.remove(shared_target)
+
+        response = self.client.post('/api/plan-schedules/994/purge',
+                                    headers=self.headers('manager-token'),
+                                    json={'version': 1, 'reason': '共享文件已缺失'})
+        self.assertEqual(response.status_code, 200, response.json)
+        with self.db() as db:
+            audit = db.execute("""SELECT remark FROM timeline_events
+                WHERE source_type='plan_schedule_purge' AND source_id=994""").fetchone()
+            summary = json.loads(audit['remark'])
+        shared_summary = next(
+            item for item in summary['attachment_summaries']
+            if item['filename'] == 'shared-994.jpg'
+        )
+        self.assertFalse(shared_summary['shared_file_retained'])
+        self.assertEqual(shared_summary['physical_files'], [{
+            'kind': 'display',
+            'locator': '/uploads/site_photos/shared-994.jpg',
+            'action': 'not_present',
+            'shared_file_retained': False,
+        }])
+        self.assertFalse(os.path.exists(shared_target))
 
     def test_plan_purge_permission_reason_and_version_fail_without_writes(self):
         self.add_purge_fixture(991)
@@ -1431,6 +2528,41 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                 WHERE source_type='plan_schedule_purge' AND source_id=992""").fetchone()[0], 0)
         self.assertTrue(os.path.exists(target))
         self.assertTrue(os.path.exists(first_target))
+
+    def test_plan_purge_database_failure_reports_incomplete_file_restoration(self):
+        self.add_purge_fixture(993)
+        target = os.path.join(self.upload_dir, 'site_photos', 'purge-993.jpg')
+        real_open = open
+
+        def fail_restore(path, mode='r', *args, **kwargs):
+            if (mode == 'wb'
+                    and os.path.normcase(os.fspath(path)) == os.path.normcase(target)):
+                raise PermissionError('injected restore write failure')
+            return real_open(path, mode, *args, **kwargs)
+
+        with mock.patch.object(
+                app_module, '_attachment_purge_delete_children',
+                side_effect=sqlite3.OperationalError('injected plan database failure')):
+            with mock.patch('builtins.open', side_effect=fail_restore):
+                response = self.client.post('/api/plan-schedules/993/purge',
+                                            headers=self.headers('manager-token'),
+                                            json={'version': 1, 'reason': '恢复失败测试'})
+
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (503, 'PLAN_PURGE_RESTORE_INCOMPLETE'))
+        self.assertTrue(response.json['restore_incomplete'])
+        self.assertEqual(response.json['failed_file_count'], 1)
+        self.assertIn('部分影像文件恢复失败', response.json['error'])
+        with self.db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM plan_schedules WHERE id=993').fetchone())
+            self.assertGreater(db.execute(
+                'SELECT COUNT(*) FROM operation_attachments WHERE plan_id IS NOT NULL').fetchone()[0], 0)
+            self.assertEqual(db.execute("""SELECT COUNT(*) FROM timeline_events
+                WHERE source_type='plan_schedule_purge' AND source_id=993""").fetchone()[0], 0)
+        self.assertFalse(os.path.exists(target))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.upload_dir, 'site_photos', 'shared-993.jpg')))
 
     def test_approval_scope_failure_keeps_every_plan_resource_table_unchanged(self):
         schedule_id = 53
@@ -1593,6 +2725,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.add_submitted_schedule(64)
         self.add_submitted_schedule(640)
         with self.db() as db:
+            db.execute("INSERT INTO vehicles VALUES (2,'TEST-002','Other vehicle','idle',1000,NULL,NULL)")
             operation_day = db.execute("SELECT date('now','localtime')").fetchone()[0]
             plan_data = json.dumps({operation_day: {'sites': [1]}})
             vehicle_days = json.dumps({operation_day: 1})
@@ -1605,17 +2738,19 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                         '巡检计划#64用车（原预约）','approved')""", (operation_day, operation_day))
             db.execute("""INSERT INTO vehicle_applications
                 (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
-                VALUES (1,2,? || ' 08:00:00',? || ' 18:00:00','巡检',
+                VALUES (2,2,? || ' 08:00:00',? || ' 18:00:00','巡检',
                         '巡检计划#640用车（另一计划）','approved')""", (operation_day, operation_day))
             db.execute("""INSERT INTO plan_resource_reservations
                 (schedule_id,part_id,planned_quantity,reserved_quantity,issued_quantity,status)
                 VALUES (64,8,2,0,0,'planned')""")
         requested = self.client.post('/api/plan-schedules/64/request-change',
                                      headers=self.headers('operator-token'),
-                                     json={'change_reason': '尝试调整同车时间'})
+                                     json={'change_reason': '尝试更换到冲突车辆'})
         self.assertEqual(requested.status_code, 200, requested.json)
         with self.db() as db:
-            db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=64")
+            db.execute("""UPDATE plan_schedules
+                SET status='change_submitted',vehicle_id=2,vehicle_days=? WHERE id=64""",
+                       (json.dumps({operation_day: 2}),))
         before = self.side_effect_snapshot(64)
         with self.db() as db:
             before_schedule = tuple(db.execute(
@@ -1645,6 +2780,7 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         self.add_submitted_schedule(65)
         self.add_submitted_schedule(650)
         with self.db() as db:
+            db.execute("INSERT INTO vehicles VALUES (2,'TEST-002','Other vehicle','idle',1000,NULL,NULL)")
             operation_day = db.execute("SELECT date('now','localtime')").fetchone()[0]
             next_day = (datetime.strptime(operation_day, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
             db.execute("""UPDATE plan_schedules SET status='approved',period_start=?,period_end=?,
@@ -1670,22 +2806,26 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             other_application_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
         requested = self.client.post('/api/plan-schedules/65/request-change',
                                      headers=self.headers('operator-token'),
-                                     json={'change_reason': '调整备注但保持今日用车'})
+                                     json={'change_reason': '更换到空闲车辆'})
         self.assertEqual(requested.status_code, 200, requested.json)
         with self.db() as db:
-            db.execute("UPDATE plan_schedules SET status='change_submitted',remarks='changed' WHERE id=65")
+            db.execute("""UPDATE plan_schedules
+                SET status='change_submitted',remarks='changed',vehicle_id=2,vehicle_days=?
+                WHERE id=65""", (json.dumps({operation_day: 2}),))
 
         response = self.client.post('/api/plan-schedules/65/approve',
                                     headers=self.headers('manager-token'))
 
         self.assertEqual(response.status_code, 200, response.json)
         with self.db() as db:
-            current_rows = db.execute("""SELECT status FROM vehicle_applications
+            current_rows = db.execute("""SELECT vehicle_id,status FROM vehicle_applications
                 WHERE reason LIKE ? ORDER BY id""", (app_module._ps_vehicle_reason_like(65),)).fetchall()
             other_status = db.execute(
                 'SELECT status FROM vehicle_applications WHERE id=?',
                 (other_application_id,)).fetchone()['status']
-        self.assertEqual([row['status'] for row in current_rows], ['cancelled', 'approved'])
+        self.assertEqual([(row['vehicle_id'], row['status']) for row in current_rows], [
+            (1, 'cancelled'), (2, 'approved'),
+        ])
         self.assertEqual(other_status, 'approved')
 
     def test_vehicle_adjustment_flag_survives_draft_and_clears_after_approved_rebooking(self):
@@ -1720,7 +2860,23 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         submitted = self.client.post('/api/plan-schedules/651/submit',
             headers=self.headers('operator-token'), json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        approved = submitted
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        with self.db() as db:
+            pending_schedule = db.execute("""SELECT vehicle_adjustment_required,vehicle_adjustment_detail
+                FROM plan_schedules WHERE id=651""").fetchone()
+            pending_old_status = db.execute('SELECT status FROM vehicle_applications WHERE id=?',
+                                            (target_id,)).fetchone()[0]
+            pending_new_count = db.execute("""SELECT COUNT(*) FROM vehicle_applications
+                WHERE vehicle_id=2 AND reason LIKE ?""",
+                (app_module._ps_vehicle_reason_like(651),)).fetchone()[0]
+        self.assertEqual((pending_schedule['vehicle_adjustment_required'],
+                          pending_schedule['vehicle_adjustment_detail']), (1, 'overlap'))
+        self.assertEqual(pending_old_status, 'approved')
+        self.assertEqual(pending_new_count, 0)
+
+        approved = self.client.post('/api/plan-schedules/651/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
         self.assertEqual(approved.json['status'], 'approved')
         with self.db() as db:
             schedule = db.execute("""SELECT vehicle_adjustment_required,vehicle_adjustment_detail
@@ -1788,7 +2944,25 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        approved = submitted
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        with self.db() as db:
+            pending_old_application = db.execute(
+                'SELECT status FROM vehicle_applications WHERE id=?',
+                (old_application_id,)).fetchone()
+            pending_old_use = db.execute(
+                'SELECT status,returned_at FROM vehicle_use_records WHERE id=?',
+                (old_use_id,)).fetchone()
+            pending_new_count = db.execute("""SELECT COUNT(*) FROM vehicle_applications
+                WHERE vehicle_id=2 AND reason LIKE ? AND id!=?""",
+                (app_module._ps_vehicle_reason_like(schedule_id), old_application_id)).fetchone()[0]
+        self.assertEqual(pending_old_application['status'], 'approved')
+        self.assertEqual((pending_old_use['status'], pending_old_use['returned_at']),
+                         ('checked_out', None))
+        self.assertEqual(pending_new_count, 0)
+
+        approved = self.client.post('/api/plan-schedules/66/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
         self.assertEqual(approved.json['status'], 'approved')
 
         with self.db() as db:
@@ -1880,8 +3054,21 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        with self.db() as db:
+            pending_applications = db.execute("""SELECT id,status,start_at,end_at
+                FROM vehicle_applications WHERE reason LIKE ? ORDER BY id""",
+                (app_module._ps_vehicle_reason_like(schedule_id),)).fetchall()
+            pending_use = db.execute("""SELECT status,returned_at FROM vehicle_use_records
+                WHERE application_id=?""", (old_application_id,)).fetchone()
+        self.assertEqual(len(pending_applications), 1)
+        self.assertEqual(str(pending_applications[0]['end_at'])[:10], operation_day)
+        self.assertEqual((pending_use['status'], pending_use['returned_at']),
+                         ('checked_out', None))
 
-        approved = submitted
+        approved = self.client.post('/api/plan-schedules/67/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
         self.assertEqual(approved.json['status'], 'approved')
         with self.db() as db:
             applications = db.execute("""SELECT id,status,start_at,end_at FROM vehicle_applications
@@ -1937,8 +3124,17 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        with self.db() as db:
+            pending_applications = db.execute("""SELECT id,status FROM vehicle_applications
+                WHERE reason LIKE ? ORDER BY id""",
+                (app_module._ps_vehicle_reason_like(schedule_id),)).fetchall()
+        self.assertEqual([(row['id'], row['status']) for row in pending_applications],
+                         [(legacy_application_id, 'approved')])
 
-        approved = submitted
+        approved = self.client.post('/api/plan-schedules/69/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
         self.assertEqual(approved.json['status'], 'approved')
         with self.db() as db:
             applications = db.execute("""SELECT id,status FROM vehicle_applications
@@ -1991,9 +3187,19 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
         submitted = self.client.post('/api/plan-schedules/70/submit',
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
-        self.assertEqual((submitted.status_code, submitted.json.get('code')),
+        self.assertEqual(submitted.status_code, 200, submitted.json)
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        after_submit = self.side_effect_snapshot(schedule_id)
+        self.assertEqual(after_submit['schedule'][1], 'change_submitted')
+        self.assertEqual(before['vehicle_applications'], after_submit['vehicle_applications'])
+        self.assertEqual(before['vehicle_use_records'], after_submit['vehicle_use_records'])
+
+        approved = self.client.post('/api/plan-schedules/70/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual((approved.status_code, approved.json.get('code')),
                          (409, 'PLAN_VEHICLE_RESERVATION_CONFLICT'))
-        self.assert_side_effect_snapshot_unchanged(before, self.side_effect_snapshot(schedule_id))
+        self.assert_side_effect_snapshot_unchanged(after_submit, self.side_effect_snapshot(schedule_id))
+        self.assertEqual(self.schedule_status(schedule_id), 'change_submitted')
         with self.db() as db:
             application_statuses = [row['status'] for row in db.execute("""SELECT status
                 FROM vehicle_applications WHERE reason LIKE ? ORDER BY id""",
@@ -2050,7 +3256,24 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                                      headers=self.headers('operator-token'),
                                      json={'version': saved.json['version']})
         self.assertEqual(submitted.status_code, 200, submitted.json)
-        approved = submitted
+        self.assertEqual(submitted.json['status'], 'change_submitted')
+        with self.db() as db:
+            pending_statuses = {
+                row['id']: row['status'] for row in db.execute(
+                    'SELECT id,status FROM vehicle_applications WHERE id IN (?,?,?)',
+                    (ongoing_id, expired_id, other_id)).fetchall()
+            }
+            pending_replacement = db.execute("""SELECT COUNT(*) FROM vehicle_applications
+                WHERE vehicle_id=2 AND reason LIKE ?""",
+                (app_module._ps_vehicle_reason_like(schedule_id),)).fetchone()[0]
+        self.assertEqual(pending_statuses, {
+            ongoing_id: 'approved', expired_id: 'approved', other_id: 'approved',
+        })
+        self.assertEqual(pending_replacement, 0)
+
+        approved = self.client.post('/api/plan-schedules/68/approve',
+                                    headers=self.headers('manager-token'))
+        self.assertEqual(approved.status_code, 200, approved.json)
         self.assertEqual(approved.json['status'], 'approved')
 
         with self.db() as db:

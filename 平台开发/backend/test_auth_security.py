@@ -2,6 +2,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -92,7 +93,8 @@ class AuthSecurityTest(unittest.TestCase):
                 );
                 CREATE TABLE work_orders (
                     id INTEGER PRIMARY KEY, order_no TEXT, title TEXT, site_id INTEGER,
-                    status TEXT DEFAULT 'pending', created_at TEXT
+                    source TEXT DEFAULT 'manual', status TEXT DEFAULT 'pending',
+                    related_alert_id INTEGER, created_at TEXT
                 );
                 CREATE TABLE reagents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, manufacturer TEXT, spec TEXT,
@@ -165,22 +167,56 @@ class AuthSecurityTest(unittest.TestCase):
         self.assertEqual(response.json['user']['roles'], ['operator'])
         self.assertIn('station_monitoring_public', response.json['user']['capabilities'])
 
+    def test_me_skips_last_seen_touch_when_another_writer_holds_sqlite(self):
+        token = self.login('operator', 'OperatorPass123')
+        old_seen_at = (datetime.now() - timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+        with self.temporary_db() as db:
+            db.execute(
+                'UPDATE auth_sessions SET last_seen_at=? WHERE token_hash=?',
+                (old_seen_at, app_module._hash_token(token)),
+            )
+
+        writer = sqlite3.connect(self.db_path, timeout=0.1)
+        writer.execute('BEGIN IMMEDIATE')
+        try:
+            started = time.monotonic()
+            response = self.client.get('/api/auth/me', headers=self.headers(token))
+            elapsed = time.monotonic() - started
+        finally:
+            writer.rollback()
+            writer.close()
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertLess(elapsed, 1.0)
+        with self.temporary_db() as db:
+            last_seen_at = db.execute(
+                'SELECT last_seen_at FROM auth_sessions WHERE token_hash=?',
+                (app_module._hash_token(token),),
+            ).fetchone()['last_seen_at']
+        self.assertEqual(last_seen_at, old_seen_at)
+
     def test_global_search_and_workorder_list_follow_page_roles(self):
         admin = self.login('admin', 'AdminPass123')
         operator = self.login('operator', 'OperatorPass123')
         reviewer = self.login('reviewer', 'ReviewerPass123')
         with self.temporary_db() as db:
             db.execute(
-                "INSERT INTO work_orders (id,order_no,title,site_id,created_at) VALUES (1,'WO-1','站点一维修',1,'2026-08-06 08:00:00')"
+                """INSERT INTO work_orders
+                    (id,order_no,title,site_id,source,status,related_alert_id,created_at)
+                    VALUES (1,'WO-1','站点一维修',1,'manual','pending',NULL,'2026-08-06 08:00:00')"""
             )
 
         reviewer_workorders = self.client.get('/api/workorders', headers=self.headers(reviewer))
-        self.assertEqual(reviewer_workorders.status_code, 403, reviewer_workorders.json)
+        self.assertEqual(reviewer_workorders.status_code, 200, reviewer_workorders.json)
+        self.assertEqual([row['order_no'] for row in reviewer_workorders.json], ['WO-1'])
 
         reviewer_sites = self.client.get('/api/global-search?q=站点一', headers=self.headers(reviewer))
-        self.assertEqual([item['type'] for item in reviewer_sites.json['results']], ['site'])
+        self.assertEqual(
+            [item['type'] for item in reviewer_sites.json['results']], ['site', 'workorder'])
         reviewer_device = self.client.get('/api/global-search?q=D1', headers=self.headers(reviewer))
         self.assertEqual(reviewer_device.json['results'], [])
+        reviewer_order = self.client.get('/api/global-search?q=WO-1', headers=self.headers(reviewer))
+        self.assertEqual([item['type'] for item in reviewer_order.json['results']], ['workorder'])
 
         operator_order = self.client.get('/api/global-search?q=WO-1', headers=self.headers(operator))
         self.assertEqual([item['type'] for item in operator_order.json['results']], ['workorder'])
@@ -274,7 +310,22 @@ class AuthSecurityTest(unittest.TestCase):
     def test_disable_account_revokes_existing_session(self):
         user_token = self.login('operator', 'OperatorPass123')
         admin_token = self.login('admin', 'AdminPass123')
-        response = self.client.put('/api/users/2/status', headers=self.headers(admin_token), json={'status': 'inactive'})
+        blocked = self.client.put('/api/users/2/status', headers=self.headers(admin_token),
+                                  json={'status': 'inactive'})
+        self.assertEqual(blocked.status_code, 409, blocked.json)
+        self.assertEqual(blocked.json['code'], 'USER_SITE_TRANSFER_REQUIRED')
+        with self.temporary_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM users WHERE id=2').fetchone()['status'],
+                             'active')
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM user_sites WHERE user_id=2 AND site_id=1').fetchone()[0], 1)
+        self.assertEqual(self.client.get(
+            '/api/auth/me', headers=self.headers(user_token)).status_code, 200)
+
+        with self.temporary_db() as db:
+            db.execute('INSERT INTO user_sites (user_id,site_id) VALUES (3,1)')
+        response = self.client.put('/api/users/2/status', headers=self.headers(admin_token),
+                                   json={'status': 'inactive'})
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(self.client.get('/api/auth/me', headers=self.headers(user_token)).status_code, 401)
 

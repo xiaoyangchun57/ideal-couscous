@@ -62,7 +62,9 @@ class InspectionReviewReworkTest(unittest.TestCase):
                     recognized_category TEXT DEFAULT '', category TEXT DEFAULT '',
                     is_deleted INTEGER DEFAULT 0, review_required INTEGER DEFAULT 1,
                     evidence_qualification TEXT DEFAULT 'qualified', evidence_reason TEXT DEFAULT '',
-                    evidence_next_action TEXT DEFAULT ''
+                    evidence_next_action TEXT DEFAULT '', capture_source TEXT DEFAULT '',
+                    evidence_basis TEXT DEFAULT 'unknown', watermark_code TEXT DEFAULT '',
+                    plan_id INTEGER, item_id INTEGER
                 );
                 CREATE TABLE inspection_template_items (id INTEGER PRIMARY KEY, template_id INTEGER, item_name TEXT, need_review INTEGER);
                 CREATE TABLE mobile_idempotency (idempotency_key TEXT, endpoint TEXT, response_json TEXT);
@@ -70,7 +72,8 @@ class InspectionReviewReworkTest(unittest.TestCase):
                     id INTEGER PRIMARY KEY, token_hash TEXT, user_id INTEGER, site_id INTEGER,
                     plan_id INTEGER, item_id INTEGER, work_order_id INTEGER, issued_at TEXT,
                     expires_at TEXT, used_at TEXT, attachment_id INTEGER,
-                    rework_required_at TEXT, capture_source TEXT
+                    rework_required_at TEXT, capture_source TEXT,
+                    nonce TEXT DEFAULT '', anti_counterfeit_code TEXT DEFAULT ''
                 );
                 CREATE TABLE inspection_checkins (id INTEGER PRIMARY KEY, site_id INTEGER, user_id INTEGER, check_time TEXT);
                 CREATE TABLE timeline_events (source_type TEXT, source_id INTEGER, event_type TEXT, operator TEXT, remark TEXT);
@@ -118,12 +121,24 @@ class InspectionReviewReworkTest(unittest.TestCase):
     def seed_evidence(self, path):
         with app_module.get_db() as db:
             if not db.execute('SELECT 1 FROM operation_attachments WHERE stored_path=?', (path,)).fetchone():
-                db.execute("""INSERT INTO operation_attachments
+                cursor = db.execute("""INSERT INTO operation_attachments
                     (stored_path,site_id,uploader_id,description,filename,review_status,
-                     evidence_qualification,review_required,extra_json)
+                     evidence_qualification,review_required,extra_json,capture_source,
+                     evidence_basis,watermark_code,plan_id,item_id)
                     VALUES (?,1,2,'测试证据',?,'pending','qualified',0,
-                            '{"material_role":"pending_inspection","plan_id":10,"item_id":100}')""",
-                    (path, os.path.basename(path)))
+                            '{"material_role":"pending_inspection","plan_id":10,"item_id":100}',
+                            'camera','server_capture_session',?,10,100)""",
+                    (path, os.path.basename(path), f'TEST-{os.path.basename(path)}'))
+                attachment_id = cursor.lastrowid
+                code = f'TEST-{os.path.basename(path)}'
+                db.execute("""INSERT INTO photo_capture_sessions
+                    (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                     attachment_id,rework_required_at,capture_source,nonce,anti_counterfeit_code)
+                    VALUES (?,2,1,10,100,datetime('now','localtime'),
+                            datetime('now','localtime','+15 minute'),datetime('now','localtime'),
+                            ?,NULL,'camera',?,?)""",
+                    (app_module._hash_token(f'fixture:{path}'), attachment_id,
+                     f'nonce:{os.path.basename(path)}', code))
 
     def test_photo_projection_accepts_real_attachment_query_rows(self):
         with app_module.get_db() as db:
@@ -219,11 +234,12 @@ class InspectionReviewReworkTest(unittest.TestCase):
             db.execute("""UPDATE operation_attachments
                 SET source_type='inspection',source_id=100 WHERE id=?""", (attachment_id,))
             db.execute("""INSERT INTO photo_capture_sessions
-                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
-                 attachment_id,rework_required_at,capture_source)
-                VALUES (1,'retake',2,1,10,100,datetime('now','localtime'),
+                (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source,nonce,anti_counterfeit_code)
+                VALUES ('retake',2,1,10,100,datetime('now','localtime'),
                         datetime('now','localtime','+15 minute'),datetime('now','localtime'),
-                        ?,?,'camera')""", (attachment_id, required_at))
+                        ?,?,'camera','retake-nonce','TEST-reading-retake.jpg')""",
+                (attachment_id, required_at))
         resubmitted = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
             'item_id': 100, 'plan_id': 10, 'result': 'normal', 'supplement': True,
             'photo_urls': json.dumps(['/uploads/inspection/reading.jpg',
@@ -444,11 +460,12 @@ class InspectionReviewReworkTest(unittest.TestCase):
             db.execute("""UPDATE operation_attachments SET source_type='inspection',source_id=100
                 WHERE id=?""", (attachment['id'],))
             db.execute("""INSERT INTO photo_capture_sessions
-                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
-                 attachment_id,rework_required_at,capture_source)
-                VALUES (2,'next-cycle',2,1,10,100,datetime('now','localtime'),
+                (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source,nonce,anti_counterfeit_code)
+                VALUES ('next-cycle',2,1,10,100,datetime('now','localtime'),
                         datetime('now','localtime','+15 minute'),datetime('now','localtime'),
-                        ?,?,'camera')""", (attachment['id'], item['rework_required_at']))
+                        ?,?,'camera','next-cycle-nonce','TEST-replacement-next.jpg')""",
+                (attachment['id'], item['rework_required_at']))
 
         replacement = self.client.post('/api/mobile/submit-item', headers=self.headers('operator-token'), json={
             'item_id': 100,
@@ -481,22 +498,24 @@ class InspectionReviewReworkTest(unittest.TestCase):
                 check_out_time='2026-08-14 09:00:00' WHERE id=100""")
             db.execute("""INSERT INTO operation_attachments
                 (id,stored_path,site_id,uploader_id,description,filename,review_status,
-                 source_type,source_id,evidence_qualification)
+                 source_type,source_id,evidence_qualification,capture_source,evidence_basis,
+                 watermark_code,plan_id,item_id)
                 VALUES (230,'/uploads/inspection/wrong-cycle.jpg',1,2,'仪表读数',
-                        'wrong-cycle.jpg','pending','inspection',100,'qualified')""")
+                        'wrong-cycle.jpg','pending','inspection',100,'qualified','camera',
+                        'server_capture_session','WRONG-CYCLE',10,100)""")
             db.execute("""INSERT INTO photo_capture_sessions
-                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
-                 attachment_id,rework_required_at,capture_source)
-                VALUES (3,'old-cycle',2,1,10,100,'2026-08-14 09:15:00',
+                (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source,nonce,anti_counterfeit_code)
+                VALUES ('old-cycle',2,1,10,100,'2026-08-14 09:15:00',
                         '2026-08-14 09:30:00','2026-08-14 09:16:00',230,
-                        '2026-08-14 09:10:00','camera')""")
+                        '2026-08-14 09:10:00','camera','old-cycle-nonce','WRONG-CYCLE')""")
             before_item = tuple(db.execute("""SELECT result,review_status,evidence_status,
                 rework_required_at,check_out_time,photo_urls,actual_photos
                 FROM insp_plan_items WHERE id=100""").fetchone())
             before_attachment = tuple(db.execute("""SELECT source_type,source_id,review_status,
                 evidence_qualification FROM operation_attachments WHERE id=230""").fetchone())
             before_session = tuple(db.execute("""SELECT used_at,attachment_id,rework_required_at
-                FROM photo_capture_sessions WHERE id=3""").fetchone())
+                FROM photo_capture_sessions WHERE attachment_id=230""").fetchone())
 
         response = self.client.post('/api/mobile/submit-item',
                                     headers=self.headers('operator-token'), json={
@@ -512,7 +531,7 @@ class InspectionReviewReworkTest(unittest.TestCase):
             after_attachment = tuple(db.execute("""SELECT source_type,source_id,review_status,
                 evidence_qualification FROM operation_attachments WHERE id=230""").fetchone())
             after_session = tuple(db.execute("""SELECT used_at,attachment_id,rework_required_at
-                FROM photo_capture_sessions WHERE id=3""").fetchone())
+                FROM photo_capture_sessions WHERE attachment_id=230""").fetchone())
         self.assertEqual(after_item, before_item)
         self.assertEqual(after_attachment, before_attachment)
         self.assertEqual(after_session, before_session)
@@ -534,11 +553,11 @@ class InspectionReviewReworkTest(unittest.TestCase):
                 VALUES (240,'/uploads/inspection/replacement-cycle-one.jpg',1,2,'仪表读数',
                         'replacement-cycle-one.jpg','pending','inspection',100,'qualified')""")
             db.execute("""INSERT INTO photo_capture_sessions
-                (id,token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
-                 attachment_id,rework_required_at,capture_source)
-                VALUES (4,?,2,1,10,100,datetime('now','localtime'),
+                (token_hash,user_id,site_id,plan_id,item_id,issued_at,expires_at,used_at,
+                 attachment_id,rework_required_at,capture_source,nonce,anti_counterfeit_code)
+                VALUES (?,2,1,10,100,datetime('now','localtime'),
                         datetime('now','localtime','+15 minute'),NULL,NULL,
-                        '2026-08-13 08:00:00','camera')""",
+                        '2026-08-13 08:00:00','camera','prior-cycle-nonce','PRIOR-CYCLE')""",
                 (app_module._hash_token('prior-cycle-token'),))
 
         response = self.client.post('/api/operation-attachments/review',

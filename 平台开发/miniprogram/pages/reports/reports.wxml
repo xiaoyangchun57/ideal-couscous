@@ -92,9 +92,11 @@
       </view>
       <view class="detail-block" wx:if="{{detail.photos.length}}">
         <text class="detail-block-label">现场照片</text>
+        <view wx:if="{{detail.mediaRefreshing}}" class="detail-media-state">正在刷新照片</view>
+        <view wx:elif="{{detail.mediaError}}" class="detail-media-state detail-media-retry" bindtap="onRetryDetailMedia">{{detail.mediaError}}</view>
         <scroll-view class="detail-photos" scroll-x="true">
           <block wx:for="{{detail.photos}}" wx:key="storedPath">
-            <image wx:if="{{item.url}}" class="detail-photo" src="{{item.url}}" mode="aspectFill" bindtap="onPreviewPhoto" data-src="{{item.url}}" />
+            <image wx:if="{{item.url}}" class="detail-photo" src="{{item.url}}" mode="aspectFill" binderror="onDetailPhotoMediaError" bindtap="onPreviewPhoto" data-stored-path="{{item.storedPath}}" />
             <text wx:else class="detail-block-text">照片地址无效，请联系管理员核对档案</text>
           </block>
         </scroll-view>
@@ -134,13 +136,24 @@
       </view>
       <view class="detail-block">
         <text class="detail-block-label">现场照片（1 至 6 张）</text>
-        <scroll-view wx:if="{{reportSheet.photos.length}}" class="detail-photos" scroll-x="true">
-          <view wx:for="{{reportSheet.photos}}" wx:key="*this" class="detail-photo">
-            <image class="detail-photo" src="{{item}}" mode="aspectFill" bindtap="onPreviewReportPhoto" data-url="{{item}}" />
-            <text class="detail-block-text" bindtap="onRemoveReportPhoto" data-url="{{item}}">移除</text>
+        <scroll-view wx:if="{{reportSheet.photoItems.length}}" class="detail-photos" scroll-x="true">
+          <view wx:for="{{reportSheet.photoItems}}" wx:key="key" class="report-photo-entry">
+            <view class="detail-photo">
+              <image class="detail-photo" src="{{item.displayUrl || item.localPath}}" mode="aspectFill" binderror="onReportPhotoMediaError" bindtap="onPreviewReportPhoto" data-key="{{item.key}}" />
+              <text wx:if="{{item.status === 'uploading'}}" class="report-photo-status">上传中</text>
+              <text wx:elif="{{item.status === 'failed'}}" class="report-photo-status report-photo-retry" bindtap="onRetryReportPhoto" data-key="{{item.key}}">{{item.requiresNewCapture ? '授权失效，重新拍摄' : '上传失败，重试'}}</text>
+              <text wx:elif="{{item.mediaRefreshing}}" class="report-photo-status">正在刷新</text>
+              <text wx:elif="{{item.mediaError}}" class="report-photo-status report-photo-retry" bindtap="onRetryReportPhotoMedia" data-key="{{item.key}}">照片加载失败，点击重试</text>
+              <text class="report-photo-remove-text" bindtap="onRemoveReportPhoto" data-key="{{item.key}}">移除</text>
+            </view>
+            <text wx:if="{{item.status === 'failed' && item.error}}" class="report-photo-message report-photo-error">{{item.error}}</text>
+            <text wx:if="{{item.status === 'failed' && item.nextAction}}" class="report-photo-message">{{item.nextAction}}</text>
           </view>
         </scroll-view>
-        <button class="btn btn-primary btn-sm" disabled="{{reportSheet.uploading || reportSheet.submitting}}" loading="{{reportSheet.uploading}}" bindtap="onAddReportPhoto">添加照片</button>
+        <view class="report-photo-actions">
+          <button class="btn btn-primary btn-sm" disabled="{{reportSheet.uploading || reportSheet.submitting}}" loading="{{reportSheet.uploading}}" bindtap="onTakeReportPhoto">现场拍照</button>
+          <button class="btn btn-secondary btn-sm" disabled="{{reportSheet.uploading || reportSheet.submitting}}" bindtap="onAddReportPhoto">从相册选择</button>
+        </view>
       </view>
     </scroll-view>
     <view class="sheet-bottom-bar">

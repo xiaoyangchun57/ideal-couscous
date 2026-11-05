@@ -170,13 +170,19 @@ class AlertManagementContractTest(unittest.TestCase):
             self.assertEqual(event['event_type'], 'simulated')
             self.assertEqual(event['operator'], '管理员')
 
-    def test_statistics_respect_reviewer_site_scope(self):
+    def test_statistics_give_reviewer_company_scope_and_keep_operator_scoped(self):
         response = self.client.get('/api/alerts/statistics', headers=self.headers('reviewer-token'))
         self.assertEqual(response.status_code, 200, response.json)
-        self.assertEqual(response.json['total'], 2)
-        self.assertEqual(response.json['by_status']['pending'], 1)
+        self.assertEqual(response.json['total'], 3)
+        self.assertEqual(response.json['by_status']['pending'], 2)
         self.assertEqual(response.json['by_status']['resolved'], 1)
-        self.assertEqual(response.json['by_level']['orange'], 0)
+        self.assertEqual(response.json['by_level']['orange'], 1)
+
+        operator = self.client.get('/api/alerts/statistics', headers=self.headers('operator-token'))
+        self.assertEqual(operator.status_code, 200, operator.json)
+        self.assertEqual(operator.json['total'], 2)
+        self.assertEqual(operator.json['by_status']['pending'], 1)
+        self.assertEqual(operator.json['by_level']['orange'], 0)
 
     def test_alert_action_projection_covers_workorder_stages_and_invalid_links(self):
         alert = {
@@ -408,9 +414,10 @@ class AlertManagementContractTest(unittest.TestCase):
 
         reviewer = self.client.get('/api/alerts', headers=self.headers('reviewer-token'))
         reviewer_rows = {row['id']: row for row in reviewer.json}
-        self.assertFalse(reviewer_rows[4]['can_view'])
-        self.assertIsNone(reviewer_rows[4]['primary_action'])
-        self.assertIsNone(reviewer_rows[4]['related_workorder_target'])
+        self.assertTrue(reviewer_rows[4]['can_view'])
+        self.assertEqual(reviewer_rows[4]['primary_action'], '查看关联工单')
+        self.assertEqual(
+            reviewer_rows[4]['related_workorder_target'], {'order_no': 'WO-LINKED'})
 
         with self.temporary_db() as db:
             states = dict(db.execute('SELECT id,status FROM alerts WHERE id IN (1,4,5)').fetchall())
@@ -430,6 +437,50 @@ class AlertManagementContractTest(unittest.TestCase):
         self.assertEqual(detail.json['related_workorder_target'], {'order_no': 'WO-DETAIL'})
         missing = self.client.get('/api/alerts/4041', headers=self.headers('operator-token'))
         self.assertEqual((missing.status_code, missing.json['code']), (404, 'ALERT_NOT_FOUND'))
+
+    def test_alert_pagination_filters_complete_authorized_history_and_keeps_legacy_array(self):
+        with self.temporary_db() as db:
+            db.executemany(
+                """INSERT INTO alerts
+                   (site_id,metric,value,level,message,status,flow_type,flow_status,created_at)
+                   VALUES (1,'ph',7.5,'yellow',?,'pending','manual','pending_review',?)""",
+                [(f'分页告警 {index:02d}', f'2026-10-{index:02d} 08:00:00') for index in range(1, 29)],
+            )
+            db.execute(
+                """INSERT INTO alerts
+                   (site_id,metric,value,level,message,status,flow_type,flow_status,created_at)
+                   VALUES (2,'ph',7.5,'red','无权分页告警','pending','manual','pending_review','2026-10-30 08:00:00')"""
+            )
+
+        legacy = self.client.get('/api/alerts?limit=5', headers=self.headers('operator-token'))
+        self.assertEqual(legacy.status_code, 200, legacy.json)
+        self.assertIsInstance(legacy.json, list)
+        self.assertEqual(len(legacy.json), 5)
+
+        first = self.client.get(
+            '/api/alerts?paginated=1&page=1&page_size=20&date_range=all',
+            headers=self.headers('operator-token'),
+        )
+        last = self.client.get(
+            '/api/alerts?paginated=1&page=2&page_size=20&date_range=all',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(first.status_code, 200, first.json)
+        self.assertEqual(last.status_code, 200, last.json)
+        self.assertEqual(first.json['total'], 30)
+        self.assertEqual(len(first.json['items']), 20)
+        self.assertEqual(len(last.json['items']), 10)
+        ids = [row['id'] for row in first.json['items'] + last.json['items']]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertFalse(any(row['site_id'] == 2 for row in first.json['items'] + last.json['items']))
+
+        searched = self.client.get(
+            '/api/alerts?paginated=1&page=1&page_size=20&date_range=all&search=分页告警%2001',
+            headers=self.headers('operator-token'),
+        )
+        self.assertEqual(searched.status_code, 200, searched.json)
+        self.assertEqual(searched.json['total'], 1)
+        self.assertEqual(searched.json['items'][0]['message'], '分页告警 01')
 
 
 if __name__ == '__main__':

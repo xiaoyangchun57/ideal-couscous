@@ -88,7 +88,8 @@ function initializeInspectionItemSelections(days, options, scheduleType = 'weekl
       const key = String(siteId);
       if (!(key in selected) && options && Object.prototype.hasOwnProperty.call(options, siteId)) {
         selected[key] = (options && options[siteId] || [])
-          .filter(item => !item.frequency || item.frequency === scheduleType)
+          .filter(item => !item.frequency || item.frequency === scheduleType
+            || (scheduleType === 'weekly' && item.frequency === 'monthly'))
           .map(item => Number(item.id));
       }
     });
@@ -1014,12 +1015,12 @@ Page({
     submission
       .then(submitted => {
         if (!this.data.editId && !this.isCurrentCreation(payload)) return;
-        if (this.data.isChange && (!submitted || submitted.status !== 'approved' || submitted.direct_applied !== true)) {
-          throw { error: '服务端未确认计划变更已生效，请直接重试' };
+        if (this.data.isChange && (!submitted || submitted.status !== 'change_submitted')) {
+          throw { error: '服务端未确认计划变更已提交审核，请直接重试' };
         }
         this._pendingFormalSubmit = null;
         this.setData({ submitError: '' });
-        wx.showToast({ title: this.data.isChange ? '计划变更已生效' : (this.data.editId || (submitted && submitted.status === 'submitted') ? '已提交审批' : '计划已恢复，请查看当前状态'), icon: 'success' });
+        wx.showToast({ title: this.data.isChange ? '变更已提交审核' : (this.data.editId || (submitted && submitted.status === 'submitted') ? '已提交审批' : '计划已恢复，请查看当前状态'), icon: 'success' });
         setTimeout(() => {
           if (this._pageAlive !== false && (this.data.editId || this.isCurrentCreation(payload))) wx.navigateBack();
         }, 1200);

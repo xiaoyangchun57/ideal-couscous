@@ -397,7 +397,7 @@
 /* ============================================================
    Sheet 弹层（车辆页专属命名空间）
    - 彻底脱离全局 .sheet 样式污染
-   - height: auto + max-height: 85vh，短内容收束，长内容单滚动
+   - height: 75vh 固定 + flex 内滚动（防底部真空模型），单一滚动源
    - 安全区只在 bottom-bar 加一次
    ============================================================ */
 
@@ -419,8 +419,8 @@
   z-index: 101;
   background: var(--color-card);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  height: 85vh;
-  max-height: 85vh;
+  height: 75vh; /* 设计系统 bottom-sheet 铁律 */
+  max-height: 75vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;

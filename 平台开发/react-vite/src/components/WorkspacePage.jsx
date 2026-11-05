@@ -1,9 +1,33 @@
 import { Button, Card, Empty, Space, Table, Tooltip, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useTheme } from '../hooks/useTheme';
+import { useTableAutoHeight } from '../hooks/useTableAutoHeight';
+import { visiblePageRowCount } from '../utils/listPagination';
 import './WorkspacePage.css';
 
 const { Title, Text } = Typography;
+
+// 空状态动态图标映射（outline 风格，常动）
+const emptyIconMap = {
+  empty: 'inbox',
+  filtered: 'magnifier',
+  sample: 'bar-chart',
+  error: 'warning-triangle',
+  'no-permission': 'arrow-out-square',
+  success: 'confetti',
+};
+
+const EmptyGif = ({ type, size = 72 }) => {
+  const name = emptyIconMap[type] || 'inbox';
+  return (
+    <img
+      src={`/icons/empty/${name}.gif`}
+      alt=""
+      style={{ width: size, height: size, objectFit: 'contain' }}
+      draggable={false}
+    />
+  );
+};
 
 export function TableLongText({ value, lines = 2, empty = '-' }) {
   const content = value == null || value === '' ? empty : String(value);
@@ -26,10 +50,12 @@ export function WorkspaceEmpty({ type = 'empty', onRefresh, description, childre
     filtered: '没有符合当前条件的记录',
     sample: '本周期尚无可用统计样本',
     error: '数据加载失败，请稍后重试',
+    'no-permission': '当前账号没有可查看内容',
+    success: '操作成功',
   };
   return (
     <div className="workspace-empty" style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
-      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description || descriptions[type]}>
+      <Empty image={<EmptyGif type={type} />} description={description || descriptions[type]}>
         {(children || onRefresh) && <Space wrap>{children}{onRefresh && <Button icon={<ReloadOutlined />} onClick={onRefresh}>刷新</Button>}</Space>}
       </Empty>
     </div>
@@ -90,23 +116,61 @@ export function ToolbarMeta({ label, children }) {
   );
 }
 
+export function formatTablePaginationTotal(total, range) {
+  const start = range?.[0] || 0;
+  const end = range?.[1] || 0;
+  return `共${total}条，当前第${start}—${end}条`;
+}
+
+export function standardListPagination(overrides = {}) {
+  return {
+    pageSize: 20,
+    showSizeChanger: true,
+    pageSizeOptions: [20, 50, 100],
+    ...overrides,
+  };
+}
+
 export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, emptyType, onRefresh, pagination = false, scroll, fillHeight = false, ...rest }) {
   const { tokens } = useTheme();
   const hasRows = dataSource.length > 0;
+  const paginationConfig = pagination && typeof pagination === 'object'
+    ? { showTotal: formatTablePaginationTotal, ...pagination }
+    : pagination;
+  const paginationTotal = paginationConfig && typeof paginationConfig === 'object'
+    && Number.isFinite(Number(paginationConfig.total))
+    ? Number(paginationConfig.total)
+    : dataSource.length;
+  const currentPage = Number(paginationConfig?.current || 1);
+  const pageSize = Number(paginationConfig?.pageSize || dataSource.length || 1);
+  const visibleRowCount = visiblePageRowCount(dataSource.length, currentPage, pageSize);
+  const liveStart = visibleRowCount ? ((currentPage - 1) * pageSize) + 1 : 0;
+  const liveEnd = visibleRowCount ? Math.min(liveStart + visibleRowCount - 1, paginationTotal) : 0;
+  const hasPaginatedRecords = Boolean(paginationConfig) && paginationTotal > 0;
+  const [tableRef, bodyHeight] = useTableAutoHeight({
+    deps: [dataSource.length, loading, currentPage, pageSize, paginationTotal],
+  });
+  const tableScroll = scroll
+    ? {
+        ...scroll,
+        ...(!scroll.y && bodyHeight ? { y: bodyHeight } : {}),
+        scrollToFirstRowOnChange: scroll.scrollToFirstRowOnChange ?? true,
+      }
+    : (bodyHeight ? { y: bodyHeight, scrollToFirstRowOnChange: true } : undefined);
   return (
-    <Card className={`workspace-table${fillHeight ? ' workspace-table--fill' : ''}`} aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
+    <Card ref={tableRef} className={`workspace-table${fillHeight ? ' workspace-table--fill' : ''}`} aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
       <span className="sr-only" role="status" aria-live="polite">
-        {loading ? '正在加载列表' : `列表已更新，共 ${dataSource.length} 条记录`}
+        {loading ? '正在加载列表' : `列表已更新，共${paginationTotal}条，当前第${liveStart}—${liveEnd}条`}
       </span>
-      {hasRows || loading ? (
+      {hasRows || hasPaginatedRecords || loading ? (
         <Table
           dataSource={dataSource}
           columns={columns}
           loading={loading}
           rowKey={rowKey}
           size="small"
-          pagination={pagination}
-          scroll={scroll || { y: 'calc(100vh - 350px)', scrollToFirstRowOnChange: true }}
+          pagination={paginationConfig}
+          scroll={tableScroll}
           {...rest}
         />
       ) : <WorkspaceEmpty type={emptyType} onRefresh={onRefresh} />}

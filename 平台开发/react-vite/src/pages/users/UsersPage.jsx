@@ -1,25 +1,26 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   App, Input, Select, Button, Space, Tag, Badge, Modal,
   Typography, Empty, Form, Checkbox, Alert, Dropdown, Tooltip,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, PlusOutlined, EditOutlined,
-  LockOutlined, StopOutlined, PlayCircleOutlined, DeleteOutlined,
+  SearchOutlined, ReloadOutlined, PlusOutlined,
+  LockOutlined, StopOutlined, PlayCircleOutlined,
   UserOutlined, SafetyOutlined, MoreOutlined, ClearOutlined,
 } from '@ant-design/icons';
+import { HoverGifIcon } from '../../components/HoverGifIcon';
 import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import FilterBar from '../../components/FilterBar';
 import ManagementPage, { UnifiedTable } from '../../components/ManagementPage';
+import { formatTablePaginationTotal, standardListPagination } from '../../components/WorkspacePage';
 import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import { finishWechatBindingUnbind } from './wechatBindingActions';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
-import { filterAssignableUsers } from '../../utils/assignableUsers';
 import { useUrlSyncedSearch } from '../../hooks/useUrlSyncedSearch';
 
 const { Text } = Typography;
@@ -186,9 +187,8 @@ export default function UsersPage() {
         return;
       }
       let targetId;
-      // 转交接收人候选：复用统一判定，排除已注销 / 已停用账号，并限定为运维人员
-      const candidates = filterAssignableUsers(users, { role: 'operator' })
-        .filter((user) => user.id !== record.id);
+      const candidates = users.filter((user) => user.id !== record.id && user.status === 'active'
+        && (user.roles || [user.role]).includes('operator'));
       modal.confirm({
         title: `先转交“${record.real_name}”的未完成工作`,
         content: <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -440,7 +440,7 @@ export default function UsersPage() {
       fixed: 'right',
       render: (_, record) => {
         if (record.deleted_at) return (
-          <Button type="link" size="small" danger icon={<DeleteOutlined />}
+          <Button type="link" size="small" danger icon={<HoverGifIcon name="trash-bin" size={14} />}
             onClick={() => handlePermanentDelete(record)}>永久删除</Button>
         );
         const isCurrent = Number(record.id) === Number(currentUser?.id);
@@ -457,7 +457,7 @@ export default function UsersPage() {
             disabled: isCurrent && record.status === 'active',
           },
           { type: 'divider' },
-          { key: 'delete', icon: <DeleteOutlined />, label: isCurrent ? '注销（当前账号）' : '注销账号', danger: true, disabled: isCurrent },
+          { key: 'delete', icon: <HoverGifIcon name="trash-bin" size={14} />, label: isCurrent ? '注销（当前账号）' : '注销账号', danger: true, disabled: isCurrent },
         ];
         const handleMenu = ({ key }) => {
           if (key === 'set-password') handleSetPassword(record);
@@ -468,7 +468,7 @@ export default function UsersPage() {
         };
         return (
           <Space size={0}>
-            <Button type="link" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
+            <Button type="link" size="small" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => handleEdit(record)}>
               编辑
             </Button>
             <Dropdown menu={{ items: menuItems, onClick: handleMenu }} trigger={['click']}>
@@ -567,7 +567,7 @@ export default function UsersPage() {
           dataSource={visibleUsers}
           rowKey={(r) => r.id || r.username}
           loading={loading}
-          pagination={{ pageSize: 20, showSizeChanger: false, hideOnSinglePage: true }}
+          pagination={standardListPagination({ showTotal: formatTablePaginationTotal })}
           locale={{ emptyText: <Empty description="暂无用户数据" /> }}
           scrollX={1090}
         />}

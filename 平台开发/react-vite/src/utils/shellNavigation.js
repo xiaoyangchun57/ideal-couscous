@@ -11,7 +11,7 @@ export function buildGlobalSearchPath(item) {
     case 'site':
       return identifier ? `/sites/${identifier}` : '/sites';
     case 'workorder':
-      return identifier ? `/workorders?search=${identifier}` : '/workorders';
+      return identifier ? `/workorders?order=${identifier}` : '/workorders';
     case 'device':
       return identifier ? `/equipment?q=${identifier}` : '/equipment';
     default:
@@ -76,8 +76,8 @@ export function getNotificationTarget(item, roles) {
   const sourceId = item?.source_id;
   switch (item?.source_type) {
     case 'workorder':
-      return hasAnyRole(roles, ['admin', 'operator'])
-        ? (hasIdentifier(sourceId) ? `/workorders?search=${encodeURIComponent(sourceId)}` : '/workorders')
+      return hasAnyRole(roles, ['admin', 'operator', 'reviewer'])
+        ? (hasIdentifier(sourceId) ? `/workorders?order=${encodeURIComponent(sourceId)}` : '/workorders')
         : null;
     case 'workorder_review':
       return hasAnyRole(roles, ['admin', 'reviewer'])
@@ -139,7 +139,7 @@ export function getNotificationTarget(item, roles) {
         return buildAuditTargetPath('plan', 'plan', sourceId, item.source_type,
           /变更|change/i.test(`${item.title || ''} ${item.content || ''}`) ? { change: 1 } : {});
       }
-      return hasAnyRole(roles, ['operator'])
+      return hasAnyRole(roles, ['operator', 'reviewer'])
         ? (hasIdentifier(sourceId) ? `/plan-schedules?schedule=${encodeURIComponent(sourceId)}` : '/plan-schedules')
         : null;
     case 'plan_schedule_change':
@@ -150,9 +150,13 @@ export function getNotificationTarget(item, roles) {
     case 'user_work_transfer':
       return hasAnyRole(roles, ['admin', 'operator']) ? '/?view=operations' : null;
     case 'manual_report':
-      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/reports' : null;
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? (hasIdentifier(sourceId) ? `/reports?report=${encodeURIComponent(sourceId)}` : '/reports')
+        : null;
     case 'alert':
-      return hasAnyRole(roles, ['admin', 'reviewer']) ? '/alerts' : null;
+      return hasAnyRole(roles, ['admin', 'reviewer'])
+        ? (hasIdentifier(sourceId) ? `/alerts?alert=${encodeURIComponent(sourceId)}` : '/alerts')
+        : null;
     case 'reagent_qc':
       return hasAnyRole(roles, ['admin']) ? '/equipment' : null;
     default:

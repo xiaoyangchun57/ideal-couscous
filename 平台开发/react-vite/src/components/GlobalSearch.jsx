@@ -7,6 +7,7 @@ import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
 import { getSearchablePages } from '../config/navigation';
 import { buildGlobalSearchPath } from '../utils/shellNavigation';
+import { HoverGifIcon } from './HoverGifIcon';
 
 const { Text } = Typography;
 const resultTypeLabels = {
@@ -106,7 +107,7 @@ export default function GlobalSearch({ open, onClose }) {
         autoFocus
         allowClear
         size="large"
-        prefix={<SearchOutlined style={{ color: tokens.colorTextTertiary }} />}
+        prefix={<HoverGifIcon name="magnifier" size={16} style={{ opacity: 0.45 }} />}
         placeholder="搜索页面、站点、工单或设备"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
@@ -151,7 +152,7 @@ export default function GlobalSearch({ open, onClose }) {
         </Spin>
       </div>
       <div className="global-search-summary" style={{ color: tokens.colorTextTertiary, borderTopColor: tokens.colorBorderSecondary }}>
-        {query.trim() ? `找到 ${results.length} 个结果` : `可访问页面 ${results.length} 个`}
+        {query.trim() ? `当前显示 ${results.length} 个匹配结果，最多显示 20 个` : `当前显示 ${results.length} 个常用页面入口`}
       </div>
     </Modal>
   );

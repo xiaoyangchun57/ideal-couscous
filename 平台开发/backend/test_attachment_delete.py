@@ -1260,6 +1260,42 @@ class AttachmentDeleteTest(unittest.TestCase):
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM attachment_purge_batches').fetchone()[0], 0)
 
+    def test_archive_batch_database_failure_reports_incomplete_staged_restore(self):
+        stored, thumb = self.add_rejected_attachment(258)
+        files = [os.path.join(self.upload_dir, value[len('/uploads/'):].replace('/', os.sep))
+                 for value in (stored, thumb)]
+        real_replace = os.replace
+
+        def fail_one_restore(source, target):
+            if ('.purge-' in os.path.basename(source)
+                    and os.path.normcase(target) == os.path.normcase(files[0])):
+                raise PermissionError('forced staged restore failure')
+            return real_replace(source, target)
+
+        with mock.patch.object(
+                app_module, '_archive_attachment_remove_compatibility_urls',
+                side_effect=sqlite3.IntegrityError('forced batch database failure')):
+            with mock.patch.object(app_module.os, 'replace', side_effect=fail_one_restore):
+                response = self.client.post('/api/attachments/purge-batch',
+                                            headers=self.headers('admin-token'), json={
+                                                'attachment_ids': [258],
+                                                'reason': '恢复失败验证',
+                                                'idempotency_key': 'batch-restore-incomplete-1',
+                                            })
+
+        self.assertEqual((response.status_code, response.json.get('code')),
+                         (503, 'ATTACHMENT_PURGE_BATCH_RESTORE_INCOMPLETE'))
+        self.assertTrue(response.json['restore_incomplete'])
+        self.assertEqual(response.json['failed_file_count'], 1)
+        self.assertIn('部分影像文件恢复失败', response.json['error'])
+        self.assertFalse(os.path.exists(files[0]))
+        self.assertTrue(os.path.exists(files[1]))
+        with app_module.get_db() as db:
+            self.assertIsNotNone(db.execute(
+                'SELECT id FROM operation_attachments WHERE id=258').fetchone())
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM attachment_purge_batches').fetchone()[0], 0)
+
     def test_archive_batch_retains_files_referenced_outside_the_selected_batch(self):
         stored, _ = self.add_rejected_attachment(256, shared=True)
         shared_file = os.path.join(

@@ -1,0 +1,17 @@
+[Unit]
+Description=Water monitor daily verified SQLite backup to NAS
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/run-daily-nas-database-backup
+TimeoutStartSec=24h
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

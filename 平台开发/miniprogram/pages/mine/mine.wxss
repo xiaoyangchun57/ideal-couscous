@@ -2,7 +2,7 @@
 
 /* 用户信息区 */
 .user-section {
-  background: var(--card);
+  background: var(--color-card);
   padding: 24rpx 32rpx 28rpx;
 }
 
@@ -21,7 +21,7 @@
   width: 96rpx;
   height: 96rpx;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--primary), #5ac8fa);
+  background: linear-gradient(135deg, var(--color-primary), #5ac8fa);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -38,14 +38,14 @@
 .user-name {
   font-size: 40rpx;
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   display: block;
   letter-spacing: -0.5rpx;
 }
 
 .user-title {
   font-size: 24rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
   margin-top: 6rpx;
   display: block;
   overflow: hidden;
@@ -55,7 +55,7 @@
 
 /* iOS 列表组 */
 .list-group {
-  background: var(--card);
+  background: var(--color-card);
   border-radius: 24rpx;
   margin: 24rpx 32rpx;
   overflow: hidden;
@@ -67,7 +67,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border-bottom: 1rpx solid var(--border);
+  border-bottom: 1rpx solid var(--color-border);
   min-height: 88rpx;
   transition: background 0.15s ease;
 }
@@ -111,13 +111,13 @@
 
 .list-row-text {
   font-size: 30rpx;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   margin-left: 20rpx;
   font-weight: 400;
 }
 
 .text-destructive {
-  color: var(--destructive) !important;
+  color: var(--color-error) !important;
 }
 
 .list-row-right {
@@ -129,23 +129,23 @@
 
 .list-row-hint {
   font-size: 26rpx;
-  color: var(--text-tertiary);
+  color: var(--color-text-tertiary);
 }
 
 .hint-orange {
-  color: var(--warning);
+  color: var(--color-warning);
 }
 
 .row-chevron {
   font-size: 36rpx;
-  color: var(--text-quaternary);
+  color: var(--color-text-quaternary);
   font-weight: 300;
 }
 
 .badge-red {
   min-width: 40rpx;
   height: 40rpx;
-  background: var(--destructive);
+  background: var(--color-error);
   border-radius: 9999rpx;
   color: #ffffff;
   font-size: 22rpx;
@@ -155,14 +155,14 @@
   justify-content: center;
   padding: 0 10rpx;
   line-height: 1;
-  border: 3rpx solid var(--card);
+  border: 3rpx solid var(--color-card);
   box-sizing: border-box;
 }
 
 /* 备件弹层中的列表项 */
 .parts-item {
   padding: 24rpx 0;
-  border-bottom: 1rpx solid var(--border);
+  border-bottom: 1rpx solid var(--color-border);
 }
 
 .parts-item:last-child {
@@ -177,14 +177,14 @@
 .parts-title {
   font-size: 28rpx;
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   margin-top: 12rpx;
   display: block;
 }
 
 .parts-sub {
   font-size: 24rpx;
-  color: var(--warning);
+  color: var(--color-warning);
   margin-top: 6rpx;
   display: block;
 }
@@ -205,7 +205,7 @@
   justify-content: space-between;
   align-items: center;
   padding: 20rpx 0;
-  border-bottom: 1rpx solid var(--border);
+  border-bottom: 1rpx solid var(--color-border);
 }
 
 .form-row:last-of-type {
@@ -214,12 +214,12 @@
 
 .form-value {
   font-size: 28rpx;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   font-weight: 500;
 }
 
 .form-value-blue {
-  color: var(--primary);
+  color: var(--color-primary);
 }
 
 .sheet-submit-btn {
@@ -231,7 +231,7 @@
 
 /* 弹层空态 */
 .sheet .empty-sub {
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
   font-size: 28rpx;
 }
 
@@ -244,18 +244,18 @@
 
 /* 选择器字段 */
 .picker-field {
-  background: var(--muted);
+  background: var(--color-muted);
   border-radius: 20rpx;
   padding: 20rpx 24rpx;
   font-size: 28rpx;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   min-height: 40rpx;
 }
 
 /* 分段控件 */
 .segmented {
   display: flex;
-  background: var(--muted);
+  background: var(--color-muted);
   border-radius: 20rpx;
   padding: 6rpx;
   gap: 6rpx;
@@ -266,14 +266,14 @@
   text-align: center;
   padding: 16rpx 0;
   font-size: 26rpx;
-  color: var(--text-secondary);
+  color: var(--color-text-secondary);
   border-radius: 16rpx;
   transition: all 0.2s ease;
 }
 
 .segmented-item.active {
-  background: var(--card);
-  color: var(--primary);
+  background: var(--color-card);
+  color: var(--color-primary);
   font-weight: 600;
   box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.06);
 }
