@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_line": "integrated-photo-list-hourly-governance",
   "candidate_tags": [
-    "release-20261104-integrated-repair-r32"
+    "release-20261105-migration-byte-fix-r33"
   ],
   "historical_tags": [
     "release-20261022-retention-maintenance-r29",
@@ -41,6 +41,7 @@
     "release-20261020-miniprogram-backend-compat-r27",
     "release-20261021-station-data-closure-r28",
     "release-20261029-governance-offline-r29",
-    "release-20261101-web-ops-r31"
+    "release-20261101-web-ops-r31",
+    "release-20261104-integrated-repair-r32"
   ]
 }
