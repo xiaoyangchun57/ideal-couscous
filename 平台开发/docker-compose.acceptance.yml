@@ -17,7 +17,8 @@ services:
     command:
       - /bin/sh
       - -ec
-      - "umask 0007; exec python app.py"
+      # 验收环境是全新空库：先补应用 init_db() 未创建的启动必需表，再启动应用
+      - "umask 0007; python /app/backend/init_acceptance_schema.py && exec python app.py"
     environment:
       TZ: Asia/Shanghai
       LD_PRELOAD: /opt/libsqlite-group-mode.so
