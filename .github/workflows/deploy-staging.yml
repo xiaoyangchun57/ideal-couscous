@@ -48,7 +48,9 @@ jobs:
         run: |
           # 空库 seed_users() 要求 >=12 位；这是临时随机值，
           # 不写入仓库，也不是飞牛验收环境的真实密码。
-          echo "INITIAL_ADMIN_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          P="$(openssl rand -hex 16)"
+          echo "::add-mask::$P"
+          echo "INITIAL_ADMIN_PASSWORD=$P" >> "$GITHUB_ENV"
 
       - name: 校验验收 compose 配置
         run: |
@@ -69,6 +71,34 @@ jobs:
           echo "--- CI Dockerfile 关键行 ---"
           (grep -E '^(FROM|RUN (npm|pip|apt))' /tmp/Dockerfile.acceptance.ci | head -20) || true
 
+      - name: 生成 CI 专用 SQLite 锁等待补丁
+        run: |
+          # app.py 的 get_db() 硬编码 `timeout=3` / `PRAGMA busy_timeout=3000`。
+          # 全新空库首次 seed（6000+ 条排程）在 GitHub runner 的 overlay2 上会撞
+          # `sqlite3.OperationalError: database is locked`；飞牛靠容器重启策略收敛。
+          # 这里只在 CI 容器内放宽锁等待，不改仓库源码、不改业务逻辑。
+          mkdir -p /tmp/ci-patch
+          cat > /tmp/ci-patch/sitecustomize.py <<'PY'
+          """CI-only: widen SQLite lock tolerance on a brand-new database."""
+          import sqlite3
+
+          class _CIConnection(sqlite3.Connection):
+              def execute(self, sql, *args, **kwargs):
+                  if isinstance(sql, str) and "busy_timeout" in sql.lower():
+                      sql = "PRAGMA busy_timeout=30000"
+                  return super().execute(sql, *args, **kwargs)
+
+          _orig_connect = sqlite3.connect
+
+          def _connect(*args, **kwargs):
+              kwargs["timeout"] = 30
+              kwargs.setdefault("factory", _CIConnection)
+              return _orig_connect(*args, **kwargs)
+
+          sqlite3.connect = _connect
+          PY
+          python3 -c "import sys; sys.path.insert(0, '/tmp/ci-patch'); import sitecustomize, sqlite3; print('sitecustomize OK:', sqlite3.connect.__name__)"
+
       - name: 构建验收镜像
         run: |
           docker build -f /tmp/Dockerfile.acceptance.ci -t water-monitor-app:ci 平台开发
@@ -81,6 +111,8 @@ jobs:
           # 启动命令与 docker-compose.acceptance.yml 保持一致（先补表再启动）。
           docker run -d --name water-accept-ci \
             -p 127.0.0.1:8080:5000 \
+            -v /tmp/ci-patch:/ci:ro \
+            -e PYTHONPATH=/ci \
             -e TZ=Asia/Shanghai \
             -e APP_RUNTIME_PROFILE=production \
             -e ENABLE_DEMO_SEED=0 \
@@ -90,13 +122,28 @@ jobs:
             -w /app/backend \
             water-monitor-app:ci \
             sh -ec 'python init_acceptance_schema.py && exec python app.py'
+          # 与飞牛验收容器 restart: unless-stopped 的行为一致：
+          # 若全新空库初始化中途崩溃，重启同一容器（保留已初始化的库）再试。
           OK=0
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json 2>/dev/null; then
-              OK=1
-              break
+          for ATTEMPT in 1 2 3; do
+            if [ "$ATTEMPT" -gt 1 ]; then
+              RUNNING="$(docker inspect -f '{{.State.Running}}' water-accept-ci 2>/dev/null || echo false)"
+              if [ "$RUNNING" != "true" ]; then
+                echo "第 $ATTEMPT 次启动（沿用上一次已初始化的库）"
+                docker start water-accept-ci >/dev/null || true
+              fi
             fi
-            sleep 2
+            for i in $(seq 1 90); do
+              if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json 2>/dev/null; then
+                OK=1
+                break 2
+              fi
+              if [ "$(docker inspect -f '{{.State.Running}}' water-accept-ci 2>/dev/null || echo false)" != "true" ]; then
+                echo "容器已退出，结束本轮等待"
+                break
+              fi
+              sleep 2
+            done
           done
           if [ "$OK" != "1" ]; then
             echo "健康检查未通过，容器日志："
