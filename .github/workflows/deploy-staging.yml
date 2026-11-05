@@ -2,26 +2,33 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 
 # 对应《验收环境搭建.md》3.2「添加工作流文件」的落地版。
 #
-# 为什么不能照抄原文的工作流：
-#   1) 本仓库没有 staging 分支，验收分支和默认分支统一为 acceptance。
+# 为什么不能照抄原文的工作流（四点结论不变）：
+#   1) 本仓库没有 staging 分支；验收分支与默认分支统一为 acceptance。
 #      原文 `git push origin main` 推上去也不会触发任何验收流程。
 #   2) 本仓库没有注册任何 self-hosted runner（yanhuo / feiniu 标签都不存在），
-#      runs-on: [self-hosted, ...] 的 job 会永久排队，永远不会执行。
+#      runs-on: [self-hosted, ...] 的 job 会永久排队。
 #   3) 仓库根目录没有 docker-compose.yml；验收 compose 在 平台开发/docker-compose.acceptance.yml，
-#      且依赖飞牛本地 .env 里的 INITIAL_ADMIN_PASSWORD，原文 `PORT=8081 docker compose up` 对它无效。
+#      且依赖飞牛本地 .env 里的 INITIAL_ADMIN_PASSWORD，原文 `PORT=8081 docker compose up` 无效。
 #   4) 仓库是 PUBLIC，把 self-hosted runner + docker.sock 暴露出来是 GitHub 官方明确警告的高风险组合。
 #
-# 现在的分工（效果与原文一致：push 验收分支 -> Actions 绿色 ✓ -> 验收地址自动更新）：
-#   - 本工作流：在 GitHub 托管 runner（PUBLIC 仓库免费）上构建验收镜像、空库真实启动并打 /api/health，
-#     拦住会让验收环境崩掉的改动。
-#   - 飞牛 water-accept-poller：每 60 秒轮询 acceptance，发现新提交即 docker compose up -d --build，
-#     它是真正的部署者。主动出站，不需要 runner 注册令牌，也不需要公网端口。
+# 2026-11-05 之后的三点变化：
+#   a) acceptance 已成为仓库默认分支，Actions 页面的「Run workflow」按钮可见。
+#   b) 增加 pull_request 触发，本 job 才能作为 acceptance 的必需状态检查（PR 合并门禁）。
+#      分支保护需仓库管理员在 Settings -> Branches 里勾选「验收版构建 + 启动门禁」。
+#   c) R33 合并后 APP_RUNTIME_PROFILE=production 启动会强制校验：
+#        私有证据目录可读可写 + station_ingest_cutover 已完成（要求 001~014 迁移过的历史业务库）。
+#      验收/CI 用全新空库，无法满足第二项；炎火云生产靠 one-shot cutover 服务 + 历史库满足。
+#      因此验收与 CI 统一改用 local profile，门禁验证「compose 可解析 / 镜像可构建 / 应用可启动 / health 200」；
+#      生产启动契约仍在炎火云用真实库验证。若以后给验收环境换上已迁移的基线库，可改回 production。
 #
+# 分工：本工作流只做质量门禁；飞牛 water-accept-poller 每 60 秒轮询 acceptance 并重建验收容器。
+# GitHub 托管 runner 访问不到局域网飞牛，因此不做内网部署。
 # 若以后改用 staging 分支，需同步把飞牛 deploy-feiniu-poller.sh 里的 BRANCH 改成 staging。
-# 当前只在 push / 手动触发时检查；飞牛轮询部署独立运行，不等待此检查结果。
 
 on:
   push:
+    branches: [acceptance]
+  pull_request:
     branches: [acceptance]
   workflow_dispatch:
 
@@ -114,12 +121,14 @@ jobs:
           docker rm -f water-accept-ci >/dev/null 2>&1 || true
           # 直接跑镜像，绕开 compose 里飞牛专用的 /vol1 绝对路径挂载；
           # 启动命令与 docker-compose.acceptance.yml 保持一致（先补表再启动）。
+          # R33 后 production 启动需要 cutover 就绪的历史业务库，全新空库无法满足；
+          # 改用 local profile 验证「构建 + 启动 + /api/health」，与飞牛验收 compose 保持一致。
           docker run -d --name water-accept-ci \
             -p 127.0.0.1:8080:5000 \
             -v /tmp/ci-patch:/ci:ro \
             -e PYTHONPATH=/ci \
             -e TZ=Asia/Shanghai \
-            -e APP_RUNTIME_PROFILE=production \
+            -e APP_RUNTIME_PROFILE=local \
             -e ENABLE_DEMO_SEED=0 \
             -e SKIP_BACKFILL=1 \
             -e BACKEND_HOST=0.0.0.0 \
@@ -170,10 +179,17 @@ jobs:
             echo ""
             echo "- 提交：\`$GITHUB_SHA\`"
             echo "- 分支：\`$GITHUB_REF_NAME\`"
+            echo "- 事件：\`$GITHUB_EVENT_NAME\`"
             echo "- ✅ 验收 compose 可解析、镜像可构建、全新空库可启动、\`/api/health\` 返回 200"
             echo ""
-            echo "### 部署由飞牛轮询器执行"
-            echo "本次 push 会被飞牛上的 \`water-accept-poller\` 在 ≤60 秒内发现，自动重建 \`water-monitor-accept\`。"
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "### 部署由飞牛轮询器执行"
+              echo "本次 push 会被飞牛上的 \`water-accept-poller\` 在 ≤60 秒内发现，自动重建 \`water-monitor-accept\`。"
+            else
+              echo "### 本次不改变验收环境"
+              echo "当前事件是 \`$GITHUB_EVENT_NAME\`，\`acceptance\` 的 HEAD 没有前进，飞牛轮询器不会重建容器；PR 合并后的 push 才会触发部署。"
+            fi
+            echo ""
             echo "验收地址：<http://192.168.2.250:8080>；健康接口：<http://192.168.2.250:8080/api/health>"
             echo ""
             echo "> GitHub 托管 runner 无法访问局域网飞牛，因此本工作流只做质量门禁，不做内网部署。"

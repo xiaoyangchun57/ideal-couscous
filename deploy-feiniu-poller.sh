@@ -31,7 +31,8 @@ while ! apk add --no-cache --quiet git docker-cli docker-cli-compose curl; do
 done
 echo "[poller] 依赖就绪：$(docker compose version 2>/dev/null || echo 'compose 插件待确认')"
 
-mkdir -p "$BASE/data" "$BASE/uploads"
+# R33 之后私有证据目录也要预建（compose 会挂载到 /app/private_uploads）
+mkdir -p "$BASE/data" "$BASE/uploads" "$BASE/private_uploads/site_photo_originals"
 
 # 2) 首次克隆（公开仓库，无需 token）
 if [ ! -d "$REPO/.git" ]; then
