@@ -1,7 +1,7 @@
 # 飞牛局域网验收环境专用 compose
 # 与 production 的区别：
 #   1) 独立容器名 water-monitor-accept，不碰炎火云生产容器
-#   2) 独立数据目录（请在飞牛上先创建 /vol1/docker/water-acceptance），与生产库完全隔离
+#   2) 独立数据目录（已在飞牛创建 /vol1/@team/水质设备运维/{data,uploads}），与生产库完全隔离
 #   3) 监听 0.0.0.0:8080 对局域网开放（后端 BACKEND_HOST=0.0.0.0），外网访问不到
 #   只起 Web 管理台，不启用 SL651 站点接收（验收用不到）。
 services:
@@ -31,9 +31,9 @@ services:
     ports:
       - "0.0.0.0:8080:5000"
     volumes:
-      # 下面两个路径在飞牛上必须先存在；如你的存储卷不是 /vol1 请改前缀
-      - /vol1/docker/water-acceptance/data:/app/backend/data
-      - /vol1/docker/water-acceptance/uploads:/app/frontend/uploads
+      # 数据目录已由用户在飞牛创建：/vol1/@team/水质设备运维/{data,uploads}
+      - /vol1/@team/水质设备运维/data:/app/backend/data
+      - /vol1/@team/水质设备运维/uploads:/app/frontend/uploads
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"]
       interval: 30s
