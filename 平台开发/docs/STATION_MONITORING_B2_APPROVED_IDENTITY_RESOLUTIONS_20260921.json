@@ -1,0 +1,21 @@
+{
+  "report_type": "station_monitoring_b2_identity_resolutions",
+  "contains_credentials": false,
+  "approved_resolutions": [
+    {
+      "canonical_system_name": "张家港",
+      "station_code": "62484420",
+      "approved_aliases": ["上饶余干县自来水公司"]
+    },
+    {
+      "canonical_system_name": "星子",
+      "station_code": "62601200",
+      "approved_aliases": []
+    },
+    {
+      "canonical_system_name": "吉安五岳观",
+      "station_code": "62381830",
+      "approved_aliases": ["吉安"]
+    }
+  ]
+}

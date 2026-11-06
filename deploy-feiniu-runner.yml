@@ -1,0 +1,32 @@
+# 飞牛上的 GitHub 自托管 runner 容器
+# 用途：让 GitHub 能派任务到你的飞牛，触发后自动部署验收容器。
+# 部署方式（二选一）：
+#   A. 在飞牛「容器」/ Container Manager 里「导入 compose」，粘贴本文件，把 RUNNER_TOKEN 填好再启动；
+#   B. 或 SSH 进飞牛执行：docker compose -f deploy-feiniu-runner.yml up -d
+# 注意：RUNNER_TOKEN 是一次性注册令牌，从
+#   仓库 Settings → Actions → Runners → New self-hosted runner 复制（1 小时内有效）。
+#   注册成功后 runner 会把凭据存进容器内的 .credentials，之后重启容器无需再填 token
+#   （除非你在 GitHub 那边删除了该 runner，需重新注册）。
+services:
+  feiniu-github-runner:
+    # 固定到 ubuntu-noble（24.04），避免 latest 漂移；该镜像内置 docker CLI
+    image: myoung34/github-runner:ubuntu-noble
+    container_name: feiniu-github-runner
+    restart: unless-stopped
+    environment:
+      REPO_URL: "https://github.com/xiaoyangchun57/ideal-couscous"
+      RUNNER_TOKEN: "<从 GitHub 仓库 Settings → Actions → Runners → New self-hosted runner 复制的 token>"
+      RUNNER_NAME: "feiniu-accept"
+      # 注意：此镜像的变量名是 LABELS，不是 RUNNER_LABELS。
+      # 写错会导致 runner 不带 feiniu-accept 标签，工作流永远排队等不到机器。
+      LABELS: "feiniu-accept"
+      RUNNER_GROUP: "Default"
+      RUN_AS_ROOT: "true"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    # 让 runner 容器内能通过 host.docker.internal 访问飞牛宿主机的发布端口（如 8080）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 让 runner 容器能用飞牛宿主机的 Docker 来构建/启动验收容器
+      - /var/run/docker.sock:/var/run/docker.sock

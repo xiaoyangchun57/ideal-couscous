@@ -1,0 +1,68 @@
+# 飞牛局域网验收环境专用 compose
+# 与 production 的区别：
+#   1) 独立容器名 water-monitor-accept，不碰炎火云生产容器
+#   2) 独立数据目录（由 ACCEPT_DATA_ROOT 指定其下的 {data,uploads,private_uploads}），与生产库完全隔离
+#   3) 监听 0.0.0.0:8080 对局域网开放（后端 BACKEND_HOST=0.0.0.0），外网访问不到
+#   只起 Web 管理台，不启用 SL651 站点接收（验收用不到）。
+services:
+  water-monitor-accept:
+    build:
+      context: .
+      # 验收专用：基础镜像走国内加速站（飞牛直连 Docker Hub 会卡住）。
+      # 生产（炎火云）仍用原 Dockerfile，未改动。
+      dockerfile: Dockerfile.acceptance
+    image: water-monitor-app:acceptance
+    container_name: water-monitor-accept
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -ec
+      # 验收环境是全新空库：先预建私有证据目录、补齐应用 init_db() 未创建的启动必需表，再启动应用
+      - "umask 0007; mkdir -p /app/private_uploads/site_photo_originals; python /app/backend/init_acceptance_schema.py && exec python app.py"
+    environment:
+      TZ: Asia/Shanghai
+      LD_PRELOAD: /opt/libsqlite-group-mode.so
+      # R33 合并后，APP_RUNTIME_PROFILE=production 启动会强制校验两件事：
+      #   1) 私有证据目录存在且可读可写（PRIVATE_UPLOAD_DIR/site_photo_originals）
+      #   2) station_ingest_cutover 已完成 —— 必须是跑过 001~014 迁移的既有业务库
+      # 验收环境用的是全新空库，无法满足第 2 项；炎火云生产靠 one-shot cutover 服务 + 历史库满足。
+      # 因此验收与 GitHub CI 统一改用 local profile，验证「构建 + 应用启动 + /api/health」；
+      # 生产启动契约仍在炎火云用真实库验证。若以后给验收环境换上已迁移的基线库，
+      # 可把这里改回 production，并在启动前补一次 station_ingest_cutover.py prepare。
+      APP_RUNTIME_PROFILE: "local"
+      # 与生产 compose 一致的私有证据存储路径，落盘到飞牛本地目录，避免容器重建丢文件
+      PRIVATE_UPLOAD_DIR: /app/private_uploads
+      MINIPROGRAM_STATE: ${MINIPROGRAM_STATE:-formal}
+      WX_APPSECRET: ${WX_APPSECRET:-}
+      # 空库首次初始化时 seed_users() 强制要求初始管理员密码（>=12 位），
+      # 不设置会抛 RuntimeError 直接退出（容器反复 Restarting）。
+      # 真实密码只放在飞牛本地「本 compose 同目录」的 .env 里，绝不写进 PUBLIC 仓库。
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:?set INITIAL_ADMIN_PASSWORD in .env on Feiniu}"
+      # 验收环境不注入演示数据，启动更快，验收数据由团队自行构造
+      ENABLE_DEMO_SEED: "0"
+      SKIP_BACKFILL: "1"
+      # 关键：绑定到 0.0.0.0，否则局域网其它设备访问不到
+      BACKEND_HOST: "0.0.0.0"
+    ports:
+      - "0.0.0.0:8080:5000"
+    volumes:
+      # 数据根目录不写死：由 ACCEPT_DATA_ROOT 注入。
+      #   飞牛：deploy-feiniu-poller.sh 里 export ACCEPT_DATA_ROOT="$BASE"
+      #   CI  ：deploy-staging.yml 里注入 /tmp/water-accept-ci
+      # 默认值只是兜底（当前飞牛目录）；以后再换文件夹，只改那两处，
+      # 本文件与 CI 都不用动，也不会再出现「改路径把门禁弄挂」。
+      # 三个子目录由轮询器预建：{data,uploads,private_uploads}
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/data:/app/backend/data
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/uploads:/app/frontend/uploads
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/private_uploads:/app/private_uploads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

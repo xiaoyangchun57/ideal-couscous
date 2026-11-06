@@ -40193,7 +40193,10 @@ if __name__ == '__main__':
     # 每30分钟更新天气
     scheduler.add_job(fetch_real_weather, 'interval', minutes=30, id='weather_updater')
     # 每10分钟自动数据审核（L1 + L2）
-    scheduler.add_job(auto_data_review, 'interval', minutes=10, id='auto_data_review')
+    if os.environ.get('AUTO_DATA_REVIEW_ENABLED') != '0':
+        scheduler.add_job(auto_data_review, 'interval', minutes=10, id='auto_data_review')
+    else:
+        print('[Server] AUTO_DATA_REVIEW_ENABLED=0: automatic data review disabled')
     # 每5分钟设备离线检测
     scheduler.add_job(check_device_offline, 'interval', minutes=5, id='device_offline_check')
     # 启动后立即运行一次（不等待5分钟）

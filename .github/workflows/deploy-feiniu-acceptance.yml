@@ -1,0 +1,57 @@
+name: Deploy Acceptance on Feiniu (optional / GitHub-runner route)
+
+# 这是「可选的第二条路线」：只有当你在飞牛上装了 GitHub self-hosted runner
+# （deploy-feiniu-runner.yml，需要仓库管理员的注册令牌）时，才把下面改成 push 触发。
+#
+# 当前默认走「零令牌轮询部署器」(deploy-feiniu-poller.yml)：
+# push 到 acceptance 后由飞牛自己轮询发现并重建验收容器，不需要 runner、不需要管理员权限。
+# 因此这里保持手动触发，避免在没有 runner 的情况下每次 push 都留下一个永久排队的 job。
+#
+# 要切回 GitHub Actions 路线，把 on: 改成：
+#   on:
+#     push: { branches: [acceptance] }
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 安全提醒（公共仓库必看）：
+# PUBLIC 仓库 + self-hosted runner + docker.sock 是高风险组合（GitHub 官方明确警告）。
+# 若启用本路线，请在 Settings → Actions → General 里关闭 fork PR 触发工作流，
+# 并确保只有可信成员能 push 到 acceptance 分支。
+jobs:
+  deploy-feiniu:
+    runs-on: [self-hosted, feiniu-accept]
+    timeout-minutes: 60
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - name: Checkout acceptance branch
+        uses: actions/checkout@v4
+
+      - name: Build and start acceptance container on Feiniu
+        working-directory: "平台开发"
+        run: |
+          set -euo pipefail
+          # 兼容两种 compose 命令写法（docker compose 插件 / 独立 docker-compose）
+          if docker compose version >/dev/null 2>&1; then
+            DC="docker compose"
+          else
+            DC="docker-compose"
+          fi
+          $DC -f docker-compose.acceptance.yml -p water-accept down --remove-orphans || true
+          # 首次构建要拉取 node:22-alpine 与 python:3.12-slim，可能 10 分钟以上
+          $DC -f docker-compose.acceptance.yml -p water-accept up -d --build
+          echo "等待健康检查 http://192.168.2.250:8080/api/health ..."
+          for i in $(seq 1 36); do
+            if curl -fsS http://192.168.2.250:8080/api/health >/dev/null 2>&1; then
+              echo "ACCEPTANCE_UP: http://192.168.2.250:8080"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "健康检查未在超时内通过，输出最近日志："
+          $DC -f docker-compose.acceptance.yml -p water-accept logs --tail=60 || true
+          exit 1
