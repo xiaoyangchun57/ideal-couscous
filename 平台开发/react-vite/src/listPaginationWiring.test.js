@@ -81,6 +81,9 @@ test('every major list uses the shared 20/50/100 pagination contract (设备与�
   // 不再出现各自为政的分页大小/文案。
   assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /pageSize: 10/);
   assert.doesNotMatch(source('./pages/plan-schedules/PlanSchedulesPage.jsx'), /共 \$\{value\} 条/);
+  // 分页控件尺寸也要与参考页一致，不能私自缩小按钮。
+  assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /size: 'small',\s+showSizeChanger: true/);
+  assert.doesNotMatch(source('./pages/archive/ArchivePage.jsx'), /pageSizeOptions=\{ARCHIVE_PAGE_SIZES\}[^\n]*size="small"/);
 });
 
 test('plans and alerts use explicit complete server pagination with latest-request guards', () => {

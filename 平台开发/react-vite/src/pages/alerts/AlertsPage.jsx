@@ -1473,7 +1473,6 @@ export default function AlertsPage() {
                     current: alertPage,
                     pageSize: alertPageSize,
                     total: alertTotal,
-                    size: 'small',
                     showSizeChanger: true,
                     pageSizeOptions: [20, 50, 100],
                     showTotal: formatTablePaginationTotal,
