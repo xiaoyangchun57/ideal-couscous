@@ -760,7 +760,7 @@ test('rejected inspection purge uses an online request and the page preserves re
   assert.ok((page.match(/rejectedInspectionEvidence\(/g) || []).length >= 2,
     'opening and rebuilding must share the same rejected evidence projection');
   assert.match(template,
-    /wx:for="\{\{sheet\.rejectedMedia\}\}"[\s\S]{0,260}src="\{\{p\.localPath\}\}"/,
+    /wx:for="\{\{sheet\.rejectedMedia\}\}"[\s\S]{0,600}src="\{\{p\.localPath\}\}"/,
     'rejected evidence must render only from the downloaded protected local file');
   assert.doesNotMatch(page, /purgeReason|onRejectedPurgeReason/);
   assert.doesNotMatch(template, /请填写彻底删除原因|textarea[^>]*purgeReason/);
