@@ -502,7 +502,7 @@ export default function UsersPage() {
     <ManagementPage
       pageTitle="人员与权限"
       pageSub="维护登录账号、业务角色和可访问站点范围。"
-      tableMode="content"
+      tableMode="fill"
       filterSlot={<Space direction="vertical" size={8} style={{ width: '100%' }}>
         {loadError && (
           <Alert
@@ -562,7 +562,7 @@ export default function UsersPage() {
         </FilterBar>
       </Space>}
       tableSlot={<UnifiedTable
-          mode="content"
+          mode="fill"
           columns={columns}
           dataSource={visibleUsers}
           rowKey={(r) => r.id || r.username}
