@@ -33,19 +33,57 @@
 .workspace-table > .ant-card-body { height: 100%; display: flex; min-height: 0; flex-direction: column; }
 .workspace-table .workspace-empty { flex: 1; }
 .workspace-table .ant-table-body { overscroll-behavior: contain; overflow-y: auto !important; }
-.workspace-table .ant-table-pagination { flex: 0 0 auto; margin: 12px 16px !important; }
+/* ===== 全站列表分页栏统一契约（参考基准：设备与物资 -> 设备台账） =====
+   1) 位置：声明了分页的列表容器用 flex 高度链把分页栏压到容器底部，
+      表格主体撑满剩余高度，行数再少分页栏也不会随内容上浮。
+   2) 几何：--list-pagination-height 是唯一的高度来源，所有分页控件
+      统一 min-height / line-height / 留白；各页不得再自带 size 或 margin。
+   .list-pagination-dock 供不走 WorkspaceTable 的裸 Table 主列表复用同一套规则。 */
+:root { --list-pagination-height: 48px; }
+/* 停靠容器本身也要进入 flex 高度链，裸 Table 主列表才撑得满。 */
+.list-pagination-dock { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.ant-table-wrapper .ant-table-pagination.ant-pagination {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: var(--list-pagination-height);
+  margin: 0 16px !important;
+  padding: 8px 0;
+  align-items: center;
+  line-height: 32px;
+}
+/* 归档网格视图用独立 Pagination，页脚宽度受限，只统一高度与行高。 */
+.archive-grid-footer { min-height: var(--list-pagination-height); }
+.archive-grid-footer .ant-pagination {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: var(--list-pagination-height);
+  margin: 0 !important;
+  align-items: center;
+  line-height: 32px;
+}
+/* 只有停靠容器强制单行并贴底；弹窗内的窄表格分页栏保持 antd 默认换行行为。 */
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-wrapper .ant-table-pagination.ant-pagination {
+  flex-wrap: nowrap;
+}
+/* 窄屏允许换行，避免长合计文案 + 条/页选择器把分页栏挤出容器。 */
+@media (max-width: 900px) {
+  .ant-table-wrapper .ant-table-pagination.ant-pagination,
+  .archive-grid-footer .ant-pagination { flex-wrap: wrap; }
+}
 .workspace-table .ant-table-thead > tr > th { white-space: nowrap; }
-.workspace-table--fill .ant-table-wrapper,
-.workspace-table--fill .ant-spin-nested-loading,
-.workspace-table--fill .ant-spin-container,
-.workspace-table--fill .ant-table,
-.workspace-table--fill .ant-table-container { min-height: 0; height: 100%; }
-.workspace-table--fill .ant-table-wrapper,
-.workspace-table--fill .ant-spin-nested-loading,
-.workspace-table--fill .ant-spin-container,
-.workspace-table--fill .ant-table { display: flex; flex: 1; flex-direction: column; }
-.workspace-table--fill .ant-table-container { display: flex; flex: 1; flex-direction: column; }
-.workspace-table--fill .ant-table-body { flex: 1; min-height: 0; max-height: none !important; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-wrapper,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-spin-nested-loading,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-spin-container,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-container { min-height: 0; height: 100%; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-wrapper,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-spin-nested-loading,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-spin-container,
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table { display: flex; flex: 1; flex-direction: column; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-container { display: flex; flex: 1; flex-direction: column; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-header { flex: 0 0 auto; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-body { flex: 1; min-height: 0; max-height: none !important; }
+:is(.workspace-table--fill, .list-pagination-dock) .ant-table-wrapper .ant-table-pagination.ant-pagination { margin-top: auto !important; }
 .ant-modal-confirm-content .workorder-confirm-textarea.ant-input-textarea-show-count { margin-bottom: 20px; }
 .workspace-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .workspace-section:last-child { margin-bottom: 0; }

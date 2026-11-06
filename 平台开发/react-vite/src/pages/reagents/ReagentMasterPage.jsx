@@ -213,7 +213,7 @@ export default function ReagentMasterPage({
       pageTitle="试剂主数据"
       pageSub="维护试剂目录；站点库存新增试剂时从此处选取。"
       headerExtra={embedded && <Button icon={<ArrowLeftOutlined />} onClick={requestBack}>返回站点</Button>}
-      tableMode="content"
+      tableMode="fill"
       filterSlot={<Space direction="vertical" size={8} style={{ width: '100%' }}>
         {loadError && (
           <Alert
@@ -241,7 +241,7 @@ export default function ReagentMasterPage({
         </FilterBar>
       </Space>}
       tableSlot={<UnifiedTable
-          mode="content"
+          mode="fill"
           rowKey="id"
           loading={loading}
           dataSource={filteredData}

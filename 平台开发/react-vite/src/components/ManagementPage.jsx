@@ -50,6 +50,7 @@ export default function ManagementPage({
       {filterSlot && <div style={{ flexShrink: 0 }}>{filterSlot}</div>}
       {tableSlot && (
         <Card
+          className={tableMode === 'fill' ? 'list-pagination-dock' : undefined}
           style={tableMode === 'fill'
             ? tableCardStyle(tokens, isDark)
             : { ...tableCardStyle(tokens, isDark), flex: 'none', overflow: 'visible' }}
@@ -93,7 +94,7 @@ export function UnifiedTable({
     : (scrollX ? { x: scrollX } : undefined);
 
   return (
-    <div ref={wrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+    <div ref={wrapRef} className="list-pagination-dock" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
       <Table size={size} pagination={pagination} scroll={scroll} {...rest} />
     </div>
   );
