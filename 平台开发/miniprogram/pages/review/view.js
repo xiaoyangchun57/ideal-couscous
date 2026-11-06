@@ -125,6 +125,12 @@ const REVIEW_BLOCK_REASON = '该审核类型暂不支持处理，请刷新或联
 const REVIEW_CAPABILITIES = {
   inspection: {
     dispatch(item, action, reason) {
+      if ((item.reviewPhotos || []).length) {
+        const rejectIds = item.reviewPhotos.filter(photo => photo.selectedForReject).map(photo => photo.id);
+        const photoIds = item.reviewPhotos.map(photo => photo.id);
+        const approveIds = photoIds.filter(id => rejectIds.indexOf(id) < 0);
+        return api.reviewInspectionPhotoSelection(approveIds, rejectIds, [], reason);
+      }
       return api.reviewInspectionItem(numId(item.id), action === 'approve' ? 'approved' : 'rejected', reason);
     }
   },
@@ -689,7 +695,7 @@ Page({
 
   rejectConfirm() {
     const reason = (this.data.rejectReason || '').trim();
-    if (!reason) { wx.showToast({ title: '请填写驳回原因', icon: 'none' }); return; }
+    if (!reason) { wx.showToast({ title: this.data.curAction === 'selective' ? '请填写不合格原因' : '请填写驳回原因', icon: 'none' }); return; }
     const riskReasonLock = this._submissionPhase === 'risk-reject'
       && this._isSubmissionFor(this.data.curId);
     this._dispatch(this.data.curAction || 'reject', reason, undefined, {
@@ -938,7 +944,7 @@ Page({
         };
         return;
       }
-      wx.showToast({ title: action === 'approve' ? '已通过' : '已驳回', icon: 'success' });
+      wx.showToast({ title: action === 'selective' ? '已记录不合格' : (action === 'approve' ? '已通过' : '已驳回'), icon: 'success' });
       this.load();
     }).catch(err => {
       const retryState = {

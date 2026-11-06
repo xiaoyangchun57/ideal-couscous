@@ -43,6 +43,30 @@ class PhotoReworkContractTest(unittest.TestCase):
         with self.app.get_db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_quality_evaluations').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT review_status FROM insp_plan_items WHERE id=100').fetchone()[0], 2)
+        for url, token in [('/api/evaluation/personnel/2/photo-quality', 'admin-token'),
+                           ('/api/mobile/photo-quality-monthly', 'operator-token')]:
+            response = self.client.get(url, headers=self.fixture.headers(token),
+                                       query_string={'month': '2026-09'})
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertEqual(response.json['deduction'], 1)
+            photo = response.json['photos'][0]
+            self.assertEqual((photo['attachment_id'], photo['plan_id'], photo['item_id'], photo['reason']),
+                             (220, 10, 100, '照片模糊'))
+            self.assertTrue(photo['display_url'])
+
+    def test_single_item_photo_selection_records_quality_and_completes_review(self):
+        response = self.client.post('/api/operation-attachments/review',
+            headers=self.fixture.headers('admin-token'), json={
+                'reject_ids': [220], 'approve_ids': [], 'approve_item_ids': [],
+                'reject_reason': '照片模糊'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with self.app.get_db() as db:
+            self.assertEqual(db.execute('SELECT review_status FROM insp_plan_items WHERE id=100').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT status FROM photo_quality_evaluations WHERE attachment_id=220').fetchone()[0], 'unqualified')
+        response = self.client.get('/api/mobile/photo-quality-monthly?month=2026-09',
+            headers=self.fixture.headers('operator-token'))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.json['deduction'], 1)
 
     def test_unqualified_photo_can_be_reviewed_qualified_without_forging_source(self):
         response = self.client.post('/api/inspection/photos/220/review',
