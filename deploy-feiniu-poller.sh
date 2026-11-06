@@ -6,9 +6,9 @@
 #       也不需要仓库管理员权限。
 #
 # 关键约定：挂载时把飞牛宿主机目录挂到「容器内同名路径」
-# 2026-11-06：验收根目录迁到 /vol1/@team/水质设备运维/水质运维2026/站点数据，
+# 2026-11-06：验收根目录迁到 /vol2/@team/Docker/水质智慧运维平台本地验收，
 # 并由本脚本统一注入 ACCEPT_DATA_ROOT（compose 里不再硬编码挂载源路径）。
-#   /vol1/@team/水质设备运维/水质运维2026/站点数据 : /vol1/@team/水质设备运维/水质运维2026/站点数据
+#   /vol2/@team/Docker/水质智慧运维平台本地验收 : /vol2/@team/Docker/水质智慧运维平台本地验收
 # 这样容器内 docker compose 传给宿主机 Docker daemon 的 build context 路径，
 # 在宿主机上也是真实存在的，不会因为「容器内路径 ≠ 宿主机路径」而构建失败。
 #
@@ -21,7 +21,7 @@ set -eu
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
-BASE="/vol1/@team/水质设备运维/水质运维2026/站点数据"
+BASE="/vol2/@team/Docker/水质智慧运维平台本地验收"
 # 数据根目录只在这里定义一次。compose 用 ${ACCEPT_DATA_ROOT:-<默认值>} 插值，
 # CI 把它设成 /tmp/water-accept-ci。以后再换目录，只改这一行
 # （外加 deploy-feiniu-poller.yml 的同名挂载与容器 CMD），仓库与 CI 都不用动。
