@@ -5,7 +5,10 @@ from contextlib import closing
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import logging
+import os
 import sqlite3
+import time as clock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -28,6 +31,21 @@ _APPROVED_HJ212_2061_RTD_PROTOCOL_CODES = frozenset({"HJ212:w01019-Rtd"})
 LATEST_COLLECTION_LOOKBACK_SECONDS = 7 * 24 * 60 * 60
 LATEST_COLLECTION_BATCH_LIMIT = 16384
 BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _station_timing_start(stage, rows=0):
+    if os.environ.get("STATION_MONITORING_TIMING") != "1":
+        return None
+    logging.getLogger("station_monitoring.timing").warning(
+        "station_timing stage=%s event=start rows=%d", stage, rows)
+    return clock.perf_counter()
+
+
+def _station_timing_end(stage, started, rows=0):
+    if started is not None:
+        logging.getLogger("station_monitoring.timing").warning(
+            "station_timing stage=%s event=end elapsed_ms=%.1f rows=%d",
+            stage, (clock.perf_counter() - started) * 1000, rows)
 
 
 def is_formal_hj212_source(protocol_code: str, function_code: int | str | None,
@@ -2007,15 +2025,9 @@ def _latest_historical_collection_values_batch(
                       )
                 ), selected_groups AS (
                     SELECT candidate.target_id,candidate.endpoint_id,
-                           candidate.observed_at
+                           MAX(candidate.observed_at) AS observed_at
                     FROM matching candidate
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM matching newer
-                        WHERE newer.target_id=candidate.target_id
-                          AND newer.observed_at>candidate.observed_at
-                    )
-                    GROUP BY candidate.target_id,candidate.endpoint_id,
-                             candidate.observed_at
+                    GROUP BY candidate.target_id,candidate.endpoint_id
                 )
                 SELECT matching.* FROM matching
                 JOIN selected_groups selected
@@ -2089,6 +2101,8 @@ def _latest_complete_actual_collection(configurations, batch_rows, value_rows):
     for value in value_rows:
         values_by_time.setdefault(value['observed_at'], []).append(value)
     for observed_at in sorted(values_by_time, reverse=True):
+        if len(values_by_time[observed_at]) < len(configurations):
+            continue
         values = _current_collection_values_from_rows(
             configurations, batches_by_time[observed_at], values_by_time[observed_at])
         if len(values) == len(configurations) and all(v['status'] == 'value' for v in values):
@@ -2151,6 +2165,7 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
     site_ids = list(configurations_by_site)
     if not site_ids:
         return {}, {}
+    timing_latest = _station_timing_start("latest_values_and_cycles", len(site_ids))
     at_time = at_time or _utc_now()
     evaluated_at = datetime.fromisoformat(at_time).astimezone(timezone.utc)
     collection_from = (evaluated_at - timedelta(
@@ -2391,8 +2406,13 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             ]
         values_by_site[site_id] = values
 
+    timing_historical = _station_timing_start(
+        "historical_values", sum(map(len, missing_configurations_by_site.values())))
     historical_by_site = _latest_historical_collection_values_batch(
         connection, missing_configurations_by_site, at_time=at_time)
+    _station_timing_end("historical_values", timing_historical,
+                        sum(map(len, historical_by_site.values())))
+    timing_hourly = _station_timing_start("hourly_values", len(site_ids))
     hourly_rows_by_site = {}
     if site_ids:
         marks = ",".join("?" * len(site_ids))
@@ -2423,6 +2443,9 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
         values.sort(key=lambda item: (
             item["business_metric"], item.get("instrument_asset_code") or ""))
 
+    _station_timing_end("hourly_values", timing_hourly,
+                        sum(map(len, hourly_rows_by_site.values())))
+    timing_complete = _station_timing_start("complete_cycles", len(site_ids))
     for site_id, configurations in configurations_by_site.items():
         site_rows = rows_by_site.get(site_id, [])
         batch_rows = candidate_batches.get(site_id, [])
@@ -2442,6 +2465,9 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
             values_by_site[site_id], evaluated_at, faults_by_site.get(site_id, {}))
         cycles_by_site[site_id]['latest_complete_cycle_at'] = _latest_complete_actual_collection(
             configurations, batch_rows, value_rows)
+    _station_timing_end("complete_cycles", timing_complete, len(cycles_by_site))
+    _station_timing_end("latest_values_and_cycles", timing_latest,
+                        sum(map(len, values_by_site.values())))
     return values_by_site, cycles_by_site
 
 

@@ -1170,7 +1170,7 @@ export default function AuditPage() {
                     <Checkbox checked={selected} style={{ marginTop: 6 }}
                       onChange={(event) => setSelectedPhotoIds((ids) => event.target.checked
                         ? [...ids, photo.id] : ids.filter(id => id !== photo.id))}>
-                      需替换此照片
+                      标记不合格
                     </Checkbox>
                     <Text strong style={{ display: 'block', fontSize: 13, marginTop: 6 }}>{itemLabel}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄时间：{photo.taken_at || '未记录'}</Text>
