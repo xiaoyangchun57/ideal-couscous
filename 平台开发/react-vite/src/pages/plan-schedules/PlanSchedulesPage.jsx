@@ -17,7 +17,10 @@ import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, {
+  FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  formatTablePaginationTotal, standardListPagination,
+} from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { listLastPage } from '../../utils/listPagination';
 import {
@@ -40,6 +43,7 @@ import {
 import { applyPlanVehicleSelection, buildPlanValidationPayload } from './planVehicleState';
 import {
   normalizePlanPurgeAudits,
+  PLAN_PURGE_AUDIT_PAGE_SIZE,
   planCancellationPresentation,
   planPurgeAuditPath,
   planPurgeAuditPresentation,
@@ -222,7 +226,7 @@ export default function PlanSchedulesPage() {
     }
   }, [statusFilter, typeFilter, attentionFilter, listPage, listPageSize, setSearchParams]);
 
-  const loadPurgeAudits = useCallback(async (page = 1) => {
+  const loadPurgeAudits = useCallback(async (page = 1, pageSize = PLAN_PURGE_AUDIT_PAGE_SIZE) => {
     if (!isAdmin) return;
     purgeAuditRequestRef.current.controller?.abort();
     const controller = new AbortController();
@@ -231,7 +235,7 @@ export default function PlanSchedulesPage() {
     setPurgeAuditsLoading(true);
     setPurgeAuditsError('');
     try {
-      const payload = await api.getStrict(planPurgeAuditPath(page), { signal: controller.signal });
+      const payload = await api.getStrict(planPurgeAuditPath(page, pageSize), { signal: controller.signal });
       if (!mountedRef.current || requestId !== purgeAuditRequestRef.current.id) return;
       setPurgeAudits(normalizePlanPurgeAudits(payload));
     } catch (error) {
@@ -1365,10 +1369,12 @@ export default function PlanSchedulesPage() {
           <Table size="small" rowKey={record => planPurgeAuditPresentation(record).key}
             loading={purgeAuditsLoading} dataSource={purgeAudits.items} columns={purgeAuditColumns}
             scroll={{ x: 800 }} locale={{ emptyText: <Empty description="暂无删除记录" /> }}
-            pagination={purgeAudits.total > purgeAudits.pageSize ? {
+            pagination={standardListPagination({
               current: purgeAudits.page, pageSize: purgeAudits.pageSize, total: purgeAudits.total,
-              showSizeChanger: false, showTotal: value => `共 ${value} 条`, onChange: loadPurgeAudits,
-            } : false} />
+              showTotal: formatTablePaginationTotal,
+              onChange: (page, pageSize) => loadPurgeAudits(
+                pageSize === purgeAudits.pageSize ? page : 1, pageSize),
+            })} />
         )}
       </Drawer>
 

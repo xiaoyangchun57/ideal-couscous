@@ -34,7 +34,10 @@ import {
   filterInputWidth, filterSelectWidth, filterSmallSelectWidth,
 } from '../../services/pageStyles';
 import ThresholdRulesTab from './components/ThresholdRulesTab';
-import { formatTablePaginationTotal, StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar } from '../../components/WorkspacePage';
+import {
+  formatTablePaginationTotal, standardListPagination,
+  StatusStrip, TableLongText, WorkspaceEmpty, WorkspaceToolbar,
+} from '../../components/WorkspacePage';
 import { ALERT_DATE_RANGE_OPTIONS } from './alertDateRange';
 import { normalizeAlertTargetId, pinTargetAlert } from './alertTargetNavigation';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
@@ -1469,7 +1472,6 @@ export default function AlertsPage() {
                     current: alertPage,
                     pageSize: alertPageSize,
                     total: alertTotal,
-                    size: 'small',
                     showSizeChanger: true,
                     pageSizeOptions: [20, 50, 100],
                     showTotal: formatTablePaginationTotal,
@@ -1511,7 +1513,7 @@ export default function AlertsPage() {
                   dataSource={reagentList}
                   rowKey={(r) => `${r.site_id}-${r.reagent_id}`}
                   loading={reagentLoading}
-                  pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
+                  pagination={standardListPagination({ showTotal: formatTablePaginationTotal })}
                   size="small"
                   scroll={reagentH ? { y: reagentH } : undefined}
                   style={{ borderRadius: 12, overflow: 'hidden' }}

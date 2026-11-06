@@ -216,6 +216,24 @@ WX_MINIPROGRAM_STATE = _resolve_miniprogram_state(os.environ.get('MINIPROGRAM_ST
 with open(__file__, 'rb') as _source_file:
     BACKEND_SOURCE_FINGERPRINT = hashlib.sha256(_source_file.read()).hexdigest()
 
+
+def _frontend_build_fingerprint():
+    """Vite 产物的 index.html 引用带内容哈希的 JS/CSS 文件名，其哈希随每次前端改动变化。
+
+    source_fingerprint 只哈希 app.py，纯前端改动不会让它变化；单独暴露前端构建指纹，
+    便于从 /api/health 直接确认「合并 acceptance -> 飞牛轮询重建 -> 浏览器拿到新前端」。
+    """
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'frontend', 'v2', 'index.html')
+        with open(path, 'rb') as _index_file:
+            return hashlib.sha256(_index_file.read()).hexdigest()[:12]
+    except OSError:
+        return 'unavailable'
+
+
+FRONTEND_BUILD_FINGERPRINT = _frontend_build_fingerprint()
+
 # 告警级别中文映射（用于升级描述，避免把 red/orange/yellow 英文写入工单）
 ALERT_LEVEL_LABEL = {
     'red': '紧急', 'orange': '重要', 'yellow': '一般', 'blue': '提示',
@@ -5892,6 +5910,7 @@ def health():
         'time': datetime.now().isoformat(),
         'runtime_profile': APP_RUNTIME_PROFILE,
         'source_fingerprint': BACKEND_SOURCE_FINGERPRINT,
+        'frontend_build': FRONTEND_BUILD_FINGERPRINT,
     })
 
 # Station-ingestion TCP receiver runs as an independent container.

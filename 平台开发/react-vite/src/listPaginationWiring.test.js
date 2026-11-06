@@ -48,6 +48,44 @@ test('remaining growth lists use the shared 20 50 100 pagination contract', () =
   assert.match(reagents, /showTotal: formatTablePaginationTotal/);
 });
 
+test('every major list uses the shared 20/50/100 pagination contract (设备与物资 reference)', () => {
+  const listPages = [
+    './pages/audit/AuditPage.jsx',
+    './pages/alerts/AlertsPage.jsx',
+    './pages/alerts/components/DataReviewTab.jsx',
+    './pages/vehicles/VehiclesPage.jsx',
+    './pages/equipment/EquipmentPage.jsx',
+    './pages/evaluation/EvaluationPage.jsx',
+    './pages/reports/ReportsPage.jsx',
+    './pages/users/UsersPage.jsx',
+    './pages/sites/SitesPage.jsx',
+    './pages/plan-schedules/PlanSchedulesPage.jsx',
+    './pages/reagents/ReagentMasterPage.jsx',
+    './pages/workorders/WorkOrdersPage.jsx',
+    './pages/archive/ArchivePage.jsx',
+  ];
+  for (const path of listPages) {
+    // 归档页把三档抽成了 ARCHIVE_PAGE_SIZES 常量，同样属于共享契约。
+    assert.match(source(path), /standardListPagination|pageSizeOptions: \[20, 50, 100\]|ARCHIVE_PAGE_SIZES/,
+      `${path} 未接入共享分页契约`);
+  }
+  // 统一审核 -> 数据审核：默认 20、改条/页会触发重新请求、不再私自关掉选择器。
+  const review = source('./pages/alerts/components/DataReviewTab.jsx');
+  assert.match(review, /per_page: 20/);
+  assert.match(review, /\[filters\.page, filters\.per_page,/);
+  assert.doesNotMatch(review, /showSizeChanger: false/);
+  // 空列表也要保留分页栏（车辆履历等功能页）。
+  const table = source('./components/WorkspacePage.jsx');
+  assert.match(table, /Boolean\(paginationConfig\)/);
+  assert.match(table, /emptyText/);
+  // 不再出现各自为政的分页大小/文案。
+  assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /pageSize: 10/);
+  assert.doesNotMatch(source('./pages/plan-schedules/PlanSchedulesPage.jsx'), /共 \$\{value\} 条/);
+  // 分页控件尺寸也要与参考页一致，不能私自缩小按钮。
+  assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /size: 'small',\s+showSizeChanger: true/);
+  assert.doesNotMatch(source('./pages/archive/ArchivePage.jsx'), /pageSizeOptions=\{ARCHIVE_PAGE_SIZES\}[^\n]*size="small"/);
+});
+
 test('plans and alerts use explicit complete server pagination with latest-request guards', () => {
   const plans = source('./pages/plan-schedules/PlanSchedulesPage.jsx');
   const alerts = source('./pages/alerts/AlertsPage.jsx');
