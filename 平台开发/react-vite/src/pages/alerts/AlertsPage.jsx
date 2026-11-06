@@ -1459,7 +1459,7 @@ export default function AlertsPage() {
                 />
               )}
               {(!error || allAlerts.length > 0) && (loading || displayedAlerts.length > 0) && (
-                <div ref={alertsWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                <div ref={alertsWrapRef} className="list-pagination-dock" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
                 <Table
                   rowKey="id"
                   columns={columns}
@@ -1503,7 +1503,7 @@ export default function AlertsPage() {
               <Text type="secondary">共 {reagentList.length} 条需要关注的站点试剂</Text>
             </WorkspaceToolbar>
             <Card style={{ ...tableCardStyle(tokens, isDark), marginTop: 0 }} styles={{ body: tableCardBody }}>
-              <div ref={reagentWrapRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <div ref={reagentWrapRef} className="list-pagination-dock" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
                 {reagentError && !reagentLoading ? <WorkspaceEmpty
                   type="error"
                   description="物资预警加载失败，当前不能判断是否暂无临期或低余量试剂。"
