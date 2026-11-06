@@ -1,7 +1,7 @@
 # 飞牛局域网验收环境专用 compose
 # 与 production 的区别：
 #   1) 独立容器名 water-monitor-accept，不碰炎火云生产容器
-#   2) 独立数据目录（已在飞牛创建 /vol1/@team/水质设备运维/{data,uploads,private_uploads}），与生产库完全隔离
+#   2) 独立数据目录（由 ACCEPT_DATA_ROOT 指定其下的 {data,uploads,private_uploads}），与生产库完全隔离
 #   3) 监听 0.0.0.0:8080 对局域网开放（后端 BACKEND_HOST=0.0.0.0），外网访问不到
 #   只起 Web 管理台，不启用 SL651 站点接收（验收用不到）。
 services:
@@ -46,10 +46,15 @@ services:
     ports:
       - "0.0.0.0:8080:5000"
     volumes:
-      # 数据目录由飞牛轮询器预建：/vol1/@team/水质设备运维/{data,uploads,private_uploads}
-      - /vol1/@team/水质设备运维/data:/app/backend/data
-      - /vol1/@team/水质设备运维/uploads:/app/frontend/uploads
-      - /vol1/@team/水质设备运维/private_uploads:/app/private_uploads
+      # 数据根目录不写死：由 ACCEPT_DATA_ROOT 注入。
+      #   飞牛：deploy-feiniu-poller.sh 里 export ACCEPT_DATA_ROOT="$BASE"
+      #   CI  ：deploy-staging.yml 里注入 /tmp/water-accept-ci
+      # 默认值只是兜底（当前飞牛目录）；以后再换文件夹，只改那两处，
+      # 本文件与 CI 都不用动，也不会再出现「改路径把门禁弄挂」。
+      # 三个子目录由轮询器预建：{data,uploads,private_uploads}
+      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/data:/app/backend/data
+      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/uploads:/app/frontend/uploads
+      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/private_uploads:/app/private_uploads
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"]
       interval: 30s
