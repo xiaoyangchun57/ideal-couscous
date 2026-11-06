@@ -81,6 +81,7 @@ async function flushPromises() {
 
 const originalReviewPhoto = api.reviewPhoto;
 const originalReviewPhotoSelection = api.reviewPhotoSelection;
+const originalInspectionPhotoSelection = api.reviewInspectionPhotoSelection;
 
 async function main() {
   try {
@@ -181,8 +182,18 @@ async function main() {
       'relation failure preserves the selected review object and photos');
     assert.match(modalCalls.at(-1).content, /原照片和本次选择均已保留/);
 
+    let inspectionArgs;
+    api.reviewInspectionPhotoSelection = (...args) => { inspectionArgs = args; return Promise.resolve({ ok: true }); };
+    const inspectionPage = makePage(Object.assign(riskyItem('insp_100', 1), { source_type: 'inspection' }));
+    inspectionPage.onSubmitPhotoReview(eventFor('insp_100'));
+    inspectionPage.data.rejectReason = '照片模糊';
+    inspectionPage.rejectConfirm();
+    await flushPromises();
+    assert.deepEqual(inspectionArgs, [[11], [12], [], '照片模糊']);
+    assert.equal(inspectionPage.reloads, 1);
     console.log('reviewPage tests passed');
   } finally {
+    api.reviewInspectionPhotoSelection = originalInspectionPhotoSelection;
     api.reviewPhoto = originalReviewPhoto;
     api.reviewPhotoSelection = originalReviewPhotoSelection;
     delete global.getApp;

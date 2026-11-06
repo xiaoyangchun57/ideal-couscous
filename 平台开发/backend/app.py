@@ -4863,11 +4863,8 @@ def create_alert_internal(db, site_id, metric, value, level, message):
     if metric == 'data_gap' and not reporting_required:
         return None
     LEVEL_PRIORITY = {'yellow':0, 'orange':1, 'red':2}
-    # 判断流转类型（A级：data_gap/device_status → 自动转工单；B级：其他 → 人工复核）
-    A_LEVEL_METRICS = {'data_gap', 'device_status'}
-    is_auto = metric in A_LEVEL_METRICS and service_active
-    flow_type = 'auto' if is_auto else 'manual'
-    flow_status = 'pending' if is_auto else 'pending_review'
+    flow_type = 'manual'
+    flow_status = 'pending_review'
 
     # 强化去重：同site+同metric+同level+未办结 且120分钟内 → 更新tracking_count，不新建
     dedup_window = "datetime('now','localtime','-120 minutes')"
@@ -4893,14 +4890,6 @@ def create_alert_internal(db, site_id, metric, value, level, message):
         new_tracking = (same['tracking_count'] or 0) + 1
         db.execute("UPDATE alerts SET tracking_count=?, value=? WHERE id=?",
                    (new_tracking, value, same['id']))
-        # 同一测项第3次触发 → 自动升级为A级
-        if new_tracking >= 2 and service_active:
-            db.execute("UPDATE alerts SET flow_type='auto', flow_status='pending' WHERE id=?",
-                       (same['id'],))
-            alert_row = db.execute("SELECT * FROM alerts WHERE id=?", (same['id'],)).fetchone()
-            if alert_row and alert_row['flow_type'] == 'auto' and alert_row['flow_status'] == 'pending':
-                _auto_convert_alert(db, same['id'], site_id, alert_row['level'],
-                                    alert_row['message'], metric)
         return same['id']
 
     # 检查同站点其他metric的未办结告警（120分钟内合并到同一条告警）
@@ -4918,32 +4907,20 @@ def create_alert_internal(db, site_id, metric, value, level, message):
         else:
             new_message = existing['message']
 
-        # 合并后包含A级metric → 整体视为A级
         merged_flow_type = existing['flow_type']
         merged_flow_status = existing['flow_status']
-        if is_auto or existing['flow_type'] == 'auto':
-            merged_flow_type = 'auto'
-            merged_flow_status = 'pending'
 
         db.execute(
             "UPDATE alerts SET message=?, level=?, value=?, flow_type=?, flow_status=? WHERE id=?",
             (new_message, new_level, value, merged_flow_type, merged_flow_status, existing['id'])
         )
 
-        # 合并后为A级且原未转工单 → 立即自动转工单
-        if (service_active and merged_flow_type == 'auto'
-                and existing['flow_status'] in ('pending', 'pending_review')):
-            # 传递单条 message（非拼接 blob）；重复工单由 _auto_convert_alert 内站点去重拦截
-            _auto_convert_alert(db, existing['id'], site_id, new_level, message, metric)
     else:
         db.execute(
-            "INSERT INTO alerts (site_id,metric,value,level,message,flow_type,flow_status) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO alerts (site_id,metric,value,level,message,flow_type,flow_status,status) VALUES (?,?,?,?,?,?,?,'pending')",
             (site_id, metric, value, level, message, flow_type, flow_status)
         )
         new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-        # 新创建的A级告警 → 立即自动转工单
-        if is_auto:
-            _auto_convert_alert(db, new_id, site_id, level, message, metric)
         # 推送订阅消息给站点负责用户（最佳努力，不阻断主流程）
         if service_active:
             try:
@@ -39913,39 +39890,7 @@ def alert_escalation_check():
                             '''UPDATE alerts SET level=?, urge_count=urge_count+1, last_urged_at=?
                                WHERE id=? AND status NOT IN ('resolved','closed')''',
                             (next_lev, now, alert['id']))
-                    # 自动生成工单：对同一站点+同一测项，未闭环前只保留一个升级工单，避免重复
-                    if (cfg['auto_workorder'] and not alert['related_order_no']
-                            and _alert_rule_allows_new_records(db, alert['metric'])):
-                        order_no = 'AL' + now[:10].replace('-', '') + str(alert['id']).zfill(4)
-                        site_id = alert['site_id'] if alert['site_id'] else 0
-                        event_type = alert['metric'] or '告警升级'
-                        metric_label = METRIC_LABEL.get(alert['metric'], alert['metric'])
-                        if site_id:
-                            site = db.execute('SELECT name, manager FROM sites WHERE id=?', (site_id,)).fetchone()
-                            site_name = site['name'] if site else ''
-                            assignee = _station_operator(site_id) if site else ''
-                        else:
-                            site_name = ''
-                            assignee = ''
-                        # 去重：同一站点+同一测项已存在未闭环的升级工单，则不再创建
-                        existing = db.execute(
-                            "SELECT order_no FROM work_orders WHERE source='escalation' AND site_id=? AND event_type=? AND status NOT IN ('closed','resolved') LIMIT 1",
-                            (site_id, event_type)).fetchone()
-                        if existing:
-                            print(f'[Escalation] 告警#{alert["id"]} 已存在升级工单 {existing["order_no"]}，跳过重复创建')
-                            continue
-                        db.execute(
-                            '''INSERT INTO work_orders (order_no, site_id, source, event_type, level, title, description, status, assignee, created_at, related_alert_id)
-                               VALUES (?,?,'escalation',?,'urgent',?,?,'pending',?,?,?)''',
-                            (order_no, site_id, event_type,
-                             _generated_workorder_title(
-                                 'escalation', f'{metric_label}: {alert["message"]}'[:200], event_type),
-                             f'源自告警#{alert["id"]}升级，原级别{ALERT_LEVEL_LABEL.get(alert["level"], alert["level"])}→{ALERT_LEVEL_LABEL.get(next_lev, next_lev)}'[:300],
-                             assignee, now, alert['id']))
-                        db.execute('UPDATE alerts SET related_order_no=? WHERE id=?', (order_no, alert['id']))
-                        print(f'[Escalation] 告警#{alert["id"]} 升级 {alert["level"]}→{next_lev}，已生成工单{order_no}')
-                    else:
-                        print(f'[Escalation] 告警#{alert["id"]} {alert["level"]}→{next_lev}（超SLA {elapsed:.0f}min）')
+                    print(f'[Escalation] 告警#{alert["id"]} {alert["level"]}→{next_lev}（超SLA {elapsed:.0f}min）')
                 db.commit()
     except Exception as e:
         import traceback

@@ -597,7 +597,7 @@ function AlertRuleEngineTab({ tokens, isDark, canManage }) {
       <div style={{ marginTop: 24 }}>
         <Title level={5} style={{ color: tokens.colorText }}>告警升级配置</Title>
         <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          系统每 5 分钟扫描未处理告警，超过 SLA 时长自动升级至下一级并自动生成工单
+          系统每 5 分钟扫描未处理告警，超过 SLA 时长自动升级；工单由人工选择生成。
         </Text>
         {escalationError ? <WorkspaceEmpty
           type="error"
@@ -613,13 +613,12 @@ function AlertRuleEngineTab({ tokens, isDark, canManage }) {
               return <Tag color={alertLevelColor[v] || 'default'}>{alertLevelLabel[v] || v}</Tag>;
             }},
             { title: '升级时限', dataIndex: 'sla_minutes', width: 100, render: v => `${v} 分钟` },
-            { title: '自动建单', dataIndex: 'auto_workorder', width: 124, render: v => v
-              ? <Tag color="success">自动建单</Tag>
-              : <Tooltip title="蓝色关注仅发送提醒；若超时未处理，升级至黄色预警后才自动建单，避免轻微波动产生无效工单。"><Tag>仅提醒</Tag></Tooltip> },
+            { title: '工单生成', key: 'workorder', width: 124, render: () => <Tag>人工转单</Tag> },
             { title: '通知方式', dataIndex: 'notify_type', width: 108, render: v => ({ app: '应用内提醒', sms: '短信通知', phone: '电话通知' }[v] || v || '未设置') },
             { title: '升级目标', dataIndex: 'escalate_to_level', width: 116, render: v => v && v !== 'None' ? <Tag color={alertLevelColor[v] || 'default'}>{alertLevelLabel[v] || v}</Tag> : '最高级别' },
             { title: '说明', dataIndex: 'description', width: 300,
-              render: value => <TableLongText value={value} /> },
+              render: value => <TableLongText value={typeof value === 'string'
+                ? value.replace(/(?:自动)?生成工单|自动转(?:为)?工单/g, '人工转单') : value} /> },
           ]}
         />}
       </div>

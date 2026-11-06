@@ -14,6 +14,8 @@ from flask import g, jsonify, request
 from hj212_parser import FrameError as HJ212FrameError, parse_hj212_frame
 from station_ingest_retention import RetentionError, read_raw_evidence
 from station_monitoring import (
+    _station_timing_start,
+    _station_timing_end,
     BUSINESS_PROJECTION_VERSION as MONITORING_BUSINESS_PROJECTION_VERSION,
     current_expected_factor_selections_batch as monitoring_expected_factor_selections_batch,
     current_factor_configurations as monitoring_factor_configurations,
@@ -1155,10 +1157,14 @@ def _station_monitoring_batch_projections_cached(db, site_rows, projection_versi
                 _station_monitoring_batch_inflight[cache_key] = inflight
                 owner = True
         if not owner:
+            timing_wait = _station_timing_start('batch_cache_wait', len(site_rows))
             inflight.wait()
+            _station_timing_end('batch_cache_wait', timing_wait, len(site_rows))
             continue
         try:
+            timing_batch = _station_timing_start('batch_projection', len(site_rows))
             items = _station_monitoring_batch_projections(db, site_rows)
+            _station_timing_end('batch_projection', timing_batch, len(items))
             with _station_monitoring_batch_cache_lock:
                 _station_monitoring_batch_cache[cache_key] = {
                     'expires_at': time.monotonic() + _STATION_MONITORING_LIST_REFRESH_SECONDS,
@@ -1258,7 +1264,9 @@ def _station_monitoring_sites_snapshot(scope, service_scope, keyword, user):
     """Read the projection and its version from one SQLite snapshot."""
     with get_db() as db:
         db.execute('BEGIN')
+        timing_version = _station_timing_start('snapshot_version')
         version = _station_monitoring_list_version(db)
+        _station_timing_end('snapshot_version', timing_version)
         body = _station_monitoring_sites_body(
             db, scope, service_scope, keyword, user, version)
         return version, body
@@ -1309,7 +1317,9 @@ def _station_monitoring_sites_cold_body(
                 _station_monitoring_list_inflight[cache_key] = inflight
                 owner = True
         if not owner:
+            timing_wait = _station_timing_start('list_cache_wait')
             inflight.wait()
+            _station_timing_end('list_cache_wait', timing_wait)
             continue
         try:
             version, body = _station_monitoring_sites_snapshot(
@@ -1362,7 +1372,9 @@ def station_monitoring_sites():
     now = time.monotonic()
     try:
         with get_db() as db:
+            timing_version = _station_timing_start('request_version')
             current_version = _station_monitoring_list_version(db)
+            _station_timing_end('request_version', timing_version)
     except Exception:
         failed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         with _station_monitoring_list_cache_lock:

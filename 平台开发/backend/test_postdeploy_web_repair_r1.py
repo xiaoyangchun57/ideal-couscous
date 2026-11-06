@@ -82,7 +82,7 @@ class DisabledAlertRuleConsumerTest(unittest.TestCase):
         app_module._alert_rules_cache_time = self.original_rules_cache_time
         os.unlink(self.db_path)
 
-    def test_disabled_metric_cannot_create_escalation_workorder_but_other_metric_can(self):
+    def test_escalation_does_not_create_workorders_for_any_metric(self):
         with mock.patch.object(app_module, '_station_operator', return_value='负责人'):
             app_module.alert_escalation_check()
 
@@ -92,13 +92,13 @@ class DisabledAlertRuleConsumerTest(unittest.TestCase):
             ).fetchall()]
             disabled = db.execute('SELECT level,related_order_no FROM alerts WHERE id=1').fetchone()
             enabled = db.execute('SELECT level,related_order_no FROM alerts WHERE id=2').fetchone()
-        self.assertEqual(orders, [{'event_type': 'data_spike', 'related_alert_id': 2}])
+        self.assertEqual(orders, [])
         self.assertEqual(disabled['level'], 'orange')
         self.assertIsNone(disabled['related_order_no'])
         self.assertEqual(enabled['level'], 'orange')
-        self.assertTrue(enabled['related_order_no'])
+        self.assertIsNone(enabled['related_order_no'])
 
-    def test_reenabling_metric_restores_escalation_workorder_creation(self):
+    def test_reenabling_metric_does_not_restore_automatic_workorders(self):
         with self.temporary_db() as db:
             db.execute("UPDATE alert_rule_config SET enabled=1 WHERE metric='data_freeze'")
         with mock.patch.object(app_module, '_station_operator', return_value='负责人'):
@@ -107,7 +107,7 @@ class DisabledAlertRuleConsumerTest(unittest.TestCase):
             order = db.execute(
                 "SELECT related_alert_id FROM work_orders WHERE event_type='data_freeze'"
             ).fetchone()
-        self.assertEqual(order['related_alert_id'], 1)
+        self.assertIsNone(order)
 
     def test_disabled_metric_is_blocked_at_central_alert_creation_fallback(self):
         with self.temporary_db() as db, mock.patch.object(
