@@ -147,6 +147,10 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
   const liveStart = visibleRowCount ? ((currentPage - 1) * pageSize) + 1 : 0;
   const liveEnd = visibleRowCount ? Math.min(liveStart + visibleRowCount - 1, paginationTotal) : 0;
   const hasPaginatedRecords = Boolean(paginationConfig) && paginationTotal > 0;
+  // 声明了分页配置的列表统一把分页栏停靠在容器底部：表格主体撑满剩余高度，
+  // 分页栏位置与当前页行数无关，也不会因数据少而随内容上浮。
+  // fillHeight 保留为历史页面的显式开关（归档、站点目录）。
+  const dockPagination = fillHeight || Boolean(paginationConfig && typeof paginationConfig === 'object');
   const [tableRef, bodyHeight] = useTableAutoHeight({
     deps: [dataSource.length, loading, currentPage, pageSize, paginationTotal],
   });
@@ -158,7 +162,7 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
       }
     : (bodyHeight ? { y: bodyHeight, scrollToFirstRowOnChange: true } : undefined);
   return (
-    <Card ref={tableRef} className={`workspace-table${fillHeight ? ' workspace-table--fill' : ''}`} aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
+    <Card ref={tableRef} className={`workspace-table${dockPagination ? ' workspace-table--fill' : ''}`} aria-busy={loading ? 'true' : 'false'} style={{ borderColor: tokens.colorBorder }} styles={{ body: { padding: 0 } }}>
       <span className="sr-only" role="status" aria-live="polite">
         {loading ? '正在加载列表' : `列表已更新，共${paginationTotal}条，当前第${liveStart}—${liveEnd}条`}
       </span>
