@@ -26,6 +26,7 @@ BASE="/vol2/@team/Docker/水质智慧运维平台本地验收"
 # CI 把它设成 /tmp/water-accept-ci。以后再换目录，只改这一行
 # （外加 deploy-feiniu-poller.yml 的同名挂载与容器 CMD），仓库与 CI 都不用动。
 export ACCEPT_DATA_ROOT="$BASE"
+
 REPO="$BASE/repo"
 COMPOSE="$REPO/平台开发/docker-compose.acceptance.yml"
 STATE="$BASE/.accept-deployed-sha"
@@ -33,6 +34,12 @@ REMOTE="https://github.com/xiaoyangchun57/ideal-couscous.git"
 BRANCH="acceptance"
 INTERVAL="${POLL_INTERVAL:-60}"
 ACCEPT_URL="http://192.168.2.250:8080/api/health"
+
+# 目录若是用飞牛「文件管理」复制/搬迁过来的，文件属主会变成 NAS 用户（如 uid 1005）；
+# 而容器内 git 以 root 运行，Git 2.35+ 会因 "dubious ownership" 拒绝操作，
+# 表现为轮询器一直打印 git fetch 失败却永不重建。这里显式放行本仓库，
+# 以后再换目录也不会因为属主变化把部署卡死。
+git config --global --add safe.directory "$REPO" 2>/dev/null || true
 
 echo "[poller] 启动：分支=$BRANCH 轮询间隔=${INTERVAL}s 目标=$BASE"
 
