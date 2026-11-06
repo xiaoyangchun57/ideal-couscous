@@ -11,7 +11,7 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 #      且依赖飞牛本地 .env 里的 INITIAL_ADMIN_PASSWORD，原文 `PORT=8081 docker compose up` 无效。
 #   4) 仓库是 PUBLIC，把 self-hosted runner + docker.sock 暴露出来是 GitHub 官方明确警告的高风险组合。
 #
-# 2026-11-05 之后的三点变化：
+# 2026-11-05 之后的变化：
 #   a) acceptance 已成为仓库默认分支，Actions 页面的「Run workflow」按钮可见。
 #   b) 增加 pull_request 触发，本 job 才能作为 acceptance 的必需状态检查（PR 合并门禁）。
 #      分支保护需仓库管理员在 Settings -> Branches 里勾选「验收版构建 + 启动门禁」。
@@ -20,6 +20,12 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 #      验收/CI 用全新空库，无法满足第二项；炎火云生产靠 one-shot cutover 服务 + 历史库满足。
 #      因此验收与 CI 统一改用 local profile，门禁验证「compose 可解析 / 镜像可构建 / 应用可启动 / health 200」；
 #      生产启动契约仍在炎火云用真实库验证。若以后给验收环境换上已迁移的基线库，可改回 production。
+#   d) 启动条件以 平台开发/docker-compose.acceptance.yml 为唯一事实来源。
+#      CI 从它生成一份临时副本，只替换挂载源路径和镜像 tag，再用 docker compose 启动。
+#      环境变量、command（umask/mkdir/补表/app.py）、healthcheck、restart 策略全部同源。
+#      旧版 CI 曾用 sitecustomize 把 SQLite 锁等待从源码的 3 秒强行放宽到 30 秒，
+#      飞牛与生产并未放宽 —— 这会让门禁给出与真实环境不符的绿灯，已移除。
+#      锁等待现在三边一致，均为 app.py 源码默认值（get_db: timeout=3 / PRAGMA busy_timeout=3000）。
 #
 # 分工：本工作流只做质量门禁；飞牛 water-accept-poller 每 60 秒轮询 acceptance 并重建验收容器。
 # GitHub 托管 runner 访问不到局域网飞牛，因此不做内网部署。
@@ -78,38 +84,32 @@ jobs:
           echo "--- CI Dockerfile 关键行 ---"
           (grep -E '^(FROM|RUN (npm|pip|apt))' /tmp/Dockerfile.acceptance.ci | head -20) || true
 
-      - name: 生成 CI 专用 SQLite 锁等待补丁
+      - name: 生成 CI 专用 compose（只换挂载路径与镜像 tag）
         run: |
-          # app.py 的 get_db() 硬编码 `timeout=3` / `PRAGMA busy_timeout=3000`。
-          # 全新空库首次 seed（6000+ 条排程）在 GitHub runner 的 overlay2 上会撞
-          # `sqlite3.OperationalError: database is locked`；飞牛靠容器重启策略收敛。
-          # 这里只在 CI 容器内放宽锁等待；实测全新空库首次 seed 仍可能撞锁，
-          # 因此配合下面「重启同一容器、复用已初始化库」的重试一起收敛
-          # （与飞牛验收容器 restart: unless-stopped 的实际表现一致）。
-          # 不改仓库源码、不改业务逻辑。
-          mkdir -p /tmp/ci-patch
-          cat > /tmp/ci-patch/sitecustomize.py <<'PY'
-          """CI-only: widen SQLite lock tolerance on a brand-new database."""
-          import sqlite3
-
-          class _CIConnection(sqlite3.Connection):
-              def execute(self, sql, *args, **kwargs):
-                  if isinstance(sql, str) and "busy_timeout" in sql.lower():
-                      sql = "PRAGMA busy_timeout=30000"
-                  return super().execute(sql, *args, **kwargs)
-
-          _orig_connect = sqlite3.connect
-
-          def _connect(*args, **kwargs):
-              kwargs["timeout"] = 30
-              kwargs.setdefault("factory", _CIConnection)
-              return _orig_connect(*args, **kwargs)
-
-          sqlite3.connect = _connect
+          # 启动条件必须和飞牛完全一致，因此不手写 docker run，
+          # 而是从飞牛那一份 compose 派生，只改两处 CI 环境无法复用的值：
+          #   1) /vol1/@team/水质设备运维/ 是飞牛本地绝对路径 -> CI 临时目录
+          #   2) 镜像 tag 换成上一步构建的 water-monitor-app:ci
+          # 环境变量、command、healthcheck、restart 策略一律原样保留。
+          mkdir -p /tmp/water-accept-ci/data /tmp/water-accept-ci/uploads /tmp/water-accept-ci/private_uploads
+          sed -e 's|/vol1/@team/水质设备运维/|/tmp/water-accept-ci/|g' \
+              -e 's|image: water-monitor-app:acceptance|image: water-monitor-app:ci|' \
+              平台开发/docker-compose.acceptance.yml > /tmp/docker-compose.acceptance.ci.yml
+          python3 - <<'PY'
+          import pathlib
+          fn = pathlib.Path('平台开发/docker-compose.acceptance.yml').read_text(encoding='utf-8')
+          ci = pathlib.Path('/tmp/docker-compose.acceptance.ci.yml').read_text(encoding='utf-8')
+          expected = fn.replace('/vol1/@team/水质设备运维/', '/tmp/water-accept-ci/') \
+                       .replace('image: water-monitor-app:acceptance', 'image: water-monitor-app:ci')
+          assert ci == expected, 'CI compose 与飞牛 compose 出现预期外差异'
+          for key in ('APP_RUNTIME_PROFILE', 'LD_PRELOAD', 'PRIVATE_UPLOAD_DIR',
+                      'healthcheck:', 'restart:', 'umask 0007', 'init_acceptance_schema.py'):
+              assert key in ci, '启动条件缺失: ' + key
+          assert 'PYTHONPATH' not in ci, 'CI 不得注入 PYTHONPATH 补丁'
+          assert 'sitecustomize' not in ci, 'CI 不得注入 sitecustomize 补丁'
+          print('启动条件一致性断言通过：env / command / healthcheck / restart 与飞牛同源')
+          print('SQLite 锁等待：CI = 飞牛 = 生产 = app.py 源码默认值，无运行时补丁')
           PY
-          # 显式按路径加载校验：直接 import sitecustomize 会命中 Python 启动时
-          # 已缓存的同名模块，得到假阳性。
-          python3 -c "import importlib.util, sqlite3; s=importlib.util.spec_from_file_location('ci_patch','/tmp/ci-patch/sitecustomize.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print('CI SQLite patch loaded:', sqlite3.connect.__name__)"
 
       - name: 构建验收镜像
         run: |
@@ -118,50 +118,26 @@ jobs:
       - name: 空库启动 + /api/health 烟测
         run: |
           set -euo pipefail
-          docker rm -f water-accept-ci >/dev/null 2>&1 || true
-          # 直接跑镜像，绕开 compose 里飞牛专用的 /vol1 绝对路径挂载；
-          # 启动命令与 docker-compose.acceptance.yml 保持一致（先补表再启动）。
-          # R33 后 production 启动需要 cutover 就绪的历史业务库，全新空库无法满足；
-          # 改用 local profile 验证「构建 + 启动 + /api/health」，与飞牛验收 compose 保持一致。
-          docker run -d --name water-accept-ci \
-            -p 127.0.0.1:8080:5000 \
-            -v /tmp/ci-patch:/ci:ro \
-            -e PYTHONPATH=/ci \
-            -e TZ=Asia/Shanghai \
-            -e APP_RUNTIME_PROFILE=local \
-            -e ENABLE_DEMO_SEED=0 \
-            -e SKIP_BACKFILL=1 \
-            -e BACKEND_HOST=0.0.0.0 \
-            -e INITIAL_ADMIN_PASSWORD="$INITIAL_ADMIN_PASSWORD" \
-            -w /app/backend \
-            water-monitor-app:ci \
-            sh -ec 'python init_acceptance_schema.py && exec python app.py'
-          # 与飞牛验收容器 restart: unless-stopped 的行为一致：
-          # 若全新空库初始化中途崩溃，重启同一容器（保留已初始化的库）再试。
+          ci_compose() {
+            docker compose --project-directory 平台开发 \
+              -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci "$@"
+          }
+          docker rm -f water-monitor-accept >/dev/null 2>&1 || true
+          # --no-build：镜像已由上一步构建好；build.context 由 --project-directory 解析为 平台开发。
+          # compose 里的 restart: unless-stopped 会在全新空库首次 seed 撞锁退出后自动重启，
+          # 复用上一次已初始化的库收敛 —— 与飞牛验收容器的真实表现一致，不再手写 docker start。
+          ci_compose up -d --no-build
           OK=0
-          for ATTEMPT in 1 2 3; do
-            if [ "$ATTEMPT" -gt 1 ]; then
-              RUNNING="$(docker inspect -f '{{.State.Running}}' water-accept-ci 2>/dev/null || echo false)"
-              if [ "$RUNNING" != "true" ]; then
-                echo "第 $ATTEMPT 次启动（沿用上一次已初始化的库）"
-                docker start water-accept-ci >/dev/null || true
-              fi
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json 2>/dev/null; then
+              OK=1
+              break
             fi
-            for i in $(seq 1 90); do
-              if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json 2>/dev/null; then
-                OK=1
-                break 2
-              fi
-              if [ "$(docker inspect -f '{{.State.Running}}' water-accept-ci 2>/dev/null || echo false)" != "true" ]; then
-                echo "容器已退出，结束本轮等待"
-                break
-              fi
-              sleep 2
-            done
+            sleep 2
           done
           if [ "$OK" != "1" ]; then
             echo "健康检查未通过，容器日志："
-            docker logs --tail 120 water-accept-ci || true
+            docker logs --tail 150 water-monitor-accept || true
             exit 1
           fi
           echo "健康检查通过：$(cat /tmp/health.json)"
@@ -169,8 +145,10 @@ jobs:
       - name: 收集日志 / 清理
         if: always()
         run: |
-          docker logs --tail 40 water-accept-ci 2>&1 || true
-          docker rm -f water-accept-ci >/dev/null 2>&1 || true
+          docker logs --tail 60 water-monitor-accept 2>&1 || true
+          docker compose --project-directory 平台开发 \
+            -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci down --remove-orphans || true
+          docker rm -f water-monitor-accept >/dev/null 2>&1 || true
 
       - name: 部署交接说明
         run: |
@@ -180,7 +158,8 @@ jobs:
             echo "- 提交：\`$GITHUB_SHA\`"
             echo "- 分支：\`$GITHUB_REF_NAME\`"
             echo "- 事件：\`$GITHUB_EVENT_NAME\`"
-            echo "- ✅ 验收 compose 可解析、镜像可构建、全新空库可启动、\`/api/health\` 返回 200"
+            echo "- ✅ 验收 compose 可解析、镜像可构建、与飞牛同一套启动条件下全新空库可启动、\`/api/health\` 返回 200"
+            echo "- ✅ 启动条件单一事实来源：\`平台开发/docker-compose.acceptance.yml\`；SQLite 锁等待与飞牛/生产一致"
             echo ""
             if [ "$GITHUB_EVENT_NAME" = "push" ]; then
               echo "### 部署由飞牛轮询器执行"
