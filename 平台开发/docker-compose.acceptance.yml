@@ -52,9 +52,9 @@ services:
       # 默认值只是兜底（当前飞牛目录）；以后再换文件夹，只改那两处，
       # 本文件与 CI 都不用动，也不会再出现「改路径把门禁弄挂」。
       # 三个子目录由轮询器预建：{data,uploads,private_uploads}
-      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/data:/app/backend/data
-      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/uploads:/app/frontend/uploads
-      - ${ACCEPT_DATA_ROOT:-/vol1/@team/水质设备运维/水质运维2026/站点数据}/private_uploads:/app/private_uploads
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/data:/app/backend/data
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/uploads:/app/frontend/uploads
+      - ${ACCEPT_DATA_ROOT:-/vol2/@team/Docker/水质智慧运维平台本地验收}/private_uploads:/app/private_uploads
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5)"]
       interval: 30s
