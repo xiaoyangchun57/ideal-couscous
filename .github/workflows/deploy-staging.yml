@@ -21,7 +21,8 @@ name: Deploy 验收环境（CI 门禁 + 飞牛自动部署）
 #      因此验收与 CI 统一改用 local profile，门禁验证「compose 可解析 / 镜像可构建 / 应用可启动 / health 200」；
 #      生产启动契约仍在炎火云用真实库验证。若以后给验收环境换上已迁移的基线库，可改回 production。
 #   d) 启动条件以 平台开发/docker-compose.acceptance.yml 为唯一事实来源。
-#      CI 从它生成一份临时副本，只替换挂载源路径和镜像 tag，再用 docker compose 启动。
+#      CI 从它生成一份临时副本，只替换镜像 tag，并用 ACCEPT_DATA_ROOT 注入临时数据根目录，
+#      再用 docker compose 启动。CI 中不含任何飞牛绝对路径，目录搬迁不会影响门禁。
 #      环境变量、command（umask/mkdir/补表/app.py）、healthcheck、restart 策略全部同源。
 #      旧版 CI 曾用 sitecustomize 把 SQLite 锁等待从源码的 3 秒强行放宽到 30 秒，
 #      飞牛与生产并未放宽 —— 这会让门禁给出与真实环境不符的绿灯，已移除。
@@ -84,30 +85,30 @@ jobs:
           echo "--- CI Dockerfile 关键行 ---"
           (grep -E '^(FROM|RUN (npm|pip|apt))' /tmp/Dockerfile.acceptance.ci | head -20) || true
 
-      - name: 生成 CI 专用 compose（只换挂载路径与镜像 tag）
+      - name: 生成 CI 专用 compose（只换镜像 tag；数据根目录由环境变量注入）
         run: |
-          # 启动条件必须和飞牛完全一致，因此不手写 docker run，
-          # 而是从飞牛那一份 compose 派生，只改两处 CI 环境无法复用的值：
-          #   1) /vol1/@team/水质设备运维/ 是飞牛本地绝对路径 -> CI 临时目录
-          #   2) 镜像 tag 换成上一步构建的 water-monitor-app:ci
-          # 环境变量、command、healthcheck、restart 策略一律原样保留。
+          # 启动条件必须和飞牛完全一致，因此不手写 docker run，从飞牛那一份 compose 派生。
+          # compose 里数据根目录写成 ${ACCEPT_DATA_ROOT:-<飞牛默认路径>}：
+          #   飞牛由 deploy-feiniu-poller.sh 注入 BASE；CI 在这里注入 /tmp/water-accept-ci。
+          # 所以派生文件只替换镜像 tag 一处；以后飞牛再搬目录，本工作流一行都不用改。
           mkdir -p /tmp/water-accept-ci/data /tmp/water-accept-ci/uploads /tmp/water-accept-ci/private_uploads
-          sed -e 's|/vol1/@team/水质设备运维/|/tmp/water-accept-ci/|g' \
-              -e 's|image: water-monitor-app:acceptance|image: water-monitor-app:ci|' \
+          sed -e 's|image: water-monitor-app:acceptance|image: water-monitor-app:ci|' \
               平台开发/docker-compose.acceptance.yml > /tmp/docker-compose.acceptance.ci.yml
           python3 - <<'PY'
           import pathlib
           fn = pathlib.Path('平台开发/docker-compose.acceptance.yml').read_text(encoding='utf-8')
           ci = pathlib.Path('/tmp/docker-compose.acceptance.ci.yml').read_text(encoding='utf-8')
-          expected = fn.replace('/vol1/@team/水质设备运维/', '/tmp/water-accept-ci/') \
-                       .replace('image: water-monitor-app:acceptance', 'image: water-monitor-app:ci')
+          expected = fn.replace('image: water-monitor-app:acceptance', 'image: water-monitor-app:ci')
           assert ci == expected, 'CI compose 与飞牛 compose 出现预期外差异'
+          assert '${ACCEPT_DATA_ROOT:-' in ci, '数据根目录必须由 ACCEPT_DATA_ROOT 注入'
+          assert ci.count('${ACCEPT_DATA_ROOT:-') == 3, '三个挂载都必须由 ACCEPT_DATA_ROOT 注入'
           for key in ('APP_RUNTIME_PROFILE', 'LD_PRELOAD', 'PRIVATE_UPLOAD_DIR',
                       'healthcheck:', 'restart:', 'umask 0007', 'init_acceptance_schema.py'):
               assert key in ci, '启动条件缺失: ' + key
           assert 'PYTHONPATH' not in ci, 'CI 不得注入 PYTHONPATH 补丁'
           assert 'sitecustomize' not in ci, 'CI 不得注入 sitecustomize 补丁'
           print('启动条件一致性断言通过：env / command / healthcheck / restart 与飞牛同源')
+          print('数据根目录由 ACCEPT_DATA_ROOT 注入，CI 不含任何飞牛绝对路径替换')
           print('SQLite 锁等待：CI = 飞牛 = 生产 = app.py 源码默认值，无运行时补丁')
           PY
 
@@ -119,8 +120,9 @@ jobs:
         run: |
           set -euo pipefail
           ci_compose() {
-            docker compose --project-directory 平台开发 \
-              -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci "$@"
+            ACCEPT_DATA_ROOT=/tmp/water-accept-ci \
+              docker compose --project-directory 平台开发 \
+                -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci "$@"
           }
           docker rm -f water-monitor-accept >/dev/null 2>&1 || true
           # --no-build：镜像已由上一步构建好；build.context 由 --project-directory 解析为 平台开发。
@@ -146,8 +148,9 @@ jobs:
         if: always()
         run: |
           docker logs --tail 60 water-monitor-accept 2>&1 || true
-          docker compose --project-directory 平台开发 \
-            -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci down --remove-orphans || true
+          ACCEPT_DATA_ROOT=/tmp/water-accept-ci \
+            docker compose --project-directory 平台开发 \
+              -f /tmp/docker-compose.acceptance.ci.yml -p water-accept-ci down --remove-orphans || true
           docker rm -f water-monitor-accept >/dev/null 2>&1 || true
 
       - name: 部署交接说明
