@@ -19,7 +19,10 @@ import { stationTypeMap } from '../../services/constants';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterInputWidth, filterSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, {
+  FilterField, TableLongText, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  standardListPagination,
+} from '../../components/WorkspacePage';
 import { getThresholds, classifyMetric } from '../../services/thresholds';
 import ArchiveTrendPanel from './components/ArchiveTrendPanel';
 import { StationMonitoringDrawer } from './SiteMonitoringPage';
@@ -152,6 +155,9 @@ export default function SitesPage() {
   }, [searchParams]);
   const monitoringSiteId = routeMonitoringSiteId || searchParams.get('monitoring');
   const tablePage = Math.max(1, Number(searchParams.get('page')) || 1);
+  // 条/页选择写进 URL，刷新/分享链接后仍保持同一分页大小。
+  const tablePageSize = [20, 50, 100].includes(Number(searchParams.get('page_size')))
+    ? Number(searchParams.get('page_size')) : 20;
   const openMonitoring = useCallback((siteId) => {
     const next = new URLSearchParams(searchParams);
     next.set('monitoring', String(siteId));
@@ -1592,17 +1598,19 @@ export default function SitesPage() {
       ) : (
         <WorkspaceTable dataSource={filteredSites} columns={columns} rowKey="id" loading={directoryLoading}
           emptyType={activeFilterCount > 0 ? 'filtered' : 'empty'} onRefresh={fetchSites} fillHeight
-          pagination={{
+          pagination={standardListPagination({
             current: tablePage,
-            pageSize: 20,
-            showSizeChanger: false,
-            onChange: (page) => {
+            pageSize: tablePageSize,
+            onChange: (page, pageSize) => {
               const next = new URLSearchParams(searchParams);
-              if (page > 1) next.set('page', String(page));
+              if (pageSize !== tablePageSize) next.delete('page');
+              else if (page > 1) next.set('page', String(page));
               else next.delete('page');
+              if (pageSize !== 20) next.set('page_size', String(pageSize));
+              else next.delete('page_size');
               setSearchParams(next, { replace: true });
             },
-          }}
+          })}
           rowClassName={(record) => String(record.id) === String(monitoringSiteId)
             ? 'station-monitoring-selected-row' : ''}
           scroll={{ x: 960, scrollToFirstRowOnChange: false }} />

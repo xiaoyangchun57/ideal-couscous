@@ -147,6 +147,9 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
   const liveStart = visibleRowCount ? ((currentPage - 1) * pageSize) + 1 : 0;
   const liveEnd = visibleRowCount ? Math.min(liveStart + visibleRowCount - 1, paginationTotal) : 0;
   const hasPaginatedRecords = Boolean(paginationConfig) && paginationTotal > 0;
+  // 页面只要声明了分页配置，就始终渲染表格（空数据用 antd 的 locale.emptyText
+  // 展示空状态），这样分页栏不会在空列表/单页时整块消失，各功能页外观保持一致。
+  const showTable = hasRows || hasPaginatedRecords || loading || Boolean(paginationConfig);
   const [tableRef, bodyHeight] = useTableAutoHeight({
     deps: [dataSource.length, loading, currentPage, pageSize, paginationTotal],
   });
@@ -162,7 +165,7 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
       <span className="sr-only" role="status" aria-live="polite">
         {loading ? '正在加载列表' : `列表已更新，共${paginationTotal}条，当前第${liveStart}—${liveEnd}条`}
       </span>
-      {hasRows || hasPaginatedRecords || loading ? (
+      {showTable ? (
         <Table
           dataSource={dataSource}
           columns={columns}
@@ -171,6 +174,7 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
           size="small"
           pagination={paginationConfig}
           scroll={tableScroll}
+          locale={hasRows ? undefined : { emptyText: <WorkspaceEmpty type={emptyType} onRefresh={onRefresh} /> }}
           {...rest}
         />
       ) : <WorkspaceEmpty type={emptyType} onRefresh={onRefresh} />}
