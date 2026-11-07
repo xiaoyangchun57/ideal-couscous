@@ -1,6 +1,7 @@
 import { Card, Table, Typography } from 'antd';
 import { useTheme } from '../hooks/useTheme';
 import { useTableAutoHeight } from '../hooks/useTableAutoHeight';
+import { useClientPagination } from '../utils/clientPagination';
 import { pageRootStyle, tableCardStyle, tableCardBody } from '../services/pageStyles';
 
 /**
@@ -77,12 +78,13 @@ export function UnifiedTable({
   mode = 'fill', heightDeps = [], scrollX, size = 'small', pagination = false, ...rest
 }) {
   const [wrapRef, bodyHeight] = useTableAutoHeight({ deps: heightDeps });
+  const { config: resolvedPagination } = useClientPagination(pagination);
 
   if (mode === 'content') {
     return (
       <Table
         size={size}
-        pagination={pagination}
+        pagination={resolvedPagination}
         scroll={scrollX ? { x: scrollX } : undefined}
         {...rest}
       />
@@ -95,7 +97,7 @@ export function UnifiedTable({
 
   return (
     <div ref={wrapRef} className="list-pagination-dock" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-      <Table size={size} pagination={pagination} scroll={scroll} {...rest} />
+      <Table size={size} pagination={resolvedPagination} scroll={scroll} {...rest} />
     </div>
   );
 }

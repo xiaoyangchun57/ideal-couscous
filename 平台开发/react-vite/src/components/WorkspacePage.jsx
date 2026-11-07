@@ -3,6 +3,7 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { useTheme } from '../hooks/useTheme';
 import { useTableAutoHeight } from '../hooks/useTableAutoHeight';
 import { visiblePageRowCount } from '../utils/listPagination';
+import { useClientPagination } from '../utils/clientPagination';
 import './WorkspacePage.css';
 
 const { Title, Text } = Typography;
@@ -134,15 +135,17 @@ export function standardListPagination(overrides = {}) {
 export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, emptyType, onRefresh, pagination = false, scroll, fillHeight = false, ...rest }) {
   const { tokens } = useTheme();
   const hasRows = dataSource.length > 0;
-  const paginationConfig = pagination && typeof pagination === 'object'
-    ? { showTotal: formatTablePaginationTotal, ...pagination }
-    : pagination;
+  // 客户端分页自管状态：否则写死的 pageSize 会把用户选的 50/100 覆盖回 20。
+  const { config: resolvedPagination, current: clientCurrent, pageSize: clientPageSize } = useClientPagination(pagination);
+  const paginationConfig = resolvedPagination && typeof resolvedPagination === 'object'
+    ? { showTotal: formatTablePaginationTotal, ...resolvedPagination }
+    : resolvedPagination;
   const paginationTotal = paginationConfig && typeof paginationConfig === 'object'
     && Number.isFinite(Number(paginationConfig.total))
     ? Number(paginationConfig.total)
     : dataSource.length;
-  const currentPage = Number(paginationConfig?.current || 1);
-  const pageSize = Number(paginationConfig?.pageSize || dataSource.length || 1);
+  const currentPage = Number(paginationConfig?.current || clientCurrent || 1);
+  const pageSize = Number(paginationConfig?.pageSize || clientPageSize || dataSource.length || 1);
   const visibleRowCount = visiblePageRowCount(dataSource.length, currentPage, pageSize);
   const liveStart = visibleRowCount ? ((currentPage - 1) * pageSize) + 1 : 0;
   const liveEnd = visibleRowCount ? Math.min(liveStart + visibleRowCount - 1, paginationTotal) : 0;
