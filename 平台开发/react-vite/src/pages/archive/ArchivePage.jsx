@@ -673,7 +673,7 @@ export default function ArchivePage() {
           <div className="archive-grid-footer">
             <Text type="secondary">{formatTablePaginationTotal(total, [items.length ? ((page - 1) * pageSize) + 1 : 0, items.length ? ((page - 1) * pageSize) + items.length : 0])}</Text>
             <Pagination current={page} pageSize={pageSize} total={total}
-              showSizeChanger pageSizeOptions={ARCHIVE_PAGE_SIZES} showLessItems responsive disabled={loading}
+              size="small" showSizeChanger pageSizeOptions={ARCHIVE_PAGE_SIZES} disabled={loading}
               onChange={(next, nextPageSize) => writeUrl(applied, view, archiveMode, nextPageSize !== pageSize ? 1 : next, nextPageSize)} />
           </div></div>}
       </Spin></div>}
