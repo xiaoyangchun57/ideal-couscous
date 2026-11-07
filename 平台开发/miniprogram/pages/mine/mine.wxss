@@ -1,5 +1,9 @@
 /* pages/mine/mine.wxss */
 
+.quality-photo-row { display: flex; align-items: flex-start; gap: 20rpx; padding: 28rpx 32rpx; }
+.quality-photo-image { width: 160rpx; height: 160rpx; flex-shrink: 0; }
+.quality-photo-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12rpx; overflow-wrap: anywhere; }
+
 /* 用户信息区 */
 .user-section {
   background: var(--color-card);

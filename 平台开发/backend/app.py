@@ -12947,6 +12947,12 @@ def purge_archive_attachment_batch():
             }), 503
 
 
+def _has_photo_quality_review(db, attachment_id):
+    return (_table_exists(db, 'photo_quality_evaluations') and bool(db.execute(
+        'SELECT 1 FROM photo_quality_evaluations WHERE attachment_id=? LIMIT 1',
+        (attachment_id,)).fetchone()))
+
+
 def _rejected_attachment_batch_context(db, aid, user_id, roles):
     row = db.execute('SELECT * FROM operation_attachments WHERE id=?', (aid,)).fetchone()
     if not row:
@@ -12983,6 +12989,11 @@ def _rejected_attachment_batch_context(db, aid, user_id, roles):
     if not plan or site_id != _positive_business_id(anchor.get('site_id')):
         return None, (jsonify({'error': '影像与计划、检查项或站点关联不一致，未执行清理',
                                'code': 'REJECTED_ATTACHMENT_PURGE_LINK_INVALID'}), 409)
+    if _has_photo_quality_review(db, aid):
+        return None, (jsonify({'error': '该照片有质量审核记录，不能通过整改清理删除',
+                               'code': 'REJECTED_ATTACHMENT_PURGE_QUALITY_PROTECTED'}), 409)
+    quality_filter = (" AND NOT EXISTS (SELECT 1 FROM photo_quality_evaluations q WHERE q.attachment_id=a.id)"
+                      if _table_exists(db, 'photo_quality_evaluations') else '')
     rows = db.execute("""SELECT a.*, i.plan_id AS linked_plan_id, i.site_id AS linked_site_id,
                                 i.execution_status AS linked_execution_status,
                                 i.evidence_status AS linked_evidence_status,
@@ -12993,8 +13004,8 @@ def _rejected_attachment_batch_context(db, aid, user_id, roles):
                          LEFT JOIN insp_plan_items i ON a.source_type='inspection' AND a.source_id=i.id
                          WHERE COALESCE(a.is_deleted,0)=0 AND a.source_type='inspection'
                            AND a.review_status='rejected'
-                           AND ((i.plan_id=? AND i.site_id=?) OR (a.plan_id=? AND a.site_id=?))
-                         ORDER BY a.id""", (plan_id, site_id, plan_id, site_id)).fetchall()
+                           AND ((i.plan_id=? AND i.site_id=?) OR (a.plan_id=? AND a.site_id=?))"""
+                      + quality_filter + " ORDER BY a.id", (plan_id, site_id, plan_id, site_id)).fetchall()
     attachments = [dict(candidate) for candidate in rows]
     if not any(int(candidate['id']) == aid for candidate in attachments):
         return None, (jsonify({'error': '锚点不属于当前整改包',
@@ -13296,6 +13307,10 @@ def purge_rejected_attachment(aid):
                     db.rollback()
                     return jsonify({'error': '仅当前返场检查项的执行人可删除本人上传的已驳回照片',
                                     'code': 'REJECTED_ATTACHMENT_PURGE_FORBIDDEN'}), 403
+            if _has_photo_quality_review(db, aid):
+                db.rollback()
+                return jsonify({'error': '该照片有质量审核记录，不能通过整改清理删除',
+                                'code': 'REJECTED_ATTACHMENT_PURGE_QUALITY_PROTECTED'}), 409
             stored_path = str(attachment.get('stored_path') or '')
             backups, shared_file = _attachment_purge_physical_backups(db, attachment, aid)
             for target, _ in backups:
@@ -28492,6 +28507,8 @@ def mobile_upload_site_photo():
         requested_item_name = '异常上报现场' if manual_report_capture else ''
     filepath = None
     original_filepath = None
+    materials_committed = False
+    cleanup_attempted = False
     try:
         import base64
         original_data = base64.b64decode(image.split(',')[-1])
@@ -28540,8 +28557,48 @@ def mobile_upload_site_photo():
         # 统一归口：写入 operation_attachments，网页端影像档案可见
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         uploader = g.current_user
+        prepared_capture = None
+        if capture_source == 'camera':
+            with get_db() as read_db:
+                prepared_session = _capture_session_row(
+                    read_db, capture_session_token, user_id=uploader['id'], site_id=int(site_id),
+                    plan_id=plan_id, item_id=inspection_item['id'] if inspection_item else None,
+                    received_at=_parse_dt(now_str), capture_source=capture_source,
+                    rework_required_at=rework_required_at if is_retake else None,
+                    require_unbound=manual_report_capture)
+                if prepared_session:
+                    prepared_site = read_db.execute('SELECT name FROM sites WHERE id=?',
+                                                    (int(site_id),)).fetchone()
+                    prepared_site_name = str(prepared_site['name'] or '').strip() if prepared_site else ''
+                    prepared_location_label = ('签到位置' if str(
+                        prepared_session.get('location_source') or '').endswith('checkin')
+                        or prepared_session.get('location_source') == 'inspection_checkin_for_workorder'
+                        else '位置坐标')
+                    prepared_capture = (
+                        prepared_session['id'], float(prepared_session['gps_lat']),
+                        float(prepared_session['gps_lng']), prepared_location_label,
+                        prepared_session['anti_counterfeit_code'], prepared_site_name,
+                        str(requested_item_name or '现场照片').strip(),
+                    )
+            if prepared_capture:
+                display_data, display_file = _create_site_photo_display_copy(
+                    original_data, original_file, {
+                        'site_name': prepared_capture[5],
+                        'item_name': prepared_capture[6],
+                        'capture_time': now_str,
+                        'gps_lat': prepared_capture[1],
+                        'gps_lng': prepared_capture[2],
+                        'location_label': prepared_capture[3],
+                        'anti_counterfeit_code': prepared_capture[4],
+                    }, capture_frame=capture_frame, render_watermark=display_watermark)
+        _persist_site_photo_materials(original_filepath, original_data, filepath, display_data)
         with get_db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if (not _has_any_role(uploader, 'admin') and not db.execute(
+                    'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=? LIMIT 1',
+                    (uploader['id'], site_id)).fetchone()):
+                db.rollback()
+                return jsonify({'error': '无权限上传影像至该站点'}), 403
             if inspection_item is not None:
                 current_item, context_error = _inspection_photo_upload_context(
                     db, item_id, site_id, plan_id, uploader)
@@ -28671,7 +28728,7 @@ def mobile_upload_site_photo():
                 session = _capture_session_row(
                     db, capture_session_token, user_id=uploader['id'], site_id=int(site_id),
                     plan_id=plan_id, item_id=inspection_item['id'] if inspection_item else None,
-                    received_at=_parse_dt(now_str), capture_source=capture_source,
+                    received_at=datetime.now(), capture_source=capture_source,
                     rework_required_at=rework_required_at if is_retake else None,
                     require_unbound=manual_report_capture)
             if capture_source == 'camera' and not session:
@@ -28700,6 +28757,12 @@ def mobile_upload_site_photo():
                                       (int(site_id),)).fetchone()
                 site_name = str(site_row['name'] or '').strip() if site_row else ''
                 item_name_snapshot = str(requested_item_name or '现场照片').strip()
+                current_capture = (session['id'], gps_lat, gps_lng, trusted_location_label,
+                                   session['anti_counterfeit_code'], site_name, item_name_snapshot)
+                if current_capture != prepared_capture:
+                    db.rollback()
+                    return jsonify({'error': '拍摄信息已变化，请重新进入相机后重试',
+                                    'code': 'CAPTURE_CONTEXT_CHANGED'}), 409
                 watermark_fields = {
                     'site_name': site_name,
                     'item_name': item_name_snapshot,
@@ -28712,16 +28775,6 @@ def mobile_upload_site_photo():
                     'source': 'server_capture_session',
                 }
                 metadata_source = 'server_capture_session'
-                display_data, display_file = _create_site_photo_display_copy(
-                    original_data, original_file, {
-                        'site_name': site_name,
-                        'item_name': item_name_snapshot,
-                        'capture_time': trusted_capture_time,
-                        'gps_lat': gps_lat,
-                        'gps_lng': gps_lng,
-                        'location_label': trusted_location_label,
-                        'anti_counterfeit_code': session['anti_counterfeit_code'],
-                    }, capture_frame=capture_frame, render_watermark=display_watermark)
                 watermark_code_duplicate = db.execute(f"""SELECT id FROM operation_attachments
                     WHERE watermark_code=? AND id!=? AND {_protected_photo_duplicate_sql()}
                     ORDER BY id LIMIT 1""",
@@ -28919,8 +28972,6 @@ def mobile_upload_site_photo():
                             f"UPDATE operation_attachments SET {','.join(optional_resets)} WHERE id=?",
                             (new_id,))
             else:
-                _persist_site_photo_materials(
-                    original_filepath, original_data, filepath, display_data)
                 db.execute("""INSERT INTO operation_attachments
                     (filename, stored_path, file_type, mime_type, file_size, description,
                      source_type, source_id, site_id, uploader_id, uploader_name,
@@ -29046,10 +29097,12 @@ def mobile_upload_site_photo():
                 db, idempotency_key, idempotency_endpoint,
                 idempotency_payload_hash, response)
             db.commit()
+            materials_committed = not bool(recovery_attachment)
         return jsonify(response)
     except Exception as e:
         cleanup_failures = []
-        for target in (filepath, original_filepath):
+        cleanup_attempted = True
+        for target in (() if materials_committed else (filepath, original_filepath)):
             if target and os.path.exists(target):
                 try:
                     os.remove(target)
@@ -29067,6 +29120,14 @@ def mobile_upload_site_photo():
                 'code': 'PHOTO_RISK_EVALUATION_FAILED',
             }), 500
         return jsonify({'error': f'保存失败: {str(e)}', 'code': 'PHOTO_UPLOAD_SAVE_FAILED'}), 500
+    finally:
+        if not materials_committed and not cleanup_attempted:
+            for target in (filepath, original_filepath):
+                if target and os.path.exists(target):
+                    try:
+                        os.remove(target)
+                    except OSError:
+                        app.logger.exception('Could not remove unreferenced site photo file: %s', target)
 
 
 @app.route('/api/mobile/site-photos/delete', methods=['POST'])
@@ -40157,7 +40218,10 @@ if __name__ == '__main__':
     # 每30分钟更新天气
     scheduler.add_job(fetch_real_weather, 'interval', minutes=30, id='weather_updater')
     # 每10分钟自动数据审核（L1 + L2）
-    scheduler.add_job(auto_data_review, 'interval', minutes=10, id='auto_data_review')
+    if os.environ.get('AUTO_DATA_REVIEW_ENABLED') != '0':
+        scheduler.add_job(auto_data_review, 'interval', minutes=10, id='auto_data_review')
+    else:
+        print('[Server] AUTO_DATA_REVIEW_ENABLED=0: automatic data review disabled')
     # 每5分钟设备离线检测
     scheduler.add_job(check_device_offline, 'interval', minutes=5, id='device_offline_check')
     # 启动后立即运行一次（不等待5分钟）

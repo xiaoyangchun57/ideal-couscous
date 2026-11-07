@@ -699,20 +699,19 @@
           <!-- 已驳回照片 -->
           <block wx:if="{{sheet.rejectedEvidence.length}}">
             <text class="ip-fp-photo-section-title">问题照片</text>
-            <view class="ip-photo-grid">
-              <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
-                <text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text>
-                <text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text>
-                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
-                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+            <view class="ip-quality-list">
+              <view class="ip-quality-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-quality-image" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-quality-image ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
                       bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">
                   <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
                 </view>
+                <view class="ip-quality-detail"><text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text><text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text></view>
               </view>
             </view>
 
             <!-- 危险操作区：独立分区，与照片网格和提交按钮保持清晰间距 -->
-            <view class="ip-danger-zone">
+            <view class="ip-danger-zone" wx:if="{{!sheet.hasQualityDecision}}">
               <view class="ip-danger-zone-hd">
                 <text class="ip-danger-zone-title">危险操作</text>
                 <text class="ip-danger-zone-desc">清理后不可恢复，仅保留文字删除摘要</text>
@@ -782,7 +781,7 @@
           </block>
 
           <!-- 拍照来源按钮 -->
-          <view class="ip-photo-source-row" wx:if="{{sheet.photos.length + sheet.localPhotos.length < 6}}">
+          <view class="ip-photo-source-row">
             <button class="ip-photo-btn ip-photo-btn-primary" bindtap="onAddPhoto" data-source="camera">现场拍照</button>
             <button class="ip-photo-btn" bindtap="onAddPhoto" data-source="album">相册上传</button>
           </view>
@@ -854,15 +853,14 @@
           <text class="ip-fp-photo-hint" wx:if="{{sheet.voidedEvidenceCount}}">历史中有 {{sheet.voidedEvidenceCount}} 张已作废证据</text>
           <block wx:if="{{sheet.rejectedEvidence.length}}">
             <text class="ip-fp-photo-section-title">问题照片</text>
-            <view class="ip-photo-grid">
-              <view class="ip-photo-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
-                <text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text>
-                <text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text>
-                <image wx:if="{{p.status === 'ready'}}" class="ip-photo-img" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
-                <view wx:else class="ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
+            <view class="ip-quality-list">
+              <view class="ip-quality-item" wx:for="{{sheet.rejectedMedia}}" wx:key="key" wx:for-item="p">
+                <image wx:if="{{p.status === 'ready'}}" class="ip-quality-image" src="{{p.localPath}}" mode="aspectFit" bindtap="onPreview" binderror="onProtectedPhotoRenderError" data-list="rejectedMedia" data-index="{{index}}" data-src="{{p.localPath}}" />
+                <view wx:else class="ip-quality-image ip-photo-media-state {{p.status === 'error' ? 'ip-photo-media-error' : ''}}"
                       bindtap="onRetryProtectedPhoto" data-list="rejectedMedia" data-index="{{index}}">
                   <text>{{p.status === 'error' ? '照片加载失败，点击重试' : '照片加载中'}}</text>
                 </view>
+                <view class="ip-quality-detail"><text>{{sheet.rejectedEvidence[index].quality_reason || sheet.rejectedEvidence[index].reject_reason}}</text><text>{{sheet.rejectedEvidence[index].quality_note || "审核意见保留，未计扣分"}}</text></view>
               </view>
             </view>
           </block>

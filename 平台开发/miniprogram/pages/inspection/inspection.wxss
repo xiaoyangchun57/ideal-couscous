@@ -3322,3 +3322,6 @@
   line-height: 1.6;
   box-sizing: border-box;
 }
+.ip-quality-item { display: flex; align-items: flex-start; gap: 20rpx; padding: 16rpx 0; }
+.ip-quality-image { width: 160rpx; height: 160rpx; flex: none; }
+.ip-quality-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12rpx; overflow-wrap: anywhere; }
