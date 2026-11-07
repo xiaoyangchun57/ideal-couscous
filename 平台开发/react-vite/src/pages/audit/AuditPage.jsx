@@ -820,7 +820,7 @@ export default function AuditPage() {
       return;
     }
     if (!canSubmitPhotoReview(item.attachment_ids, selectedPhotoIds, reviewComment)) {
-      message.error('勾选驳回照片后必须填写统一驳回原因');
+      message.error('勾选不合格照片后必须填写统一不合格原因');
       return;
     }
     const session = reviewSessionRef.current;
@@ -1045,7 +1045,7 @@ export default function AuditPage() {
           {!submissionCommitted && !(item.source_type === 'inspection_batch' && item.attachment_ids?.length) && <Button key="reject" danger loading={processing}
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>}
-          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一驳回原因后再提交' : undefined}>
+          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一不合格原因后再提交' : undefined}>
             <span><Button key="approve" type="primary" loading={processing}
               disabled={missingResolution || missingRequiredPhotos || failedApproveIds.length > 0 || rejectionReasonMissing}
               onClick={() => handleReview(item, 'approve')}
@@ -1237,7 +1237,7 @@ export default function AuditPage() {
             : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
           <div data-review-reason-slot style={{ height: 22, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
             <Text type={rejectionReasonMissing ? 'danger' : 'secondary'}>
-              {rejectionReasonMissing ? '已选择驳回照片，请填写统一驳回原因' : ' '}
+              {rejectionReasonMissing ? '已选择不合格照片，请填写统一不合格原因' : ' '}
             </Text>
           </div>
         </div>

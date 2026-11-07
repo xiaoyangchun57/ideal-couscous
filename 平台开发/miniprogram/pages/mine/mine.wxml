@@ -82,11 +82,12 @@
       <view class="list-row" wx:if="{{qualityLoading}}"><text>正在加载…</text></view>
       <view class="list-row" wx:elif="{{qualityError}}" bindtap="loadPhotoQuality"><text>{{qualityError}} · 点击重试</text></view>
       <block wx:else>
-        <view class="list-row"><text>本月照片质量扣分：{{qualityDeduction}}</text></view>
+        <view class="list-row"><text>{{qualityMonth}} 照片质量扣分：{{qualityDeduction}}</text></view>
+        <view class="list-row" wx:if="{{qualityPhotos.length === 0}}"><text>该检查月份暂无已确认扣分照片</text></view>
         <view wx:for="{{qualityPhotos}}" wx:key="attachment_id">
-          <view class="list-row">
-            <image src="{{item.display_url}}" mode="aspectFit" data-url="{{item.display_url}}" bindtap="previewQualityPhoto" style="width:160rpx;height:160rpx" />
-            <text>{{item.item_name}} · 扣{{item.deduction}}分\n{{item.reason}}</text>
+          <view class="quality-photo-row">
+            <image class="quality-photo-image" src="{{item.display_url}}" mode="aspectFit" data-url="{{item.display_url}}" bindtap="previewQualityPhoto" />
+            <view class="quality-photo-detail"><text>{{item.item_name}} · 扣{{item.deduction}}分</text><text>{{item.reason}}</text></view>
           </view>
           <view class="list-row" data-id="{{item.attachment_id}}" bindtap="openQualityInspection"><text>查看原巡检</text><text class="row-chevron">›</text></view>
         </view>

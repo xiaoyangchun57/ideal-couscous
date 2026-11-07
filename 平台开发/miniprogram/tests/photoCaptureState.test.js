@@ -511,9 +511,9 @@ test('inspection photo card sends camera and album photos into the formal collec
     /onAddReportPhoto\(\)[\s\S]*?uploadReportPhotoPaths\(paths, context, \{ capture_source: 'unknown' \}\)/);
   assert.match(pageSource, /handlePhotoActionFailure\(error, message => new Promise/);
   assert.match(pageSource, /onAddPhoto\(e\)[\s\S]*?runPhotoActionOnce\(this, captureSource/);
-  assert.match(pageSource, /const formalPhotoCount = sheet\.photos\.length \+ sheet\.localPhotos\.length/);
-  assert.match(pageSource, /chooseInspectionPhotos\(6 - formalPhotoCount, 'album'\)/);
-  assert.match(wxml, /sheet\.photos\.length \+ sheet\.localPhotos\.length < 6/);
+  assert.match(pageSource, /chooseInspectionPhotos\(9, 'album'\)/);
+  assert.doesNotMatch(pageSource, /formalPhotoCount >= 6/);
+  assert.doesNotMatch(wxml, /sheet\.photos\.length \+ sheet\.localPhotos\.length < 6/);
   assert.match(pageSource, /capture_source: captureSource/);
   assert.match(pageSource, /_openTrustedCamera\(sheet\)[\s\S]{0,1600}wx\.navigateTo\(/);
   assert.match(pageSource, /capture_client = 'trusted_camera_v1'/);

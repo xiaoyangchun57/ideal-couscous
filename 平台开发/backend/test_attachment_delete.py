@@ -400,6 +400,39 @@ class AttachmentDeleteTest(unittest.TestCase):
         self.assertEqual(summaries[21]['reason'], '审核记录原因')
         self.assertEqual(summaries[22]['reason'], '清理已驳回影像')
 
+    def test_rejected_cleanup_preserves_quality_review_across_items(self):
+        with app_module.get_db() as db:
+            db.execute("""INSERT INTO insp_plan_items
+                (id,plan_id,site_id,photo_urls,review_status,execution_status,item_name)
+                VALUES (102,100,1,'[]',3,'active','电导率')""")
+        self.add_rejected_attachment(60, reject_reason='历史整改照片')
+        stored, thumb = self.add_rejected_attachment(62, source_id=102, item_id=102,
+                                                     reject_reason='质量审核意见')
+        with app_module.get_db() as db:
+            app_module.ensure_photo_quality_schema(db)
+            db.execute("""INSERT INTO photo_quality_evaluations
+                (attachment_id,status,reason,reviewed_at,responsible_user_id,score_month,attribution_status)
+                VALUES (62,'unqualified','质量审核意见','2026-11-06 12:00:00',2,'2026-11','reliable')""")
+        headers = self.headers('admin-token')
+        for method, url in ((self.client.post, '/api/attachments/62/purge-rejected'),
+                            (self.client.get, '/api/attachments/62/purge-rejected-batch'),
+                            (self.client.post, '/api/attachments/62/purge-rejected-batch')):
+            response = method(url, headers=headers)
+            self.assertEqual((response.status_code, response.json['code']),
+                             (409, 'REJECTED_ATTACHMENT_PURGE_QUALITY_PROTECTED'))
+        preview = self.client.get('/api/attachments/60/purge-rejected-batch', headers=headers)
+        self.assertEqual((preview.status_code, preview.json['count']), (200, 1))
+        response = self.client.post('/api/attachments/60/purge-rejected-batch', headers=headers)
+        self.assertEqual((response.status_code, response.json['count'], response.json['attachment_ids']),
+                         (200, 1, [60]))
+        with app_module.get_db() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM operation_attachments WHERE id=60').fetchone())
+            self.assertIsNotNone(db.execute('SELECT 1 FROM operation_attachments WHERE id=62').fetchone())
+            quality = db.execute('SELECT reason,score_month FROM photo_quality_evaluations WHERE attachment_id=62').fetchone()
+            self.assertEqual((quality['reason'], quality['score_month']), ('质量审核意见', '2026-11'))
+        for path in (stored, thumb):
+            self.assertTrue(os.path.isfile(os.path.join(self.upload_dir, path[len('/uploads/'):].replace('/', os.sep))))
+
     def test_batch_preview_admin_success_per_photo_reason_and_idempotent_replay(self):
         with app_module.get_db() as db:
             db.execute("""INSERT INTO insp_plan_items

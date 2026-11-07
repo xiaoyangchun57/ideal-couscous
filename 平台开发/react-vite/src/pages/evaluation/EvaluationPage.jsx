@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Dropdown, Image, Modal, Select, Space, Tabs, Tag, Typography, message } from 'antd';
+import { Alert, Button, DatePicker, Dropdown, Image, Modal, Select, Space, Tabs, Tag, Typography, message } from 'antd';
+import dayjs from 'dayjs';
 import { DownloadOutlined, FileExcelOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
@@ -53,27 +54,29 @@ export default function EvaluationPage() {
   useEffect(() => () => { photoRequest.current += 1; originRequest.current += 1; }, []);
   const openOriginalInspection = useCallback(async (photo) => {
     const requestId = ++originRequest.current;
-    setOriginDetail({ loading: true });
+    setOriginDetail({ loading: true, attachmentId: photo.attachment_id });
     try {
       const plan = await api.getStrict(`/inspection-v2/plans/${photo.plan_id}`);
       if (requestId !== originRequest.current) return;
       const item = (plan.items || []).find(row => Number(row.id) === photo.item_id);
-      setOriginDetail(item ? { plan, item } : { error: '原检查项不存在或当前账号无权查看' });
+      setOriginDetail(item ? { plan, item, attachmentId: photo.attachment_id } : { error: '原检查项不存在或当前账号无权查看', attachmentId: photo.attachment_id });
     } catch (error) {
-      if (requestId === originRequest.current) setOriginDetail({ error: error.message || '原巡检加载失败' });
+      if (requestId === originRequest.current) setOriginDetail({ error: error.message || '原巡检加载失败', attachmentId: photo.attachment_id });
     }
   }, []);
-  const openPhotoDetail = useCallback(async (person) => {
+  const openPhotoDetail = useCallback(async (person, selectedPeriod = period, month = '') => {
     const requestId = ++photoRequest.current;
     originRequest.current += 1;
     setOriginDetail(null);
-    setPhotoDetail({ person, loading: true, photos: [], error: '' });
+    setPhotoDetail({ person, selectedPeriod, month, loading: true, photos: [], error: '' });
     try {
-      const detail = await api.getStrict(`/evaluation/personnel/${person.id}/photo-quality?period=${period}`);
+      const query = month ? `month=${encodeURIComponent(month)}` : `period=${encodeURIComponent(selectedPeriod)}`;
+      const detail = await api.getStrict(`/evaluation/personnel/${person.id}/photo-quality?${query}`);
+      if (!detail || !Array.isArray(detail.photos) || typeof detail.deduction !== 'number') throw new Error('照片明细数据不完整，请重试');
       if (requestId !== photoRequest.current) return;
-      setPhotoDetail({ person, loading: false, photos: detail.photos || [], deduction: detail.deduction, error: '' });
+      setPhotoDetail({ person, selectedPeriod, month, loading: false, photos: detail.photos, deduction: detail.deduction, start: detail.start, end: detail.end, error: '' });
     } catch (error) {
-      if (requestId === photoRequest.current) setPhotoDetail({ person, loading: false, photos: [], error: error.message || '明细加载失败' });
+      if (requestId === photoRequest.current) setPhotoDetail({ person, selectedPeriod, month, loading: false, photos: [], error: error.message || '明细加载失败' });
     }
   }, [period]);
 
@@ -241,25 +244,29 @@ export default function EvaluationPage() {
     {activeView !== 'people' && unconfiguredSites === 0 && !hasMonitoringSamples && <Alert type="info" showIcon message="本周期未接收到监测样本" description="已配置站点按应报量计算缺失；有效性和及时性在无实到样本时保持“无样本”。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
     <Modal title={`${photoDetail?.person?.real_name || ''} · 照片质量扣分明细`} open={Boolean(photoDetail)} footer={null}
       onCancel={() => { photoRequest.current += 1; originRequest.current += 1; setPhotoDetail(null); setOriginDetail(null); }}>
-      <Text type="secondary">按实际检查月份归属；点击照片查看大图。</Text>
+      <Space wrap><Text>检查月份</Text><DatePicker picker="month" value={photoDetail?.month ? dayjs(`${photoDetail.month}-01`) : null} placeholder="原查询范围" onChange={(_, value) => openPhotoDetail(photoDetail.person, photoDetail.selectedPeriod, value || '')} /></Space>
+      {!photoDetail?.loading && !photoDetail?.error && <p>范围：{photoDetail?.start} 至 {photoDetail?.end}</p>}
       {photoDetail?.loading && <p>正在加载照片明细…</p>}
-      {photoDetail?.error && <Alert type="error" message={photoDetail.error} action={<Button onClick={() => openPhotoDetail(photoDetail.person)}>重试</Button>} />}
-      {!photoDetail?.loading && !photoDetail?.error && <p>本周期扣分：{photoDetail?.deduction || 0}</p>}
+      {photoDetail?.error && <Alert type="error" message={photoDetail.error} action={<Button onClick={() => openPhotoDetail(photoDetail.person, photoDetail.selectedPeriod, photoDetail.month)}>重试</Button>} />}
+      {!photoDetail?.loading && !photoDetail?.error && <p>本范围扣分：{photoDetail?.deduction}</p>}
+      {!photoDetail?.loading && !photoDetail?.error && photoDetail?.photos.length === 0 && <p>{photoDetail.month ? '该检查月份暂无已确认扣分照片' : '该范围暂无已确认扣分照片'}</p>}
       <Image.PreviewGroup>{photoDetail?.photos.map(photo => <div key={photo.attachment_id} style={{ marginBottom: 16 }}>
         <Image src={photo.display_url} width={120} alt={photo.item_name || '不合格照片'} />
         <p>{photo.score_month} · {photo.item_name} · 扣{photo.deduction}分</p>
         <p>{photo.reason}</p>
         <Button type="link" onClick={() => openOriginalInspection(photo)}>查看原巡检</Button>
+        {originDetail?.attachmentId === photo.attachment_id && <>
+          {originDetail.loading && <p>正在加载原巡检…</p>}
+          {originDetail.error && <Alert type="error" message={originDetail.error} />}
+          {originDetail.item && <section aria-label="原巡检记录">
+            <Typography.Title level={5}>{originDetail.plan.plan_name || `巡检 #${originDetail.plan.id}`}</Typography.Title>
+            <p>检查项：{originDetail.item.item_name}（#{originDetail.item.id}）</p>
+            <p>实际结果：{originDetail.item.result === 'normal' ? '正常' : originDetail.item.result === 'abnormal' ? '异常' : '未填写'}</p>
+            <p>实际检查时间：{originDetail.item.completed_at || originDetail.item.check_time || '未记录'}</p>
+            <p>原说明：{originDetail.item.remark || '无'}</p>
+          </section>}
+        </>}
       </div>)}</Image.PreviewGroup>
-      {originDetail?.loading && <p>正在加载原巡检…</p>}
-      {originDetail?.error && <Alert type="error" message={originDetail.error} />}
-      {originDetail?.item && <section aria-label="原巡检记录">
-        <Typography.Title level={5}>{originDetail.plan.plan_name || `巡检 #${originDetail.plan.id}`}</Typography.Title>
-        <p>检查项：{originDetail.item.item_name}（#{originDetail.item.id}）</p>
-        <p>实际结果：{originDetail.item.result === 'normal' ? '正常' : originDetail.item.result === 'abnormal' ? '异常' : '未填写'}</p>
-        <p>实际检查时间：{originDetail.item.completed_at || originDetail.item.check_time || '未记录'}</p>
-        <p>原说明：{originDetail.item.remark || '无'}</p>
-      </section>}
     </Modal>
     <Tabs className="workspace-tabs" activeKey={activeView} onChange={(value) => updateQuery({ view: value })} items={tabs} />
   </WorkspacePage>;
