@@ -59,6 +59,31 @@ function AuditEmptyState({ title, onRefresh, error }) {
 
 // 通用工具栏：搜索 + 筛选 + 刷新 + 计数
 // 结构一致性（B 类）：统一走 FilterBar 组合——筛选控件左对齐为 children，动作按钮收 extra
+// 待审队列是一次性取回的本地数据，站点/人员筛选可以直接在前端做，不影响服务端分页。
+function collectAuditScopeOptions(items = []) {
+  const siteNames = new Set();
+  const personNames = new Set();
+  items.forEach((item) => {
+    if (item.site_name) siteNames.add(String(item.site_name));
+    [item.assignee, item.applicant_name, item.requester_name, item.applicant, item.submitter_name]
+      .filter(Boolean).forEach((name) => personNames.add(String(name)));
+  });
+  const toOptions = (values, label) => listFilterOptions(
+    label, [...values].sort().map((value) => ({ value, label: value })),
+  );
+  return {
+    siteOptions: toOptions(siteNames, '全部站点'),
+    personOptions: toOptions(personNames, '全部人员'),
+  };
+}
+
+function matchesAuditScope(item, siteFilter, personFilter) {
+  if (siteFilter && String(item.site_name || '') !== siteFilter) return false;
+  if (!personFilter) return true;
+  return [item.assignee, item.applicant_name, item.requester_name, item.applicant, item.submitter_name]
+    .some((name) => name && String(name) === personFilter);
+}
+
 function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, extraAction, total, filteredCount, refresh, helpText }) {
   const { tokens } = useTheme();
   return (
@@ -104,11 +129,15 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState(undefined);
+  const [siteFilter, setSiteFilter] = useState(undefined);
+  const [personFilter, setPersonFilter] = useState(undefined);
 
   const filtered = allItems.filter(i => sourceTypes.includes(i.source_type));
+  const scoped = filtered.filter(i => matchesAuditScope(i, siteFilter, personFilter));
+  const { siteOptions, personOptions } = collectAuditScopeOptions(filtered);
   const typeFiltered = typeFilter
-    ? filtered.filter(i => i.source_type === typeFilter)
-    : filtered;
+    ? scoped.filter(i => i.source_type === typeFilter)
+    : scoped;
   const searched = searchText
     ? typeFiltered.filter(i => {
         const kw = searchText.toLowerCase();
@@ -378,19 +407,33 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
         searchText={searchText}
         onSearchChange={setSearchText}
         placeholder="搜索内容 / 站点 / 来源"
-        filterSlot={showType ? (
-          <FilterField label="审核类型">
-            <Select
-              aria-label="审核类型"
-              placeholder="全部类型"
-              allowClear
-              value={typeFilter}
-              onChange={(value) => setTypeFilter(listFilterValue(value))}
-              style={{ width: filterSmallSelectWidth }}
-              options={listFilterOptions('全部审核类型', typeOptions)}
-            />
-          </FilterField>
-        ) : null}
+        filterSlot={(
+          <>
+            {showType ? (
+              <FilterField label="审核类型">
+                <Select
+                  aria-label="审核类型"
+                  placeholder="全部类型"
+                  allowClear
+                  value={typeFilter}
+                  onChange={(value) => setTypeFilter(listFilterValue(value))}
+                  style={{ width: filterSmallSelectWidth }}
+                  options={listFilterOptions('全部审核类型', typeOptions)}
+                />
+              </FilterField>
+            ) : null}
+            <FilterField label="站点">
+              <Select aria-label="审核站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label"
+                value={siteFilter} onChange={(value) => setSiteFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={siteOptions} />
+            </FilterField>
+            <FilterField label="人员">
+              <Select aria-label="审核人员" placeholder="全部人员" allowClear showSearch optionFilterProp="label"
+                value={personFilter} onChange={(value) => setPersonFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={personOptions} />
+            </FilterField>
+          </>
+        )}
         extraAction={extraAction}
         total={filtered.length}
         filteredCount={searched.length}
@@ -402,7 +445,7 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => auditItemKey(record) === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
-        emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
+        emptyType={searchText || typeFilter || siteFilter || personFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -415,9 +458,13 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [sourceFilter, setSourceFilter] = useState(undefined);
+  const [siteFilter, setSiteFilter] = useState(undefined);
+  const [personFilter, setPersonFilter] = useState(undefined);
 
   const requestItems = allItems.filter(i => ['parts_request', 'spare_part_request'].includes(i.source_type));
-  const flattened = requestItems
+  const scopedItems = requestItems.filter(i => matchesAuditScope(i, siteFilter, personFilter));
+  const { siteOptions, personOptions } = collectAuditScopeOptions(requestItems);
+  const flattened = scopedItems
     .flatMap(parent => {
       const details = Array.isArray(parent.parts_detail) && parent.parts_detail.length
         ? parent.parts_detail
@@ -549,19 +596,31 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
         onSearchChange={setSearchText}
         placeholder="搜索备件名称 / 编号 / 厂家 / 型号 / 申请人 / 计划"
         filterSlot={(
-          <FilterField label="来源计划">
-            <Select
-              aria-label="来源计划"
-              placeholder="全部计划"
-              allowClear
-              showSearch
-              value={sourceFilter}
-              onChange={(value) => setSourceFilter(listFilterValue(value))}
-              style={{ width: filterSelectWidth }}
-              options={listFilterOptions('全部来源计划', sourceOptions)}
-              optionFilterProp="label"
-            />
-          </FilterField>
+          <>
+            <FilterField label="来源计划">
+              <Select
+                aria-label="来源计划"
+                placeholder="全部计划"
+                allowClear
+                showSearch
+                value={sourceFilter}
+                onChange={(value) => setSourceFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }}
+                options={listFilterOptions('全部来源计划', sourceOptions)}
+                optionFilterProp="label"
+              />
+            </FilterField>
+            <FilterField label="站点">
+              <Select aria-label="审核站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label"
+                value={siteFilter} onChange={(value) => setSiteFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={siteOptions} />
+            </FilterField>
+            <FilterField label="人员">
+              <Select aria-label="审核人员" placeholder="全部人员" allowClear showSearch optionFilterProp="label"
+                value={personFilter} onChange={(value) => setPersonFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={personOptions} />
+            </FilterField>
+          </>
         )}
         total={flattened.length}
         filteredCount={searched.length}
@@ -573,7 +632,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => record.parent_key === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
-        emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
+        emptyType={searchText || sourceFilter || siteFilter || personFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
