@@ -66,6 +66,15 @@ jobs:
           node --version
           node --test src/listPaginationWiring.test.js
 
+      - name: 小程序前端契约测试（node 内置 runner，无需 npm ci）
+        working-directory: 平台开发
+        run: |
+          # 小程序 273 条契约测试同样只用 node 内置模块，不依赖 npm 包。
+          # 在 Linux runner 上实跑，可挡住页面/工具函数与契约漂移，
+          # 也保证测试不依赖本机私有文件或 Windows 专用脚本。
+          node --version
+          node --test miniprogram/tests/*.test.js
+
       - name: 生成仅用于本次 CI 的初始管理员密码
         run: |
           # 空库 seed_users() 要求 >=12 位；这是临时随机值，
