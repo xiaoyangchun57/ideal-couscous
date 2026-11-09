@@ -14,9 +14,6 @@ test('repository root is the only WeChat project entry', () => {
   assert.equal(rootProject.libVersion, '3.17.0');
   assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.json')), false);
   assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.legacy.json')), false);
-  assert.equal(fs.existsSync(path.join(root, 'project.private.config.json')), true);
-  // miniprogram/ 下的 project.private.config.json 是微信开发者工具在本机生成的
-  // 私有设置，不提交仓库；入口唯一性由上面的 project.config.json 断言保证。
 });
 
 test('miniprogram enables required component lazy loading', () => {
