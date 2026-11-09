@@ -197,7 +197,7 @@ export function buildWorkorderListRequest(searchString = '') {
     page: String(page),
     page_size: String(pageSize),
   });
-  ['search', 'assignee', 'level', 'status'].forEach((key) => {
+  ['search', 'assignee', 'level', 'status', 'site_id'].forEach((key) => {
     const value = activeParams.get(key);
     if (value) query.set(key, value);
   });
@@ -253,6 +253,7 @@ export default function WorkOrdersPage() {
   // Filter state - initialize from URL params
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [assigneeFilter, setAssigneeFilter] = useState(searchParams.get('assignee') || '');
+  const [siteFilter, setSiteFilter] = useState(searchParams.get('site_id') || '');
   const [levelFilter, setLevelFilter] = useState(searchParams.get('level') || undefined);
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
 
@@ -376,7 +377,6 @@ export default function WorkOrdersPage() {
   const [assigneesError, setAssigneesError] = useState('');
 
   const loadAssignees = useCallback(async () => {
-    if (!isAdmin) return;
     setAssigneesLoading(true);
     setAssigneesError('');
     try {
@@ -388,7 +388,7 @@ export default function WorkOrdersPage() {
     } finally {
       setAssigneesLoading(false);
     }
-  }, [isAdmin]);
+  }, []);
 
   // Fetch sites for dropdown
   useEffect(() => {
@@ -477,15 +477,17 @@ export default function WorkOrdersPage() {
     const urlAssignee = searchParams.get('assignee') || '';
     const urlLevel = searchParams.get('level') || undefined;
     const urlStatus = searchParams.get('status') || undefined;
+    const urlSite = searchParams.get('site_id') || '';
     setSearch(urlSearch);
     setAssigneeFilter(urlAssignee);
     setLevelFilter(urlLevel);
     setStatusFilter(urlStatus);
+    setSiteFilter(urlSite);
     // Refetch data when navigating from other pages with URL params
     fetchOrders();
   }, [location.search, fetchOrders]);
 
-  const hasActiveFilters = Boolean(search || assigneeFilter || levelFilter || statusFilter);
+  const hasActiveFilters = Boolean(search || assigneeFilter || levelFilter || statusFilter || siteFilter);
   const tablePagination = useMemo(() => ({
     current: page,
     pageSize,
@@ -528,6 +530,24 @@ export default function WorkOrdersPage() {
     setSearchParams(next, { replace: true });
   };
 
+  const handleSiteChange = (value) => {
+    setSiteFilter(value || '');
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('site_id', value);
+    else next.delete('site_id');
+    next.delete('page');
+    setSearchParams(next, { replace: true });
+  };
+
+  const handleAssigneeChange = (value) => {
+    setAssigneeFilter(value || '');
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('assignee', value);
+    else next.delete('assignee');
+    next.delete('page');
+    setSearchParams(next, { replace: true });
+  };
+
   const handleAssigneeClear = () => {
     setAssigneeFilter('');
     const next = new URLSearchParams(searchParams);
@@ -539,10 +559,11 @@ export default function WorkOrdersPage() {
   const handleReset = () => {
     setSearch('');
     setAssigneeFilter('');
+    setSiteFilter('');
     setLevelFilter(undefined);
     setStatusFilter(undefined);
     const next = new URLSearchParams(searchParams);
-    ['search', 'assignee', 'level', 'status', 'page'].forEach((key) => next.delete(key));
+    ['search', 'assignee', 'level', 'status', 'site_id', 'page'].forEach((key) => next.delete(key));
     setSearchParams(next, { replace: true });
   };
 
@@ -1025,6 +1046,10 @@ export default function WorkOrdersPage() {
     },
   ];
 
+  const siteOptions = (Array.isArray(sites) ? sites : [])
+    .map((site) => ({ value: String(site.id), label: site.name || `站点 #${site.id}` }));
+  const assigneeOptions = (Array.isArray(assignees) ? assignees : [])
+    .map((item) => ({ value: item.name, label: item.name }));
   const statusOptions = Object.entries(orderStatusMap).map(([value, label]) => ({ value, label }));
   const levelOptions = [
     { value: 'normal', label: '一般' },
@@ -1075,6 +1100,8 @@ export default function WorkOrdersPage() {
             onChange={(e) => setSearch(e.target.value)} onPressEnter={(e) => handleSearch(e.target.value)} style={{ width: filterInputWidth }} /></FilterField>
           <FilterField label="级别"><Select aria-label="级别" placeholder="全部级别" allowClear value={levelFilter} onChange={(value) => handleLevelChange(listFilterValue(value))} style={{ width: filterSmallSelectWidth }} options={listFilterOptions('全部级别', levelOptions)} /></FilterField>
           <FilterField label="状态"><Select aria-label="状态" placeholder="全部状态" allowClear value={statusFilter} onChange={(value) => handleStatusChange(listFilterValue(value))} style={{ width: filterSelectWidth }} options={listFilterOptions('全部状态', statusOptions)} /></FilterField>
+          <FilterField label="所属站点"><Select aria-label="所属站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label" value={siteFilter || undefined} onChange={(value) => handleSiteChange(listFilterValue(value))} style={{ width: filterSelectWidth }} options={listFilterOptions('全部站点', siteOptions)} /></FilterField>
+          <FilterField label="负责人"><Select aria-label="负责人" placeholder="全部负责人" allowClear showSearch optionFilterProp="label" value={assigneeFilter || undefined} onChange={(value) => handleAssigneeChange(listFilterValue(value))} style={{ width: filterSelectWidth }} options={listFilterOptions('全部负责人', assigneeOptions)} /></FilterField>
           {assigneeFilter && <ToolbarMeta label="负责人"><Tag closable onClose={handleAssigneeClear}>{assigneeFilter}</Tag></ToolbarMeta>}
           <ToolbarMeta label={hasActiveFilters ? '当前筛选' : '当前范围'}>
             共 {totalOrders} 条，第 {totalOrders ? page : 0}/{totalOrders ? Math.ceil(totalOrders / pageSize) : 0} 页

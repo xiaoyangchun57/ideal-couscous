@@ -168,3 +168,39 @@ test('major workspace lists no longer pin table bodies to page-specific viewport
     assert.doesNotMatch(source(path), /WorkspaceTable[\s\S]{0,500}calc\(100vh/);
   }
 });
+
+
+test('client-side lists keep the selected page size instead of pinning it back to 20', () => {
+  const hook = source('./utils/clientPagination.js');
+  assert.match(hook, /defaultPageSize: clientPage\.pageSize/);
+  assert.match(hook, /defaultCurrent: clientPage\.current/);
+  assert.match(hook, /setClientPage\(\{ current: next, pageSize: size \}\)/);
+  assert.match(hook, /typeof pagination\.onChange === 'function'/);
+  for (const path of ['./components/WorkspacePage.jsx', './components/ManagementPage.jsx']) {
+    assert.match(source(path), /useClientPagination\(pagination\)/, `${path} 未接入客户端分页状态`);
+  }
+  // 服务端分页仍由调用方控制，不能被共享层改写
+  assert.doesNotMatch(hook, /defaultPageSize:.*current:.*onChange:.*setSearchParams/);
+});
+
+test('work orders and plan schedules filter by site / person through the server', () => {
+  const orders = source('./pages/workorders/WorkOrdersPage.jsx');
+  const plans = source('./pages/plan-schedules/PlanSchedulesPage.jsx');
+  assert.match(orders, /aria-label="所属站点"/);
+  assert.match(orders, /aria-label="负责人"/);
+  assert.match(orders, /'search', 'assignee', 'level', 'status', 'site_id'/);
+  assert.match(plans, /aria-label="计划负责人"/);
+  assert.match(plans, /params\.set\('user_id', userFilter\)/);
+  const backend = readFileSync(new URL('../../backend/app.py', import.meta.url), 'utf8');
+  assert.match(backend, /site_id = request\.args\.get\('site_id'/);
+  assert.match(backend, /where\.append\('w\.site_id=\?'\)/);
+});
+
+test('unified review gets client-side site and person filters', () => {
+  const audit = source('./pages/audit/AuditPage.jsx');
+  assert.match(audit, /function collectAuditScopeOptions/);
+  assert.match(audit, /function matchesAuditScope/);
+  assert.equal((audit.match(/aria-label="审核站点"/g) || []).length, 2);
+  assert.equal((audit.match(/aria-label="审核人员"/g) || []).length, 2);
+  assert.match(audit, /flattened\.length === 0 && !siteFilter && !personFilter/);
+});
