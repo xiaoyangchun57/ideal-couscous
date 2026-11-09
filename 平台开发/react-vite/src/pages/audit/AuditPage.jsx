@@ -372,7 +372,7 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       : defaultColumns;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="workspace-embedded-page">
       <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
@@ -402,6 +402,7 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => auditItemKey(record) === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
+        scroll={{ x: columns.reduce((total, column) => total + (column.width || 120), 0) }}
         emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -542,7 +543,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="workspace-embedded-page">
       <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
@@ -573,6 +574,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => record.parent_key === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
+        scroll={{ x: columns.reduce((total, column) => total + (column.width || 120), 0) }}
         emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
@@ -818,7 +820,7 @@ export default function AuditPage() {
       return;
     }
     if (!canSubmitPhotoReview(item.attachment_ids, selectedPhotoIds, reviewComment)) {
-      message.error('勾选驳回照片后必须填写统一驳回原因');
+      message.error('勾选不合格照片后必须填写统一不合格原因');
       return;
     }
     const session = reviewSessionRef.current;
@@ -1043,7 +1045,7 @@ export default function AuditPage() {
           {!submissionCommitted && !(item.source_type === 'inspection_batch' && item.attachment_ids?.length) && <Button key="reject" danger loading={processing}
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>}
-          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一驳回原因后再提交' : undefined}>
+          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一不合格原因后再提交' : undefined}>
             <span><Button key="approve" type="primary" loading={processing}
               disabled={missingResolution || missingRequiredPhotos || failedApproveIds.length > 0 || rejectionReasonMissing}
               onClick={() => handleReview(item, 'approve')}
@@ -1168,7 +1170,7 @@ export default function AuditPage() {
                     <Checkbox checked={selected} style={{ marginTop: 6 }}
                       onChange={(event) => setSelectedPhotoIds((ids) => event.target.checked
                         ? [...ids, photo.id] : ids.filter(id => id !== photo.id))}>
-                      需替换此照片
+                      标记不合格
                     </Checkbox>
                     <Text strong style={{ display: 'block', fontSize: 13, marginTop: 6 }}>{itemLabel}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄时间：{photo.taken_at || '未记录'}</Text>
@@ -1235,7 +1237,7 @@ export default function AuditPage() {
             : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
           <div data-review-reason-slot style={{ height: 22, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
             <Text type={rejectionReasonMissing ? 'danger' : 'secondary'}>
-              {rejectionReasonMissing ? '已选择驳回照片，请填写统一驳回原因' : ' '}
+              {rejectionReasonMissing ? '已选择不合格照片，请填写统一不合格原因' : ' '}
             </Text>
           </div>
         </div>
@@ -1366,10 +1368,6 @@ export default function AuditPage() {
   return (
     <div style={pageRootStyle}>
       <style>{`
-        .audit-tabs { height: 100%; }
-        .audit-tabs > .ant-tabs-content-holder { flex: 1 1 auto; min-height: 0; }
-        .audit-tabs > .ant-tabs-content-holder > .ant-tabs-content { height: 100%; }
-        .audit-tabs .ant-tabs-tabpane-active { height: 100%; }
         .audit-target-row > td { background: #fff7e6 !important; }
         .audit-target-row:hover > td { background: #ffe7ba !important; }
       `}</style>
@@ -1390,7 +1388,7 @@ export default function AuditPage() {
       {targetNotice && <Alert type="warning" showIcon style={{ marginBottom: 12, flexShrink: 0 }} message={targetNotice} />}
 
       <Tabs
-        className="audit-tabs"
+        className="audit-tabs workspace-tabs"
         activeKey={activeKey}
         onChange={handleTabChange}
         items={tabItems}

@@ -672,6 +672,7 @@ Page({
   },
 
   _resetForExecutionTarget() {
+    this._qualityItemOpened = false;
     this._disposeProtectedMedia(true);
     this._executionRequestId = (this._executionRequestId || 0) + 1;
     this._entryRequestId = (this._entryRequestId || 0) + 1;
@@ -2138,7 +2139,7 @@ Page({
           // 接口给出的业务展示名优先；旧接口或新增分类则保留原有名称，不能笼统显示“未分类”。
           category_cn: cat.category_cn || map(INSPECTION_CATEGORY, cat.category, cat.category || '其他检查'),
           items: (cat.items || []).map(it => {
-            const pendingSubmit = localStore.getPendingSubmit(it.item_id, it.plan_id);
+            const pendingSubmit = this.data.viewMode === 'readonly' ? null : localStore.getPendingSubmit(it.item_id, it.plan_id);
             const merged = pendingSubmit ? Object.assign({}, it, {
               result: pendingSubmit.data.result,
               sync_pending: true,
@@ -2159,6 +2160,10 @@ Page({
         }
         const abnormalCount = decorated.reduce((count, cat) => count + (cat.items || [])
           .filter(item => item.result === 'abnormal').length, 0);
+        const openQualityItem = this._resultIntent && this._entryTarget
+          && this._entryTarget.source === 'photo_quality_history' && focusedItemId
+          && executionTarget.itemBelongsToCategories(decorated, focusedItemId)
+          && !this._qualityItemOpened;
         this.setData({
           site: selectedSite,
           selSite: selectedSite,
@@ -2171,6 +2176,11 @@ Page({
           abnormalCount,
           loaded: true,
           photoProgress: inspectionPhotoProgress(res.categories)
+        }, () => {
+          if (openQualityItem) {
+            this._qualityItemOpened = true;
+            this.onOpenItem({ currentTarget: { dataset: { id: focusedItemId } } });
+          }
         });
         this.refreshStationStage(siteId);
         if (this.data.viewMode === 'execute') this.loadReagents(siteId);
@@ -3031,7 +3041,7 @@ Page({
     }
     const supplementRequired = false;
     const submittedReadOnly = !readOnly && submitted && (!supplementRequired || !checkedIn);
-    if (target.sync_pending || localStore.getPendingSubmit(target.item_id, target.plan_id)) {
+    if (!readOnly && (target.sync_pending || localStore.getPendingSubmit(target.item_id, target.plan_id))) {
       wx.showToast({ title: '该检查项已本地保存，等待同步完成', icon: 'none' });
       return;
     }
@@ -3063,7 +3073,7 @@ Page({
     const supplementPhotos = inspectionSupplementPhotos(target);
     this._inspectionSheetScrollTop = Number(this._inspectionParentScrollTop) || 0;
     this.setData({
-      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', requiresCalibration: target.requiresCalibration === true, photos: photos.map(resolveUploadUrl), photoMedia: [], pendingPhotos: photoState.pendingPhotos.map(resolveUploadUrl), localPhotos: retryLocalPhotos, localPhotoMeta: retryLocalMeta, rejectedMedia: [], supplementPhotos, supplementMedia: [], supplementLocalPhotos, supplementLocalMeta, requiredPhotos, replacementRequiredPhotos: photoInfo.required, replacementPhotoStatus: target.replacement_photo_status || 'not_applicable', replacementBlockReason: target.replacement_block_reason || '', originalPhotoCount: photoState.formalPhotos.length, supplementOnly: supplementRequired, readOnly: readOnly || submittedReadOnly, photoCorrection: false, correctionIdempotencyKey: '', voidedEvidenceCount: (target.voided_evidence || []).length, rejectedEvidence, purgeTarget: null, purgeCount: 0, purgeError: '', purgeLoading: false, photoResultTitle: '', photoResultMessage: '', photoInfo }
+      sheet: { open: true, item: target, result: target.result || 'normal', remark: target.remark || '', calibrator: target.calibrator || '', calValues: target.calibration_values || '', requiresCalibration: target.requiresCalibration === true, photos: photos.map(resolveUploadUrl), photoMedia: [], pendingPhotos: photoState.pendingPhotos.map(resolveUploadUrl), localPhotos: retryLocalPhotos, localPhotoMeta: retryLocalMeta, rejectedMedia: [], supplementPhotos, supplementMedia: [], supplementLocalPhotos, supplementLocalMeta, requiredPhotos, replacementRequiredPhotos: photoInfo.required, replacementPhotoStatus: target.replacement_photo_status || 'not_applicable', replacementBlockReason: target.replacement_block_reason || '', originalPhotoCount: photoState.formalPhotos.length, supplementOnly: supplementRequired, readOnly: readOnly || submittedReadOnly, photoCorrection: false, correctionIdempotencyKey: '', voidedEvidenceCount: (target.voided_evidence || []).length, rejectedEvidence, hasQualityDecision: rejectedEvidence.some(row => !!row.quality_decision_id), purgeTarget: null, purgeCount: 0, purgeError: '', purgeLoading: false, photoResultTitle: '', photoResultMessage: '', photoInfo }
     }, () => this._prepareProtectedMediaForSheet());
   },
 
@@ -3240,8 +3250,6 @@ Page({
     const sheet = this.data.sheet;
     if (this._showInspectionPhotoEditBlocked(sheet)) return;
     if (sheet.photoCorrection) this.setData({ 'sheet.correctionIdempotencyKey': '' });
-    const formalPhotoCount = sheet.photos.length + sheet.localPhotos.length;
-    if (formalPhotoCount >= 6) { wx.showToast({ title: '最多 6 张', icon: 'none' }); return; }
     const captureSource = e && e.currentTarget.dataset.source === 'camera'
       ? 'camera' : 'album';
     return runPhotoActionOnce(this, captureSource, () => {
@@ -3253,7 +3261,7 @@ Page({
               capture,
             };
           })
-        : chooseInspectionPhotos(6 - formalPhotoCount, 'album')
+        : chooseInspectionPhotos(9, 'album')
           .then(paths => ({ paths, session: null, capture: null }));
       return captureTask.then(({ paths, session, capture }) => {
         if (!paths || !paths.length) return;

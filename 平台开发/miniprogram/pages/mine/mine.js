@@ -44,7 +44,8 @@ Page({
     });
     this._prepareUnreadRefresh();
     this.loadUnreadCount();
-    if (this.data.qualityOpen) this.loadPhotoQuality();
+    if (this.data.qualityOpen && !this._returnFromQualityInspection) this.loadPhotoQuality();
+    this._returnFromQualityInspection = false;
     loadReviewTodoCount(u, api.auditPending)
       .then(count => this.setData({ reviewTodo: count }))
       .catch(() => this.setData({ reviewTodo: 0 }));
@@ -95,8 +96,9 @@ Page({
     this.setData({ qualityLoading: true, qualityError: '', qualityPhotos: [] });
     return api.photoQualityMonthly(this.data.qualityMonth).then(result => {
       if (!this._alive || requestId !== this._qualityRequest) return;
-      this.setData({ qualityLoading: false, qualityDeduction: result.deduction || 0,
-        qualityPhotos: (result.photos || []).map(photo => ({ ...photo, display_url: resolveUploadUrl(photo.display_url) })) });
+      if (!result || !Array.isArray(result.photos) || typeof result.deduction !== 'number') throw new Error('照片明细数据不完整，请重试');
+      this.setData({ qualityLoading: false, qualityDeduction: result.deduction,
+        qualityPhotos: result.photos.map(photo => ({ ...photo, display_url: resolveUploadUrl(photo.display_url) })) });
     }).catch(error => {
       if (!this._alive || requestId !== this._qualityRequest) return;
       this.setData({ qualityLoading: false, qualityError: error.error || error.message || '明细加载失败，请重试' });
@@ -108,7 +110,19 @@ Page({
   },
   openQualityInspection(event) {
     const photo = this.data.qualityPhotos.find(row => row.attachment_id === Number(event.currentTarget.dataset.id));
-    if (photo) wx.navigateTo({ url: '/pages/inspection/inspection?plan_id=' + photo.plan_id + '&site_id=' + photo.site_id + '&source=photo_quality_history' });
+    const ids = photo && [photo.plan_id, photo.site_id, photo.item_id].map(Number);
+    if (!ids || !ids.every(id => Number.isInteger(id) && id > 0)) {
+      wx.showToast({ title: '原检查项信息不完整', icon: 'none' });
+      return;
+    }
+    const target = { executionPlanId: ids[0], siteId: ids[1], itemId: ids[2], readOnly: true, source: 'photo_quality_history' };
+    app.globalData.executionTarget = target;
+    this._returnFromQualityInspection = true;
+    wx.navigateTo({ url: '/pages/inspection/inspection', fail: () => {
+      if (app.globalData.executionTarget === target) app.globalData.executionTarget = null;
+      this._returnFromQualityInspection = false;
+      wx.showToast({ title: '原检查项打开失败，请重试', icon: 'none' });
+    } });
   },
   goMessage() { wx.navigateTo({ url: '/pages/message/message' }); },
   goReports() { wx.navigateTo({ url: '/pages/reports/reports' }); },

@@ -50,7 +50,7 @@ test('the four PM-15 sheets use isolated roots with one calculated scroll surfac
   assert.match(reports, /class="sheet-bottom-bar"/);
   assert.doesNotMatch(reports, /report-compose-sheet[\s\S]*sheet-handle/);
 
-  const workorderDetail = workorder.split('<!-- ===== 用车申请 Sheet ===== -->')[0];
+  const workorderDetail = workorder.split('<!-- ===== 无需处理提前结束 Sheet ===== -->')[0];
   assert.match(workorderDetail, /class="om-sheet workorder-detail-sheet"/);
   assert.match(workorderDetail, /class="om-sheet-scroll sheet-scroll workorder-detail-scroll"/);
   assert.match(workorderDetail, /class="sheet-bottom-bar"/);

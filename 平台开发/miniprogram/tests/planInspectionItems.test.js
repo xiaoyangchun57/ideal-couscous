@@ -306,7 +306,7 @@ test('weekly plans default monthly items too and preserve explicit cancellation 
     assert.deepEqual(initializeInspectionItemSelections([{sites:[10],inspection_items:{'10':[1]}}],refreshed,'weekly')[0].inspection_items['10'], [1]);
   }
   const groups = inspectionGroupsForDays(days, options, 'weekly')[0].inspectionGroups[10];
-  assert.deepEqual(groups.map(group => group.expanded), [true, false, false]);
+  assert.deepEqual(groups.map(group => group.expanded), [false, true, true]);
   assert.deepEqual(groups.map(group => group.selectedCount), [1, 1, 0]);
   assert.equal(groups[0].dueLabels, '');
   assert.equal(groups[1].dueLabels, '1项临近周期');
@@ -321,6 +321,55 @@ test('weekly plans default monthly items too and preserve explicit cancellation 
   assert.deepEqual(initializeInspectionItemSelections([{sites:[10]}],options,'monthly')[0].inspection_items['10'], [2]);
   delete global.getApp;
   delete global.Page;
+});
+
+test('weekly adjustment preserves selection and isolates dates and sites while summaries follow choices', t => {
+  let definition;
+  global.getApp = () => ({ globalData: {} });
+  global.Page = value => { definition = value; };
+  t.after(() => { delete global.getApp; delete global.Page; });
+  delete require.cache[pagePath];
+  const { inspectionGroupsForDays } = require(pagePath);
+  const options = {
+    10: [1, 2, 3, 4].map(id => ({ id, frequency: 'weekly', item_name: `周检${id}` })),
+    20: [{ id: 5, frequency: 'weekly', item_name: '另一站周检' }],
+  };
+  const days = [
+    { date: '2026-11-09', sites: [10, 20], inspection_items: { 10: [1, 2, 3, 4], 20: [5] } },
+    { date: '2026-11-10', sites: [10], inspection_items: { 10: [1, 2] } },
+  ];
+  const page = Object.assign({}, definition, { data: Object.assign({}, definition.data, {
+    days: inspectionGroupsForDays(days, options, 'weekly'), inspectionItemOptions: options, scheduleType: 'weekly',
+  }) });
+  page.setData = (patch, done) => { Object.assign(page.data, patch); if (done) done(); };
+  page.refreshValidation = () => {};
+  const group = (day, site) => page.data.days[day].inspectionGroups[site][0];
+  const toggleGroup = (dayIdx, siteId, frequency = 'weekly') => page.onToggleInspectionGroup({ currentTarget: { dataset: { dayIdx, siteId, frequency } } });
+  const toggleItem = itemId => page.onToggleInspectionItem({ currentTarget: { dataset: { dayIdx: 0, siteId: 10, itemId } } });
+
+  assert.equal(group(0, 10).selectedSummary, '周检1、周检2、周检3 等4项');
+  toggleGroup(0, 10);
+  assert.equal(group(0, 10).expanded, true);
+  assert.equal(group(0, 20).expanded, false);
+  assert.equal(group(1, 10).expanded, false);
+  assert.deepEqual(page.data.days[0].inspection_items[10], [1, 2, 3, 4]);
+  toggleItem(2);
+  assert.equal(group(0, 10).selectedCount, 3);
+  assert.equal(group(0, 10).selectedSummary, '周检1、周检3、周检4');
+  assert.equal(group(0, 10).unselectedNames, '周检2');
+  toggleGroup(0, 10);
+  assert.equal(group(0, 10).expanded, false);
+  assert.deepEqual(page.data.days[0].inspection_items[10], [1, 3, 4]);
+  assert.deepEqual(page.data.days[0].inspection_items[20], [5]);
+  assert.deepEqual(page.data.days[1].inspection_items[10], [1, 2]);
+  toggleGroup(1, 10);
+  assert.equal(group(1, 10).expanded, true);
+  assert.equal(group(0, 10).expanded, false);
+  toggleGroup(0, 10, 'monthly');
+  assert.equal(group(0, 10).expanded, false);
+  toggleItem(2);
+  assert.equal(group(0, 10).selectedCount, 4);
+  assert.equal(group(0, 10).unselectedNames, '');
 });
 const fs = require('node:fs');
 const path = require('node:path');

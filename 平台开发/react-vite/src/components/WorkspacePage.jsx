@@ -147,6 +147,9 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
   const liveStart = visibleRowCount ? ((currentPage - 1) * pageSize) + 1 : 0;
   const liveEnd = visibleRowCount ? Math.min(liveStart + visibleRowCount - 1, paginationTotal) : 0;
   const hasPaginatedRecords = Boolean(paginationConfig) && paginationTotal > 0;
+  // 页面只要声明了分页配置，就始终渲染表格（空数据用 antd 的 locale.emptyText
+  // 展示空状态），这样分页栏不会在空列表/单页时整块消失，各功能页外观保持一致。
+  const showTable = hasRows || hasPaginatedRecords || loading || Boolean(paginationConfig);
   // 声明了分页配置的列表统一把分页栏停靠在容器底部：表格主体撑满剩余高度，
   // 分页栏位置与当前页行数无关，也不会因数据少而随内容上浮。
   // fillHeight 保留为历史页面的显式开关（归档、站点目录）。
@@ -166,7 +169,7 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
       <span className="sr-only" role="status" aria-live="polite">
         {loading ? '正在加载列表' : `列表已更新，共${paginationTotal}条，当前第${liveStart}—${liveEnd}条`}
       </span>
-      {hasRows || hasPaginatedRecords || loading ? (
+      {showTable ? (
         <Table
           dataSource={dataSource}
           columns={columns}
@@ -175,6 +178,7 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
           size="small"
           pagination={paginationConfig}
           scroll={tableScroll}
+          locale={hasRows ? undefined : { emptyText: <WorkspaceEmpty type={emptyType} onRefresh={onRefresh} /> }}
           {...rest}
         />
       ) : <WorkspaceEmpty type={emptyType} onRefresh={onRefresh} />}
@@ -182,9 +186,9 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
   );
 }
 
-export default function WorkspacePage({ title, subtitle, primaryAction, secondaryAction, statusItems, toolbar, children }) {
+export default function WorkspacePage({ title, subtitle, primaryAction, secondaryAction, statusItems, toolbar, children, className = '' }) {
   return (
-    <div className="workspace-page">
+    <div className={`workspace-page ${className}`.trim()}>
       <div className="workspace-page__header">
         <div>
           <Title level={4}>{title}</Title>

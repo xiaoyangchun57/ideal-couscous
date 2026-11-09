@@ -356,6 +356,41 @@ test('late retry success clears item A draft and remains visible after returning
   }
 });
 
+test('inspection can append camera and album photos after six existing photos', async () => {
+  const originalUpload = api.uploadSitePhoto;
+  const originalTrack = api.trackEvent;
+  const originalChoose = wx.chooseMedia;
+  try {
+    const page = createPhotoPage();
+    page.data.sheet.photos = Array.from({ length: 6 }, (_, i) => `/uploads/site_photos/old-${i}.jpg`);
+    page._openTrustedCamera = () => Promise.resolve({
+      path: '/tmp/seventh.jpg', captureSession: 'seventh', frameOrientation: 'portrait',
+      frameRatio: '3:4', frameMode: 'photo',
+    });
+    let requestedCount;
+    wx.chooseMedia = options => {
+      requestedCount = options.count;
+      options.success({ tempFiles: [{ tempFilePath: '/tmp/eighth.jpg' }] });
+    };
+    let uploaded = 0;
+    api.trackEvent = () => {};
+    api.uploadSitePhoto = () => {
+      uploaded += 1;
+      return Promise.resolve({ id: uploaded, url: `/uploads/site_photos/new-${uploaded}.jpg`,
+        accepted_for_review: true });
+    };
+    await page.onAddPhoto({ currentTarget: { dataset: { source: 'camera' } } });
+    await page.onAddPhoto({ currentTarget: { dataset: { source: 'album' } } });
+    assert.equal(requestedCount, 9);
+    assert.equal(uploaded, 2);
+    assert.equal(page.data.sheet.photos.length, 8);
+  } finally {
+    api.uploadSitePhoto = originalUpload;
+    api.trackEvent = originalTrack;
+    wx.chooseMedia = originalChoose;
+  }
+});
+
 test('same uploaded file with refreshed tickets stays one card and submits one storage path', async () => {
   const originalUpload = api.uploadSitePhoto;
   const originalTrack = api.trackEvent;

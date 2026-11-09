@@ -99,6 +99,16 @@ while true; do
           LAST="$HEAD"
           echo "[poller] DEPLOY_OK  ${HEAD}  验收地址 http://192.168.2.250:8080"
           cleanup_images
+          # 小程序开发版预览二维码：与本次部署使用同一个 SHA。
+          # 失败只记日志，绝不影响 Web + 后端验收容器，也不回滚已写入的部署状态。
+          if [ -f "$BASE/mp-preview.sh" ] && [ -f "$BASE/private.wx1b28df61adae8ca1.key" ]; then
+            echo "[poller] 生成小程序预览二维码（SHA=$HEAD）"
+            if docker run --rm -v "$BASE:$BASE" alpine:3.20 sh "$BASE/mp-preview.sh" > "$BASE/mp-preview-run.log" 2>&1; then
+              echo "[poller] 二维码已刷新：$BASE/小程序预览二维码.jpg"
+            else
+              echo "[poller] 二维码生成失败（不影响验收容器），详见 mp-preview.log"
+            fi
+          fi
         else
           echo "[poller] 容器已启动但健康检查未通过，输出最近日志："
           docker compose -f "$COMPOSE" -p water-accept logs --tail=40 || true

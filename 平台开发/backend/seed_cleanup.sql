@@ -82,7 +82,7 @@ INSERT OR IGNORE INTO data_arrival (site_id, date, metric, expected_count, actua
 -- 1.3 alert_escalation_config（已在 Step 3 创建，补数据）
 INSERT OR IGNORE INTO alert_escalation_config (level, sla_minutes, auto_workorder, notify_type, escalate_to_level, color, description) VALUES
 ('blue', 120, 0, 'app', 'yellow', '#1890ff', '蓝色关注：超阈值≤10%，APP推送，120分钟未处理升级黄色'),
-('yellow', 60, 1, 'sms', 'orange', '#faad14', '黄色预警：超阈值10~30%，生成工单+SMS通知'),
+('yellow', 60, 1, 'sms', 'orange', '#faad14', '黄色预警：超阈值10~30%，人工转单+SMS通知'),
 ('orange', 30, 1, 'phone', 'red', '#fa8c16', '橙色严重：超阈值30~50%，电话通知主管'),
 ('red', 10, 1, 'phone', NULL, '#f5222d', '红色紧急：超阈值≥50%，电话+全员通知');
 
