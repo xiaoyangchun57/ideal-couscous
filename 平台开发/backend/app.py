@@ -7767,6 +7767,7 @@ def get_workorders():
     status = request.args.get('status', '').strip()
     level = request.args.get('level', '').strip()
     assignee = request.args.get('assignee', '').strip()
+    site_id = request.args.get('site_id', '').strip()
     search = request.args.get('search', '').strip().lower()
     paginated = (request.args.get('paginated') == '1'
                  or request.args.get('page') is not None
@@ -7795,6 +7796,9 @@ def get_workorders():
         if assignee:
             where.append('w.assignee=?')
             params.append(assignee)
+        if site_id:
+            where.append('w.site_id=?')
+            params.append(site_id)
         if search:
             where.append('''(
                 lower(COALESCE(w.order_no,'')) LIKE ?

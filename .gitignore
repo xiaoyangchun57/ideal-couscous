@@ -2,6 +2,7 @@
 .playwright-cli/
 .superpowers/
 .workbuddy/
+**/project.private.config.json
 
 # Dependencies and generated caches
 **/node_modules/
