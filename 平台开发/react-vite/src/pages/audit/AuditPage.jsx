@@ -539,7 +539,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   const totalQuantity = searched.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
   const distinctSources = new Set(searched.map(i => i.source_name).filter(Boolean)).size;
 
-  if (!loading && flattened.length === 0) {
+  if (!loading && flattened.length === 0 && !siteFilter && !personFilter) {
     return <AuditEmptyState title="备件需求" onRefresh={onRefresh} error={loadError} />;
   }
 

@@ -202,4 +202,5 @@ test('unified review gets client-side site and person filters', () => {
   assert.match(audit, /function matchesAuditScope/);
   assert.equal((audit.match(/aria-label="审核站点"/g) || []).length, 2);
   assert.equal((audit.match(/aria-label="审核人员"/g) || []).length, 2);
+  assert.match(audit, /flattened\.length === 0 && !siteFilter && !personFilter/);
 });
