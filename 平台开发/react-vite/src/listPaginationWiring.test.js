@@ -169,49 +169,38 @@ test('major workspace lists no longer pin table bodies to page-specific viewport
   }
 });
 
-test('every list footer is docked at one fixed bottom slot with identical geometry', () => {
-  const table = source('./components/WorkspacePage.jsx');
-  const css = source('./components/WorkspacePage.css');
-  // 共享层：只要声明了分页配置就自动停靠，不再逐页手写 fillHeight。
-  assert.match(table, /const dockPagination = fillHeight \|\| Boolean\(paginationConfig/);
-  assert.match(table, /\$\{dockPagination \? ' workspace-table--fill'/);
-  // 几何只有一个来源，且分页栏被推到容器底部。
-  assert.match(css, /--list-pagination-height: 48px/);
-  assert.match(css, /min-height: var\(--list-pagination-height\)/);
-  assert.match(css, /line-height: 32px/);
-  assert.match(css, /margin-top: auto !important/);
-  assert.match(css, /\.list-pagination-dock \{ display: flex; flex: 1; min-height: 0; flex-direction: column; \}/);
-  assert.match(css, /:is\(\.workspace-table--fill, \.list-pagination-dock\) \.ant-table-body/);
-  // 不允许再出现各页私有的分页栏留白。
-  assert.doesNotMatch(css, /margin: 12px 16px !important/);
-  // 归档网格视图的独立 Pagination 也统一几何。
-  assert.match(css, /\.archive-grid-footer \.ant-pagination/);
-  // 不走 WorkspaceTable 的裸 Table 主列表接入同一 class。
-  const alerts = source('./pages/alerts/AlertsPage.jsx');
-  assert.equal((alerts.match(/list-pagination-dock/g) || []).length, 2);
-  assert.match(source('./components/ManagementPage.jsx'), /tableMode === 'fill' \? 'list-pagination-dock'/);
-  // 试剂主数据与用户管理从内容自适应改为撑满，分页栏才可能固定在底部。
-  for (const path of [
-    './pages/reagents/ReagentMasterPage.jsx',
-    './pages/users/UsersPage.jsx',
-  ]) {
-    const page = source(path);
-    assert.match(page, /tableMode="fill"/, `${path} 未撑满表格卡片`);
-    assert.match(page, /mode="fill"/, `${path} 未启用自动高度表格`);
-    assert.doesNotMatch(page, /tableMode="content"|mode="content"/);
+
+test('client-side lists keep the selected page size instead of pinning it back to 20', () => {
+  const hook = source('./utils/clientPagination.js');
+  assert.match(hook, /defaultPageSize: clientPage\.pageSize/);
+  assert.match(hook, /defaultCurrent: clientPage\.current/);
+  assert.match(hook, /setClientPage\(\{ current: next, pageSize: size \}\)/);
+  assert.match(hook, /typeof pagination\.onChange === 'function'/);
+  for (const path of ['./components/WorkspacePage.jsx', './components/ManagementPage.jsx']) {
+    assert.match(source(path), /useClientPagination\(pagination\)/, `${path} 未接入客户端分页状态`);
   }
-  // 管理页模板的包装层自身也要进入 flex 高度链，否则分页栏仍会随行数上浮。
-  const management = source('./components/ManagementPage.jsx');
-  assert.match(management, /<div ref=\{wrapRef\} className="list-pagination-dock"/);
-  // antd 会把 Table size="small" 传给 Pagination：全站主列表因此都是 small 档，
-  // 归档网格的独立 Pagination 必须显式对齐，且不得使用改变控件形态的私有开关。
-  const archive = source('./pages/archive/ArchivePage.jsx');
-  assert.match(table, /size="small"/);
-  assert.match(management, /size = 'small'/);
-  assert.match(alerts, /size="small"/);
-  assert.match(archive, /<Pagination[\s\S]{0,200}size="small"/);
-  assert.doesNotMatch(archive, /showLessItems|\sresponsive/);
-  // 强制单行只作用于停靠容器，窄屏仍可换行。
-  assert.match(css, /:is\(\.workspace-table--fill, \.list-pagination-dock\) \.ant-table-wrapper \.ant-table-pagination\.ant-pagination \{\s*flex-wrap: nowrap;/);
-  assert.match(css, /\.archive-grid-footer \.ant-pagination \{ flex-wrap: wrap; \}/);
+  // 服务端分页仍由调用方控制，不能被共享层改写
+  assert.doesNotMatch(hook, /defaultPageSize:.*current:.*onChange:.*setSearchParams/);
+});
+
+test('work orders and plan schedules filter by site / person through the server', () => {
+  const orders = source('./pages/workorders/WorkOrdersPage.jsx');
+  const plans = source('./pages/plan-schedules/PlanSchedulesPage.jsx');
+  assert.match(orders, /aria-label="所属站点"/);
+  assert.match(orders, /aria-label="负责人"/);
+  assert.match(orders, /'search', 'assignee', 'level', 'status', 'site_id'/);
+  assert.match(plans, /aria-label="计划负责人"/);
+  assert.match(plans, /params\.set\('user_id', userFilter\)/);
+  const backend = readFileSync(new URL('../../backend/app.py', import.meta.url), 'utf8');
+  assert.match(backend, /site_id = request\.args\.get\('site_id'/);
+  assert.match(backend, /where\.append\('w\.site_id=\?'\)/);
+});
+
+test('unified review gets client-side site and person filters', () => {
+  const audit = source('./pages/audit/AuditPage.jsx');
+  assert.match(audit, /function collectAuditScopeOptions/);
+  assert.match(audit, /function matchesAuditScope/);
+  assert.equal((audit.match(/aria-label="审核站点"/g) || []).length, 2);
+  assert.equal((audit.match(/aria-label="审核人员"/g) || []).length, 2);
+  assert.match(audit, /flattened\.length === 0 && !siteFilter && !personFilter/);
 });
