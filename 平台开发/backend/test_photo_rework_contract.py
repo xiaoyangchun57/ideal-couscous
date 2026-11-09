@@ -10,6 +10,12 @@ class PhotoReworkContractTest(unittest.TestCase):
         self.app = fixtures.app_module
         self.client = self.fixture.client
         with self.app.get_db() as db:
+            db.executescript('''
+                CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT, code TEXT);
+                INSERT INTO sites VALUES (1, '测试站', 'TEST-1');
+                ALTER TABLE operation_attachments ADD COLUMN uploader_name TEXT;
+                ALTER TABLE operation_attachments ADD COLUMN created_at TEXT;
+            ''')
             db.execute("""UPDATE insp_plan_items SET result='normal',
                 completed_at='2026-09-21 10:00:00',review_status=1 WHERE id=100""")
             db.execute("""INSERT INTO operation_attachments
@@ -20,6 +26,24 @@ class PhotoReworkContractTest(unittest.TestCase):
 
     def tearDown(self):
         self.fixture.tearDown()
+
+    def test_original_inspection_requires_matching_target_and_permission(self):
+        base = '/api/evaluation/original-inspection/10/1/100/'
+        admin = self.fixture.headers('admin-token')
+        response = self.client.get(base + '220', headers=admin)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.json['plan']['id'], 10)
+        target = next(item for item in response.json['items'] if item['id'] == 100)
+        self.assertIn(220, [row['id'] for row in target['evidence_attachments']])
+        self.assertEqual(self.client.get(base + '999', headers=admin).status_code, 404)
+        self.assertEqual(self.client.get('/api/evaluation/original-inspection/10/1/999/220',
+                                         headers=admin).status_code, 404)
+        self.assertEqual(self.client.get(base + '220',
+                                         headers=self.fixture.headers('operator-token')).status_code, 403)
+        item_url = '/api/evaluation/original-inspection/10/1/100'
+        self.assertEqual(self.client.get(item_url, headers=admin).status_code, 200)
+        self.assertEqual(self.client.get(item_url, headers=self.fixture.headers('operator-token')).status_code, 403)
+        self.assertEqual(self.client.get('/api/evaluation/original-inspection/10/1/999', headers=admin).status_code, 404)
 
     def test_quality_rejection_does_not_reopen_item_and_replay_does_not_charge_twice(self):
         headers = self.fixture.headers('admin-token')
@@ -149,10 +173,13 @@ class PhotoReworkContractTest(unittest.TestCase):
         self.assertEqual(mine.json['deduction'], 1)
         self.assertEqual(mine.json['photos'][0]['reason'], '照片模糊')
         self.assertEqual(mine.json['photos'][0]['plan_id'], 10)
+        self.assertEqual(mine.json['photos'][0]['completed_at'], '2026-09-21 10:00:00')
+        self.assertEqual(mine.json['photos'][0]['score_month'], '2026-09')
         self.assertTrue(mine.json['photos'][0]['display_url'])
         team = self.client.get('/api/evaluation/personnel/2/photo-quality?month=2026-09',
             headers=self.fixture.headers('admin-token'))
         self.assertEqual(team.json['deduction'], mine.json['deduction'])
+        self.assertEqual(team.json['photos'][0]['completed_at'], mine.json['photos'][0]['completed_at'])
         denied = self.client.get('/api/evaluation/personnel/1/photo-quality?month=2026-09',
             headers=self.fixture.headers('operator-token'))
         self.assertEqual(denied.status_code, 403)
@@ -198,6 +225,7 @@ class PhotoReworkContractTest(unittest.TestCase):
                 self.assertEqual(len(response.json['photos']), expected)
                 if expected:
                     self.assertEqual(response.json['photos'][0]['score_month'], '2026-09')
+                    self.assertEqual(response.json['photos'][0]['completed_at'], '2026-09-21 10:00:00')
 
         rejected = self.client.post('/api/inspection/photos/220/review', headers=admin,
             json={'action': 'reject', 'reject_reason': 'blurred'})

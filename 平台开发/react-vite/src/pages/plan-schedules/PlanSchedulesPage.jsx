@@ -50,6 +50,7 @@ import {
 } from './planAuditPresentation';
 import './PlanSchedulesPage.css';
 import InspectionSettingsPage from '../inspection-settings/InspectionSettingsPage';
+import OriginalInspectionView from './OriginalInspectionView';
 
 const { Text } = Typography;
 
@@ -86,6 +87,11 @@ function scoreLevel(score, tokens) {
 }
 
 export default function PlanSchedulesPage() {
+  const [params] = useSearchParams();
+  return params.has('original_plan') ? <OriginalInspectionView /> : <PlanSchedulesMain />;
+}
+
+function PlanSchedulesMain() {
   const { tokens } = useTheme();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
