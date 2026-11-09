@@ -15568,6 +15568,41 @@ def v2_apply_favorite(fid):
         db.commit()
     return jsonify({'success': True, 'plan_id': plan_id, 'total_items': total})
 
+@app.route('/api/evaluation/original-inspection/<int:plan_id>/<int:site_id>/<int:item_id>/<int:attachment_id>')
+@app.route('/api/evaluation/original-inspection/<int:plan_id>/<int:site_id>/<int:item_id>', defaults={'attachment_id': None})
+@login_required
+def evaluation_original_inspection(plan_id, site_id, item_id, attachment_id):
+    """Read an exact photo's original execution without granting write access."""
+    denied = require_reviewer() or _read_site_access_denied(site_id)
+    if denied:
+        return denied
+    with get_db() as db:
+        plan = db.execute('SELECT * FROM insp_plans WHERE id=?', (plan_id,)).fetchone()
+        if not plan:
+            return jsonify({'error': '原巡检计划不存在'}), 404
+        target = db.execute('SELECT * FROM insp_plan_items WHERE id=? AND plan_id=? AND site_id=?',
+                            (item_id, plan_id, site_id)).fetchone()
+        if not target:
+            return jsonify({'error': '原检查项不存在或与站点不匹配'}), 404
+        if attachment_id is not None:
+            evidence, _ = _item_attachment_history(db, target)
+            if not any(row['id'] == attachment_id for row in evidence):
+                return jsonify({'error': '原照片不存在或与检查项不匹配'}), 404
+        allowed = _readable_site_ids()
+        rows = db.execute('''SELECT pi.*, s.name AS site_name, s.code AS site_code
+            FROM insp_plan_items pi JOIN sites s ON s.id=pi.site_id
+            WHERE pi.plan_id=? ORDER BY pi.site_id, pi.id''', (plan_id,)).fetchall()
+        items = []
+        for row in rows:
+            if allowed is not None and row['site_id'] not in allowed:
+                continue
+            item = dict(row)
+            item['evidence_attachments'], _ = _item_attachment_history(db, row)
+            items.append(item)
+        return jsonify({'plan': dict(plan), 'items': items,
+                        'site_id': site_id, 'item_id': item_id, 'attachment_id': attachment_id})
+
+
 @app.route('/api/inspection-v2/plans/<int:plan_id>')
 def v2_get_plan_detail(plan_id):
     """获取巡检计划详情"""
@@ -16769,6 +16804,10 @@ def evaluation_personnel():
         """, (start, end, start, end, start, end, start, end,
               start, end, start, end, start, end, now_s,
               start, end, start, end)).fetchall()
+        ambiguous_names = {row['real_name'] for row in db.execute("""
+            SELECT real_name FROM users WHERE COALESCE(real_name,'') != ''
+            GROUP BY real_name HAVING COUNT(DISTINCT id) > 1
+        """)}
 
     result = []
     for r in rows:
@@ -16785,6 +16824,12 @@ def evaluation_personnel():
         d['wo_avg_days'] = round(d['wo_avg_days'], 1) if d.get('wo_avg_days') is not None else None
         d['closed_sla_breach'] = closed_breach
         d['sla_breach'] = closed_breach + open_overdue
+        d['work_order_attribution'] = 'ambiguous' if not d.get('real_name') or d['real_name'] in ambiguous_names else 'name_match'
+        if d['work_order_attribution'] == 'ambiguous':
+            for key in ('wo_total', 'wo_closed', 'wo_closed_rate', 'response_hours',
+                        'wo_avg_days', 'closed_sla_sample', 'closed_sla_met', 'closed_sla_breach',
+                        'on_time_rate', 'open_overdue', 'sla_breach'):
+                d[key] = None
         result.append(d)
 
     with get_db() as db:
@@ -16797,13 +16842,14 @@ def evaluation_personnel():
     overview = {
         'staff_count': len(result),
         'photo_quality_deduction': sum(d['photo_quality_deduction'] for d in result),
-        'wo_total': sum(d['wo_total'] for d in result),
-        'wo_closed': sum(d['wo_closed'] for d in result),
-        'closed_sla_sample': sum(d['closed_sla_sample'] for d in result),
-        'closed_sla_met': sum(d['closed_sla_met'] for d in result),
-        'closed_sla_breach': sum(d['closed_sla_breach'] for d in result),
-        'open_overdue': sum(d['open_overdue'] for d in result),
-        'sla_breach': sum(d['sla_breach'] for d in result),
+        'wo_total': sum(d['wo_total'] or 0 for d in result),
+        'wo_closed': sum(d['wo_closed'] or 0 for d in result),
+        'closed_sla_sample': sum(d['closed_sla_sample'] or 0 for d in result),
+        'closed_sla_met': sum(d['closed_sla_met'] or 0 for d in result),
+        'closed_sla_breach': sum(d['closed_sla_breach'] or 0 for d in result),
+        'open_overdue': sum(d['open_overdue'] or 0 for d in result),
+        'sla_breach': sum(d['sla_breach'] or 0 for d in result),
+        'work_order_attribution_incomplete': any(d['work_order_attribution'] == 'ambiguous' for d in result),
         'insp_done': sum(d['insp_done'] for d in result),
     }
     overview['closed_rate'] = round(overview['wo_closed'] / overview['wo_total'] * 100, 1) if overview['wo_total'] else None
@@ -16813,8 +16859,47 @@ def evaluation_personnel():
 
     return jsonify({
         'period': period, 'period_label': period_label, 'days': days,
+        'start': start, 'end': end,
         'scope_label': scope_label, 'overview': overview, 'list': result,
     })
+
+
+@app.route('/api/evaluation/personnel/<int:user_id>/records')
+@login_required
+def evaluation_personnel_records(user_id):
+    denied = require_reviewer()
+    if denied:
+        return denied
+    start, end, _, _ = _resolve_period(request.args.get('period', 'month'),
+                                       request.args.get('start'), request.args.get('end'))
+    kind = request.args.get('kind', 'workorders')
+    with get_db() as db:
+        allowed, _ = _report_scope_context(db)
+        people = _active_operator_rows(db, user_id)
+        if not people or (allowed is not None and not any(
+                row['site_id'] in allowed for row in db.execute(
+                    'SELECT site_id FROM user_sites WHERE user_id=?', (user_id,)))):
+            return jsonify({'error': '人员不存在或无权查看'}), 404
+        if kind == 'workorders':
+            name = people[0]['real_name']
+            duplicates = db.execute('SELECT COUNT(DISTINCT id) FROM users WHERE real_name=?', (name,)).fetchone()[0]
+            if not name or duplicates != 1:
+                return jsonify({'error': '工单归属待核对', 'code': 'AMBIGUOUS_WORK_ORDER_OWNER'}), 409
+            rows = db.execute(f"""SELECT w.* FROM work_orders w WHERE w.assignee=?
+                {_site_scope_clause('w', allowed)} AND
+                (CASE WHEN w.status='closed' AND w.resolved_at IS NOT NULL
+                 THEN w.resolved_at ELSE w.created_at END) BETWEEN ? AND ?
+                ORDER BY w.created_at DESC, w.id DESC""", (name, start, end)).fetchall()
+        elif kind in ('inspection_done', 'inspection_reviewed'):
+            condition = ('p.assignee_id=? AND i.completed_at BETWEEN ? AND ?' if kind == 'inspection_done'
+                         else 'i.reviewer_id=? AND i.review_time BETWEEN ? AND ?')
+            rows = db.execute(f"""SELECT i.*, p.plan_name FROM insp_plan_items i
+                JOIN insp_plans p ON p.id=i.plan_id WHERE {condition}
+                {_site_scope_clause('i', allowed)} ORDER BY i.id DESC""", (user_id, start, end)).fetchall()
+        else:
+            return jsonify({'error': '不支持的明细类型'}), 400
+        return jsonify({'start': start, 'end': end, 'kind': kind,
+                        'records': [dict(row) for row in rows]})
 
 
 @app.route('/api/evaluation/personnel/<int:user_id>/photo-quality')
@@ -16853,6 +16938,7 @@ def photo_quality_monthly(user_id):
                 'attachment_id': row['attachment_id'], 'item_id': row['item_id'],
                 'plan_id': row['plan_id'], 'site_id': row['site_id'],
                 'item_name': row['item_name'], 'score_month': row['score_month'],
+                'completed_at': row['completed_at'],
                 'deduction': row['deduction'],
                 'reason': row['history'][0]['reason'] if row['history'] else row['reject_reason'],
                 'display_url': _attachment_display_url(dict(attachment)),
@@ -17051,6 +17137,10 @@ def export_evaluation():
         """, (start, end, start, end, start, end, start, end,
               start, end, start, end, start, end, now_s,
               start, end, start, end)).fetchall()
+        ambiguous_names = {row['real_name'] for row in db.execute("""
+            SELECT real_name FROM users WHERE COALESCE(real_name,'') != ''
+            GROUP BY real_name HAVING COUNT(DISTINCT id) > 1
+        """)}
         data = []
         for r in rows:
             d = dict(r)
@@ -17061,6 +17151,7 @@ def export_evaluation():
             d['wo_closed_rate'] = round(closed / total * 100, 1) if total else None
             d['closed_sla_breach'] = max(0, sla_sample - sla_met)
             d['on_time_rate'] = round(sla_met / sla_sample * 100, 1) if sla_sample else None
+            d['work_order_ambiguous'] = not d.get('real_name') or d['real_name'] in ambiguous_names
             d['photo_quality_deduction'] = sum(photo['deduction'] for photo in current_photo_quality(db, d['id'], start, end, allowed_site_ids=allowed_sites))
             data.append(d)
 
@@ -17071,6 +17162,10 @@ def export_evaluation():
     ws.append(headers)
     for c in ws[header_row]: _set_header_style(c)
     for d in data:
+        if d['work_order_ambiguous']:
+            ws.append([d['real_name'], role_cn.get(d['role'], d['role'])] + ['归属待核对'] * 9 +
+                      [d['insp_done'], d['insp_reviewed'], d['photo_quality_deduction']])
+            continue
         ws.append([
             d['real_name'], role_cn.get(d['role'], d['role']), d['wo_total'], d['wo_closed'],
             d['wo_closed_rate'] if d['wo_closed_rate'] is not None else '无样本', d['response_hours'] if d['response_hours'] is not None else '—',
@@ -17125,13 +17220,15 @@ def export_ops_report():
             (start, end)).fetchone()[0]
         pending_alerts = db.execute(
             'SELECT COUNT(*) FROM alerts a WHERE a.status=\'pending\'' + _site_scope_clause('a', allowed_sites)).fetchone()[0]
-        people = db.execute(f"""SELECT DISTINCT u.real_name,
+        ambiguous_names = {row['real_name'] for row in db.execute("""
+            SELECT real_name FROM users GROUP BY real_name HAVING COUNT(DISTINCT id)>1""")}
+        people = db.execute(f"""SELECT DISTINCT u.id, u.real_name,
                 (SELECT COUNT(*) FROM work_orders w WHERE w.assignee=u.real_name {wo_scope}
                  AND (CASE WHEN w.status='closed' AND w.resolved_at IS NOT NULL THEN w.resolved_at ELSE w.created_at END) BETWEEN ? AND ?) AS workorders,
                 (SELECT COUNT(*) FROM insp_plan_items i JOIN insp_plans p ON p.id=i.plan_id
                  WHERE p.assignee_id=u.id {item_scope} AND i.completed_at BETWEEN ? AND ?) AS inspections
             FROM users u LEFT JOIN user_roles ur ON ur.user_id=u.id
-            WHERE {_ACTIVE_OPERATOR_WHERE} ORDER BY u.real_name""",
+            WHERE {_ACTIVE_OPERATOR_WHERE} {_operator_scope_clause(allowed_sites)} ORDER BY u.real_name""",
             (start, end, start, end)).fetchall()
 
     document = Document()
@@ -17159,7 +17256,8 @@ def export_ops_report():
     for person in people:
         cells = table.add_row().cells
         cells[0].text = person['real_name'] or '未命名'
-        cells[1].text = str(person['workorders'] or 0)
+        cells[1].text = ('归属待核对' if not person['real_name'] or person['real_name'] in ambiguous_names
+                         else str(person['workorders'] or 0))
         cells[2].text = str(person['inspections'] or 0)
     document.add_heading('六、未闭环事项', level=1)
     document.add_paragraph(f'未闭环工单 {open_orders} 张；待处理告警 {pending_alerts} 条。')
@@ -17272,8 +17370,15 @@ def export_ops_report_details():
               start, end, start, end, start, end, now_s,
               start, end, start, end)).fetchall()
         role_cn = {'manager':'主管','operator':'运维员','inspector':'审核员'}
+        ambiguous_names = {row['real_name'] for row in db.execute("""
+            SELECT real_name FROM users GROUP BY real_name HAVING COUNT(DISTINCT id)>1""")}
         for r in rows:
             d = dict(r); total = d['wo_total'] or 0; closed = d['wo_closed'] or 0
+            if not d['real_name'] or d['real_name'] in ambiguous_names:
+                ws2.append([d['real_name'], role_cn.get(d['role'], d['role'])] + ['归属待核对'] * 9 + [
+                    d['insp_done'] or 0, d['insp_reviewed'] or 0,
+                    sum(photo['deduction'] for photo in current_photo_quality(db, d['id'], start, end, allowed_site_ids=allowed_sites))])
+                continue
             sla_sample = d['closed_sla_sample'] or 0
             sla_met = d['closed_sla_met'] or 0
             closed_breach = max(0, sla_sample - sla_met)
@@ -21986,6 +22091,7 @@ def _p90(values):
 
 
 @app.route('/api/data/health')
+@app.route('/api/data/health/records')
 @login_required
 def data_health():
     """数据健康度分析（考核口径：正常数据量 / 应报数据总量）
@@ -22005,35 +22111,28 @@ def data_health():
     custom_start = request.args.get('start')
     custom_end = request.args.get('end')
 
-    now = datetime.now()
-    if period == '7d':
-        start_dt = now - timedelta(days=6)
-        start = start_dt.strftime('%Y-%m-%d 00:00:00')
-        end = now.strftime('%Y-%m-%d 23:59:59')
-        period_label = '近7天'
-    elif period == '30d':
-        start_dt = now - timedelta(days=29)
-        start = start_dt.strftime('%Y-%m-%d 00:00:00')
-        end = now.strftime('%Y-%m-%d 23:59:59')
-        period_label = '近30天'
-    elif period == 'custom' and custom_start and custom_end:
-        start = custom_start + ' 00:00:00'
-        end = custom_end + ' 23:59:59'
-        period_label = custom_start + '~' + custom_end
-    else:  # month（默认自然月）
-        start = now.strftime('%Y-%m-01 00:00:00')
-        end = now.strftime('%Y-%m-%d 23:59:59')
-        period_label = now.strftime('%Y-%m')
-
-    d0 = datetime.strptime(start[:10], '%Y-%m-%d')
-    d1 = datetime.strptime(end[:10], '%Y-%m-%d')
-    days = (d1 - d0).days + 1
+    start, end, period_label, days = _resolve_period(period, custom_start, custom_end)
     start_boundary = datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
     end_boundary = datetime.strptime(end, '%Y-%m-%d %H:%M:%S')
     freshness_reference = min(datetime.strptime(end, '%Y-%m-%d %H:%M:%S'), datetime.now())
 
-    # 范围隔离：操作员仅本人负责站点；管理员返回 None=全部
-    site_ids = _filter_site_ids()
+    # 绩效报告采用审核读取范围，其他调用保持原有站点范围。
+    if request.args.get('scope') == 'report':
+        denied = require_reviewer()
+        if denied:
+            return denied
+        site_ids = _readable_site_ids()
+    else:
+        site_ids = _filter_site_ids()
+    detail_request = request.path.endswith('/records')
+    detail_site = request.args.get('site_id', type=int) if detail_request else None
+    detail_metric = request.args.get('metric', '').strip() if detail_request else ''
+    if detail_request:
+        if detail_site is None or not detail_metric:
+            return jsonify({'error': '请提供站点和因子'}), 400
+        if site_ids is not None and detail_site not in site_ids:
+            return jsonify({'error': '无权查看该站点'}), 403
+        site_ids = [detail_site]
     if site_ids is None:
         _site_where, _site_params = '', []
         _sd_where, _sd_params = '', []
@@ -22052,6 +22151,15 @@ def data_health():
         current_service_ids = set(_current_service_site_ids(
             db, [site['id'] for site in sites]))
         sites = [site for site in sites if site['id'] in current_service_ids]
+        responsible_by_site = {}
+        for person in db.execute(f"""SELECT DISTINCT us.site_id, u.id, u.real_name
+                FROM user_sites us JOIN users u ON u.id=us.user_id
+                LEFT JOIN user_roles ur ON ur.user_id=u.id
+                WHERE {_ACTIVE_OPERATOR_WHERE} ORDER BY u.real_name, u.id"""):
+            if person['site_id'] in current_service_ids:
+                responsible_by_site.setdefault(person['site_id'], []).append({
+                    'id': person['id'], 'name': person['real_name'],
+                })
         th = {r['metric']: dict(r) for r in db.execute("SELECT * FROM param_thresholds").fetchall()}
         scoped_site_ids = [int(site['id']) for site in sites]
         local_zone = datetime.now().astimezone().tzinfo
@@ -22127,6 +22235,8 @@ def data_health():
                         over_slots.add(slot_key)
                         over_map[key] = over_map.get(key, 0) + 1
         else:
+            if detail_request:
+                return jsonify({'error': '当前数据源不支持按应报时段查看明细'}), 409
             # Compatibility for old isolated databases only.  Once the normalized
             # schema exists, the production path above never reads sensor_data.
             monitored_sites, observed_metrics = _monitoring_metric_context(db)
@@ -22158,6 +22268,31 @@ def data_health():
                         frequency, start_boundary, end_boundary, freshness_reference)
                     freshness_seconds[(site_id, metric)] = max(7200, int(172800 / frequency))
 
+        if detail_request:
+            if detail_site not in current_service_ids:
+                return jsonify({'error': '站点不存在或当前不可查看'}), 404
+            if detail_metric not in observed_metrics.get(detail_site, set()):
+                return jsonify({'error': '所选范围没有该监测因子'}), 404
+            slot_rows = {}
+            for row in formal_rows:
+                slot_key = (row['business_site_id'], row['endpoint_id'], row['business_metric'],
+                            row.get('instrument_asset_code'), row['scheduled_at'])
+                if slot_key in expected_slots and slot_key[2] == detail_metric:
+                    slot_rows.setdefault(slot_key, row)
+            records = []
+            for slot_key in sorted(expected_slots, key=lambda key: (key[4], str(key[1]), str(key[3]))):
+                if slot_key[2] != detail_metric:
+                    continue
+                row = slot_rows.get(slot_key)
+                records.append({
+                    'scheduled_at': slot_key[4], 'endpoint_id': slot_key[1],
+                    'instrument_asset_code': slot_key[3], 'missing': row is None,
+                    'over_limit': slot_key in over_slots,
+                    'observation': row,
+                })
+            return jsonify({'start': start, 'end': end, 'site_id': detail_site,
+                            'metric': detail_metric, 'records': records})
+
         by_site = []
         manager_agg = {}
         metric_agg = {}
@@ -22173,7 +22308,8 @@ def data_health():
         for site in sites:
             sid = site['id']
             stype = site['type']
-            mgr = site['manager'] or '未分配'
+            people = responsible_by_site.get(sid, [])
+            mgr = '、'.join(person['name'] or str(person['id']) for person in people) or '未分配'
             monitoring_enabled = sid in monitored_sites
             site_metrics = set(observed_metrics.get(sid, set())) if monitoring_enabled else set()
             configuration_status = (
@@ -22233,7 +22369,8 @@ def data_health():
             timeliness_rate = round(timely_metrics / sampled_metric_count * 100, 1) if sampled_metric_count else None
             by_site.append({
                 'site_id': sid, 'site_name': site['name'], 'site_code': site['code'],
-                'manager': mgr, 'expected': exp, 'abnormal': abn, 'normal': normal,
+                'manager': mgr, 'responsible_people': people,
+                'expected': exp, 'abnormal': abn, 'normal': normal,
                 'actual': actual_total, 'missing': miss, 'over_limit': over, 'rate': rate,
                 'completeness_rate': completeness_rate, 'validity_rate': validity_rate,
                 'timeliness_rate': timeliness_rate, 'metrics': metric_detail,
@@ -22249,28 +22386,31 @@ def data_health():
             total_actual += actual_total
             total_sampled_metric_count += sampled_metric_count
             total_timely_metrics += timely_metrics
-            if mgr not in manager_agg:
-                manager_agg[mgr] = {
-                    'expected': 0, 'actual': 0, 'missing': 0, 'over_limit': 0,
-                    'timely_metrics': 0, 'sampled_metric_count': 0, 'site_count': 0,
-                    'configured_site_count': 0,
-                }
-            manager_agg[mgr]['expected'] += exp
-            manager_agg[mgr]['actual'] += actual_total
-            manager_agg[mgr]['missing'] += miss
-            manager_agg[mgr]['over_limit'] += over
-            manager_agg[mgr]['timely_metrics'] += timely_metrics
-            manager_agg[mgr]['sampled_metric_count'] += sampled_metric_count
-            manager_agg[mgr]['site_count'] += 1
-            if configuration_status == 'configured':
-                manager_agg[mgr]['configured_site_count'] += 1
+            for person in people or [{'id': None, 'name': '未分配'}]:
+                person_id = person['id']
+                if person_id not in manager_agg:
+                    manager_agg[person_id] = {
+                        'expected': 0, 'actual': 0, 'missing': 0, 'over_limit': 0,
+                        'timely_metrics': 0, 'sampled_metric_count': 0, 'site_count': 0,
+                        'configured_site_count': 0, 'manager': person['name'],
+                    }
+                agg = manager_agg[person_id]
+                agg['expected'] += exp
+                agg['actual'] += actual_total
+                agg['missing'] += miss
+                agg['over_limit'] += over
+                agg['timely_metrics'] += timely_metrics
+                agg['sampled_metric_count'] += sampled_metric_count
+                agg['site_count'] += 1
+                if configuration_status == 'configured':
+                    agg['configured_site_count'] += 1
 
     by_manager = []
-    for mgr, a in sorted(manager_agg.items(), key=lambda x: x[0]):
+    for person_id, a in sorted(manager_agg.items(), key=lambda x: (x[1]['manager'] or '', x[0] or 0)):
         e = a['expected']; actual = a['actual']; missing = a['missing']; over = a['over_limit']
         abnormal = min(e, missing + over)
         by_manager.append({
-            'manager': mgr, 'site_count': a['site_count'],
+            'manager': a['manager'], 'user_id': person_id, 'site_count': a['site_count'],
             'configured_site_count': a['configured_site_count'],
             'expected': e, 'actual': actual, 'abnormal': abnormal, 'normal': max(0, e - abnormal),
             'missing': missing, 'over_limit': over,
@@ -22294,6 +22434,7 @@ def data_health():
     timeliness_rate = round(total_timely_metrics / total_sampled_metric_count * 100, 1) if total_sampled_metric_count else None
     return jsonify({
         'period': period, 'period_label': period_label, 'days': days,
+        'start': start, 'end': end,
         'total': {
             'expected': total_expected, 'abnormal': total_abnormal,
             'normal': total_normal,

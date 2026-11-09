@@ -65,7 +65,7 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
                     event_type TEXT, level TEXT, assignee TEXT, status TEXT, created_at TEXT,
                     check_in_time TEXT, resolved_at TEXT, sla_deadline TEXT, description TEXT
                 );
-                CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, assignee_id INTEGER);
+                CREATE TABLE insp_plans (id INTEGER PRIMARY KEY, assignee_id INTEGER, plan_name TEXT);
                 CREATE TABLE insp_plan_items (
                     id INTEGER PRIMARY KEY, plan_id INTEGER, site_id INTEGER, completed_at TEXT,
                     reviewer_id INTEGER, review_time TEXT, result TEXT
@@ -131,6 +131,54 @@ class EvaluationReportSemanticsTest(unittest.TestCase):
         self.assertEqual(operator['closed_sla_breach'], 0)
         self.assertEqual(operator['on_time_rate'], 100.0)
         self.assertEqual(operator['open_overdue'], 1)
+
+    def test_same_name_including_inactive_user_is_not_attributed(self):
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO users VALUES (5, '运维甲', 'operator', '', 'inactive', 'old-user')")
+        response = self.client.get('/api/evaluation/personnel?period=month', headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.json)
+        operator = next(row for row in response.json['list'] if row['id'] == 2)
+        self.assertEqual(operator['work_order_attribution'], 'ambiguous')
+        self.assertIsNone(operator['wo_total'])
+        self.assertIsNone(operator['response_hours'])
+        self.assertEqual(operator['insp_done'], 0)
+        self.assertTrue(response.json['overview']['work_order_attribution_incomplete'])
+        detail = self.client.get('/api/evaluation/personnel/2/records?kind=workorders', headers=self.headers())
+        self.assertEqual(detail.status_code, 409)
+        exported = self.client.get('/api/export/evaluation?period=month', headers=self.headers())
+        self.assertEqual(exported.status_code, 200)
+        book = load_workbook(io.BytesIO(exported.data))
+        row = next(row for row in book['人员评估'].iter_rows(min_row=8, values_only=True) if row[0] == '运维甲')
+        self.assertEqual(row[2:11], ('归属待核对',) * 9)
+        book.close()
+        exported.close()
+        report = self.client.get('/api/export/ops-report?period=quarter', headers=self.headers())
+        self.assertEqual(report.status_code, 200)
+        document = Document(io.BytesIO(report.data))
+        person = next(row for row in document.tables[0].rows if row.cells[0].text == '运维甲')
+        self.assertEqual(person.cells[1].text, '归属待核对')
+        report.close()
+        details = self.client.get('/api/export/ops-report-details?period=quarter', headers=self.headers())
+        self.assertEqual(details.status_code, 200)
+        book = load_workbook(io.BytesIO(details.data))
+        row = next(row for row in book['人员绩效'].iter_rows(min_row=8, values_only=True) if row[0] == '运维甲')
+        self.assertEqual(row[2:11], ('归属待核对',) * 9)
+        book.close()
+        details.close()
+
+    def test_personnel_records_match_summary(self):
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with app_module.get_db() as db:
+            db.execute("INSERT INTO insp_plans VALUES (7, 2, '测试计划')")
+            db.execute('INSERT INTO insp_plan_items VALUES (8, 7, 1, ?, 2, ?, ?)', (now, now, 'normal'))
+        summary = self.client.get('/api/evaluation/personnel?period=month', headers=self.headers()).json
+        person = next(row for row in summary['list'] if row['id'] == 2)
+        for kind, field in [('workorders', 'wo_total'), ('inspection_done', 'insp_done'),
+                            ('inspection_reviewed', 'insp_reviewed')]:
+            detail = self.client.get(f'/api/evaluation/personnel/2/records?period=month&kind={kind}', headers=self.headers())
+            self.assertEqual(detail.status_code, 200, detail.json)
+            self.assertEqual(len(detail.json['records']), person[field])
+            self.assertEqual((detail.json['start'], detail.json['end']), (summary['start'], summary['end']))
 
     def test_exports_include_identity_layout_and_real_expected_health_counts(self):
         evaluation = self.client.get('/api/export/evaluation?period=month', headers=self.headers())

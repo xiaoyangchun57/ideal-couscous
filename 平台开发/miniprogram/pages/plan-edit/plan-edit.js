@@ -118,10 +118,15 @@ function inspectionGroupsForDays(days, options, scheduleType) {
         const items = (options[siteId] || []).filter(item => (item.frequency || scheduleType) === frequency);
         const overdue = items.filter(item => item.due_status === 'overdue').length;
         const soon = items.filter(item => item.due_status === 'due_soon').length;
+        const selectedItems = items.filter(item => selected.has(Number(item.id)));
+        const unselectedItems = items.filter(item => !selected.has(Number(item.id)));
         return {
           frequency, label: SCHEDULE_LABELS[frequency], optional: frequency !== scheduleType,
-          expanded: frequency === scheduleType || !!(day.expandedInspectionGroups && day.expandedInspectionGroups[siteId + ':' + frequency]),
-          count: items.length, selectedCount: items.filter(item => selected.has(Number(item.id))).length,
+          expanded: frequency !== 'weekly' || !!(day.expandedInspectionGroups && day.expandedInspectionGroups[siteId + ':' + frequency]),
+          count: items.length, selectedCount: selectedItems.length,
+          selectedSummary: selectedItems.slice(0, 3).map(item => item.item_name).join('、')
+            + (selectedItems.length > 3 ? ' 等' + selectedItems.length + '项' : ''),
+          unselectedNames: unselectedItems.map(item => item.item_name).join('、'),
           dueLabels: frequency === 'weekly' ? '' : [overdue ? overdue + '项已到期' : '',
             soon ? soon + '项临近周期' : ''].filter(Boolean).join('；'), items
         };
@@ -692,7 +697,7 @@ Page({
     const { dayIdx, siteId, frequency } = e.currentTarget.dataset;
     const days = this.data.days.slice();
     const day = days[dayIdx];
-    if (!day) return;
+    if (!day || frequency !== 'weekly') return;
     const expanded = Object.assign({}, day.expandedInspectionGroups || {});
     expanded[siteId + ':' + frequency] = !expanded[siteId + ':' + frequency];
     days[dayIdx] = Object.assign({}, day, { expandedInspectionGroups: expanded });

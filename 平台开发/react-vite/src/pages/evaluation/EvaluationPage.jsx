@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, DatePicker, Dropdown, Image, Modal, Select, Space, Tabs, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, DatePicker, Drawer, Dropdown, Image, Modal, Select, Space, Tag, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import { DownloadOutlined, FileExcelOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
-import { evaluationRateColor } from '../../services/constants';
+import { evaluationRateColor, orderStatusMap } from '../../services/constants';
 import WorkspacePage, {
   FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
   standardListPagination,
 } from '../../components/WorkspacePage';
 import { useTheme } from '../../hooks/useTheme';
+import './EvaluationPage.css';
 
 const { Text } = Typography;
 
@@ -22,7 +23,6 @@ const PERIOD_OPTS = [
   { value: 'year', label: '本年度' },
 ];
 const PERIOD_KEYS = new Set(PERIOD_OPTS.map((item) => item.value));
-const VIEW_KEYS = new Set(['people', 'managers', 'sites']);
 const CONFIG_STATUS = {
   configured: { label: '已配置', color: 'green' },
   metrics_unconfigured: { label: '参数未配置', color: 'orange' },
@@ -34,40 +34,58 @@ const renderRate = (value) => value == null
   : <Tag color={evaluationRateColor(Number(value))}>{Number(value)}%</Tag>;
 
 const opsReportFilename = () => '水质运维工作报告.docx';
+const evaluationScroll = () => document.querySelector('.evaluation-page');
+
+const beijingTime = (value) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}`;
+};
 
 export default function EvaluationPage() {
   const { tokens } = useTheme();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const periodParam = searchParams.get('period') || 'month';
   const period = PERIOD_KEYS.has(periodParam) ? periodParam : 'month';
-  const viewParam = searchParams.get('view') || 'people';
-  const activeView = VIEW_KEYS.has(viewParam) ? viewParam : 'people';
+  const month = searchParams.get('month') || '';
+  const historicalMonth = period === 'month' && /^\d{4}-\d{2}$/.test(month) && month !== dayjs().format('YYYY-MM') ? month : '';
+  const periodQuery = historicalMonth
+    ? `period=custom&start=${historicalMonth}-01&end=${dayjs(`${historicalMonth}-01`).endOf('month').format('YYYY-MM-DD')}`
+    : `period=${period}`;
+  const [selectedPerson, setSelectedPerson] = useState(location.state?.restorePhoto?.selectedPerson ?? location.state?.restoreRecords?.selectedPerson ?? null);
+  const [siteMode, setSiteMode] = useState(location.state?.restorePhoto?.siteMode || location.state?.restoreRecords?.siteMode || 'all');
+  const [selectedSite, setSelectedSite] = useState(null);
+  const [factorDetail, setFactorDetail] = useState(null);
+  const [recordDetail, setRecordDetail] = useState(null);
   const [health, setHealth] = useState(null);
   const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '', scope_label: '' });
   const [loading, setLoading] = useState(true);
   const [loadErrors, setLoadErrors] = useState([]);
   const [exporting, setExporting] = useState('');
   const [photoDetail, setPhotoDetail] = useState(null);
-  const [originDetail, setOriginDetail] = useState(null);
   const photoRequest = useRef(0);
-  const originRequest = useRef(0);
-  useEffect(() => () => { photoRequest.current += 1; originRequest.current += 1; }, []);
-  const openOriginalInspection = useCallback(async (photo) => {
-    const requestId = ++originRequest.current;
-    setOriginDetail({ loading: true, attachmentId: photo.attachment_id });
-    try {
-      const plan = await api.getStrict(`/inspection-v2/plans/${photo.plan_id}`);
-      if (requestId !== originRequest.current) return;
-      const item = (plan.items || []).find(row => Number(row.id) === photo.item_id);
-      setOriginDetail(item ? { plan, item, attachmentId: photo.attachment_id } : { error: '原检查项不存在或当前账号无权查看', attachmentId: photo.attachment_id });
-    } catch (error) {
-      if (requestId === originRequest.current) setOriginDetail({ error: error.message || '原巡检加载失败', attachmentId: photo.attachment_id });
-    }
-  }, []);
-  const openPhotoDetail = useCallback(async (person, selectedPeriod = period, month = '') => {
+  const loadRequest = useRef(0);
+  const recordRequest = useRef(0);
+  const factorRequest = useRef(0);
+  const restored = useRef(false);
+  const siteSection = useRef(null);
+  useEffect(() => () => { photoRequest.current += 1; recordRequest.current += 1; factorRequest.current += 1; loadRequest.current += 1; }, []);
+  const openOriginalInspection = useCallback((photo) => {
+    const restore = { person: photoDetail.person, selectedPeriod: photoDetail.selectedPeriod,
+      month: photoDetail.month, photoId: photo.attachment_id, scrollY: evaluationScroll()?.scrollTop || 0,
+      selectedPerson, siteMode };
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: { restorePhoto: restore } });
+    const params = new URLSearchParams({ original_plan: photo.plan_id, original_site: photo.site_id,
+      original_item: photo.item_id, original_attachment: photo.attachment_id });
+    navigate(`/plan-schedules?${params}`);
+  }, [location.pathname, location.search, navigate, photoDetail, selectedPerson, siteMode]);
+  const openPhotoDetail = useCallback(async (person, selectedPeriod = period, month = historicalMonth) => {
     const requestId = ++photoRequest.current;
-    originRequest.current += 1;
-    setOriginDetail(null);
     setPhotoDetail({ person, selectedPeriod, month, loading: true, photos: [], error: '' });
     try {
       const query = month ? `month=${encodeURIComponent(month)}` : `period=${encodeURIComponent(selectedPeriod)}`;
@@ -78,7 +96,20 @@ export default function EvaluationPage() {
     } catch (error) {
       if (requestId === photoRequest.current) setPhotoDetail({ person, selectedPeriod, month, loading: false, photos: [], error: error.message || '明细加载失败' });
     }
-  }, [period]);
+  }, [period, historicalMonth]);
+
+  useEffect(() => {
+    const restore = location.state?.restorePhoto;
+    if (!restore || restored.current) return;
+    restored.current = true;
+    openPhotoDetail(restore.person, restore.selectedPeriod, restore.month);
+  }, [location.state, openPhotoDetail]);
+
+  useEffect(() => {
+    if (!photoDetail || photoDetail.loading || !location.state?.restorePhoto?.photoId) return;
+    const timer = setTimeout(() => document.getElementById(`quality-photo-${location.state.restorePhoto.photoId}`)?.scrollIntoView({ block: 'center' }), 150);
+    return () => clearTimeout(timer);
+  }, [location.state, photoDetail]);
 
   const updateQuery = useCallback((patch) => {
     const next = new URLSearchParams(searchParams);
@@ -90,12 +121,16 @@ export default function EvaluationPage() {
   }, [searchParams, setSearchParams]);
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequest.current;
     setLoading(true);
+    setHealth(null);
+    setPersonnel({ overview: null, list: [], period_label: '', scope_label: '' });
     const requests = [
-      ['数据质量', api.getStrict(`/data/health?period=${period}`)],
-      ['人员绩效', api.getStrict(`/evaluation/personnel?period=${period}`)],
+      ['数据质量', api.getStrict(`/data/health?scope=report&${periodQuery}`)],
+      ['人员绩效', api.getStrict(`/evaluation/personnel?${periodQuery}`)],
     ];
     const results = await Promise.allSettled(requests.map(([, promise]) => promise));
+    if (requestId !== loadRequest.current) return;
     const errors = [];
     if (results[0].status === 'fulfilled') setHealth(results[0].value || null);
     else errors.push(`数据质量：${results[0].reason?.message || '加载失败'}`);
@@ -103,13 +138,25 @@ export default function EvaluationPage() {
       const data = results[1].value;
       setPersonnel(Array.isArray(data)
         ? { overview: null, list: data, period_label: '', scope_label: '' }
-        : { overview: data?.overview || null, list: data?.list || [], period_label: data?.period_label || '', scope_label: data?.scope_label || '' });
+        : { overview: data?.overview || null, list: data?.list || [], period_label: data?.period_label || '', scope_label: data?.scope_label || '', start: data?.start, end: data?.end });
     } else errors.push(`人员绩效：${results[1].reason?.message || '加载失败'}`);
     setLoadErrors(errors);
     setLoading(false);
-  }, [period]);
+  }, [periodQuery]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!loading && ['managers', 'sites'].includes(searchParams.get('view'))) {
+      siteSection.current?.scrollIntoView({ block: 'start' });
+    }
+  }, [loading, searchParams]);
+  useEffect(() => {
+    recordRequest.current += 1;
+    factorRequest.current += 1;
+    setSelectedSite(null);
+    setFactorDetail(null);
+    setRecordDetail(null);
+  }, [periodQuery]);
   useEffect(() => { api.track('report.opened', {}); }, []);
 
   const downloadExport = useCallback(async (url, fallbackFilename, reportType) => {
@@ -134,32 +181,63 @@ export default function EvaluationPage() {
     }
   }, [exporting]);
 
-  const personCols = useMemo(() => [
-    { title: '人员', key: 'person', width: 150, render: (_, row) => <><Text strong>{row.real_name || '未命名'}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{ROLE_CN[row.role] || row.role || '-'}</Text></> },
-    { title: '工单', key: 'workorders', width: 120, sorter: (a, b) => (a.wo_total || 0) - (b.wo_total || 0), render: (_, row) => <><Text strong>{row.wo_total || 0} 份</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>已闭环 {row.wo_closed || 0} 份</Text></> },
-    {
-      title: '闭环与 SLA', key: 'quality', width: 250, render: (_, row) => <Space size={[4, 4]} wrap>
-        {Number(row.wo_total) > 0 ? <Tag color={evaluationRateColor(Number(row.wo_closed_rate) || 0)}>闭环 {Number(row.wo_closed_rate) || 0}%</Tag> : <Text type="secondary">无工单样本</Text>}
-        {Number(row.closed_sla_sample) > 0 ? <Tag color={evaluationRateColor(Number(row.on_time_rate) || 0)}>已关单按时 {Number(row.on_time_rate) || 0}%</Tag> : <Text type="secondary">无已关单 SLA 样本</Text>}
-        {Number(row.closed_sla_breach) > 0 && <Tag color="red">已关单超时 {row.closed_sla_breach}</Tag>}
-        {Number(row.open_overdue) > 0 && <Tag color="orange">开放已逾期 {row.open_overdue}</Tag>}
-      </Space>,
-    },
-    { title: '响应与处置', key: 'duration', width: 170, render: (_, row) => <><Text>{row.response_hours == null ? '无到站签到样本' : `平均响应 ${row.response_hours}h`}</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>{row.wo_avg_days == null ? '无已关单处置样本' : `平均处置 ${row.wo_avg_days} 天`}</Text></> },
-    { title: '巡检', key: 'inspection', width: 130, render: (_, row) => <><Text>执行 {row.insp_done || 0} 项</Text><Text type="secondary" style={{ display: 'block', fontSize: 12 }}>审核 {row.insp_reviewed || 0} 项</Text><Button type="link" size="small" onClick={() => openPhotoDetail(row)}>照片质量扣分 {row.photo_quality_deduction || 0}</Button></> },
-  ], [openPhotoDetail]);
+  const openRecords = useCallback(async (person, kind) => {
+    factorRequest.current += 1;
+    setFactorDetail(null);
+    setSelectedSite(null);
+    const requestId = ++recordRequest.current;
+    setRecordDetail({ person, kind, loading: true });
+    try {
+      const data = await api.getStrict(`/evaluation/personnel/${person.id}/records?${periodQuery}&kind=${kind}`);
+      if (requestId === recordRequest.current) setRecordDetail({ person, kind, ...data });
+    } catch (error) {
+      if (requestId === recordRequest.current) setRecordDetail({ person, kind, error: error.message || '明细加载失败' });
+    }
+  }, [periodQuery]);
 
-  const managerCols = useMemo(() => [
-    { title: '负责人', dataIndex: 'manager', key: 'manager', render: (value) => <Text strong>{value || '未分配'}</Text> },
-    { title: '已配置 / 负责站点', key: 'configured', render: (_, row) => `${row.configured_site_count || 0} / ${row.site_count || 0}` },
-    { title: '应报', dataIndex: 'expected', key: 'expected' },
-    { title: '实到', dataIndex: 'actual', key: 'actual' },
-    { title: '完整性', dataIndex: 'completeness_rate', key: 'completeness_rate', render: renderRate },
-    { title: '有效性', dataIndex: 'validity_rate', key: 'validity_rate', render: renderRate },
-    { title: '及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate', render: renderRate },
-    { title: '缺失', dataIndex: 'missing', key: 'missing' },
-    { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
-  ], []);
+  const restoredRecords = useRef(false);
+  useEffect(() => {
+    const restore = location.state?.restoreRecords;
+    if (!restore || restoredRecords.current) return;
+    restoredRecords.current = true;
+    openRecords(restore.person, restore.kind);
+  }, [location.state, openRecords]);
+
+  const openInspectionRecord = useCallback((row) => {
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: {
+      restoreRecords: { person: recordDetail.person, kind: recordDetail.kind, selectedPerson, siteMode, scrollY: evaluationScroll()?.scrollTop || 0 },
+    } });
+    navigate(`/plan-schedules?${new URLSearchParams({ original_plan: row.plan_id, original_site: row.site_id, original_item: row.id })}`);
+  }, [location.pathname, location.search, navigate, recordDetail, selectedPerson, siteMode]);
+
+  const openWorkOrder = useCallback((orderNo) => {
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: {
+      restoreRecords: { person: recordDetail.person, kind: recordDetail.kind, selectedPerson, siteMode, scrollY: evaluationScroll()?.scrollTop || 0 },
+    } });
+    navigate(`/workorders?order=${encodeURIComponent(orderNo)}`);
+  }, [location.pathname, location.search, navigate, recordDetail, selectedPerson, siteMode]);
+
+  useEffect(() => {
+    const restore = location.state?.restorePhoto || location.state?.restoreRecords;
+    if (loading || !restore) return;
+    const frame = requestAnimationFrame(() => {
+      const container = evaluationScroll();
+      if (container) container.scrollTop = restore.scrollY || 0;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, location.state]);
+
+  const openFactor = useCallback(async (site, metric) => {
+    const requestId = ++factorRequest.current;
+    setFactorDetail({ site, metric, loading: true });
+    try {
+      const query = new URLSearchParams(`scope=report&${periodQuery}&site_id=${site.site_id}&metric=${encodeURIComponent(metric.metric)}`);
+      const data = await api.getStrict(`/data/health/records?${query}`);
+      if (requestId === factorRequest.current) setFactorDetail({ ...data, site, metric });
+    } catch (error) {
+      if (requestId === factorRequest.current) setFactorDetail({ site, metric, error: error.message || '因子明细加载失败' });
+    }
+  }, [periodQuery]);
 
   const siteCols = useMemo(() => [
     { title: '站点', dataIndex: 'site_name', key: 'site_name', ellipsis: true },
@@ -172,27 +250,27 @@ export default function EvaluationPage() {
     { title: '及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate', render: renderRate },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
+    { title: '', key: 'details', render: (_, row) => <Button type="link" onClick={() => { recordRequest.current += 1; setRecordDetail(null); factorRequest.current += 1; setFactorDetail(null); setSelectedSite(row); }}>因子与记录</Button> },
   ], []);
 
   const byManager = useMemo(() => health?.by_manager || [], [health]);
   const bySite = useMemo(() => health?.by_site || [], [health]);
-  const hasPersonnelActivity = personnel.list.some((row) => Number(row.wo_total) > 0 || Number(row.insp_done) > 0 || Number(row.insp_reviewed) > 0);
-  const hasMonitoringSamples = Number(health?.total?.actual) > 0;
-  const unconfiguredSites = Number(health?.total?.unconfigured_site_count) || 0;
+  const visibleSites = bySite.filter(site => siteMode === 'unassigned' ? !site.responsible_people?.length :
+    siteMode === 'person' ? site.responsible_people?.some(person => person.id === selectedPerson) : true);
   const hasAnyLoadedData = personnel.list.length > 0 || byManager.length > 0 || bySite.length > 0;
   const closedSlaBreach = personnel.list.reduce((sum, item) => sum + (Number(item.closed_sla_breach) || 0), 0);
   const openOverdue = personnel.list.reduce((sum, item) => sum + (Number(item.open_overdue) || 0), 0);
   const statusItems = [
     { key: 'staff', label: '在岗人员', value: personnel.overview?.staff_count ?? personnel.list.length, always: true },
-    { key: 'workorders', label: '本周期工单', value: personnel.overview?.wo_total || 0, always: true },
-    { key: 'closed-breach', label: '已关单超时', value: closedSlaBreach, color: closedSlaBreach ? '#cf1322' : undefined, always: true },
-    { key: 'open-overdue', label: '开放已逾期', value: openOverdue, color: openOverdue ? tokens.colorWarning : undefined, always: true },
-    { key: 'inspection', label: '已完成巡检', value: personnel.overview?.insp_done || 0, always: true },
+    { key: 'workorders', label: '本周期工单', value: personnel.overview?.work_order_attribution_incomplete ? '归属待核对' : personnel.overview?.wo_total || 0, always: true },
+    { key: 'closed-breach', label: '已关单超时', value: personnel.overview?.work_order_attribution_incomplete ? '归属待核对' : closedSlaBreach, color: closedSlaBreach ? '#cf1322' : undefined, always: true },
+    { key: 'open-overdue', label: '开放已逾期', value: personnel.overview?.work_order_attribution_incomplete ? '归属待核对' : openOverdue, color: openOverdue ? tokens.colorWarning : undefined, always: true },
+    { key: 'inspection', label: '已完成巡检项', value: personnel.overview?.insp_done || 0, always: true },
   ];
 
   const toolbar = <WorkspaceToolbar actions={<>
     <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
-    <Button icon={<DownloadOutlined />} loading={exporting === 'evaluation'} disabled={Boolean(exporting)} onClick={() => downloadExport(`/export/evaluation?period=${period}`, `人员客观指标明细_${personnel.period_label || period}.xlsx`, 'evaluation')}>下载人员指标明细</Button>
+    <Button icon={<DownloadOutlined />} loading={exporting === 'evaluation'} disabled={Boolean(exporting)} onClick={() => downloadExport(`/export/evaluation?${periodQuery}`, `人员客观指标明细_${personnel.period_label || period}.xlsx`, 'evaluation')}>下载人员指标明细</Button>
     <Dropdown menu={{ items: [
       { key: 'report-quarter', label: '本季度工作报告（Word）' },
       { key: 'report-year', label: '本年度工作报告（Word）' },
@@ -207,67 +285,108 @@ export default function EvaluationPage() {
     </Dropdown>
   </>}>
     <FilterField label="统计周期">
-      <Select aria-label="选择运营绩效统计周期" value={period} onChange={(value) => updateQuery({ period: value })} options={PERIOD_OPTS} style={{ width: 160 }} />
+      <Select aria-label="选择运营绩效统计周期" value={period} onChange={(value) => updateQuery({ period: value, month: '' })} options={PERIOD_OPTS} style={{ width: 160 }} />
     </FilterField>
+    {period === 'month' && <FilterField label="统计月份"><DatePicker picker="month" allowClear={false} disabledDate={value => value.isAfter(dayjs(), 'month')} value={dayjs(`${month || dayjs().format('YYYY-MM')}-01`)} onChange={(_, value) => updateQuery({ month: value })} /></FilterField>}
     {personnel.scope_label && <Text type="secondary">统计范围：{personnel.scope_label}</Text>}
   </WorkspaceToolbar>;
 
-  const periodRule = '已关闭工单按关单时间归期，未关闭工单按创建时间归期；SLA 达标率只统计已关单且配置截止时间的样本';
   if (!loading && loadErrors.length > 0 && !hasAnyLoadedData) {
-    return <WorkspacePage title="运营绩效" subtitle={periodRule} toolbar={toolbar}><WorkspaceEmpty type="error" description={`${loadErrors.join('；')}。当前不能判断是否无记录。`} onRefresh={load} /></WorkspacePage>;
+    return <WorkspacePage className="evaluation-page" title="运营绩效" toolbar={toolbar}><WorkspaceEmpty type="error" description={loadErrors.join('；')} onRefresh={load} /></WorkspacePage>;
   }
 
-  const tabs = [
-    {
-      key: 'people', label: `人员绩效 ${personnel.list.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.id} loading={loading} columns={personCols} dataSource={personnel.list} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 820 }} />,
-    },
-    {
-      key: 'managers', label: `负责人数据质量 ${byManager.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.manager || 'unassigned'} loading={loading} columns={managerCols} dataSource={byManager} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 900 }} />,
-    },
-    {
-      key: 'sites', label: `站点数据质量 ${bySite.length}`,
-      children: <WorkspaceTable rowKey={(row) => row.site_id || row.site_name} loading={loading} columns={siteCols} dataSource={bySite} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 920 }} />,
-    },
-  ];
-
   return <WorkspacePage
+    className="evaluation-page"
     title="运营绩效"
-    subtitle={personnel.period_label ? `考核周期：${personnel.period_label}；${periodRule}` : periodRule}
-    statusItems={statusItems}
+    subtitle={personnel.start ? `考核周期：${personnel.start.slice(0, 10)} 至 ${personnel.end.slice(0, 10)}` : undefined}
+    statusItems={loading || !personnel.overview ? [] : statusItems}
     toolbar={toolbar}
   >
     {loadErrors.length > 0 && <Alert type="warning" showIcon message="部分数据未更新" description={loadErrors.join('；')} style={{ marginBottom: 8 }} />}
-    {activeView === 'people' && !hasPersonnelActivity && <Alert type="info" showIcon message="本周期没有人员执行样本" description="在岗人员仍保留在名单中；无工单或巡检记录不等同于绩效为 0 分。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
-    {activeView !== 'people' && unconfiguredSites > 0 && <Alert type="info" showIcon message={`${unconfiguredSites} 个站点没有可用的应报参数配置`} description="未启用监测或没有历史参数依据的站点不计算应报、缺失和完整性，不使用全局阈值参数代替站点配置。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
-    {activeView !== 'people' && unconfiguredSites === 0 && !hasMonitoringSamples && <Alert type="info" showIcon message="本周期未接收到监测样本" description="已配置站点按应报量计算缺失；有效性和及时性在无实到样本时保持“无样本”。" style={{ marginBottom: 8, padding: '8px 12px' }} />}
+    <div className={`evaluation-layout${selectedSite || recordDetail ? ' evaluation-layout--detail' : ''}`} style={{
+      '--evaluation-text': tokens.colorText,
+      '--evaluation-secondary': tokens.colorTextSecondary,
+      '--evaluation-border': tokens.colorBorder,
+      '--evaluation-primary': tokens.colorPrimary,
+      '--evaluation-error': tokens.colorError,
+      '--evaluation-surface': tokens.panelBg,
+      '--evaluation-shadow': tokens.shadowCard,
+    }}>
+    <div className="evaluation-main">
+    <Typography.Title level={4}>人员绩效</Typography.Title>
+    <div className="evaluation-people">
+      {personnel.list.map(person => {
+        const assigned = bySite.filter(site => site.responsible_people?.some(owner => owner.id === person.id));
+        const unconfigured = assigned.filter(site => site.configuration_status !== 'configured').length;
+        const calculable = assigned.filter(site => site.configuration_status === 'configured' && site.expected > 0);
+        const ambiguous = person.work_order_attribution === 'ambiguous';
+        return <Card key={person.id} className="evaluation-person" size="small" onClick={() => { setSelectedPerson(person.id); setSiteMode('person'); }}
+          tabIndex={0} onKeyDown={event => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelectedPerson(person.id); setSiteMode('person'); } }}
+          aria-label={`${person.real_name || '未命名'}，${siteMode === 'person' && selectedPerson === person.id ? '已选中' : '查看负责站点'}`}
+          style={{ cursor: 'pointer', borderColor: siteMode === 'person' && selectedPerson === person.id ? tokens.colorPrimary : undefined }}>
+          <div className="evaluation-person-head"><div><strong>{person.real_name || '未命名'}</strong> <Text type="secondary">{ROLE_CN[person.role] || person.role}</Text></div><Text type="secondary">{period === 'month' ? month || dayjs().format('YYYY-MM') : personnel.period_label}</Text></div>
+          <div className="evaluation-metrics">
+            <div className="evaluation-metric">{ambiguous ? <><span className="evaluation-metric-title">工单闭环</span><strong className="evaluation-metric-empty">归属待核对</strong></> : <button className="evaluation-metric-main" onClick={event => { event.stopPropagation(); openRecords(person, 'workorders'); }}><span className="evaluation-metric-title">工单闭环</span><strong className="evaluation-metric-value">{person.wo_closed}<small> / {person.wo_total} 份</small></strong>{person.wo_total > 0 && <span className="evaluation-metric-note">闭环率 {Math.round(person.wo_closed / person.wo_total * 100)}%</span>}</button>}</div>
+            <div className="evaluation-metric"><button className="evaluation-metric-main" onClick={event => { event.stopPropagation(); openRecords(person, 'inspection_done'); }}><span className="evaluation-metric-title">巡检执行</span><strong className="evaluation-metric-value">{person.insp_done}<small> 项</small></strong></button><button className="evaluation-metric-note evaluation-link" onClick={event => { event.stopPropagation(); openRecords(person, 'inspection_reviewed'); }}>审核 {person.insp_reviewed} 项</button></div>
+            <div className="evaluation-metric"><span className="evaluation-metric-title">已关单按时</span><strong className={person.on_time_rate == null || ambiguous ? 'evaluation-metric-empty' : 'evaluation-metric-value'}>{ambiguous ? '归属待核对' : person.on_time_rate == null ? '无样本' : <>{person.on_time_rate}<small> %</small></>}</strong>{!ambiguous && person.on_time_rate != null && <span className="evaluation-metric-note">超时 {person.closed_sla_breach || 0} · 逾期 {person.open_overdue || 0}</span>}</div>
+            <div className="evaluation-metric"><button className="evaluation-metric-main" onClick={event => { event.stopPropagation(); openPhotoDetail(person); }}><span className="evaluation-metric-title">照片质量扣分</span><strong className={`evaluation-metric-value${Number(person.photo_quality_deduction) > 0 ? ' evaluation-metric-value--error' : ''}`}>{person.photo_quality_deduction || 0}<small> 分</small></strong></button></div>
+          </div>
+          <div className="evaluation-person-secondary"><span>响应 {ambiguous ? '待核对' : person.response_hours == null ? '无样本' : `${person.response_hours} 小时`}</span><span>处置 {ambiguous ? '待核对' : person.wo_avg_days == null ? '无样本' : `${person.wo_avg_days} 天`}</span></div>
+          <div className="evaluation-person-sites"><strong>本人负责站点</strong><span>{health ? `${assigned.length} 站` : '数据不可用'}</span><div>{health ? `${calculable.length ? `缺失 ${calculable.reduce((n, site) => n + site.missing, 0)} · 超限 ${calculable.reduce((n, site) => n + site.over_limit, 0)}` : '无可计算样本'} · 未配置或未启用 ${unconfigured} 站` : '站点数据读取失败'}</div></div>
+        </Card>;
+      })}
+    </div>
+    <Space ref={siteSection} wrap style={{ margin: '24px 0 12px' }}><Typography.Title level={4} style={{ margin: 0 }}>站点数据质量</Typography.Title>
+      <Button onClick={() => { setSiteMode('all'); setSelectedPerson(null); }}>全部站点</Button>
+      <Button onClick={() => { setSiteMode('unassigned'); setSelectedPerson(null); }}>无有效负责人</Button>
+      {siteMode === 'person' && <Text>当前人员：{personnel.list.find(person => person.id === selectedPerson)?.real_name}</Text>}
+    </Space>
+    <WorkspaceTable rowKey="site_id" loading={loading} columns={siteCols} dataSource={visibleSites} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 920 }} />
+    </div>
+    {(selectedSite || recordDetail) && <aside className="evaluation-detail-host" aria-label="明细">
+    <Drawer getContainer={false} rootStyle={{ position: 'absolute' }} title={selectedSite?.site_name} open={Boolean(selectedSite)} onClose={() => { factorRequest.current += 1; setFactorDetail(null); setSelectedSite(null); }} width="100%" mask={false}>
+      <p>当前负责人：{selectedSite?.manager || '未分配'}</p>
+      <p>完整性 {renderRate(selectedSite?.completeness_rate)} 有效性 {renderRate(selectedSite?.validity_rate)} 及时性 {renderRate(selectedSite?.timeliness_rate)}</p>
+      <WorkspaceTable rowKey="metric" dataSource={selectedSite?.metrics || []} pagination={false} columns={[
+        { title: '因子', dataIndex: 'label', render: (value, row) => <Button type="link" onClick={() => openFactor(selectedSite, row)}>{value}</Button> }, { title: '应报', dataIndex: 'expected' }, { title: '实到', dataIndex: 'actual' },
+        { title: '缺失', dataIndex: 'missing' }, { title: '超限', dataIndex: 'over_limit' }, { title: '最近记录', dataIndex: 'latest_at', render: beijingTime },
+      ]} />
+      {factorDetail && <section>
+        <Typography.Title level={5}>{factorDetail.metric.label} · 应报时段与记录</Typography.Title>
+        {factorDetail.loading && <p>正在加载因子明细…</p>}
+        {factorDetail.error && <Alert type="error" message={factorDetail.error} action={<Button onClick={() => openFactor(factorDetail.site, factorDetail.metric)}>重试</Button>} />}
+        {factorDetail.records && <WorkspaceTable rowKey={row => `${row.endpoint_id}-${row.instrument_asset_code || ''}-${row.scheduled_at}`} dataSource={factorDetail.records} pagination={standardListPagination()} columns={[
+          { title: '应报时间', dataIndex: 'scheduled_at', render: beijingTime },
+          { title: '状态', render: (_, row) => row.missing ? '缺失' : row.over_limit ? '超限' : '实到' },
+          { title: '观测时间', render: (_, row) => beijingTime(row.observation?.observed_at) },
+          { title: '数值', render: (_, row) => row.observation ? `${row.observation.standard_value} ${row.observation.standard_unit || ''}` : '—' },
+        ]} />}
+      </section>}
+    </Drawer>
+    <Drawer getContainer={false} rootStyle={{ position: 'absolute' }} title={`${recordDetail?.person?.real_name || ''} · ${recordDetail?.kind === 'workorders' ? '工单' : recordDetail?.kind === 'inspection_done' ? '本人执行检查项' : '本人审核检查项'}`} open={Boolean(recordDetail)} onClose={() => { recordRequest.current += 1; setRecordDetail(null); }} width="100%" mask={false}>
+      {recordDetail?.loading && <p>正在加载明细…</p>}
+      {recordDetail?.error && <Alert type="error" message={recordDetail.error} />}
+      {recordDetail?.records && <><p>范围：{recordDetail.start} 至 {recordDetail.end}</p><WorkspaceTable rowKey="id" tableLayout="fixed" dataSource={recordDetail.records} pagination={standardListPagination()} columns={recordDetail.kind === 'workorders' ? [
+        { title: '工单', dataIndex: 'order_no', render: value => <Button type="link" onClick={() => openWorkOrder(value)}>{value}</Button> }, { title: '标题', dataIndex: 'title' }, { title: '状态', dataIndex: 'status', render: value => orderStatusMap[value] || value || '—' }, { title: '创建时间', dataIndex: 'created_at' }, { title: '关单时间', dataIndex: 'resolved_at' },
+      ] : [{ title: '计划', dataIndex: 'plan_name' }, { title: '检查项', dataIndex: 'item_name', render: (value, row) => <Button type="link" onClick={() => openInspectionRecord(row)}>{value}</Button> }, { title: '结果', dataIndex: 'result', render: value => value === 'normal' ? '正常' : value === 'abnormal' ? '异常' : '未填写' }, { title: '完成时间', dataIndex: 'completed_at' }, { title: '审核时间', dataIndex: 'review_time' }]} /></>}
+    </Drawer>
+    </aside>}
+    </div>
     <Modal title={`${photoDetail?.person?.real_name || ''} · 照片质量扣分明细`} open={Boolean(photoDetail)} footer={null}
-      onCancel={() => { photoRequest.current += 1; originRequest.current += 1; setPhotoDetail(null); setOriginDetail(null); }}>
+      onCancel={() => { photoRequest.current += 1; setPhotoDetail(null); }}>
       <Space wrap><Text>检查月份</Text><DatePicker picker="month" value={photoDetail?.month ? dayjs(`${photoDetail.month}-01`) : null} placeholder="原查询范围" onChange={(_, value) => openPhotoDetail(photoDetail.person, photoDetail.selectedPeriod, value || '')} /></Space>
       {!photoDetail?.loading && !photoDetail?.error && <p>范围：{photoDetail?.start} 至 {photoDetail?.end}</p>}
       {photoDetail?.loading && <p>正在加载照片明细…</p>}
       {photoDetail?.error && <Alert type="error" message={photoDetail.error} action={<Button onClick={() => openPhotoDetail(photoDetail.person, photoDetail.selectedPeriod, photoDetail.month)}>重试</Button>} />}
       {!photoDetail?.loading && !photoDetail?.error && <p>本范围扣分：{photoDetail?.deduction}</p>}
       {!photoDetail?.loading && !photoDetail?.error && photoDetail?.photos.length === 0 && <p>{photoDetail.month ? '该检查月份暂无已确认扣分照片' : '该范围暂无已确认扣分照片'}</p>}
-      <Image.PreviewGroup>{photoDetail?.photos.map(photo => <div key={photo.attachment_id} style={{ marginBottom: 16 }}>
+      <Image.PreviewGroup>{photoDetail?.photos.map(photo => <div id={`quality-photo-${photo.attachment_id}`} key={photo.attachment_id} style={{ marginBottom: 16 }}>
         <Image src={photo.display_url} width={120} alt={photo.item_name || '不合格照片'} />
-        <p>{photo.score_month} · {photo.item_name} · 扣{photo.deduction}分</p>
+        <p>检查时间：{photo.completed_at || '未知'} · 归属月份：{photo.score_month || '未知'}</p>
+        <p>{photo.item_name} · 扣{photo.deduction}分</p>
         <p>{photo.reason}</p>
         <Button type="link" onClick={() => openOriginalInspection(photo)}>查看原巡检</Button>
-        {originDetail?.attachmentId === photo.attachment_id && <>
-          {originDetail.loading && <p>正在加载原巡检…</p>}
-          {originDetail.error && <Alert type="error" message={originDetail.error} />}
-          {originDetail.item && <section aria-label="原巡检记录">
-            <Typography.Title level={5}>{originDetail.plan.plan_name || `巡检 #${originDetail.plan.id}`}</Typography.Title>
-            <p>检查项：{originDetail.item.item_name}（#{originDetail.item.id}）</p>
-            <p>实际结果：{originDetail.item.result === 'normal' ? '正常' : originDetail.item.result === 'abnormal' ? '异常' : '未填写'}</p>
-            <p>实际检查时间：{originDetail.item.completed_at || originDetail.item.check_time || '未记录'}</p>
-            <p>原说明：{originDetail.item.remark || '无'}</p>
-          </section>}
-        </>}
       </div>)}</Image.PreviewGroup>
     </Modal>
-    <Tabs className="workspace-tabs" activeKey={activeView} onChange={(value) => updateQuery({ view: value })} items={tabs} />
   </WorkspacePage>;
 }

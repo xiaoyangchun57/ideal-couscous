@@ -186,9 +186,9 @@ export function WorkspaceTable({ dataSource = [], columns, loading, rowKey, empt
   );
 }
 
-export default function WorkspacePage({ title, subtitle, primaryAction, secondaryAction, statusItems, toolbar, children }) {
+export default function WorkspacePage({ title, subtitle, primaryAction, secondaryAction, statusItems, toolbar, children, className = '' }) {
   return (
-    <div className="workspace-page">
+    <div className={`workspace-page ${className}`.trim()}>
       <div className="workspace-page__header">
         <div>
           <Title level={4}>{title}</Title>
