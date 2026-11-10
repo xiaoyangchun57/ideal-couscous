@@ -17,7 +17,10 @@ import { api } from '../../services/api';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../hooks/useAuth';
 import { filterSelectWidth, filterSmallSelectWidth } from '../../services/pageStyles';
-import WorkspacePage, { FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar } from '../../components/WorkspacePage';
+import WorkspacePage, {
+  FilterField, ToolbarMeta, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
+  formatTablePaginationTotal, standardListPagination,
+} from '../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../utils/listFilterOptions';
 import { listLastPage } from '../../utils/listPagination';
 import {
@@ -40,12 +43,14 @@ import {
 import { applyPlanVehicleSelection, buildPlanValidationPayload } from './planVehicleState';
 import {
   normalizePlanPurgeAudits,
+  PLAN_PURGE_AUDIT_PAGE_SIZE,
   planCancellationPresentation,
   planPurgeAuditPath,
   planPurgeAuditPresentation,
 } from './planAuditPresentation';
 import './PlanSchedulesPage.css';
 import InspectionSettingsPage from '../inspection-settings/InspectionSettingsPage';
+import OriginalInspectionView from './OriginalInspectionView';
 
 const { Text } = Typography;
 
@@ -82,6 +87,11 @@ function scoreLevel(score, tokens) {
 }
 
 export default function PlanSchedulesPage() {
+  const [params] = useSearchParams();
+  return params.has('original_plan') ? <OriginalInspectionView /> : <PlanSchedulesMain />;
+}
+
+function PlanSchedulesMain() {
   const { tokens } = useTheme();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -116,6 +126,8 @@ export default function PlanSchedulesPage() {
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || undefined);
   const [attentionFilter, setAttentionFilter] = useState(searchParams.get('attention') || undefined);
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || undefined);
+  const [userFilter, setUserFilter] = useState(searchParams.get('user_id') || undefined);
+  const [planUsers, setPlanUsers] = useState([]);
   const listPage = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1);
   const requestedPageSize = Number.parseInt(searchParams.get('page_size') || '20', 10) || 20;
   const listPageSize = [20, 50, 100].includes(requestedPageSize) ? requestedPageSize : 20;
@@ -195,6 +207,7 @@ export default function PlanSchedulesPage() {
       if (statusFilter) params.set('status', statusFilter);
       if (typeFilter) params.set('schedule_type', typeFilter);
       if (attentionFilter) params.set('attention', attentionFilter);
+      if (userFilter) params.set('user_id', userFilter);
       const response = await api.getStrict(`/plan-schedules?${params}`);
       if (mountedRef.current && requestId === listRequestRef.current) {
         const rows = Array.isArray(response) ? response : response?.items;
@@ -220,9 +233,9 @@ export default function PlanSchedulesPage() {
     } finally {
       if (mountedRef.current && requestId === listRequestRef.current && !correctingPage) setLoading(false);
     }
-  }, [statusFilter, typeFilter, attentionFilter, listPage, listPageSize, setSearchParams]);
+  }, [statusFilter, typeFilter, attentionFilter, userFilter, listPage, listPageSize, setSearchParams]);
 
-  const loadPurgeAudits = useCallback(async (page = 1) => {
+  const loadPurgeAudits = useCallback(async (page = 1, pageSize = PLAN_PURGE_AUDIT_PAGE_SIZE) => {
     if (!isAdmin) return;
     purgeAuditRequestRef.current.controller?.abort();
     const controller = new AbortController();
@@ -231,7 +244,7 @@ export default function PlanSchedulesPage() {
     setPurgeAuditsLoading(true);
     setPurgeAuditsError('');
     try {
-      const payload = await api.getStrict(planPurgeAuditPath(page), { signal: controller.signal });
+      const payload = await api.getStrict(planPurgeAuditPath(page, pageSize), { signal: controller.signal });
       if (!mountedRef.current || requestId !== purgeAuditRequestRef.current.id) return;
       setPurgeAudits(normalizePlanPurgeAudits(payload));
     } catch (error) {
@@ -396,11 +409,24 @@ export default function PlanSchedulesPage() {
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => { loadOverview(); }, [loadOverview]);
 
+  // 人员下拉用无门槛的 /assignees（在岗运维人员），不依赖 admin 专属的 /api/users。
+  useEffect(() => {
+    let active = true;
+    api.getStrict('/assignees').then((rows) => {
+      if (active && Array.isArray(rows)) setPlanUsers(rows);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
   useEffect(() => {
     setStatusFilter(searchParams.get('status') || undefined);
     setAttentionFilter(searchParams.get('attention') || undefined);
     setTypeFilter(searchParams.get('type') || undefined);
+    setUserFilter(searchParams.get('user_id') || undefined);
   }, [searchParams]);
+
+  const planUserOptions = (Array.isArray(planUsers) ? planUsers : [])
+    .map((user) => ({ value: String(user.id), label: user.name || `人员 #${user.id}` }));
 
   const updateFilter = useCallback((key, value) => {
     const next = new URLSearchParams(searchParams);
@@ -412,7 +438,7 @@ export default function PlanSchedulesPage() {
 
   const resetFilters = useCallback(() => {
     const next = new URLSearchParams(searchParams);
-    ['status', 'type', 'attention'].forEach((key) => next.delete(key));
+    ['status', 'type', 'attention', 'user_id'].forEach((key) => next.delete(key));
     next.delete('page');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
@@ -1133,6 +1159,11 @@ export default function PlanSchedulesPage() {
             <Select allowClear placeholder="全部类型" style={{ width: filterSelectWidth }} value={typeFilter} onChange={(value) => updateFilter('type', listFilterValue(value))}
               options={listFilterOptions('全部类型', Object.entries(TYPE_MAP).map(([k, v]) => ({ value: k, label: v })))} />
           </FilterField>
+          <FilterField label="计划负责人">
+            <Select aria-label="计划负责人" placeholder="全部人员" allowClear showSearch optionFilterProp="label"
+              value={userFilter} onChange={(value) => updateFilter('user_id', listFilterValue(value))}
+              style={{ width: filterSelectWidth }} options={listFilterOptions('全部人员', planUserOptions)} />
+          </FilterField>
           {attentionFilter && <ToolbarMeta label="关注条件"><Tag closable onClose={() => updateFilter('attention', undefined)}>{ATTENTION_MAP[attentionFilter]}</Tag></ToolbarMeta>}
         </WorkspaceToolbar>
 
@@ -1365,10 +1396,12 @@ export default function PlanSchedulesPage() {
           <Table size="small" rowKey={record => planPurgeAuditPresentation(record).key}
             loading={purgeAuditsLoading} dataSource={purgeAudits.items} columns={purgeAuditColumns}
             scroll={{ x: 800 }} locale={{ emptyText: <Empty description="暂无删除记录" /> }}
-            pagination={purgeAudits.total > purgeAudits.pageSize ? {
+            pagination={standardListPagination({
               current: purgeAudits.page, pageSize: purgeAudits.pageSize, total: purgeAudits.total,
-              showSizeChanger: false, showTotal: value => `共 ${value} 条`, onChange: loadPurgeAudits,
-            } : false} />
+              showTotal: formatTablePaginationTotal,
+              onChange: (page, pageSize) => loadPurgeAudits(
+                pageSize === purgeAudits.pageSize ? page : 1, pageSize),
+            })} />
         )}
       </Drawer>
 

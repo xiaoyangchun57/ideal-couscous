@@ -16,7 +16,8 @@ global.wx = {
   showModal() {},
   navigateTo(options) { navigations.push(options); }
 };
-global.getApp = () => ({ globalData: { token: 'token' } });
+const app = { globalData: { token: 'token' } };
+global.getApp = () => app;
 let minePageDefinition;
 global.Page = definition => { minePageDefinition = definition; };
 delete require.cache[minePagePath];
@@ -89,9 +90,16 @@ test('monthly quality ignores old month responses and preserves a visible load e
 });
 
 test('monthly quality links the original inspection without changing its facts', () => {
-  const page = eventPage({ qualityPhotos: [{ attachment_id: 2, plan_id: 10, site_id: 1 }] });
+  const page = eventPage({ qualityPhotos: [{ attachment_id: 2, plan_id: 10, site_id: 1, item_id: 99 }] });
   page.openQualityInspection({ currentTarget: { dataset: { id: 2 } } });
-  assert.equal(navigations.at(-1).url, '/pages/inspection/inspection?plan_id=10&site_id=1&source=photo_quality_history');
+  assert.equal(navigations.at(-1).url, '/pages/inspection/inspection');
+  assert.deepEqual(app.globalData.executionTarget, { executionPlanId: 10, siteId: 1, itemId: 99, readOnly: true, source: 'photo_quality_history' });
+  navigations.at(-1).fail();
+  assert.equal(app.globalData.executionTarget, null);
+  const count = navigations.length;
+  page.data.qualityPhotos[0].item_id = null;
+  page.openQualityInspection({ currentTarget: { dataset: { id: 2 } } });
+  assert.equal(navigations.length, count);
 });
 
 test('mine page does not duplicate parts application, issue, order or fulfillment responsibilities', () => {

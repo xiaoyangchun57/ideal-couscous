@@ -59,6 +59,31 @@ function AuditEmptyState({ title, onRefresh, error }) {
 
 // 通用工具栏：搜索 + 筛选 + 刷新 + 计数
 // 结构一致性（B 类）：统一走 FilterBar 组合——筛选控件左对齐为 children，动作按钮收 extra
+// 待审队列是一次性取回的本地数据，站点/人员筛选可以直接在前端做，不影响服务端分页。
+function collectAuditScopeOptions(items = []) {
+  const siteNames = new Set();
+  const personNames = new Set();
+  items.forEach((item) => {
+    if (item.site_name) siteNames.add(String(item.site_name));
+    [item.assignee, item.applicant_name, item.requester_name, item.applicant, item.submitter_name]
+      .filter(Boolean).forEach((name) => personNames.add(String(name)));
+  });
+  const toOptions = (values, label) => listFilterOptions(
+    label, [...values].sort().map((value) => ({ value, label: value })),
+  );
+  return {
+    siteOptions: toOptions(siteNames, '全部站点'),
+    personOptions: toOptions(personNames, '全部人员'),
+  };
+}
+
+function matchesAuditScope(item, siteFilter, personFilter) {
+  if (siteFilter && String(item.site_name || '') !== siteFilter) return false;
+  if (!personFilter) return true;
+  return [item.assignee, item.applicant_name, item.requester_name, item.applicant, item.submitter_name]
+    .some((name) => name && String(name) === personFilter);
+}
+
 function AuditToolbar({ searchText, onSearchChange, placeholder, filterSlot, extraAction, total, filteredCount, refresh, helpText }) {
   const { tokens } = useTheme();
   return (
@@ -104,11 +129,15 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState(undefined);
+  const [siteFilter, setSiteFilter] = useState(undefined);
+  const [personFilter, setPersonFilter] = useState(undefined);
 
   const filtered = allItems.filter(i => sourceTypes.includes(i.source_type));
+  const scoped = filtered.filter(i => matchesAuditScope(i, siteFilter, personFilter));
+  const { siteOptions, personOptions } = collectAuditScopeOptions(filtered);
   const typeFiltered = typeFilter
-    ? filtered.filter(i => i.source_type === typeFilter)
-    : filtered;
+    ? scoped.filter(i => i.source_type === typeFilter)
+    : scoped;
   const searched = searchText
     ? typeFiltered.filter(i => {
         const kw = searchText.toLowerCase();
@@ -372,25 +401,39 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       : defaultColumns;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="workspace-embedded-page">
       <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
         onSearchChange={setSearchText}
         placeholder="搜索内容 / 站点 / 来源"
-        filterSlot={showType ? (
-          <FilterField label="审核类型">
-            <Select
-              aria-label="审核类型"
-              placeholder="全部类型"
-              allowClear
-              value={typeFilter}
-              onChange={(value) => setTypeFilter(listFilterValue(value))}
-              style={{ width: filterSmallSelectWidth }}
-              options={listFilterOptions('全部审核类型', typeOptions)}
-            />
-          </FilterField>
-        ) : null}
+        filterSlot={(
+          <>
+            {showType ? (
+              <FilterField label="审核类型">
+                <Select
+                  aria-label="审核类型"
+                  placeholder="全部类型"
+                  allowClear
+                  value={typeFilter}
+                  onChange={(value) => setTypeFilter(listFilterValue(value))}
+                  style={{ width: filterSmallSelectWidth }}
+                  options={listFilterOptions('全部审核类型', typeOptions)}
+                />
+              </FilterField>
+            ) : null}
+            <FilterField label="站点">
+              <Select aria-label="审核站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label"
+                value={siteFilter} onChange={(value) => setSiteFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={siteOptions} />
+            </FilterField>
+            <FilterField label="人员">
+              <Select aria-label="审核人员" placeholder="全部人员" allowClear showSearch optionFilterProp="label"
+                value={personFilter} onChange={(value) => setPersonFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={personOptions} />
+            </FilterField>
+          </>
+        )}
         extraAction={extraAction}
         total={filtered.length}
         filteredCount={searched.length}
@@ -402,7 +445,8 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => auditItemKey(record) === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
-        emptyType={searchText || typeFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
+        scroll={{ x: columns.reduce((total, column) => total + (column.width || 120), 0) }}
+        emptyType={searchText || typeFilter || siteFilter || personFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -415,9 +459,13 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   const mode = isDark ? 'dark' : 'light';
   const [searchText, setSearchText] = useState('');
   const [sourceFilter, setSourceFilter] = useState(undefined);
+  const [siteFilter, setSiteFilter] = useState(undefined);
+  const [personFilter, setPersonFilter] = useState(undefined);
 
   const requestItems = allItems.filter(i => ['parts_request', 'spare_part_request'].includes(i.source_type));
-  const flattened = requestItems
+  const scopedItems = requestItems.filter(i => matchesAuditScope(i, siteFilter, personFilter));
+  const { siteOptions, personOptions } = collectAuditScopeOptions(requestItems);
+  const flattened = scopedItems
     .flatMap(parent => {
       const details = Array.isArray(parent.parts_detail) && parent.parts_detail.length
         ? parent.parts_detail
@@ -491,7 +539,7 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   const totalQuantity = searched.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
   const distinctSources = new Set(searched.map(i => i.source_name).filter(Boolean)).size;
 
-  if (!loading && flattened.length === 0) {
+  if (!loading && flattened.length === 0 && !siteFilter && !personFilter) {
     return <AuditEmptyState title="备件需求" onRefresh={onRefresh} error={loadError} />;
   }
 
@@ -542,26 +590,38 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="workspace-embedded-page">
       <StatusStrip items={metrics.map((metric, index) => ({ key: index, label: metric.title, value: metric.value, color: metric.color }))} />
       <AuditToolbar
         searchText={searchText}
         onSearchChange={setSearchText}
         placeholder="搜索备件名称 / 编号 / 厂家 / 型号 / 申请人 / 计划"
         filterSlot={(
-          <FilterField label="来源计划">
-            <Select
-              aria-label="来源计划"
-              placeholder="全部计划"
-              allowClear
-              showSearch
-              value={sourceFilter}
-              onChange={(value) => setSourceFilter(listFilterValue(value))}
-              style={{ width: filterSelectWidth }}
-              options={listFilterOptions('全部来源计划', sourceOptions)}
-              optionFilterProp="label"
-            />
-          </FilterField>
+          <>
+            <FilterField label="来源计划">
+              <Select
+                aria-label="来源计划"
+                placeholder="全部计划"
+                allowClear
+                showSearch
+                value={sourceFilter}
+                onChange={(value) => setSourceFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }}
+                options={listFilterOptions('全部来源计划', sourceOptions)}
+                optionFilterProp="label"
+              />
+            </FilterField>
+            <FilterField label="站点">
+              <Select aria-label="审核站点" placeholder="全部站点" allowClear showSearch optionFilterProp="label"
+                value={siteFilter} onChange={(value) => setSiteFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={siteOptions} />
+            </FilterField>
+            <FilterField label="人员">
+              <Select aria-label="审核人员" placeholder="全部人员" allowClear showSearch optionFilterProp="label"
+                value={personFilter} onChange={(value) => setPersonFilter(listFilterValue(value))}
+                style={{ width: filterSelectWidth }} options={personOptions} />
+            </FilterField>
+          </>
         )}
         total={flattened.length}
         filteredCount={searched.length}
@@ -573,7 +633,8 @@ function PartsRequestAuditTab({ queueKey, allItems, loading, loadError, onOpenRe
       <WorkspaceTable dataSource={searched} columns={columns} rowKey="id" loading={loading}
         rowClassName={record => record.parent_key === highlightedItemId ? 'audit-target-row' : ''}
         pagination={standardListPagination()}
-        emptyType={searchText || sourceFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
+        scroll={{ x: columns.reduce((total, column) => total + (column.width || 120), 0) }}
+        emptyType={searchText || sourceFilter || siteFilter || personFilter ? 'filtered' : 'empty'} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -818,7 +879,7 @@ export default function AuditPage() {
       return;
     }
     if (!canSubmitPhotoReview(item.attachment_ids, selectedPhotoIds, reviewComment)) {
-      message.error('勾选驳回照片后必须填写统一驳回原因');
+      message.error('勾选不合格照片后必须填写统一不合格原因');
       return;
     }
     const session = reviewSessionRef.current;
@@ -1043,7 +1104,7 @@ export default function AuditPage() {
           {!submissionCommitted && !(item.source_type === 'inspection_batch' && item.attachment_ids?.length) && <Button key="reject" danger loading={processing}
             onClick={() => handleReview(item, 'reject')}
             icon={<CloseOutlined />}>驳回</Button>}
-          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一驳回原因后再提交' : undefined}>
+          {!submissionCommitted && <Tooltip key="approve-tip" title={rejectionReasonMissing ? '请填写统一不合格原因后再提交' : undefined}>
             <span><Button key="approve" type="primary" loading={processing}
               disabled={missingResolution || missingRequiredPhotos || failedApproveIds.length > 0 || rejectionReasonMissing}
               onClick={() => handleReview(item, 'approve')}
@@ -1168,7 +1229,7 @@ export default function AuditPage() {
                     <Checkbox checked={selected} style={{ marginTop: 6 }}
                       onChange={(event) => setSelectedPhotoIds((ids) => event.target.checked
                         ? [...ids, photo.id] : ids.filter(id => id !== photo.id))}>
-                      需替换此照片
+                      标记不合格
                     </Checkbox>
                     <Text strong style={{ display: 'block', fontSize: 13, marginTop: 6 }}>{itemLabel}</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>拍摄时间：{photo.taken_at || '未记录'}</Text>
@@ -1235,7 +1296,7 @@ export default function AuditPage() {
             : '请输入审核意见（可选）'} style={{ marginTop: 8 }} />
           <div data-review-reason-slot style={{ height: 22, display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
             <Text type={rejectionReasonMissing ? 'danger' : 'secondary'}>
-              {rejectionReasonMissing ? '已选择驳回照片，请填写统一驳回原因' : ' '}
+              {rejectionReasonMissing ? '已选择不合格照片，请填写统一不合格原因' : ' '}
             </Text>
           </div>
         </div>
@@ -1366,10 +1427,6 @@ export default function AuditPage() {
   return (
     <div style={pageRootStyle}>
       <style>{`
-        .audit-tabs { height: 100%; }
-        .audit-tabs > .ant-tabs-content-holder { flex: 1 1 auto; min-height: 0; }
-        .audit-tabs > .ant-tabs-content-holder > .ant-tabs-content { height: 100%; }
-        .audit-tabs .ant-tabs-tabpane-active { height: 100%; }
         .audit-target-row > td { background: #fff7e6 !important; }
         .audit-target-row:hover > td { background: #ffe7ba !important; }
       `}</style>
@@ -1390,7 +1447,7 @@ export default function AuditPage() {
       {targetNotice && <Alert type="warning" showIcon style={{ marginBottom: 12, flexShrink: 0 }} message={targetNotice} />}
 
       <Tabs
-        className="audit-tabs"
+        className="audit-tabs workspace-tabs"
         activeKey={activeKey}
         onChange={handleTabChange}
         items={tabItems}

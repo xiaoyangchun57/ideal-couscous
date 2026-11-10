@@ -244,37 +244,36 @@
 
         <block wx:else>
           <block wx:for="{{day.inspectionGroups[selectedSiteId]}}" wx:key="frequency" wx:for-item="group">
-            <!-- 跳过：无适用项的按需分组（不显示 0/0） -->
-            <block wx:if="{{group.count > 0 || !group.optional}}">
-              <view class="pe-inspect-group-head {{group.optional ? 'pe-inspect-group-head--optional' : ''}} {{group.optional && group.expanded ? 'pe-inspect-group-head--optional-expanded' : ''}}"
-                    data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-frequency="{{group.frequency}}"
-                    bindtap="onToggleInspectionGroup">
+            <view class="pe-inspect-group" wx:if="{{group.count > 0 || !group.optional}}">
+              <view class="pe-inspect-group-head">
                 <view class="pe-inspect-group-left">
-                  <view class="pe-inspect-caret pe-inspect-caret-{{group.expanded ? 'down' : 'right'}}"></view>
                   <text class="pe-inspect-group-label">{{group.label}}</text>
-                  <view class="pe-inspect-group-tag {{group.optional ? 'pe-tag-optional' : 'pe-tag-default'}}">
-                    <text class="pe-inspect-group-tag-tx">{{group.optional ? '按需' : '默认'}}</text>
-                  </view>
+                  <text class="pe-inspect-group-count">{{group.selectedCount}} / {{group.count}}</text>
                 </view>
                 <view class="pe-inspect-group-right">
-                  <!-- 到期提醒（头内右侧，小标签） -->
                   <view class="pe-inspect-due-tag" wx:if="{{group.dueLabels}}">
                     <text class="pe-inspect-due-tag-tx">{{group.dueLabels}}</text>
                   </view>
-                  <text class="pe-inspect-group-count">{{group.selectedCount}}/{{group.count}}</text>
+                  <button wx:if="{{group.frequency === 'weekly'}}" class="pe-inspect-adjust"
+                          data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-frequency="{{group.frequency}}"
+                          bindtap="onToggleInspectionGroup">{{group.expanded ? '收起' : '调整'}}</button>
                 </view>
               </view>
 
-              <!-- 展开内容：检查项 chips -->
-              <view class="pe-inspect-group-body {{group.optional ? 'pe-inspect-group-body--optional' : ''}}" wx:if="{{group.expanded}}">
-                <view class="pe-chip-group pe-chip-group-sm pe-chip-group--inspect">
-                  <view class="pe-chip pe-chip-sm {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'pe-chip-on' : ''}}"
-                        wx:for="{{group.items}}" wx:key="id" wx:for-item="item"
-                        data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-item-id="{{item.id}}"
-                        bindtap="onToggleInspectionItem">{{item.item_name}}</view>
+              <view class="pe-inspect-summary" wx:if="{{group.frequency === 'weekly' && !group.expanded}}">
+                <text class="pe-inspect-summary-selected">{{group.selectedCount ? '已选：' + group.selectedSummary : '未选择'}}</text>
+                <text class="pe-inspect-summary-missing" wx:if="{{group.selectedCount < group.count}}">未选：{{group.unselectedNames}}</text>
+              </view>
+              <view class="pe-inspect-list" wx:if="{{group.expanded}}">
+                <view class="pe-inspect-option {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'pe-inspect-option--selected' : ''}}"
+                      wx:for="{{group.items}}" wx:key="id" wx:for-item="item"
+                      data-day-idx="{{di}}" data-site-id="{{selectedSiteId}}" data-item-id="{{item.id}}"
+                      bindtap="onToggleInspectionItem">
+                  <view class="pe-inspect-checkbox {{ft.hasSite(day.inspection_items[selectedSiteId], item.id) ? 'pe-inspect-checkbox--checked' : ''}}"></view>
+                  <text class="pe-inspect-option-name">{{item.item_name}}</text>
                 </view>
               </view>
-            </block>
+            </view>
           </block>
 
           <!-- 本站无适用检查项（ready 态且无任何分组时兜底） -->

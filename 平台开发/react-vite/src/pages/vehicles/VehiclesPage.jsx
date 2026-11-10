@@ -693,20 +693,20 @@ export default function VehiclesPage() {
           style={{ marginBottom: 12 }}
         />
       ) : null}
-      <Tabs activeKey={tab} onChange={(key) => updateQuery({ tab: key === 'ledger' ? '' : key })} type="line" items={[
+      <Tabs className="workspace-tabs" activeKey={tab} onChange={(key) => updateQuery({ tab: key === 'ledger' ? '' : key })} type="line" items={[
         {
-          key: 'ledger', label: '台账', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          key: 'ledger', label: '台账', children: <div className="workspace-embedded-page">
             <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
               <Input aria-label="车辆搜索" placeholder="搜索车牌号 / 负责人" prefix={<HoverGifIcon name="magnifier" size={14} style={{ opacity: 0.45 }} />}
                 allowClear {...searchInputProps} style={{ width: filterInputWidth }} />
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={filteredVehicles} loading={loading} columns={ledgerColumns}
-              pagination={standardListPagination()}
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }}
               emptyType={searchText ? 'filtered' : 'empty'} onRefresh={load} />
           </div>,
         },
         {
-          key: 'history', label: '履历', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          key: 'history', label: '履历', children: <div className="workspace-embedded-page">
             <Segmented value={historyView} onChange={(value) => updateQuery({ history: value === 'use' ? '' : value })} options={[
               { value: 'use', label: '使用' }, { value: 'maint', label: '保养' }, { value: 'refuel', label: '补给' },
             ]} />
@@ -714,16 +714,16 @@ export default function VehiclesPage() {
               <Text type="secondary">{historyView === 'use' ? '来自巡检计划和工单的出车、还车记录。' : historyView === 'maint' ? '车辆保养历史与下次保养里程。' : '车辆加油、充电和费用记录。'}</Text>
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={historyData} loading={auxiliaryLoading} columns={historyColumns}
-              pagination={standardListPagination()} emptyType="empty" onRefresh={load} />
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }} emptyType="empty" onRefresh={load} />
           </div>,
         },
         {
-          key: 'decision', label: decisionCount ? `待办 ${decisionCount}` : '待办', children: <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          key: 'decision', label: decisionCount ? `待办 ${decisionCount}` : '待办', children: <div className="workspace-embedded-page">
             <WorkspaceToolbar actions={<Button icon={<ReloadOutlined />} onClick={load} loading={loading || auxiliaryLoading}>刷新</Button>}>
               <Text type="secondary">仅列出需要处理的证照、车况、维修和归还事项。</Text>
             </WorkspaceToolbar>
             <WorkspaceTable rowKey="id" dataSource={decisionRows.filter(row => row.issues.length)} loading={auxiliaryLoading} emptyType="empty" onRefresh={load}
-              pagination={standardListPagination()}
+              pagination={standardListPagination()} scroll={{ x: 'max-content' }}
               columns={[
                 { title: '车辆', width: 140, render: (_, r) => <span>{r.plate_no}<br /><Text type="secondary" style={{ fontSize: 12 }}>{r.model || '-'}</Text></span> },
                 { title: '待处理事项', width: 220, render: (_, r) => <Space size={[4, 4]} wrap>{r.issues.map(issue => <Tag color={issue === '证照临期' ? 'orange' : 'red'} key={issue}>{issue}</Tag>)}</Space> },

@@ -167,7 +167,7 @@
             <block wx:elif="{{it.source_type === 'inspection_batch' || it.source_type === 'photo_review' || it.source_type === 'inspection'}}">
               <!-- 照片审核提示 -->
               <view class="rv-photo-hint" wx:if="{{it.canReview && it.reviewPhotos.length && it.source_type !== 'workorder_review'}}">
-                勾选内容不符合要求、需要替换的照片
+                勾选内容不符合要求的照片
               </view>
 
               <!-- 检查项分组（循环 reviewItemGroups，零照片也显示结果与备注） -->
@@ -191,7 +191,7 @@
                       <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state">照片加载中</view>
                       <view wx:else class="rv-photo-media-state rv-photo-media-error" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
                       <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
-                        {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
+                        {{photo.selectedForReject ? '已标记不合格' : '标记不合格'}}
                       </view>
                       <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
                     </view>
@@ -210,7 +210,7 @@
                     <view wx:elif="{{photo.mediaStatus === 'loading'}}" class="rv-photo-media-state">照片加载中</view>
                     <view wx:else class="rv-photo-media-state rv-photo-media-error" bindtap="onRetryProtectedReviewPhoto" data-id="{{it.id}}" data-photo-key="{{photo.mediaKey}}">{{photo.mediaError || '照片加载失败，点击重试'}}</view>
                     <view class="rv-photo-toggle" wx:if="{{it.canReview}}" bindtap="onTogglePhotoReject" data-id="{{it.id}}" data-photo-id="{{photo.id}}">
-                      {{photo.selectedForReject ? '已标记替换' : '需替换此照片'}}
+                      {{photo.selectedForReject ? '已标记不合格' : '标记不合格'}}
                     </view>
                     <text class="rv-photo-time">{{photo.takenAt || '未记录拍摄时间'}}</text>
                   </view>
@@ -411,7 +411,7 @@
 
             <!-- ========== 决策区 ========== -->
             <view class="rv-actions" wx:if="{{it.detailOpen && it.canReview}}">
-              <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch') && it.reviewPhotos.length}}">
+              <block wx:if="{{(it.source_type === 'photo_review' || it.source_type === 'inspection_batch' || it.source_type === 'inspection') && it.reviewPhotos.length}}">
                 <button class="rv-btn rv-btn-primary" data-id="{{it.id}}" loading="{{submittingId === it.id}}" disabled="{{submittingId === it.id || loading || loadState === 'stale'}}" bindtap="onSubmitPhotoReview">
                   {{it.selectedRejectCount ? '记录' + it.selectedRejectCount + '张不合格，其余合格' : '全部通过'}}
                 </button>
@@ -432,11 +432,11 @@
   <view wx:if="{{rejectShow}}" class="rv-sheet-mask" bindtap="closeReject">
     <view class="rv-sheet" catchtap="noop">
       <view class="rv-sheet-handle"></view>
-      <view class="rv-sheet-title">驳回原因</view>
-      <textarea class="rv-reject-input" placeholder="请填写驳回原因（必填）" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" placeholder-class="rv-reject-placeholder" />
+      <view class="rv-sheet-title">{{curAction === 'selective' ? '照片不合格原因' : '驳回原因'}}</view>
+      <textarea class="rv-reject-input" placeholder="{{curAction === 'selective' ? '请填写照片不合格原因（必填）' : '请填写驳回原因（必填）'}}" value="{{rejectReason}}" bindinput="onReasonInput" maxlength="200" placeholder-class="rv-reject-placeholder" />
       <view class="rv-sheet-actions">
         <button class="rv-btn rv-btn-ghost" bindtap="closeReject">取消</button>
-        <button class="rv-btn rv-btn-danger" bindtap="rejectConfirm" disabled="{{!!submittingId && curAction !== 'selective'}}">确认驳回</button>
+        <button class="rv-btn rv-btn-danger" bindtap="rejectConfirm" disabled="{{!!submittingId && curAction !== 'selective'}}">{{curAction === 'selective' ? '确认记录' : '确认驳回'}}</button>
       </view>
     </view>
   </view>

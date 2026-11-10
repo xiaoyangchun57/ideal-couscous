@@ -8,7 +8,9 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -2204,6 +2206,213 @@ class MobilePhotoProvenanceTest(unittest.TestCase):
         self.assertEqual(app_module._parse_gps_pair(90, 180), (90.0, 180.0))
         self.assertGreater(app_module._haversine(-90, -180, 90, 180), 0)
         self.assertIsNone(app_module._haversine('nan', 0, 0, 0))
+
+    def test_camera_render_does_not_hold_writer_during_another_capture(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        entered, resume = threading.Event(), threading.Event()
+        original_render = app_module._create_site_photo_display_copy
+
+        def render(*args, **kwargs):
+            if len(args) > 2 and args[2]:
+                entered.set()
+                if not resume.wait(10):
+                    raise RuntimeError('render test timed out')
+            return original_render(*args, **kwargs)
+
+        payload = {
+            'site_id': 1, 'plan_id': 10, 'item_id': 100,
+            'image': 'data:image/jpeg;base64,' + base64.b64encode(portrait_jpeg_bytes()).decode('ascii'),
+            'capture_source': 'camera', 'capture_session': session.json['capture_session'],
+            'capture_client': 'trusted_camera_v1', 'capture_frame_orientation': 'portrait',
+            'capture_frame_ratio': '3:4', 'capture_frame_mode': 'center_cover',
+            '_idempotency_key': 'concurrent-render',
+        }
+
+        def upload():
+            with app_module.app.test_client() as client:
+                return client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+
+        with mock.patch.object(app_module, '_create_site_photo_display_copy', side_effect=render):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(upload)
+                try:
+                    self.assertTrue(entered.wait(5), 'camera render was not reached')
+                    other = self.create_manual_report_capture_session(prepare_only=True)
+                    self.assertEqual(other.status_code, 200, other.json)
+                    bound = self.client.post('/api/mobile/photo-capture-session/location',
+                        headers=self.headers(), json={
+                            'capture_session': other.json['capture_session'],
+                            'gps_lat': 28.071303, 'gps_lng': 115.539684,
+                        })
+                    self.assertEqual(bound.status_code, 200, bound.json)
+                finally:
+                    resume.set()
+                uploaded = future.result(timeout=10)
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        self.assertTrue(uploaded.json['accepted_for_review'])
+        replay = self.client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertEqual(replay.json['id'], uploaded.json['id'])
+
+    def test_camera_file_write_does_not_hold_writer_during_another_capture(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        entered, resume = threading.Event(), threading.Event()
+        persist = app_module._persist_site_photo_materials
+
+        def slow_persist(*args):
+            entered.set()
+            if not resume.wait(10):
+                raise RuntimeError('file write test timed out')
+            return persist(*args)
+
+        payload = {
+            'site_id': 1, 'plan_id': 10, 'item_id': 100,
+            'image': 'data:image/jpeg;base64,' + base64.b64encode(portrait_jpeg_bytes()).decode('ascii'),
+            'capture_source': 'camera', 'capture_session': session.json['capture_session'],
+            'capture_client': 'trusted_camera_v1', 'capture_frame_orientation': 'portrait',
+            'capture_frame_ratio': '3:4', 'capture_frame_mode': 'center_cover',
+            '_idempotency_key': 'concurrent-file-write',
+        }
+
+        def upload():
+            with app_module.app.test_client() as client:
+                return client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+
+        with mock.patch.object(app_module, '_persist_site_photo_materials', side_effect=slow_persist):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(upload)
+                try:
+                    self.assertTrue(entered.wait(5), 'photo file write was not reached')
+                    other = self.create_manual_report_capture_session(prepare_only=True)
+                    self.assertEqual(other.status_code, 200, other.json)
+                finally:
+                    resume.set()
+                uploaded = future.result(timeout=10)
+        self.assertEqual(uploaded.status_code, 200, uploaded.json)
+        replay = self.client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertEqual(replay.json['id'], uploaded.json['id'])
+        self.assertEqual(self.photo_file_counts(), (1, 1))
+
+    def test_periodic_retention_concurrent_with_photo_flow(self):
+        import station_ingest_retention as retention
+        from migrate_station_ingestion import apply_migration
+
+        root = Path(self.temp_dir)
+        database = Path(self.db_path)
+        apply_migration(database, root / 'migration-backup', isolated_test=True)
+        with app_module.get_db() as db:
+            endpoint = db.execute("""INSERT INTO trusted_endpoints
+                (station_code,credential_hmac,business_site_id,endpoint_state)
+                VALUES ('TEST-RETENTION','test',1,'bound')""").lastrowid
+            db.executemany("""INSERT INTO ingest_raw_frames
+                (endpoint_id,station_code,received_at,frame_sha256,raw_frame,body_length,
+                 crc_status,authentication_status,disposition,persistence_state)
+                VALUES (?,'TEST-RETENTION','2026-10-01T00:00:00+00:00',?,?,?,
+                        'valid','authenticated','accepted','persisted')""", [
+                (endpoint, hashlib.sha256(str(i).encode()).hexdigest(),
+                 ('test frame %d' % i).encode(), len(('test frame %d' % i).encode()))
+                for i in range(2000)
+            ])
+        policy = retention.StoragePolicy(root, retention.VALIDATION_MINIMUM_TOTAL_BYTES,
+                                         retention.VALIDATION_MINIMUM_FREE_BYTES, 'validation')
+        started = threading.Event()
+        real_maintain = retention.maintain_retention
+
+        def maintain(*args, **kwargs):
+            started.set()
+            return real_maintain(*args, **kwargs)
+
+        def run_maintenance():
+            return retention.run_periodic_maintenance(
+                database, policy, lock_file=root / 'retention.lock',
+                batch_limit=1000, time_budget_seconds=30)
+
+        with mock.patch.object(retention, 'maintain_retention', side_effect=maintain):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_maintenance)
+                self.assertTrue(started.wait(10), 'retention did not start')
+                t0 = time.monotonic()
+                session = self.create_manual_report_capture_session(prepare_only=True)
+                t1 = time.monotonic()
+                self.assertEqual(session.status_code, 200, session.json)
+                bound = self.client.post('/api/mobile/photo-capture-session/location',
+                    headers=self.headers(), json={
+                        'capture_session': session.json['capture_session'],
+                        'gps_lat': 28.071303, 'gps_lng': 115.539684,
+                    })
+                t2 = time.monotonic()
+                self.assertEqual(bound.status_code, 200, bound.json)
+                payload = {
+                    'site_id': 1, 'image': 'data:image/jpeg;base64,'
+                        + base64.b64encode(portrait_jpeg_bytes()).decode('ascii'),
+                    'capture_source': 'camera', 'capture_context': 'manual_report',
+                    'capture_session': session.json['capture_session'],
+                    'capture_client': 'trusted_camera_v1', 'capture_frame_orientation': 'portrait',
+                    'capture_frame_ratio': '3:4', 'capture_frame_mode': 'center_cover',
+                    '_idempotency_key': 'retention-concurrent-upload',
+                }
+                upload = self.client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+                t3 = time.monotonic()
+                replay = self.client.post('/api/mobile/upload-site-photo', headers=self.headers(), json=payload)
+                t4 = time.monotonic()
+                result = future.result(timeout=40)
+        self.assertEqual(upload.status_code, 200, upload.json)
+        self.assertTrue(upload.json['success'], upload.json)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertEqual(replay.json['id'], upload.json['id'])
+        print('RETENTION_PHOTO_TIMINGS', json.dumps({
+            'session_s': round(t1-t0, 3), 'location_s': round(t2-t1, 3),
+            'upload_s': round(t3-t2, 3), 'replay_s': round(t4-t3, 3),
+            'retention_s': result['elapsed_seconds'], 'status': result['status'],
+            'batches': result['maintenance_batches'], 'totals': result['totals'],
+        }, ensure_ascii=False))
+
+    def test_camera_render_rechecks_site_before_writing(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        original_render = app_module._create_site_photo_display_copy
+
+        def render(*args, **kwargs):
+            result = original_render(*args, **kwargs)
+            if len(args) > 2 and args[2]:
+                with app_module.get_db() as db:
+                    db.execute("UPDATE sites SET name='changed' WHERE id=1")
+            return result
+
+        with mock.patch.object(app_module, '_create_site_photo_display_copy', side_effect=render):
+            response = self.upload(portrait_jpeg_bytes(), capture_source='camera',
+                                   capture_session=session.json['capture_session'],
+                                   _idempotency_key='site-changed')
+        self.assertEqual(response.status_code, 409, response.json)
+        self.assertEqual(response.json['code'], 'CAPTURE_CONTEXT_CHANGED')
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+            self.assertIsNone(db.execute('SELECT used_at FROM photo_capture_sessions').fetchone()[0])
+        self.assertEqual(self.photo_file_counts(), (0, 0))
+
+    def test_camera_render_rechecks_site_permission_before_writing(self):
+        session = self.create_capture_session()
+        self.assertEqual(session.status_code, 200, session.json)
+        original_render = app_module._create_site_photo_display_copy
+
+        def render(*args, **kwargs):
+            result = original_render(*args, **kwargs)
+            if len(args) > 2 and args[2]:
+                with app_module.get_db() as db:
+                    db.execute('DELETE FROM user_sites WHERE user_id=2 AND site_id=1')
+            return result
+
+        with mock.patch.object(app_module, '_create_site_photo_display_copy', side_effect=render):
+            response = self.upload(portrait_jpeg_bytes(), capture_source='camera',
+                                   capture_session=session.json['capture_session'])
+        self.assertEqual(response.status_code, 403, response.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments').fetchone()[0], 0)
+            self.assertIsNone(db.execute('SELECT used_at FROM photo_capture_sessions').fetchone()[0])
+        self.assertEqual(self.photo_file_counts(), (0, 0))
 
     def test_prepared_capture_session_reuses_checkin_and_manual_report_still_binds_location(self):
         prepared = self.client.post(

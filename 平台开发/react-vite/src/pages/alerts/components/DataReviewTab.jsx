@@ -11,7 +11,10 @@ import {
 } from '@ant-design/icons';
 import { api } from '../../../services/api';
 import EChart from '../../../components/EChart';
-import { StatusStrip, WorkspaceTable, WorkspaceToolbar } from '../../../components/WorkspacePage';
+import {
+  StatusStrip, WorkspaceTable, WorkspaceToolbar,
+  formatTablePaginationTotal, standardListPagination,
+} from '../../../components/WorkspacePage';
 import { listFilterOptions, listFilterValue } from '../../../utils/listFilterOptions';
 import { nextQueueItem } from '../../audit/auditQueueNavigation';
 import { dataReviewMetric, dataReviewValue, formatReviewTime } from './dataReviewPresentation';
@@ -87,7 +90,9 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
   const [stats, setStats] = useState({ by_status: {}, by_metric: [], by_site: [], total: 0, pass_rate: 0 });
   const [loading, setLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
-  const [filters, setFilters] = useState({ level: '', status: '', metric: '', page: 1, per_page: 10 });
+  // 与「设备与物资」等列表页统一：默认 20 条/页，可选 20/50/100。
+  // 后端 /api/data-reviews 的 per_page 上限是 200，三档都合法。
+  const [filters, setFilters] = useState({ level: '', status: '', metric: '', page: 1, per_page: 20 });
   const [reviewModal, setReviewModal] = useState({ open: false, mode: 'batch', items: [], action: 'approve', reason: '', conclusion: '' });
   const [reviewProcessing, setReviewProcessing] = useState(false);
   const [reviewCommitted, setReviewCommitted] = useState(false);
@@ -144,7 +149,8 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
   // 打开编码参考时加载
   useEffect(() => { if (codeModal) loadCodes(); }, [codeModal]);
 
-  useEffect(() => { load(); loadStats(); }, [filters.page, filters.level, filters.status, filters.metric]);
+  // per_page 必须进依赖：否则切换「条/页」只改了 state，列表不会重新请求。
+  useEffect(() => { load(); loadStats(); }, [filters.page, filters.per_page, filters.level, filters.status, filters.metric]);
 
   // 溯源链
   const openTrace = async (review) => {
@@ -332,7 +338,7 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
   };
 
   const columns = [
-    { title: 'ID', dataIndex: 'id', width: 50 },
+    { title: 'ID', dataIndex: 'id', width: 90, onCell: () => ({ style: { whiteSpace: 'nowrap' } }) },
     { title: '站点', width: 130, render: (_, r) => (
       <Text strong style={{ fontSize: 12 }}>{r.site_name}</Text>
     )},
@@ -363,7 +369,7 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
       const s = MANUAL_RESULT_MAP[v];
       return <Tag color={s.color} style={{ borderRadius: 4, fontSize: 11 }}>{s.label}</Tag>;
     }},
-    { title: '操作', width: 110, render: (_, r) => (
+    { title: '操作', width: 110, fixed: 'right', render: (_, r) => (
       <Space size={0}>
       {r.status === 'smart_reviewed' || r.status === 'manual_reviewed' ? (
         <>
@@ -446,19 +452,24 @@ export default function DataReviewTab({ tokens, targetReviewId, onTargetStatus }
       <WorkspaceTable
           rowKey="id"
           columns={columns}
+          scroll={{ x: 1320 }}
           dataSource={reviews}
           loading={loading}
           rowSelection={{
             selectedRowKeys,
             onChange: setSelectedRowKeys,
           }}
-          pagination={{
+          pagination={standardListPagination({
             current: filters.page,
             pageSize: filters.per_page,
             total,
-            showSizeChanger: false,
-            onChange: (page, pageSize) => setFilters(f => ({ ...f, page, per_page: pageSize })),
-          }}
+            showTotal: formatTablePaginationTotal,
+            onChange: (page, pageSize) => setFilters(f => ({
+              ...f,
+              page: pageSize === f.per_page ? page : 1,
+              per_page: pageSize,
+            })),
+          })}
           emptyType={(filters.level || filters.status || filters.metric) ? 'filtered' : 'empty'}
           onRefresh={() => { load(); loadStats(); }}
         />

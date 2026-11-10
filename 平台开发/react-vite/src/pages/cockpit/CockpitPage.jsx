@@ -1378,7 +1378,7 @@ function SiteMonitoringView() {
                           const barColor = rate == null ? tokens.colorTextTertiary : rate >= 95 ? tokens.colorSuccess
                             : rate >= 80 ? tokens.colorWarning : tokens.colorError;
                           return (
-                            <div key={m.manager}>
+                            <div key={m.user_id ?? 'unassigned'}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                                 <Text style={{ fontSize: 11, color: tokens.colorTextSecondary }}>
                                   {m.manager}

@@ -107,7 +107,7 @@ test('workorder filters form five exhaustive groups while cards keep exact stage
     { key: 'pending', label: '待受理' },
     { key: 'in_progress', label: '进行中' },
     { key: 'reviewing', label: '待核验' },
-    { key: 'closed', label: '已完成' },
+    { key: 'closed', label: '已结束' },
   ]);
   assert.deepEqual(page.filter(rows, 'all').map(row => row.status), statuses);
   assert.deepEqual(page.filter(rows, 'pending').map(row => row.status), ['pending']);

@@ -1,15 +1,10 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const childProcess = require('node:child_process');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
 const configPath = path.resolve(__dirname, '..', 'utils', 'config.js');
-const prepareScriptPath = path.resolve(
-  __dirname, '..', '..', 'dev_scripts', 'prepare-miniprogram-local-api.ps1',
-);
 const preparedValuePattern = /const PREPARED_REAL_DEVICE_API_BASE_URL = '[^']*'; \/\/ local-api-prepared-value/;
 
 test('repository root is the only WeChat project entry', () => {
@@ -19,8 +14,6 @@ test('repository root is the only WeChat project entry', () => {
   assert.equal(rootProject.libVersion, '3.17.0');
   assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.json')), false);
   assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.config.legacy.json')), false);
-  assert.equal(fs.existsSync(path.join(root, 'project.private.config.json')), true);
-  assert.equal(fs.existsSync(path.join(root, 'miniprogram', 'project.private.config.json')), true);
 });
 
 test('miniprogram enables required component lazy loading', () => {
@@ -113,31 +106,15 @@ test('unknown account environment fails closed to the online API', () => {
   assert.equal(config.API_PROFILE, 'online');
 });
 
-test('local preparation script writes a private address and clears stale output on failure', () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'miniprogram-local-api-'));
-  const tempConfigPath = path.join(tempDir, 'config.js');
-  fs.copyFileSync(configPath, tempConfigPath);
-  try {
-    const prepared = childProcess.spawnSync('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', prepareScriptPath,
-      '-ConfigPath', tempConfigPath, '-Address', '192.168.50.23', '-Port', '5000',
-    ], { encoding: 'utf8' });
-    assert.equal(prepared.status, 0, prepared.stderr || prepared.stdout);
-    assert.match(
-      fs.readFileSync(tempConfigPath, 'utf8'),
-      /PREPARED_REAL_DEVICE_API_BASE_URL = 'http:\/\/192\.168\.50\.23:5000'/,
-    );
-
-    const rejected = childProcess.spawnSync('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', prepareScriptPath,
-      '-ConfigPath', tempConfigPath, '-Address', '203.0.113.10', '-Port', '5000',
-    ], { encoding: 'utf8' });
-    assert.notEqual(rejected.status, 0);
-    assert.match(
-      fs.readFileSync(tempConfigPath, 'utf8'),
-      /PREPARED_REAL_DEVICE_API_BASE_URL = ''/,
-    );
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+// 原测试依赖 dev_scripts/prepare-miniprogram-local-api.ps1（本机私有、仓库从未提交）
+// 且 hardcode powershell.exe，Linux CI 不可能通过。改为跨平台验证同一份契约：
+// config.js 只接受私网 IPv4 + 端口，公网地址与 localhost 一律失败关闭。
+test('prepared LAN address is accepted and non-private addresses fail closed', () => {
+  const { config } = loadConfig('android', 'develop', 'http://192.168.50.23:5000');
+  assert.equal(config.API_PROFILE, 'local');
+  assert.equal(config.BASE_URL, 'http://192.168.50.23:5000');
+  assert.throws(() => loadConfig('android', 'develop', 'http://203.0.113.10:5000'),
+    /REAL_DEVICE_LOCAL_API_NOT_PREPARED/);
+  assert.throws(() => loadConfig('android', 'develop', 'http://127.0.0.1:5000'),
+    /REAL_DEVICE_LOCAL_API_NOT_PREPARED/);
 });

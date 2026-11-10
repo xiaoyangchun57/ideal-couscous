@@ -48,6 +48,45 @@ test('remaining growth lists use the shared 20 50 100 pagination contract', () =
   assert.match(reagents, /showTotal: formatTablePaginationTotal/);
 });
 
+test('every major list uses the shared 20/50/100 pagination contract (设备与物资 reference)', () => {
+  const listPages = [
+    './pages/audit/AuditPage.jsx',
+    './pages/alerts/AlertsPage.jsx',
+    './pages/alerts/components/DataReviewTab.jsx',
+    './pages/vehicles/VehiclesPage.jsx',
+    './pages/equipment/EquipmentPage.jsx',
+    './pages/evaluation/EvaluationPage.jsx',
+    './pages/reports/ReportsPage.jsx',
+    './pages/users/UsersPage.jsx',
+    './pages/sites/SitesPage.jsx',
+    './pages/plan-schedules/PlanSchedulesPage.jsx',
+    './pages/reagents/ReagentMasterPage.jsx',
+    './pages/workorders/WorkOrdersPage.jsx',
+    './pages/archive/ArchivePage.jsx',
+  ];
+  for (const path of listPages) {
+    // 归档页把三档抽成了 ARCHIVE_PAGE_SIZES 常量，同样属于共享契约。
+    assert.match(source(path), /standardListPagination|pageSizeOptions: \[20, 50, 100\]|ARCHIVE_PAGE_SIZES/,
+      `${path} 未接入共享分页契约`);
+  }
+  // 统一审核 -> 数据审核：默认 20、改条/页会触发重新请求、不再私自关掉选择器。
+  const review = source('./pages/alerts/components/DataReviewTab.jsx');
+  assert.match(review, /per_page: 20/);
+  assert.match(review, /\[filters\.page, filters\.per_page,/);
+  assert.doesNotMatch(review, /showSizeChanger: false/);
+  // 空列表也要保留分页栏（车辆履历等功能页）。
+  const table = source('./components/WorkspacePage.jsx');
+  assert.match(table, /Boolean\(paginationConfig\)/);
+  assert.match(table, /emptyText/);
+  // 不再出现各自为政的分页大小/文案。
+  assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /pageSize: 10/);
+  assert.doesNotMatch(source('./pages/plan-schedules/PlanSchedulesPage.jsx'), /共 \$\{value\} 条/);
+  // 分页控件尺寸也要与参考页一致，不能私自缩小按钮。
+  assert.doesNotMatch(source('./pages/alerts/AlertsPage.jsx'), /size: 'small',\s+showSizeChanger: true/);
+  // 表格视图的分页配置里不得再声明私有 size（由 Table size 统一决定）。
+  assert.doesNotMatch(source('./pages/archive/ArchivePage.jsx'), /pagination=\{\{[^}]*size:/);
+});
+
 test('plans and alerts use explicit complete server pagination with latest-request guards', () => {
   const plans = source('./pages/plan-schedules/PlanSchedulesPage.jsx');
   const alerts = source('./pages/alerts/AlertsPage.jsx');
@@ -70,17 +109,6 @@ test('work orders and operation logs also recover from stale server pages', () =
   assert.match(workorders, /requestId !== orderListRequestRef\.current/);
   assert.match(equipment, /page > lastPage/);
   assert.match(equipment, /requestId !== requestRef\.current/);
-});
-
-test('major workspace lists no longer pin table bodies to page-specific viewport subtraction', () => {
-  for (const path of [
-    './pages/archive/ArchivePage.jsx',
-    './pages/evaluation/EvaluationPage.jsx',
-    './pages/reports/ReportsPage.jsx',
-    './pages/sites/SitesPage.jsx',
-  ]) {
-    assert.doesNotMatch(source(path), /WorkspaceTable[\s\S]{0,500}calc\(100vh/);
-  }
 });
 
 test('every list footer is docked at one fixed bottom slot with identical geometry', () => {
@@ -128,4 +156,51 @@ test('every list footer is docked at one fixed bottom slot with identical geomet
   // 强制单行只作用于停靠容器，窄屏仍可换行。
   assert.match(css, /:is\(\.workspace-table--fill, \.list-pagination-dock\) \.ant-table-wrapper \.ant-table-pagination\.ant-pagination \{\s*flex-wrap: nowrap;/);
   assert.match(css, /\.archive-grid-footer \.ant-pagination \{ flex-wrap: wrap; \}/);
+});
+
+test('major workspace lists no longer pin table bodies to page-specific viewport subtraction', () => {
+  for (const path of [
+    './pages/archive/ArchivePage.jsx',
+    './pages/evaluation/EvaluationPage.jsx',
+    './pages/reports/ReportsPage.jsx',
+    './pages/sites/SitesPage.jsx',
+  ]) {
+    assert.doesNotMatch(source(path), /WorkspaceTable[\s\S]{0,500}calc\(100vh/);
+  }
+});
+
+
+test('client-side lists keep the selected page size instead of pinning it back to 20', () => {
+  const hook = source('./utils/clientPagination.js');
+  assert.match(hook, /defaultPageSize: clientPage\.pageSize/);
+  assert.match(hook, /defaultCurrent: clientPage\.current/);
+  assert.match(hook, /setClientPage\(\{ current: next, pageSize: size \}\)/);
+  assert.match(hook, /typeof pagination\.onChange === 'function'/);
+  for (const path of ['./components/WorkspacePage.jsx', './components/ManagementPage.jsx']) {
+    assert.match(source(path), /useClientPagination\(pagination\)/, `${path} 未接入客户端分页状态`);
+  }
+  // 服务端分页仍由调用方控制，不能被共享层改写
+  assert.doesNotMatch(hook, /defaultPageSize:.*current:.*onChange:.*setSearchParams/);
+});
+
+test('work orders and plan schedules filter by site / person through the server', () => {
+  const orders = source('./pages/workorders/WorkOrdersPage.jsx');
+  const plans = source('./pages/plan-schedules/PlanSchedulesPage.jsx');
+  assert.match(orders, /aria-label="所属站点"/);
+  assert.match(orders, /aria-label="负责人"/);
+  assert.match(orders, /'search', 'assignee', 'level', 'status', 'site_id'/);
+  assert.match(plans, /aria-label="计划负责人"/);
+  assert.match(plans, /params\.set\('user_id', userFilter\)/);
+  const backend = readFileSync(new URL('../../backend/app.py', import.meta.url), 'utf8');
+  assert.match(backend, /site_id = request\.args\.get\('site_id'/);
+  assert.match(backend, /where\.append\('w\.site_id=\?'\)/);
+});
+
+test('unified review gets client-side site and person filters', () => {
+  const audit = source('./pages/audit/AuditPage.jsx');
+  assert.match(audit, /function collectAuditScopeOptions/);
+  assert.match(audit, /function matchesAuditScope/);
+  assert.equal((audit.match(/aria-label="审核站点"/g) || []).length, 2);
+  assert.equal((audit.match(/aria-label="审核人员"/g) || []).length, 2);
+  assert.match(audit, /flattened\.length === 0 && !siteFilter && !personFilter/);
 });
