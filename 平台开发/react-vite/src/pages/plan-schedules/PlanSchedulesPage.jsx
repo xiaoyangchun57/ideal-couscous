@@ -1324,11 +1324,12 @@ function PlanSchedulesMain() {
                     {row.tasks.length > 0 ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {row.tasks.map(task => (
-                          <div key={`${task.date}-${task.site_id}`} style={{
+                          <div key={`${task.date}-${task.plan_id}-${task.site_id}`} style={{
                             display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
                             padding: '4px 0', minWidth: 0,
                           }}>
                             <Text strong style={{ fontSize: 12 }}>{task.site_name}{scoreBadge(task.site_id)}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>任务 #{task.plan_id}</Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>{task.assignee || '未指定负责人'}</Text>
                             <Tag color={task.status === 'completed' ? 'green' : task.status === 'change_pending' ? 'gold' : task.status === 'partial' ? 'blue' : 'default'}>
                               {task.status_cn || task.status}
@@ -1339,8 +1340,9 @@ function PlanSchedulesMain() {
                         ))}
                         {(executionPackagesByDate[row.date] || []).filter(task => canApprove && task.can_handle_overdue).map(task => (
                           <div key={`package-${task.plan_id}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
-                            <Button size="small" type="link" aria-label={`催办${row.date}逾期执行`}
-                              onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>
+                            <Text type="secondary" style={{ fontSize: 11 }}>任务 #{task.plan_id}</Text>
+                            {task.can_remind_overdue && <Button size="small" type="link" aria-label={`催办${row.date}逾期执行`}
+                              onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>}
                             <Button size="small" type="link" danger aria-label={`登记${row.date}未执行原因并关闭`}
                               onClick={() => closeOverdueExecution(task)}>登记并关闭</Button>
                           </div>

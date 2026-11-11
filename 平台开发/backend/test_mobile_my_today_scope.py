@@ -291,6 +291,22 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         self.assertEqual([site['name'] for site in carryovers[0]['sites']], ['昨日遗留站'])
         self.assertEqual(carryovers[0]['sites'][0]['total'], 1)
 
+    def test_checked_out_incomplete_carryover_stays_visible_when_parent_changes(self):
+        with app_module.get_db() as db:
+            db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=13")
+            db.execute("UPDATE insp_plan_items SET check_out_time='2026-01-01 18:00:00' WHERE id=1003")
+        headers = {'Authorization': 'Bearer operator-token'}
+        home = self.client.get('/api/mobile/my-today', headers=headers)
+        execution = self.client.get('/api/mobile/today-execution', headers=headers)
+        self.assertEqual(home.status_code, 200, home.json)
+        self.assertEqual(execution.status_code, 200, execution.json)
+        self.assertIn(13, home.json['work_package']['schedule_ids'])
+        package = next(item for item in execution.json['packages'] if item['plan_id'] == 103)
+        self.assertEqual(package['schedule_status'], 'change_submitted')
+        self.assertTrue(package['sites'][0]['checked_out'])
+        detail = self.client.get('/api/mobile/execution-plans/103/sites/2', headers=headers)
+        self.assertEqual(detail.status_code, 404, detail.json)
+
     def test_completed_historical_site_stays_until_checkout_then_is_archived(self):
         db = sqlite3.connect(self.db_path)
         try:
@@ -676,12 +692,41 @@ class MobileMyTodayScopeTest(unittest.TestCase):
         today_package = next(item for item in response.json['packages'] if item['plan_id'] == 101)
         self.assertEqual(today_package['vehicle_application_id'], 1)
         self.assertEqual(today_package['vehicle_use']['id'], 1)
-        self.assertFalse(today_package['vehicle_can_return'])
+        self.assertTrue(today_package['vehicle_can_return'])
         self.assertTrue(today_package['arrival_gate']['allowed'])
         detail = self.client.get('/api/mobile/execution-plans/101/sites/1',
                                  headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(detail.status_code, 200, detail.json)
         self.assertTrue(detail.json['arrival_gate']['allowed'])
+
+    def test_carryover_and_new_plan_share_actual_holder_trip(self):
+        today = datetime.now().strftime('%Y-%m-%d')
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        with app_module.get_db() as db:
+            db.execute('UPDATE plan_schedules SET vehicle_days=? WHERE id=13', (json.dumps({yesterday: 1}),))
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,status,plan_data,vehicle_days,spare_parts,work_order_ids,version,remarks,period_start,period_end)
+                VALUES (14,2,'weekly','approved','{}',?,'[]','[]',1,'',?,?)''',
+                (json.dumps({today: 1}), today, today))
+            db.execute("INSERT INTO insp_plans VALUES (104,'新计划',2,14,?,'active',0)", (today,))
+            db.execute("INSERT INTO insp_plan_items (id,plan_id,site_id,item_name,category,frequency,execution_status) VALUES (1004,104,1,'新检查','设备','weekly','active')")
+            db.execute("INSERT INTO vehicle_applications VALUES (14,1,2,?,?,'巡检','approved','巡检计划#14用车')",
+                       (today + ' 08:00:00', today + ' 18:00:00'))
+            db.execute('''INSERT INTO plan_schedules
+                (id,user_id,schedule_type,status,plan_data,vehicle_days,spare_parts,work_order_ids,version,remarks,period_start,period_end)
+                VALUES (15,2,'weekly','approved','{}',?,'[]','[]',1,'',?,?)''',
+                (json.dumps({today: 1}), today, today))
+            db.execute("INSERT INTO insp_plans VALUES (105,'第三份计划',2,15,?,'active',0)", (today,))
+            db.execute("INSERT INTO insp_plan_items (id,plan_id,site_id,item_name,category,frequency,execution_status) VALUES (1005,105,1,'新检查','设备','weekly','active')")
+            db.execute("INSERT INTO vehicle_applications VALUES (15,1,2,?,?,'巡检','approved','巡检计划#15用车')",
+                       (today + ' 08:00:00', today + ' 18:00:00'))
+        response = self.client.get('/api/mobile/today-execution', headers={'Authorization': 'Bearer operator-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        packages = {item['plan_id']: item for item in response.json['packages']}
+        for plan_id in (103, 104, 105):
+            self.assertEqual(packages[plan_id]['vehicle_use']['id'], 1)
+            self.assertTrue(packages[plan_id]['arrival_gate']['allowed'])
+            self.assertTrue(packages[plan_id]['vehicle_use_shared'])
 
     def test_today_execution_vehicle_gate_does_not_treat_acknowledgement_as_checkout(self):
         headers = {'Authorization': 'Bearer operator-token'}
@@ -1256,15 +1301,23 @@ class MobileMyTodayScopeTest(unittest.TestCase):
                 self.assertEqual(item['review_status'], review_status)
                 self.assertEqual(item['evidence_status'], evidence_status)
 
-    def test_plan_vehicle_cannot_return_before_trip_end(self):
+    def test_plan_vehicle_can_return_while_original_task_remains_open(self):
         records = self.client.get('/api/vehicle/use-records', headers={'Authorization': 'Bearer operator-token'})
         self.assertEqual(records.status_code, 200, records.json)
         self.assertEqual(records.json[0]['plan_schedule_id'], 11)
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE vehicle_use_records ADD COLUMN return_inspection_id INTEGER')
+            db.execute('ALTER TABLE vehicle_use_records ADD COLUMN return_operator_id INTEGER')
+            db.execute('CREATE TABLE vehicle_inspections (id INTEGER PRIMARY KEY, vehicle_id INTEGER, inspection_type TEXT, overall_status TEXT)')
+            db.execute("INSERT INTO vehicle_inspections VALUES (1,1,'return','normal')")
         response = self.client.post('/api/vehicle/use-records/1/return',
                                     headers={'Authorization': 'Bearer operator-token'},
-                                    json={'end_mileage': 12001})
-        self.assertEqual(response.status_code, 409, response.json)
-        self.assertIn('计划行程尚未结束', response.json['error'])
+                                    json={'end_mileage': 12001, 'return_inspection_id': 1})
+        self.assertEqual(response.status_code, 200, response.json)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM vehicle_use_records WHERE id=1').fetchone()[0], 'returned')
+            self.assertEqual(db.execute('SELECT status FROM vehicle_applications WHERE id=1').fetchone()[0], 'returned')
+            self.assertGreater(db.execute("SELECT COUNT(*) FROM insp_plan_items WHERE plan_id=101 AND result IS NULL").fetchone()[0], 0)
 
 
 if __name__ == '__main__':

@@ -31,9 +31,12 @@ function hasExactTarget(target) {
 }
 
 function sitePhase(site) {
-  if (site.checked_out) return { phase: 'closed', text: '已离站', tone: 'success' };
   const total = Number(site.total);
   const completed = Number(site.completed);
+  if (site.checked_out && total > 0 && completed < total) {
+    return { phase: 'in_progress', text: '已离站，待补检查项', tone: 'warning' };
+  }
+  if (site.checked_out) return { phase: 'closed', text: '已离站', tone: 'success' };
   if (site.checked_in && total > 0 && completed >= total) {
     return { phase: 'ready_to_leave', text: '待离站', tone: 'warning' };
   }
@@ -85,6 +88,10 @@ function buildPackageOption(pkg) {
   return {
     executionPlanId: positiveId(source.plan_id),
     scheduleId: positiveId(source.schedule_id),
+    scheduleStatus: source.schedule_status === undefined ? 'approved' : source.schedule_status,
+    scheduleStatusLabel: source.schedule_id && source.schedule_status !== undefined && source.schedule_status !== 'approved'
+      ? ({ modifying: '父计划变更中', submitted: '父计划待审批', rejected: '父计划已退回',
+        draft: '父计划草稿', cancelled: '父计划已取消' }[source.schedule_status] || '父计划不可用') : '',
     workDate: String(source.work_date || ''),
     planType: source.schedule_type || 'inspection',
     planTypeLabel: TYPE_LABELS[source.schedule_type] || '巡检',

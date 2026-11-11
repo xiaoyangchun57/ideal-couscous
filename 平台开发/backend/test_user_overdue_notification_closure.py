@@ -326,23 +326,86 @@ class UserOverdueNotificationClosureTest(unittest.TestCase):
             self.assertEqual(items[2]['execution_status'], 'cancelled')
             self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'cancelled')
 
-    def test_parent_schedule_change_blocks_remind_and_close_without_side_effects(self):
+    def test_parent_schedule_change_allows_recorded_close_and_idempotent_retry(self):
         with app_module.get_db() as db:
             db.execute("UPDATE plan_schedules SET status='change_submitted' WHERE id=20")
-            before = {
-                'notifications': db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0],
-                'events': db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0],
-            }
+            db.execute("INSERT INTO vehicle_applications VALUES (1,2,'approved')")
+            db.execute("INSERT INTO operation_attachments (id,site_id,source_id,uploader_id) VALUES (9,1,101,2)")
         reminded = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
                                     json={'action': 'remind'})
         closed = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
-                                  json={'action': 'close', 'reason': '不应写入'})
-        self.assertEqual((reminded.status_code, closed.status_code), (409, 409))
+                                  json={'action': 'close', 'reason': '道路封闭'})
+        retried = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                   json={'action': 'close', 'reason': '道路封闭'})
+        self.assertEqual((reminded.status_code, closed.status_code, retried.status_code), (409, 200, 200))
+        self.assertTrue(retried.json['already_closed'])
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'cancelled')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM insp_plan_items WHERE execution_status='cancelled'").fetchone()[0], 2)
+            self.assertEqual(tuple(db.execute('SELECT result,execution_status FROM insp_plan_items WHERE id=101').fetchone()), ('已完成', 'active'))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM operation_attachments WHERE id=9').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT status FROM vehicle_applications WHERE id=1').fetchone()[0], 'approved')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='overdue_closed'").fetchone()[0], 1)
+
+    def test_closed_task_remains_in_plan_detail_with_original_counts_and_reason(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE insp_plan_items ADD COLUMN check_out_time TEXT')
+        closed = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                  json={'action': 'close', 'reason': '道路封闭'})
+        self.assertEqual(closed.status_code, 200, closed.json)
+        with app_module.get_db() as db:
+            rows = app_module._ps_execution_site_rows(db, 20, 'approved')
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row['status'], row['status_cn'], row['completed_items'], row['total_items']),
+                         ('closed', '登记结束', 1, 3))
+        self.assertIn('道路封闭', row['close_reason'])
+        self.assertEqual(row['attention'], row['close_reason'])
+        self.assertFalse(row['can_close_overdue'])
+        self.assertFalse(row['can_remind_overdue'])
+        self.assertFalse(row['overdue'])
+        self.assertEqual(app_module._ps_schedule_execution_status('approved', 'pending', rows),
+                         {'execution_status': 'closed', 'execution_status_cn': '登记结束'})
+        mixed = rows + [{'status': 'completed'}]
+        self.assertEqual(app_module._ps_schedule_execution_status('approved', 'pending', mixed)['execution_status'],
+                         'partial')
+
+    def test_close_completed_items_without_departure_preserves_results(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE insp_plan_items ADD COLUMN check_out_time TEXT')
+            db.execute("UPDATE insp_plan_items SET result='已完成' WHERE plan_id=10")
+        closed = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                  json={'action': 'close', 'reason': '未正常离站'})
+        self.assertEqual(closed.status_code, 200, closed.json)
+        self.assertEqual(closed.json['cancelled_items'], 0)
+        with app_module.get_db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM insp_plan_items WHERE result='已完成' AND execution_status='active'").fetchone()[0], 3)
+
+    def test_close_rejects_normally_completed_active_plan(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE insp_plan_items ADD COLUMN check_out_time TEXT')
+            db.execute("UPDATE insp_plan_items SET result='已完成', check_out_time='2026-01-01 18:00:00' WHERE plan_id=10")
+        closed = self.client.post('/api/insp-plans/10/overdue-action', headers=self.headers(),
+                                  json={'action': 'close', 'reason': '误操作'})
+        self.assertEqual(closed.status_code, 409, closed.json)
         with app_module.get_db() as db:
             self.assertEqual(db.execute('SELECT status FROM insp_plans WHERE id=10').fetchone()[0], 'active')
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM insp_plan_items WHERE execution_status='cancelled'").fetchone()[0], 0)
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM notifications').fetchone()[0], before['notifications'])
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM timeline_events').fetchone()[0], before['events'])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM timeline_events WHERE event_type='overdue_closed'").fetchone()[0], 0)
+
+    def test_plan_detail_exposes_exact_unfinished_execution_for_admin_close(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE insp_plan_items ADD COLUMN check_out_time TEXT')
+            db.execute("UPDATE insp_plan_items SET result='已完成' WHERE plan_id=10")
+            db.execute("INSERT INTO insp_plans VALUES (11,2,'原运维','另一个执行任务','2026-01-01','active',20)")
+            db.execute("INSERT INTO insp_plan_items (id,plan_id,result,execution_status,site_id) VALUES (103,11,NULL,'active',1)")
+            rows = app_module._ps_execution_site_rows(db, 20, 'change_submitted')
+            self.assertEqual({row['plan_id'] for row in rows}, {10, 11})
+            self.assertTrue(all(row['can_close_overdue'] for row in rows))
+            self.assertTrue(all(not row['can_remind_overdue'] for row in rows))
+            db.execute("UPDATE insp_plan_items SET check_out_time='2026-01-01 18:00:00' WHERE plan_id=10")
+            rows = app_module._ps_execution_site_rows(db, 20, 'approved')
+            self.assertFalse(next(row for row in rows if row['plan_id'] == 10)['can_close_overdue'])
+            self.assertTrue(next(row for row in rows if row['plan_id'] == 11)['can_close_overdue'])
 
     def test_notification_gets_are_read_only_and_background_maintenance_is_idempotent(self):
         with app_module.get_db() as db:
