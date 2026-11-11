@@ -328,7 +328,7 @@ const originals = {
     const reportPage = createPage();
     seedStation(reportPage);
     reportPage.data.reportSheet = {
-      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '',
+      open: true, siteId: 20, siteName: '青云站', sites: [{ id: 20, name: '青云站' }], typeIndex: 1, description: '',
       photos: [], photoSiteId: null, uploading: false, submitting: false
     };
     let reportWrites = 0;
@@ -383,7 +383,7 @@ const originals = {
     assert.equal(reportRefreshes, 1, 'only a confirmed work order refreshes the station data');
 
     reportPage.data.reportSheet = {
-      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '水泵异响',
+      open: true, siteId: 20, siteName: '青云站', sites: [{ id: 20, name: '青云站' }], typeIndex: 1, description: '水泵异响',
       photos: ['/uploads/site_photos/equipment.jpg'], photoSiteId: 20,
       uploading: false, submitting: false
     };

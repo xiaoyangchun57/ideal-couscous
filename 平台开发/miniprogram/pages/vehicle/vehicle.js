@@ -505,7 +505,7 @@ Page({
   onOpenReturn() {
     if (!this._ensureWritable()) return;
     const use = this.data.activeUse; if (!use) { wx.showToast({ title: '未找到唯一进行中的行程', icon: 'none' }); return; }
-    if (!use.can_return) { wx.showToast({ title: '计划行程未结束，到站打卡会继续记录行程节点', icon: 'none' }); return; }
+    if (!use.can_return) { wx.showToast({ title: '当前行程不可还车，请刷新核对最新状态', icon: 'none' }); return; }
     const requestId = (this._sheetOpenRequestId || 0) + 1;
     this._sheetOpenRequestId = requestId;
     const authorityRequestId = this._loadRequestId;
@@ -521,8 +521,8 @@ Page({
     });
   },
   onVehiclePrimaryAction() {
-    if (this.data.activeUse && this.data.activeUse.needs_extension) this.onOpenExtension();
-    else if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
+    if (this.data.activeUse && this.data.activeUse.can_return) this.onOpenReturn();
+    else if (this.data.activeUse && this.data.activeUse.needs_extension) this.onOpenExtension();
     else if (this.data.activeUse && this.data.activeUse.plan_status === 'unknown') {
       wx.showToast({ title: this.data.activeUse.plan_issue_message || '关联计划数据异常，请联系管理员核对', icon: 'none' });
     }
@@ -610,7 +610,7 @@ Page({
   onSubmitReturn() {
     if (!this._ensureWritable()) return;
     const use = this.data.activeUse; const sheet = this.data.returnSheet; const mileage = Number(sheet.mileage);
-    if (use && !use.can_return) { wx.showToast({ title: '计划行程未结束，请先发起计划变更', icon: 'none' }); return; }
+    if (use && !use.can_return) { wx.showToast({ title: '当前行程不可还车，请刷新核对最新状态', icon: 'none' }); return; }
     if (!use || !Number.isFinite(mileage) || mileage < Number(use.start_mileage || 0)) { wx.showToast({ title: '结束里程不能小于出车里程', icon: 'none' }); return; }
     const blocked = sheet.items.some(item => item.status === 'blocked'); const attention = sheet.items.some(item => item.status === 'attention');
     if ((blocked || attention) && !sheet.remarks.trim()) { wx.showToast({ title: '发现异常时请填写现场说明', icon: 'none' }); return; }

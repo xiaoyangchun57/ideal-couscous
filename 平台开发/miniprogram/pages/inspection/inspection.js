@@ -51,6 +51,8 @@ function emptyInspectionReportSheet(siteId, siteName) {
     open: false,
     siteId: Number.isInteger(normalizedSiteId) && normalizedSiteId > 0 ? normalizedSiteId : null,
     siteName: String(siteName || ''),
+    sites: [],
+    siteIndex: 0,
     typeIndex: 0,
     description: '',
     photos: [],
@@ -296,6 +298,7 @@ function decoratePackageResources(pkg) {
 
 Page({
   data: {
+    panelKeyboardHeight: 0,
     viewMode: 'execute',
     // ===== 6.5.1 执行包与站点选择阶段 =====
     viewPhase: 'entry',       // entry | departure | inspection
@@ -1061,6 +1064,10 @@ Page({
       this.setData({ entryTargetMessage: '目标已变化，请重新选择', entryCanEnter: false });
       return;
     }
+    if (packageTarget.scheduleId && packageTarget.scheduleStatus !== undefined && packageTarget.scheduleStatus !== 'approved') {
+      wx.showModal({ title: '计划暂不可执行', content: '父计划正在变更或已失效，请联系管理员处理；已有检查和用车记录会保留。', showCancel: false });
+      return;
+    }
     this.setData({ entryEntering: true });
     const requestId = (this._entryRequestId || 0) + 1;
     this._entryRequestId = requestId;
@@ -1152,7 +1159,8 @@ Page({
       const localCheckin = localStore.getSiteCheckIn(siteId);
       const localCheckinMatchesPlan = localCheckin
         && Number(localCheckin.data && localCheckin.data.plan_id) === Number(pkgId);
-      const alreadyOnSite = currentSite && currentSite.checked_in && !currentSite.checked_out
+      const alreadyOnSite = currentSite && currentSite.checked_in
+        && (!currentSite.checked_out || Number(currentSite.completed) < Number(currentSite.total))
         && !currentSite.rework_checkin_required;
       const selectedPlanReady = String(target.source || '').startsWith('plan_detail')
         && verifiedPkg.arrival_gate && verifiedPkg.arrival_gate.allowed === true;
@@ -1817,12 +1825,16 @@ Page({
       return;
     }
     if (!pkg.vehicle_application_id) { wx.showToast({ title: '未找到本计划获批的用车安排', icon: 'none' }); return; }
+    if (pkg.vehicle_use && !pkg.vehicle_use.returned_at) {
+      wx.showToast({ title: '沿用当前持车行程，无需重复出车', icon: 'none' });
+      return;
+    }
     if (pkg.vehicle_needs_extension) {
       if (this._showDepartureActionBlocked('extend')) return;
       wx.showModal({
         title: '用车安排已超期',
-        content: '结转巡检尚未完成，请先到“我的用车”延续本次用车截止日期。',
-        confirmText: '立即延续',
+        content: '预计用车时间已到，可到“我的用车”更新预计时间。已有任务和持车记录会保留。',
+        confirmText: '查看用车',
         success: result => {
           if (!result.confirm) return;
           const snapshot = this._beginDepartureAction('extend');
@@ -2283,41 +2295,60 @@ Page({
   onSelectSite(e) {
     const id = Number(e.currentTarget.dataset.id);
     const reportSheet = this.data.reportSheet || emptyInspectionReportSheet();
-    if (normalizeReportPhotoItems(reportSheet).length && Number(reportSheet.siteId) !== id) {
-      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
-      return;
-    }
-    if (Number(reportSheet.siteId) !== id) {
+    const hasDraft = normalizeReportPhotoItems(reportSheet).length
+      || String(reportSheet.description || '').trim() || reportSheet.uploading || reportSheet.submitting;
+    if (!hasDraft && Number(reportSheet.siteId) !== id) {
       this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
       this._reportTrustedCameraRequest = null;
     }
     this.setData({ selSiteId: id, stationStage: null, reagents: [], reagentAction: '加载中…',
       categories: [], total: 0, completed: 0, completionPercent: 0, progressFillStyle: 'width:0%', abnormalCount: 0,
       photoProgress: { req: 0, taken: 0, missing: 0 },
-      reportSheet: Number(reportSheet.siteId) === id
+      reportSheet: hasDraft || Number(reportSheet.siteId) === id
         ? reportSheet : emptyInspectionReportSheet(id),
     });
     this.loadTasks(id);
   },
 
   onOpenReport() {
+    if (this.data.reportSheet && this.data.reportSheet.open) return;
     const siteId = Number(this.data.selSiteId);
     if (!siteId) return;
-    const site = this.data.selSite || this.data.site
-      || (this.data.sites || []).find(row => Number(row.id || row.site_id) === siteId) || {};
+    const site = (this.data.sites || []).find(row => Number(row.id || row.site_id) === siteId)
+      || (Number((this.data.selSite || {}).id) === siteId ? this.data.selSite : {}) || {};
     const current = this.data.reportSheet || emptyInspectionReportSheet();
     const sameSite = Number(current.siteId) === siteId;
-    if (!sameSite && normalizeReportPhotoItems(current).length) {
-      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
-      return;
-    }
-    const next = sameSite ? Object.assign({}, current) : emptyInspectionReportSheet(siteId);
+    const hasDraft = normalizeReportPhotoItems(current).length || String(current.description || '').trim();
+    const next = sameSite || hasDraft ? Object.assign({}, current) : emptyInspectionReportSheet(siteId);
+    next.restored = !!hasDraft;
     next.open = true;
-    next.siteId = siteId;
-    next.siteName = String(site.name || site.site_name || next.siteName || '');
+    if (!hasDraft || sameSite) {
+      next.siteId = siteId;
+      next.siteName = String(site.name || site.site_name || next.siteName || '');
+    }
+    if (!(next.sites || []).length && next.siteId && next.siteName) {
+      next.sites = [{ id: Number(next.siteId), name: next.siteName }];
+    }
     next.uploading = false;
     next.submitting = false;
     this.setData({ reportSheet: next });
+    const version = this._reportDraftVersion || 0;
+    api.sites().then(rows => {
+      const sheet = this.data.reportSheet || {};
+      if (this._reportPageUnloaded || !sheet.open || (this._reportDraftVersion || 0) !== version) return;
+      const sites = (Array.isArray(rows) ? rows : []).map(row => ({
+        id: Number(row.id), name: String(row.name || row.code || '').trim(),
+      })).filter(row => Number.isInteger(row.id) && row.id > 0 && row.name);
+      const index = sites.findIndex(row => row.id === Number(sheet.siteId));
+      this.setData({ 'reportSheet.sites': sites, 'reportSheet.siteIndex': index,
+        'reportSheet.siteId': index >= 0 ? sheet.siteId : null,
+        'reportSheet.siteName': index >= 0 ? sheet.siteName : '' });
+    }).catch(() => {
+      if (!this._reportPageUnloaded && this.data.reportSheet.open
+          && (this._reportDraftVersion || 0) === version) {
+        wx.showToast({ title: '授权站点加载失败，请关闭后重试', icon: 'none' });
+      }
+    });
   },
   onCloseReport() {
     const sheet = this.data.reportSheet || {};
@@ -2325,17 +2356,41 @@ Page({
       wx.showToast({ title: sheet.submitting ? '正在提交上报，请稍候' : '照片上传中，请稍候', icon: 'none' });
       return;
     }
-    this.setData({ 'reportSheet.open': false });
+    this.setData({ 'reportSheet.open': false, panelKeyboardHeight: 0 });
   },
-  onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
-  onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value }); },
+  onPanelKeyboardHeightChange(e) {
+    this.setData({ panelKeyboardHeight: Math.max(0, Number(e.detail.height) || 0) });
+  },
+  onReportType(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
+  onReportDescription(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.description': e.detail.value }); },
+  onReportSite(e) {
+    const sheet = this.data.reportSheet || {};
+    const index = Number(e.detail.value);
+    const selected = (sheet.sites || [])[index];
+    if (!selected || sheet.submitting || selected.id === Number(sheet.siteId)) return;
+    const sourceSiteId = Number(sheet.siteId);
+    const draftVersion = this._reportDraftVersion || 0;
+    const apply = () => {
+      const current = this.data.reportSheet || {};
+      if (this._reportPageUnloaded || !current.open || current.submitting
+          || (this._reportDraftVersion || 0) !== draftVersion
+          || Number(current.siteId) !== sourceSiteId
+          || !(current.sites || []).some(site => site.id === selected.id)) return;
+      this.setData({ 'reportSheet.siteId': selected.id, 'reportSheet.siteName': selected.name,
+        'reportSheet.siteIndex': index });
+    };
+    if (!normalizeReportPhotoItems(sheet).length && !sheet.uploading
+        && !String(sheet.description || '').trim()) return apply();
+    wx.showModal({ title: '确认更正站点', content: `将上报站点更正为${selected.name}？已拍照片和填写内容会保留。`,
+      success: result => { if (result.confirm) apply(); } });
+  },
 
   reportPhotoContext(options) {
     const sheet = this.data.reportSheet || {};
     const siteId = Number(sheet.siteId);
     if (sheet.submitting || sheet.uploading) return null;
-    if (!siteId || siteId !== Number(this.data.selSiteId)) {
-      wx.showToast({ title: '当前上报站点已变化，请重新进入上报', icon: 'none' });
+    if (!siteId || !(sheet.sites || []).some(site => site.id === siteId)) {
+      wx.showToast({ title: '请选择授权站点', icon: 'none' });
       return null;
     }
     const photoItems = normalizeReportPhotoItems(sheet);
@@ -2356,8 +2411,6 @@ Page({
   reportPhotoContextIsCurrent(context) {
     const sheet = this.data.reportSheet || {};
     return !this._reportPageUnloaded && !!sheet.open
-      && Number(sheet.siteId) === context.siteId
-      && Number(this.data.selSiteId) === context.siteId
       && (this._reportDraftVersion || 0) === context.draftVersion;
   },
 
@@ -2369,7 +2422,7 @@ Page({
       wx.showLoading({ title: '上传中', mask: true });
       const pending = savedPaths.map((path, index) => {
         const idempotencyKey = photoIdempotencyKey(context.siteId, path, index);
-        return createPendingReportPhoto(path, idempotencyKey, metadata);
+        return Object.assign(createPendingReportPhoto(path, idempotencyKey, metadata), { uploadSiteId: context.siteId });
       });
       const replaced = context.replaceKey
         ? context.photoItems.find(item => item.key === context.replaceKey) : null;
@@ -2384,7 +2437,7 @@ Page({
   uploadReportPhotoItems(pending, context) {
     return Promise.allSettled(pending.map(item => fileToBase64(item.localPath)
       .then(image => api.uploadSitePhoto(
-        context.siteId, image, item.idempotencyKey, item.metadata
+        item.uploadSiteId || context.siteId, image, item.idempotencyKey, item.metadata
       )))).then(results => {
         const successful = results.filter(result => (
           result.status === 'fulfilled' && result.value && result.value.url
@@ -2403,7 +2456,7 @@ Page({
         }));
         const currentItems = normalizeReportPhotoItems(this.data.reportSheet);
         const merged = currentItems.map(item => outcomeByKey.get(item.key) || item);
-        this.setData(reportPhotoSheetPatch(merged, context.siteId));
+        this.setData(reportPhotoSheetPatch(merged, this.data.reportSheet.siteId));
         const failed = merged.filter(item => outcomeByKey.has(item.key) && item.status === 'failed');
         pending.forEach(item => {
           const outcome = outcomeByKey.get(item.key);
@@ -2710,9 +2763,8 @@ Page({
     }
     if (rs.uploading) return Promise.resolve({ busy: true });
     const siteId = Number(rs.siteId);
-    if (!siteId || siteId !== Number(this.data.selSiteId)
-        || Number(rs.photoSiteId) !== siteId) {
-      wx.showToast({ title: '照片与当前站点不一致，请重新上传', icon: 'none' });
+    if (!siteId || !(rs.sites || []).some(site => site.id === siteId)) {
+      wx.showToast({ title: '请选择授权站点', icon: 'none' });
       return Promise.resolve({ invalid: true });
     }
     const preparedPhotos = prepareReportPhotoStoragePaths(rs.photos);
@@ -2742,7 +2794,7 @@ Page({
           return { success: true, orderNo, stale: true };
         }
         this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
-        this.setData({ reportSheet: emptyInspectionReportSheet() });
+        this.setData({ reportSheet: emptyInspectionReportSheet(), panelKeyboardHeight: 0 });
         wx.showModal({ title: '异常已上报', content: `已生成工单：${orderNo}`, showCancel: false });
         this.loadTasks(siteId);
         return { success: true, orderNo };
@@ -2777,7 +2829,8 @@ Page({
         || localStore.getPendingSubmit(item.item_id, item.plan_id)).length, 0);
     const localCheckinPending = !!(checkin && checkin.syncStatus === 'pending');
     const stationSyncPending = localCheckinPending || pendingItems > 0;
-    const stationStage = site && site.checked_out
+    const historicalIncomplete = site && site.checked_out && this.data.total > this.data.completed;
+    const stationStage = site && site.checked_out && !historicalIncomplete
       ? { code: 'checked_out', label: '已离站', cls: 'station-stage-ok' }
       : !checkin && !this.hasSiteCheckIn(siteId)
       ? { code: 'unvisited', label: '待到站', cls: 'station-stage-wait' }
@@ -2862,8 +2915,15 @@ Page({
     const site = this.data.site;
     const planId = this.data.selectedPlanId;
     if (!site || !planId || this.data.checkingOut) return;
+    if (site.checked_out) return;
+    if (this.data.viewMode !== 'execute' || !this.hasSiteCheckIn(site.id)) return;
+    this.refreshStationStage(this.data.selSiteId);
     if (this.data.stationSyncPending) {
       wx.showToast({ title: '本站仍有待同步记录，请先完成同步', icon: 'none' });
+      return;
+    }
+    if (!this.data.total || this.data.completed !== this.data.total) {
+      wx.showToast({ title: '请先完成本站检查项', icon: 'none' });
       return;
     }
     this.setData({ checkingOut: true });
@@ -2879,7 +2939,8 @@ Page({
         ? orderedIds.map(id => sites.find(item => Number(item.id) === id || Number(item.site_id) === id)).filter(Boolean)
         : sites;
       const currentIdx = routeSites.findIndex(item => Number(item.id) === Number(site.id));
-      const nextSite = routeSites.find((item, index) => index > currentIdx && !item.checked_out && item.phase !== 'closed');
+      const nextSite = routeSites.find((item, index) => index > currentIdx
+        && (!item.checked_out || Number(item.completed) < Number(item.total)) && item.phase !== 'closed');
       const stationOutcome = nextSite ? {
         type: 'next_site',
         siteId: nextSite.id || nextSite.site_id,
@@ -2905,7 +2966,8 @@ Page({
       return;
     }
     const nextSite = (this.data.sites || []).find(item => Number(item.id) === nextSiteId || Number(item.site_id) === nextSiteId);
-    if (!nextSite || nextSite.checked_out || nextSite.phase === 'closed') {
+    if (!nextSite || (nextSite.checked_out && !(Number(nextSite.completed) < Number(nextSite.total)))
+        || nextSite.phase === 'closed') {
       wx.showToast({ title: '下一站已变化，请刷新后重试', icon: 'none' });
       return;
     }

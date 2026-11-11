@@ -296,6 +296,31 @@ def record_photo_quality(
     }
 
 
+def photo_quality_deductions(db, assignee_ids, start_at, end_at, allowed_site_ids=None):
+    """Return current deductions without loading the per-photo audit history."""
+    ids = sorted({int(value) for value in assignee_ids})
+    if not ids or not all(table_exists(db, name) for name in (
+            'operation_attachments', 'insp_plan_items', 'insp_plans', 'photo_quality_evaluations')):
+        return {}
+    sites = None if allowed_site_ids is None else sorted({int(value) for value in allowed_site_ids})
+    if sites == []:
+        return {}
+    item_link = 'COALESCE(a.item_id,a.source_id)' if column_exists(db, 'operation_attachments', 'item_id') else 'a.source_id'
+    site_clause = '' if sites is None else f" AND i.site_id IN ({','.join('?' for _ in sites)})"
+    rows = db.execute(f'''SELECT q.responsible_user_id, COUNT(*) AS deduction
+        FROM operation_attachments a
+        JOIN insp_plan_items i ON i.id={item_link}
+        JOIN insp_plans p ON p.id=i.plan_id
+        JOIN photo_quality_evaluations q ON q.id=(SELECT MAX(id)
+            FROM photo_quality_evaluations WHERE attachment_id=a.id)
+        WHERE a.source_type='inspection' AND COALESCE(a.is_deleted,0)=0
+          AND q.responsible_user_id IN ({','.join('?' for _ in ids)})
+          AND q.inspection_completed_at>=? AND q.inspection_completed_at<=?
+          AND q.status='unqualified' AND q.attribution_status='reliable'{site_clause}
+        GROUP BY q.responsible_user_id''', (*ids, start_at, end_at, *(sites or []))).fetchall()
+    return {row['responsible_user_id']: row['deduction'] for row in rows}
+
+
 def current_photo_quality(
         db, assignee_id, start_at, end_at, allowed_site_ids=None, limit=None,
         include_unknown=False):

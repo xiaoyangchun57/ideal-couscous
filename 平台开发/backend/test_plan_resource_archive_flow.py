@@ -2666,6 +2666,44 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             locks = db.execute("SELECT COUNT(*) FROM vehicle_applications WHERE vehicle_id=1 AND status='approved'").fetchone()[0]
         self.assertEqual(locks, 1)
 
+    def test_holder_can_approve_another_plan_without_duplicate_checkout(self):
+        self.add_submitted_schedule(11, user_id=2)
+        self.add_submitted_schedule(12, user_id=2)
+        self.add_submitted_schedule(13, user_id=2)
+        self.add_submitted_schedule(14, user_id=2)
+        first = self.client.post('/api/plan-schedules/11/approve', headers=self.headers('manager-token'))
+        self.assertEqual(first.status_code, 200, first.json)
+        with self.db() as db:
+            app_id = db.execute("SELECT id FROM vehicle_applications WHERE reason LIKE '%#11用车%'").fetchone()[0]
+            db.execute("INSERT INTO vehicle_use_records (application_id,start_mileage,checked_out_at,status) VALUES (?,1000,?,'checked_out')",
+                       (app_id, self.business_timestamp()))
+            db.execute("UPDATE vehicles SET status='in_use' WHERE id=1")
+        second = self.client.post('/api/plan-schedules/12/approve', headers=self.headers('manager-token'))
+        self.assertEqual(second.status_code, 200, second.json)
+        third = self.client.post('/api/plan-schedules/13/approve', headers=self.headers('manager-token'))
+        self.assertEqual(third.status_code, 200, third.json)
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_use_records WHERE returned_at IS NULL').fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM vehicle_applications WHERE status='approved'").fetchone()[0], 3)
+            self.assertEqual(db.execute('SELECT status FROM plan_schedules WHERE id=12').fetchone()[0], 'approved')
+            self.assertEqual(db.execute('SELECT status FROM plan_schedules WHERE id=13').fetchone()[0], 'approved')
+            use_id = db.execute('SELECT id FROM vehicle_use_records WHERE application_id=?', (app_id,)).fetchone()[0]
+            db.execute("INSERT INTO vehicle_inspections VALUES (66,1,'return','normal')")
+            db.execute("""INSERT INTO vehicle_applications
+                (vehicle_id,applicant_id,start_at,end_at,destination,reason,status)
+                VALUES (1,3,? || ' 08:00:00',? || ' 18:00:00','巡检','其他人预约','approved')""",
+                (self.day(), self.day()))
+        blocked = self.client.post('/api/plan-schedules/14/approve', headers=self.headers('manager-token'))
+        self.assertEqual(blocked.status_code, 409, blocked.json)
+        returned = self.client.post(f'/api/vehicle/use-records/{use_id}/return',
+                                    headers=self.headers('operator-token'),
+                                    json={'end_mileage': 1010, 'return_inspection_id': 66})
+        self.assertEqual(returned.status_code, 200, returned.json)
+        with self.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM vehicle_use_records').fetchone()[0], 1)
+            self.assertEqual(tuple(db.execute('SELECT status,start_mileage,end_mileage FROM vehicle_use_records WHERE id=?',
+                                              (use_id,)).fetchone()), ('returned', 1000, 1010))
+
     def test_plan_vehicle_lock_does_not_prefix_match_another_schedule(self):
         self.add_submitted_schedule(1)
         with self.db() as db:
@@ -3400,6 +3438,53 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
             'end_at': '2099-01-02 18:00:00', 'reason': 'Other operator trip',
         })
         self.assertEqual(rebooked.status_code, 201, rebooked.json)
+
+    def test_recorded_closure_matches_list_and_detail_for_all_closed_and_mixed_tasks(self):
+        with self.db() as db:
+            db.execute("ALTER TABLE insp_plan_items ADD COLUMN supplement_required_at TEXT DEFAULT ''")
+        for schedule_id, mixed in ((71, False), (72, True)):
+            with self.subTest(mixed=mixed):
+                self.add_submitted_schedule(schedule_id)
+                closed_plan_id = schedule_id * 10
+                old_day = (BUSINESS_NOW - timedelta(days=1)).strftime('%Y-%m-%d')
+                with self.db() as db:
+                    db.execute("UPDATE plan_schedules SET status='approved',tasks_generated=1 WHERE id=?", (schedule_id,))
+                    db.execute("""INSERT INTO insp_plans
+                        (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                        VALUES (?,'待结束','Operator',2,?,'active',?)""", (closed_plan_id, old_day, schedule_id))
+                    db.execute("""INSERT INTO insp_plan_items
+                        (plan_id,site_id,item_name,result,execution_status) VALUES (?,1,'未完成',NULL,'active')""",
+                        (closed_plan_id,))
+                    if mixed:
+                        db.execute("""INSERT INTO insp_plans
+                            (id,plan_name,assignee,assignee_id,generate_date,status,plan_schedule_id)
+                            VALUES (?,'已完成','Operator',2,?,'completed',?)""",
+                            (closed_plan_id + 1, old_day, schedule_id))
+                        db.execute("""INSERT INTO insp_plan_items
+                            (plan_id,site_id,item_name,result,execution_status,check_out_time)
+                            VALUES (?,1,'已完成','normal','active',?)""",
+                            (closed_plan_id + 1, old_day + ' 18:00:00'))
+                closed = self.client.post(f'/api/insp-plans/{closed_plan_id}/overdue-action',
+                                          headers=self.headers('manager-token'),
+                                          json={'action': 'close', 'reason': '道路封闭'})
+                self.assertEqual(closed.status_code, 200, closed.json)
+                detail = self.client.get(f'/api/plan-schedules/{schedule_id}', headers=self.headers('manager-token'))
+                listed = self.client.get('/api/plan-schedules', headers=self.headers('manager-token'))
+                self.assertEqual((detail.status_code, listed.status_code), (200, 200))
+                list_row = next(row for row in listed.json if row['id'] == schedule_id)
+                expected = 'partial' if mixed else 'closed'
+                self.assertEqual((list_row['execution_status'], detail.json['execution_status']), (expected, expected))
+                summary = list_row['execution_summary']
+                self.assertEqual((summary['total_tasks'], summary['completed_tasks'], summary['closed_tasks']),
+                                 (2 if mixed else 1, 1 if mixed else 0, 1))
+                tasks = detail.json['generated_site_tasks']
+                self.assertEqual(sum(row['total_items'] for row in tasks), 2 if mixed else 1)
+                self.assertEqual(sum(row['completed_items'] for row in tasks), 1 if mixed else 0)
+                ended = next(row for row in tasks if row['plan_id'] == closed_plan_id)
+                self.assertEqual(ended['status'], 'closed')
+                self.assertIn('道路封闭', ended['close_reason'])
+                self.assertFalse(ended['can_close_overdue'])
+                self.assertFalse(ended['can_remind_overdue'])
 
     def test_completed_items_without_checkout_do_not_complete_the_schedule_execution(self):
         self.add_submitted_schedule(20)

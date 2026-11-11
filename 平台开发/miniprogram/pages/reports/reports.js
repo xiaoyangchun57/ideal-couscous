@@ -50,6 +50,7 @@ function photoIdempotencyKey(siteId, path, index) {
 
 Page({
   data: {
+    panelKeyboardHeight: 0,
     loading: true, reports: [], filter: '', detail: null,
     filters: ['全部', '待处理', '已核实', '已解决', '已归档'],
     reportTypes: REPORT_TYPES,
@@ -107,6 +108,10 @@ Page({
     this.setData({ filter: statuses[index] || '' });
   },
 
+  onPanelKeyboardHeightChange(e) {
+    this.setData({ panelKeyboardHeight: Math.max(0, Number(e.detail.height) || 0) });
+  },
+
   onGoReport() {
     if (this.data.reportSheet.open) return Promise.resolve({ alreadyOpen: true });
     return this.loadAuthorizedReportSites();
@@ -158,6 +163,7 @@ Page({
     const current = this.data.reportSheet || emptyReportSheet();
     const selected = sites.find(site => site.id === Number(current.siteId));
     const next = Object.assign({}, current, {
+      restored: !!(normalizeReportPhotoItems(current).length || String(current.description || '').trim()),
       open: true, sites, siteIndex: selected ? sites.indexOf(selected) : -1,
       siteId: selected ? selected.id : null,
       siteName: selected ? selected.name : '',
@@ -179,7 +185,7 @@ Page({
       return;
     }
     // Keep the draft in page state so an accidental close does not discard evidence or input.
-    this.setData({ 'reportSheet.open': false });
+    this.setData({ 'reportSheet.open': false, panelKeyboardHeight: 0 });
   },
 
   onReportSite(e) {
@@ -187,25 +193,34 @@ Page({
     const index = Number(e && e.detail && e.detail.value);
     const selected = sites[index];
     const sheet = this.data.reportSheet || {};
-    if (!selected || sheet.submitting || sheet.uploading) return;
+    if (!selected || sheet.submitting) return;
     if (Number(sheet.siteId) === selected.id) return;
-    if (normalizeReportPhotoItems(sheet).length) {
-      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
-      return;
-    }
-    this.setData({
-      'reportSheet.siteId': selected.id,
-      'reportSheet.siteName': selected.name,
-      'reportSheet.siteIndex': index,
-      'reportSheet.photoItems': [],
-      'reportSheet.photos': [],
-      'reportSheet.photoSiteId': null,
+    const sourceSiteId = Number(sheet.siteId);
+    const draftVersion = this._reportDraftVersion || 0;
+    const applySelection = () => {
+      const current = this.data.reportSheet || {};
+      if (this._unloaded || !current.open || current.submitting
+          || (this._reportDraftVersion || 0) !== draftVersion
+          || Number(current.siteId) !== sourceSiteId
+          || !(current.sites || []).some(site => site.id === selected.id)) return;
+      this.setData({
+        'reportSheet.siteId': selected.id,
+        'reportSheet.siteName': selected.name,
+        'reportSheet.siteIndex': index,
+      });
+    };
+    if (!normalizeReportPhotoItems(sheet).length && !sheet.uploading
+        && !String(sheet.description || '').trim()) return applySelection();
+    wx.showModal({
+      title: '确认更正站点',
+      content: `将上报站点更正为${selected.name}？已拍照片和填写内容会保留。`,
+      success: result => { if (result.confirm) applySelection(); },
     });
   },
 
-  onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
+  onReportType(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
 
-  onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value || '' }); },
+  onReportDescription(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.description': e.detail.value || '' }); },
 
   reportPhotoContext(options) {
     const sheet = this.data.reportSheet || {};
@@ -234,7 +249,6 @@ Page({
   reportPhotoContextIsCurrent(context) {
     const sheet = this.data.reportSheet || {};
     return !this._unloaded && !!sheet.open
-      && Number(sheet.siteId) === context.siteId
       && (this._reportDraftVersion || 0) === context.draftVersion;
   },
 
@@ -247,7 +261,7 @@ Page({
         wx.showLoading({ title: '上传中', mask: true });
         const pending = savedPaths.map((path, index) => {
           const idempotencyKey = photoIdempotencyKey(context.siteId, path, index);
-          return createPendingReportPhoto(path, idempotencyKey, metadata);
+          return Object.assign(createPendingReportPhoto(path, idempotencyKey, metadata), { uploadSiteId: context.siteId });
         });
         const replaced = context.replaceKey
           ? context.photoItems.find(item => item.key === context.replaceKey) : null;
@@ -263,7 +277,7 @@ Page({
   uploadReportPhotoItems(pending, context) {
     return Promise.allSettled(pending.map(item => fileToBase64(item.localPath)
       .then(image => api.uploadSitePhoto(
-        context.siteId, image, item.idempotencyKey, item.metadata
+        item.uploadSiteId || context.siteId, image, item.idempotencyKey, item.metadata
       )))).then(results => {
           const successful = results.filter(result => (
             result.status === 'fulfilled' && result.value && result.value.url
@@ -282,7 +296,7 @@ Page({
           }));
           const currentItems = normalizeReportPhotoItems(this.data.reportSheet);
           const merged = currentItems.map(item => outcomeByKey.get(item.key) || item);
-          this.setData(reportPhotoSheetPatch(merged, context.siteId));
+          this.setData(reportPhotoSheetPatch(merged, this.data.reportSheet.siteId));
           const failed = merged.filter(item => outcomeByKey.has(item.key) && item.status === 'failed');
           pending.forEach((item, index) => {
             const outcome = outcomeByKey.get(item.key);
@@ -580,10 +594,6 @@ Page({
       wx.showToast({ title: '请填写说明并拍摄现场照片', icon: 'none' });
       return Promise.resolve({ invalid: true });
     }
-    if (Number(sheet.photoSiteId) !== siteId) {
-      wx.showToast({ title: '照片与当前站点不一致，请重新上传', icon: 'none' });
-      return Promise.resolve({ invalid: true });
-    }
     const preparedPhotos = prepareReportPhotoStoragePaths(sheet.photos);
     if (!preparedPhotos.ok) {
       wx.showToast({
@@ -609,7 +619,7 @@ Page({
       if (!orderNo) throw { error: '工单编号未返回，请重试' };
       if (!this.canUpdateReportDraft()) return { success: true, orderNo, stale: true };
       this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
-      this.setData({ reportSheet: emptyReportSheet() });
+      this.setData({ reportSheet: emptyReportSheet(), panelKeyboardHeight: 0 });
       if (this._visible !== false) {
         this.load();
         this.showReportSuccess(orderNo, locationWarning);

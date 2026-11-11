@@ -21,7 +21,7 @@
 
   <!-- 超期提示条 -->
   <view class="vh-alert" wx:if="{{hasVehicleExpiry}}">
-    <text class="vh-alert-text">车辆安排已超期，关联巡检计划尚未完成，请延续用车时间；车辆归还前不会重新进入可申请列表。</text>
+    <text class="vh-alert-text">预计用车时间已到，请按实际情况归还或更新预计时间；车辆归还前仍由当前持有人使用。</text>
   </view>
 
   <view class="vh-alert" wx:if="{{activeUse && activeUse.plan_deleted}}">
@@ -39,11 +39,11 @@
       <view class="vh-status-pill vh-status-pill--active">使用中</view>
     </view>
     <text class="vh-hero-plate">{{activeUse.vehicle_label}}</text>
-    <text class="vh-hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.plan_deleted ? '关联计划已删除，可还车' : (activeUse.can_return ? '计划末日，可还车' : (activeUse.plan_status === 'unknown' ? '关联计划异常' : ('计划行程至 ' + activeUse.trip_end_date)))}}</text></text>
+    <text class="vh-hero-meta">出车 {{activeUse.checked_out_at || '已登记'}} · {{activeUse.start_mileage || 0}} km<text wx:if="{{activeUse.is_plan_trip}}"> · {{activeUse.plan_deleted ? '关联计划已删除，可还车' : (activeUse.can_return ? '可按实际归还' : (activeUse.plan_status === 'unknown' ? '关联计划异常' : ('计划行程至 ' + activeUse.trip_end_date)))}}</text></text>
 
     <!-- 主动作 -->
     <view class="vh-hero-primary">
-      <view class="vh-btn-primary" bindtap="onVehiclePrimaryAction">{{activeUse.needs_extension ? '延续用车' : (activeUse.can_return ? '还车' : (activeUse.plan_status === 'unknown' ? '核对异常' : '查看计划'))}}</view>
+      <view class="vh-btn-primary" bindtap="onVehiclePrimaryAction">{{activeUse.can_return ? '还车' : (activeUse.needs_extension ? '延续用车' : (activeUse.plan_status === 'unknown' ? '核对异常' : '查看计划'))}}</view>
     </view>
 
     <!-- 途中快捷操作 -->
@@ -70,7 +70,7 @@
   <view class="vh-card vh-card--occupied" wx:elif="{{activeArrangement}}">
     <view class="vh-occupied-icon">!</view>
     <text class="vh-occupied-title">{{activeArrangement.vehicle_label}}仍由巡检计划占用</text>
-    <text class="vh-occupied-copy">{{activeArrangement.needs_extension ? ('原安排已于 ' + activeArrangement.trip_end_date + ' 到期，结转任务完成前需延续用车时间。') : '计划仍有未完成任务，车辆暂不释放给其他人员。'}}</text>
+    <text class="vh-occupied-copy">{{activeArrangement.needs_extension ? ('预计用车时间 ' + activeArrangement.trip_end_date + ' 已到，可更新预计时间。') : '车辆安排已保留，请以最新出车和归还记录核对实际持车情况。'}}</text>
     <view class="vh-btn-primary vh-btn-full" wx:if="{{activeArrangement.needs_extension}}" bindtap="onOpenExtension" data-id="{{activeArrangement.id}}">延续用车时间</view>
   </view>
 

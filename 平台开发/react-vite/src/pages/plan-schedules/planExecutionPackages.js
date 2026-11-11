@@ -6,6 +6,7 @@ const PLAN_EXECUTION_STATUS = {
   rework: { label: '需整改', color: 'warning' },
   modifying: { label: '变更中，暂缓执行', color: 'warning' },
   cancelled: { label: '已取消', color: 'default' },
+  closed: { label: '登记结束', color: 'default' },
 };
 
 function userRoles(user = {}) {
@@ -67,7 +68,8 @@ export function groupExecutionPackagesByDate(tasks = []) {
       plan_id: planId,
       site_count: new Set(packageTasks.map(task => task.site_id)).size,
       can_handle_overdue: packageTasks.some(task =>
-        ['pending', 'partial'].includes(task.status) && task.overdue),
+        task.can_close_overdue === true),
+      can_remind_overdue: packageTasks.some(task => task.can_remind_overdue === true),
     })),
   ]));
 }
@@ -81,7 +83,8 @@ export function planDetailItineraryRows(planData = {}, generatedTasks = []) {
     const siteKey = task.site_id === undefined || task.site_id === null
       ? `name:${task.site_name || ''}`
       : `id:${task.site_id}`;
-    if (!tasksByDate.get(date).has(siteKey)) tasksByDate.get(date).set(siteKey, task);
+    const taskKey = `${task.plan_id ?? ''}:${siteKey}`;
+    if (!tasksByDate.get(date).has(taskKey)) tasksByDate.get(date).set(taskKey, task);
   });
 
   const dates = new Set([
