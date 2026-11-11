@@ -60,6 +60,7 @@ import OperationsTodayView from './OperationsTodayView';
 import { buildMonitoringDeviceIndex, devicesForSite } from './cockpitDevices';
 import { completenessPresentation, qualityRate } from './dataQualityPresentation';
 import { runIndependentLoads } from '../../services/independentLoads';
+import { createHealthRequest } from './healthRequest';
 import './CockpitPage.css';
 
 const { Text, Title } = Typography;
@@ -435,6 +436,8 @@ function SiteMonitoringView() {
   const [workOrders, setWorkOrders] = useState({});
   const [dataHealth, setDataHealth] = useState(null);
   const [healthPeriod, setHealthPeriod] = useState('month'); // month / 30d / 7d / custom
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthError, setHealthError] = useState('');
   const [thresholds, setThresholds] = useState([]);
 
   const [typeFilter, setTypeFilter] = useState(FILTER_ALL);
@@ -459,6 +462,7 @@ function SiteMonitoringView() {
   const [popupOpenSiteId, setPopupOpenSiteId] = useState(null);
   const popupRequestRef = useRef(0);
   const dataRequestRef = useRef(0);
+  const healthRequestRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -566,14 +570,6 @@ function SiteMonitoringView() {
         onError: (failure) => recordFailure('devices', '设备状态', failure),
       },
       {
-        key: 'health', load: () => api.getStrict('/data/health?period=' + healthPeriod),
-        onSuccess: (value) => {
-          if (requestId !== dataRequestRef.current) return;
-          setDataHealth(value && value.total ? value : null);
-        },
-        onError: (failure) => recordFailure('health', '数据健康度', failure),
-      },
-      {
         key: 'thresholds', load: () => getThresholds(),
         onSuccess: (value) => {
           if (requestId !== dataRequestRef.current) return;
@@ -586,7 +582,28 @@ function SiteMonitoringView() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [healthPeriod]);
+  }, []);
+
+  useEffect(() => {
+    const controller = createHealthRequest({
+      load: period => api.getStrict('/data/health?period=' + period),
+      onStart: () => { setHealthLoading(true); setHealthError(''); },
+      onSuccess: value => {
+        if (!value?.total) throw new Error('返回格式异常');
+        setDataHealth(value);
+      },
+      onError: failure => setHealthError(failure?.message || '加载失败'),
+      onIdle: () => setHealthLoading(false),
+    });
+    healthRequestRef.current = controller;
+    controller.request('month');
+    return () => { controller.dispose(); healthRequestRef.current = null; };
+  }, []);
+
+  const refreshAll = useCallback(() => {
+    fetchData();
+    healthRequestRef.current?.request(healthPeriod);
+  }, [fetchData, healthPeriod]);
 
   useEffect(() => {
     fetchData();
@@ -841,7 +858,7 @@ function SiteMonitoringView() {
           <Button
             type="primary"
             icon={<ReloadOutlined />}
-            onClick={fetchData}
+            onClick={refreshAll}
           >
             重新加载
           </Button>
@@ -1132,10 +1149,10 @@ function SiteMonitoringView() {
           <Button
             type="text"
             size="small"
-            icon={<ReloadOutlined spin={refreshing} />}
+            icon={<ReloadOutlined spin={refreshing || healthLoading} />}
             aria-label="刷新站点监测数据"
-            onClick={fetchData}
-            loading={refreshing}
+            onClick={refreshAll}
+            loading={refreshing || healthLoading}
             style={{ color: tokens.colorTextSecondary, borderRadius: 6 }}
           />
         </Tooltip>
@@ -1319,7 +1336,12 @@ function SiteMonitoringView() {
                   <Segmented
                     size="small"
                     value={healthPeriod}
-                    onChange={(v) => setHealthPeriod(v)}
+                    onChange={(v) => {
+                      if (v === healthPeriod) return;
+                      setDataHealth(null);
+                      healthRequestRef.current?.request(v);
+                      setHealthPeriod(v);
+                    }}
                     options={[
                       { label: '本月', value: 'month' },
                       { label: '近30天', value: '30d' },
@@ -1329,6 +1351,8 @@ function SiteMonitoringView() {
                 }
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {healthError && <Alert type="warning" showIcon message={`数据质量：${healthError}`} action={<Button size="small" onClick={() => healthRequestRef.current?.request(healthPeriod)}>重试</Button>} />}
+                  {healthLoading && !dataHealth && <Spin size="small" />}
                   {/* 全站总览：分维度展示，不用单一分数替代判断 */}
                   {dataHealth && dataHealth.total && (
                     <div style={{

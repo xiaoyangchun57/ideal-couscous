@@ -105,6 +105,21 @@ class DataHealthSemanticsTest(unittest.TestCase):
         self.assertGreater(site['expected'], 0)
         self.assertEqual(site['actual'], 1)
 
+    def test_known_factor_uses_shared_label_without_threshold(self):
+        db = sqlite3.connect(self.db_path)
+        try:
+            db.execute('UPDATE device_shadows SET monitoring_enabled=1 WHERE site_id=1')
+            db.execute('INSERT INTO sensor_data VALUES (1,?,?,?)',
+                       ('codmn', 3.0, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            db.commit()
+        finally:
+            db.close()
+        response = self.client.get('/api/data/health?period=month',
+                                   headers={'Authorization': 'Bearer admin-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        metric = response.json['by_site'][0]['metrics'][0]
+        self.assertEqual((metric['metric'], metric['label']), ('codmn', '高锰酸盐指数'))
+
     def test_current_day_excludes_future_sampling_slots(self):
         expected = app_module._expected_samples_for_period(
             96,
@@ -174,6 +189,7 @@ class DataHealthSemanticsTest(unittest.TestCase):
             'monitoring_factor_configurations_batch': {1: [config]},
             'monitoring_expected_business_slots': slots,
             '_formal_business_observation_rows': observations,
+            '_formal_health_observation_rows': observations,
             '_site_reporting_required_at': True,
         }
         with ExitStack() as stack:

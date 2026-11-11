@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, DatePicker, Drawer, Dropdown, Image, Modal, Select, Space, Tag, Typography, message } from 'antd';
+import { Alert, Button, Card, DatePicker, Drawer, Dropdown, Image, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
 import dayjs from 'dayjs';
-import { DownloadOutlined, FileExcelOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CloseOutlined, DownloadOutlined, FileExcelOutlined, LeftOutlined, ReloadOutlined, RightOutlined } from '@ant-design/icons';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../../services/api';
 import { evaluationRateColor, orderStatusMap } from '../../services/constants';
 import WorkspacePage, {
   FilterField, WorkspaceEmpty, WorkspaceTable, WorkspaceToolbar,
-  standardListPagination,
+  formatTablePaginationTotal, standardListPagination,
 } from '../../components/WorkspacePage';
 import { useTheme } from '../../hooks/useTheme';
 import './EvaluationPage.css';
@@ -36,6 +36,16 @@ const renderRate = (value) => value == null
 const opsReportFilename = () => '水质运维工作报告.docx';
 const evaluationScroll = () => document.querySelector('.evaluation-page');
 
+const queryForPeriod = (params) => {
+  const requested = params.get('period') || 'month';
+  const period = PERIOD_KEYS.has(requested) ? requested : 'month';
+  const month = params.get('month') || '';
+  const historical = period === 'month' && /^\d{4}-\d{2}$/.test(month) && month !== dayjs().format('YYYY-MM') ? month : '';
+  return historical
+    ? `period=custom&start=${historical}-01&end=${dayjs(`${historical}-01`).endOf('month').format('YYYY-MM-DD')}`
+    : `period=${period}`;
+};
+
 const beijingTime = (value) => {
   if (!value) return '—';
   const date = new Date(value);
@@ -54,9 +64,7 @@ export default function EvaluationPage() {
   const period = PERIOD_KEYS.has(periodParam) ? periodParam : 'month';
   const month = searchParams.get('month') || '';
   const historicalMonth = period === 'month' && /^\d{4}-\d{2}$/.test(month) && month !== dayjs().format('YYYY-MM') ? month : '';
-  const periodQuery = historicalMonth
-    ? `period=custom&start=${historicalMonth}-01&end=${dayjs(`${historicalMonth}-01`).endOf('month').format('YYYY-MM-DD')}`
-    : `period=${period}`;
+  const periodQuery = queryForPeriod(searchParams);
   const [selectedPerson, setSelectedPerson] = useState(location.state?.restorePhoto?.selectedPerson ?? location.state?.restoreRecords?.selectedPerson ?? null);
   const [siteMode, setSiteMode] = useState(location.state?.restorePhoto?.siteMode || location.state?.restoreRecords?.siteMode || 'all');
   const [selectedSite, setSelectedSite] = useState(null);
@@ -64,8 +72,10 @@ export default function EvaluationPage() {
   const [recordDetail, setRecordDetail] = useState(null);
   const [health, setHealth] = useState(null);
   const [personnel, setPersonnel] = useState({ overview: null, list: [], period_label: '', scope_label: '' });
-  const [loading, setLoading] = useState(true);
-  const [loadErrors, setLoadErrors] = useState([]);
+  const [personLoading, setPersonLoading] = useState(true);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState({});
+  const loading = personLoading || healthLoading;
   const [exporting, setExporting] = useState('');
   const [photoDetail, setPhotoDetail] = useState(null);
   const photoRequest = useRef(0);
@@ -74,6 +84,22 @@ export default function EvaluationPage() {
   const factorRequest = useRef(0);
   const restored = useRef(false);
   const siteSection = useRef(null);
+  const siteOpener = useRef(null);
+  const siteDetailHeading = useRef(null);
+  const siteDetailScroll = useRef(null);
+  const siteFactorScroll = useRef(0);
+  const selectedSiteId = selectedSite?.site_id;
+  const selectedMetric = factorDetail?.metric?.metric;
+  useEffect(() => {
+    if (!selectedSiteId) return;
+    siteDetailScroll.current?.scrollTo({ top: selectedMetric ? 0 : siteFactorScroll.current });
+    siteDetailHeading.current?.focus({ preventScroll: true });
+  }, [selectedSiteId, selectedMetric]);
+  useEffect(() => {
+    factorRequest.current += 1;
+    setFactorDetail(null);
+    setSelectedSite(null);
+  }, [selectedPerson, siteMode]);
   useEffect(() => () => { photoRequest.current += 1; recordRequest.current += 1; factorRequest.current += 1; loadRequest.current += 1; }, []);
   const openOriginalInspection = useCallback((photo) => {
     const restore = { person: photoDetail.person, selectedPeriod: photoDetail.selectedPeriod,
@@ -117,31 +143,40 @@ export default function EvaluationPage() {
       if (value && !((key === 'period' && value === 'month') || (key === 'view' && value === 'people'))) next.set(key, value);
       else next.delete(key);
     });
+    if (queryForPeriod(next) !== periodQuery) {
+      loadRequest.current += 1;
+      recordRequest.current += 1;
+      factorRequest.current += 1;
+    }
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [periodQuery, searchParams, setSearchParams]);
 
   const load = useCallback(async () => {
     const requestId = ++loadRequest.current;
-    setLoading(true);
+    recordRequest.current += 1;
+    factorRequest.current += 1;
+    setSelectedSite(null);
+    setFactorDetail(null);
+    setRecordDetail(null);
+    setPersonLoading(true);
+    setHealthLoading(true);
+    setLoadErrors({});
     setHealth(null);
     setPersonnel({ overview: null, list: [], period_label: '', scope_label: '' });
-    const requests = [
-      ['数据质量', api.getStrict(`/data/health?scope=report&${periodQuery}`)],
-      ['人员绩效', api.getStrict(`/evaluation/personnel?${periodQuery}`)],
-    ];
-    const results = await Promise.allSettled(requests.map(([, promise]) => promise));
-    if (requestId !== loadRequest.current) return;
-    const errors = [];
-    if (results[0].status === 'fulfilled') setHealth(results[0].value || null);
-    else errors.push(`数据质量：${results[0].reason?.message || '加载失败'}`);
-    if (results[1].status === 'fulfilled') {
-      const data = results[1].value;
-      setPersonnel(Array.isArray(data)
-        ? { overview: null, list: data, period_label: '', scope_label: '' }
-        : { overview: data?.overview || null, list: data?.list || [], period_label: data?.period_label || '', scope_label: data?.scope_label || '', start: data?.start, end: data?.end });
-    } else errors.push(`人员绩效：${results[1].reason?.message || '加载失败'}`);
-    setLoadErrors(errors);
-    setLoading(false);
+    const healthRequest = api.getStrict(`/data/health?scope=report&${periodQuery}`)
+      .then(data => { if (requestId === loadRequest.current) setHealth(data || null); })
+      .catch(error => { if (requestId === loadRequest.current) setLoadErrors(prev => ({ ...prev, health: `数据质量：${error.message || '加载失败'}` })); })
+      .finally(() => { if (requestId === loadRequest.current) setHealthLoading(false); });
+    const personnelRequest = api.getStrict(`/evaluation/personnel?${periodQuery}`)
+      .then(data => {
+        if (requestId !== loadRequest.current) return;
+        setPersonnel(Array.isArray(data)
+          ? { overview: null, list: data, period_label: '', scope_label: '' }
+          : { overview: data?.overview || null, list: data?.list || [], period_label: data?.period_label || '', scope_label: data?.scope_label || '', start: data?.start, end: data?.end });
+      })
+      .catch(error => { if (requestId === loadRequest.current) setLoadErrors(prev => ({ ...prev, personnel: `人员绩效：${error.message || '加载失败'}` })); })
+      .finally(() => { if (requestId === loadRequest.current) setPersonLoading(false); });
+    await Promise.all([healthRequest, personnelRequest]);
   }, [periodQuery]);
 
   useEffect(() => { load(); }, [load]);
@@ -239,8 +274,28 @@ export default function EvaluationPage() {
     }
   }, [periodQuery]);
 
+  const openSite = useCallback((site, opener) => {
+    if (opener) siteOpener.current = opener;
+    siteFactorScroll.current = 0;
+    recordRequest.current += 1;
+    setRecordDetail(null);
+    factorRequest.current += 1;
+    setFactorDetail(null);
+    setSelectedSite(site);
+  }, []);
+  const closeSite = useCallback(() => {
+    factorRequest.current += 1;
+    setFactorDetail(null);
+    setSelectedSite(null);
+    if (siteOpener.current?.isConnected) siteOpener.current.focus({ preventScroll: true });
+  }, []);
+  const returnToFactors = () => {
+    factorRequest.current += 1;
+    setFactorDetail(null);
+  };
+
   const siteCols = useMemo(() => [
-    { title: '站点', dataIndex: 'site_name', key: 'site_name', ellipsis: true },
+    { title: '站点', dataIndex: 'site_name', key: 'site_name', render: (value, row) => <Button className="evaluation-site-name" type="link" aria-pressed={selectedSiteId === row.site_id} onClick={event => openSite(row, event.currentTarget)}>{value}</Button> },
     { title: '负责人', dataIndex: 'manager', key: 'manager', ellipsis: true, render: (value) => value || '未分配' },
     { title: '监测配置', dataIndex: 'configuration_status', key: 'configuration_status', render: (value) => { const status = CONFIG_STATUS[value] || { label: value || '未知', color: 'default' }; return <Tag color={status.color}>{status.label}</Tag>; } },
     { title: '应报', dataIndex: 'expected', key: 'expected' },
@@ -250,13 +305,14 @@ export default function EvaluationPage() {
     { title: '及时性', dataIndex: 'timeliness_rate', key: 'timeliness_rate', render: renderRate },
     { title: '缺失', dataIndex: 'missing', key: 'missing' },
     { title: '超限', dataIndex: 'over_limit', key: 'over_limit' },
-    { title: '', key: 'details', render: (_, row) => <Button type="link" onClick={() => { recordRequest.current += 1; setRecordDetail(null); factorRequest.current += 1; setFactorDetail(null); setSelectedSite(row); }}>因子与记录</Button> },
-  ], []);
+    { title: '', key: 'details', render: (_, row) => <Button type="link" onClick={event => openSite(row, event.currentTarget)}>因子与记录</Button> },
+  ], [openSite, selectedSiteId]);
 
   const byManager = useMemo(() => health?.by_manager || [], [health]);
   const bySite = useMemo(() => health?.by_site || [], [health]);
   const visibleSites = bySite.filter(site => siteMode === 'unassigned' ? !site.responsible_people?.length :
     siteMode === 'person' ? site.responsible_people?.some(person => person.id === selectedPerson) : true);
+  const selectedSiteIndex = visibleSites.findIndex(site => site.site_id === selectedSiteId);
   const hasAnyLoadedData = personnel.list.length > 0 || byManager.length > 0 || bySite.length > 0;
   const closedSlaBreach = personnel.list.reduce((sum, item) => sum + (Number(item.closed_sla_breach) || 0), 0);
   const openOverdue = personnel.list.reduce((sum, item) => sum + (Number(item.open_overdue) || 0), 0);
@@ -291,19 +347,20 @@ export default function EvaluationPage() {
     {personnel.scope_label && <Text type="secondary">统计范围：{personnel.scope_label}</Text>}
   </WorkspaceToolbar>;
 
-  if (!loading && loadErrors.length > 0 && !hasAnyLoadedData) {
-    return <WorkspacePage className="evaluation-page" title="运营绩效" toolbar={toolbar}><WorkspaceEmpty type="error" description={loadErrors.join('；')} onRefresh={load} /></WorkspacePage>;
+  const errorMessages = Object.values(loadErrors);
+  if (!loading && errorMessages.length === 2 && !hasAnyLoadedData) {
+    return <WorkspacePage className="evaluation-page" title="运营绩效" toolbar={toolbar}><WorkspaceEmpty type="error" description={errorMessages.join('；')} onRefresh={load} /></WorkspacePage>;
   }
 
   return <WorkspacePage
     className="evaluation-page"
     title="运营绩效"
     subtitle={personnel.start ? `考核周期：${personnel.start.slice(0, 10)} 至 ${personnel.end.slice(0, 10)}` : undefined}
-    statusItems={loading || !personnel.overview ? [] : statusItems}
+    statusItems={personLoading || !personnel.overview ? [] : statusItems}
     toolbar={toolbar}
   >
-    {loadErrors.length > 0 && <Alert type="warning" showIcon message="部分数据未更新" description={loadErrors.join('；')} style={{ marginBottom: 8 }} />}
-    <div className={`evaluation-layout${selectedSite || recordDetail ? ' evaluation-layout--detail' : ''}`} style={{
+    {errorMessages.length > 0 && <Alert type="warning" showIcon message="部分数据未更新" description={errorMessages.join('；')} style={{ marginBottom: 8 }} />}
+    <div className={`evaluation-layout${recordDetail ? ' evaluation-layout--detail' : ''}`} style={{
       '--evaluation-text': tokens.colorText,
       '--evaluation-secondary': tokens.colorTextSecondary,
       '--evaluation-border': tokens.colorBorder,
@@ -332,7 +389,7 @@ export default function EvaluationPage() {
             <div className="evaluation-metric"><button className="evaluation-metric-main" onClick={event => { event.stopPropagation(); openPhotoDetail(person); }}><span className="evaluation-metric-title">照片扣分</span><strong className={`evaluation-metric-value${Number(person.photo_quality_deduction) > 0 ? ' evaluation-metric-value--error' : ''}`}>{person.photo_quality_deduction || 0}<small> 分</small></strong></button></div>
           </div>
           <div className="evaluation-person-secondary"><span>响应 {ambiguous ? '待核对' : person.response_hours == null ? '无样本' : `${person.response_hours} 小时`}</span><span>处置 {ambiguous ? '待核对' : person.wo_avg_days == null ? '无样本' : `${person.wo_avg_days} 天`}</span></div>
-          <div className="evaluation-person-sites"><strong>本人负责站点</strong><span>{health ? `${assigned.length} 站` : '数据不可用'}</span><div>{health ? `${calculable.length ? `缺失 ${calculable.reduce((n, site) => n + site.missing, 0)} · 超限 ${calculable.reduce((n, site) => n + site.over_limit, 0)}` : '无可计算样本'} · 未配置或未启用 ${unconfigured} 站` : '站点数据读取失败'}</div></div>
+          <div className="evaluation-person-sites"><strong>本人负责站点</strong><span>{health ? `${assigned.length} 站` : healthLoading ? '加载中' : '数据不可用'}</span><div>{health ? `${calculable.length ? `缺失 ${calculable.reduce((n, site) => n + site.missing, 0)} · 超限 ${calculable.reduce((n, site) => n + site.over_limit, 0)}` : '无可计算样本'} · 未配置或未启用 ${unconfigured} 站` : healthLoading ? '正在读取站点数据' : '站点数据读取失败'}</div></div>
         </Card>;
       })}
     </div>
@@ -341,28 +398,47 @@ export default function EvaluationPage() {
       <Button onClick={() => { setSiteMode('unassigned'); setSelectedPerson(null); }}>无有效负责人</Button>
       {siteMode === 'person' && <Text>当前人员：{personnel.list.find(person => person.id === selectedPerson)?.real_name}</Text>}
     </Space>
-    <WorkspaceTable rowKey="site_id" loading={loading} columns={siteCols} dataSource={visibleSites} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 920 }} />
+    <WorkspaceTable rowKey="site_id" loading={healthLoading} columns={siteCols} dataSource={visibleSites} emptyType="sample" onRefresh={load} pagination={standardListPagination()} scroll={{ x: 920 }} rowClassName={row => row.site_id === selectedSiteId ? 'evaluation-site-row--selected' : ''} />
     </div>
-    {(selectedSite || recordDetail) && <aside className="evaluation-detail-host" aria-label="明细">
-    <Drawer getContainer={false} rootStyle={{ position: 'absolute' }} title={selectedSite?.site_name} open={Boolean(selectedSite)} onClose={() => { factorRequest.current += 1; setFactorDetail(null); setSelectedSite(null); }} width="100%" mask={false}>
-      <p>当前负责人：{selectedSite?.manager || '未分配'}</p>
-      <p>完整性 {renderRate(selectedSite?.completeness_rate)} 有效性 {renderRate(selectedSite?.validity_rate)} 及时性 {renderRate(selectedSite?.timeliness_rate)}</p>
-      <WorkspaceTable rowKey="metric" dataSource={selectedSite?.metrics || []} pagination={false} columns={[
-        { title: '因子', dataIndex: 'label', render: (value, row) => <Button type="link" onClick={() => openFactor(selectedSite, row)}>{value}</Button> }, { title: '应报', dataIndex: 'expected' }, { title: '实到', dataIndex: 'actual' },
-        { title: '缺失', dataIndex: 'missing' }, { title: '超限', dataIndex: 'over_limit' }, { title: '最近记录', dataIndex: 'latest_at', render: beijingTime },
-      ]} />
-      {factorDetail && <section>
-        <Typography.Title level={5}>{factorDetail.metric.label} · 应报时段与记录</Typography.Title>
-        {factorDetail.loading && <p>正在加载因子明细…</p>}
-        {factorDetail.error && <Alert type="error" message={factorDetail.error} action={<Button onClick={() => openFactor(factorDetail.site, factorDetail.metric)}>重试</Button>} />}
-        {factorDetail.records && <WorkspaceTable rowKey={row => `${row.endpoint_id}-${row.instrument_asset_code || ''}-${row.scheduled_at}`} dataSource={factorDetail.records} pagination={standardListPagination()} columns={[
-          { title: '应报时间', dataIndex: 'scheduled_at', render: beijingTime },
-          { title: '状态', render: (_, row) => row.missing ? '缺失' : row.over_limit ? '超限' : '实到' },
-          { title: '观测时间', render: (_, row) => beijingTime(row.observation?.observed_at) },
-          { title: '数值', render: (_, row) => row.observation ? `${row.observation.standard_value} ${row.observation.standard_unit || ''}` : '—' },
-        ]} />}
-      </section>}
-    </Drawer>
+    {selectedSite && <aside className="evaluation-site-panel" aria-labelledby="evaluation-site-title" onKeyDown={event => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !event.target.closest('.ant-select')) { event.stopPropagation(); if (factorDetail) returnToFactors(); else closeSite(); }
+    }}>
+      <header className="evaluation-site-panel__header">
+        <div className="evaluation-site-panel__title">
+          <h2 id="evaluation-site-title" ref={siteDetailHeading} tabIndex={-1}>{selectedSite.site_name}{factorDetail ? ` · ${factorDetail.metric.label || factorDetail.metric.metric}` : ' · 因子'}</h2>
+          <Button type="text" icon={<CloseOutlined />} aria-label="关闭站点详情" onClick={closeSite} />
+        </div>
+        <div className="evaluation-site-panel__navigation">
+          <Select aria-label="切换站点" showSearch optionFilterProp="label" value={selectedSiteId} options={visibleSites.map(site => ({ value: site.site_id, label: site.site_name }))} onChange={value => { const site = visibleSites.find(item => item.site_id === value); if (site) openSite(site); }} />
+          <Button icon={<LeftOutlined />} aria-label="上一站点" disabled={selectedSiteIndex <= 0} onClick={() => openSite(visibleSites[selectedSiteIndex - 1])} />
+          <Button icon={<RightOutlined />} aria-label="下一站点" disabled={selectedSiteIndex < 0 || selectedSiteIndex >= visibleSites.length - 1} onClick={() => openSite(visibleSites[selectedSiteIndex + 1])} />
+        </div>
+      </header>
+      <div className="evaluation-site-panel__content" ref={siteDetailScroll}>
+        <div className="evaluation-site-panel__context">
+          <Text>负责人：{selectedSite.manager || '未分配'}</Text>
+          {personnel.start && <Text type="secondary">{personnel.start.slice(0, 10)} — {personnel.end.slice(0, 10)}</Text>}
+        </div>
+        {!factorDetail ? <>
+          <div className="evaluation-site-panel__rates"><span>完整性 {renderRate(selectedSite.completeness_rate)}</span><span>有效性 {renderRate(selectedSite.validity_rate)}</span><span>及时性 {renderRate(selectedSite.timeliness_rate)}</span></div>
+          <Table className="evaluation-site-panel__table" rowKey="metric" size="small" tableLayout="fixed" dataSource={selectedSite.metrics || []} pagination={false} locale={{ emptyText: <WorkspaceEmpty type="sample" /> }} columns={[
+            { title: '因子', dataIndex: 'label', render: (value, row) => <Button type="link" onClick={() => { siteFactorScroll.current = siteDetailScroll.current?.scrollTop || 0; openFactor(selectedSite, row); }}>{value || row.metric}</Button> },
+            { title: '应报', dataIndex: 'expected', width: 52 }, { title: '实到', dataIndex: 'actual', width: 52 },
+            { title: '缺失', dataIndex: 'missing', width: 52 }, { title: '超限', dataIndex: 'over_limit', width: 52 },
+            { title: '最近记录', dataIndex: 'latest_at', width: 128, render: value => <span className="evaluation-site-panel__time">{beijingTime(value)}</span> },
+          ]} />
+        </> : <section aria-label="因子记录" aria-busy={factorDetail.loading ? 'true' : 'false'}>
+          <div className="evaluation-site-panel__factor-heading"><Button icon={<ArrowLeftOutlined />} onClick={returnToFactors}>因子列表</Button><strong>{factorDetail.metric.label || factorDetail.metric.metric}</strong></div>
+          {factorDetail.error ? <Alert type="error" message={factorDetail.error} action={<Button onClick={() => openFactor(factorDetail.site, factorDetail.metric)}>重试</Button>} /> : <Table className="evaluation-site-panel__table" key={`${selectedSiteId}-${selectedMetric}`} size="small" tableLayout="fixed" loading={factorDetail.loading} rowKey={row => `${row.endpoint_id}-${row.instrument_asset_code || ''}-${row.scheduled_at}`} dataSource={factorDetail.records || []} pagination={standardListPagination({ pageSize: undefined, defaultPageSize: 20, showTotal: formatTablePaginationTotal })} onChange={() => siteDetailScroll.current?.scrollTo({ top: 0 })} locale={{ emptyText: <WorkspaceEmpty type="sample" /> }} columns={[
+            { title: '应报时间', dataIndex: 'scheduled_at', render: beijingTime },
+            { title: '状态', width: 64, render: (_, row) => row.missing ? '缺失' : row.over_limit ? '超限' : '实到' },
+            { title: '观测时间', render: (_, row) => beijingTime(row.observation?.observed_at) },
+            { title: '数值', render: (_, row) => row.observation ? `${row.observation.standard_value} ${row.observation.standard_unit || ''}` : '—' },
+          ]} />}
+        </section>}
+      </div>
+    </aside>}
+    {recordDetail && <aside className="evaluation-detail-host" aria-label="明细">
     <Drawer getContainer={false} rootStyle={{ position: 'absolute' }} title={`${recordDetail?.person?.real_name || ''} · ${recordDetail?.kind === 'workorders' ? '工单' : recordDetail?.kind === 'inspection_done' ? '本人执行检查项' : '本人审核检查项'}`} open={Boolean(recordDetail)} onClose={() => { recordRequest.current += 1; setRecordDetail(null); }} width="100%" mask={false}>
       {recordDetail?.loading && <p>正在加载明细…</p>}
       {recordDetail?.error && <Alert type="error" message={recordDetail.error} />}

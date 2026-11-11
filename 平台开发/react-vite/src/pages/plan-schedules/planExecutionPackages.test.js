@@ -17,12 +17,21 @@ import {
 
 test('two sites in one internal day package expose one day-level action entry', () => {
   const grouped = groupExecutionPackagesByDate([
-    { date: '2026-08-17', plan_id: 91, site_id: 1, status: 'pending', overdue: true },
-    { date: '2026-08-17', plan_id: 91, site_id: 2, status: 'partial', overdue: true },
+    { date: '2026-08-17', plan_id: 91, site_id: 1, status: 'pending', overdue: true, can_close_overdue: true, can_remind_overdue: true },
+    { date: '2026-08-17', plan_id: 91, site_id: 2, status: 'partial', overdue: true, can_close_overdue: true, can_remind_overdue: true },
   ]);
   assert.equal(grouped['2026-08-17'].length, 1);
   assert.equal(grouped['2026-08-17'][0].site_count, 2);
   assert.equal(grouped['2026-08-17'][0].can_handle_overdue, true);
+});
+
+test('change-pending and completed-but-not-departed tasks can be closed without reminder', () => {
+  for (const status of ['change_pending', 'completed']) {
+    const grouped = groupExecutionPackagesByDate([{ date: '2026-08-17', plan_id: 92,
+      site_id: 1, status, overdue: false, can_close_overdue: true, can_remind_overdue: false }]);
+    assert.equal(grouped['2026-08-17'][0].can_handle_overdue, true);
+    assert.equal(grouped['2026-08-17'][0].can_remind_overdue, false);
+  }
 });
 
 test('overall execution presentation uses the server user state', () => {
@@ -126,6 +135,16 @@ test('generated site tasks replace planned chips for the same date and keep each
   assert.deepEqual(itineraryRowSiteIds(rows[0]), [1, 2]);
   assert.deepEqual(rows[1].planned_site_ids, [3]);
   assert.deepEqual(itineraryRowSiteIds(rows[1]), [3]);
+});
+
+test('same site and date retain distinct execution tasks and close actions', () => {
+  const tasks = [
+    { date: '2026-08-19', plan_id: 91, site_id: 1, status: 'completed', can_close_overdue: false },
+    { date: '2026-08-19', plan_id: 92, site_id: 1, status: 'pending', can_close_overdue: true },
+  ];
+  assert.deepEqual(planDetailItineraryRows({}, tasks)[0].tasks.map(task => task.plan_id), [91, 92]);
+  assert.deepEqual(groupExecutionPackagesByDate(tasks)['2026-08-19']
+    .filter(task => task.can_handle_overdue).map(task => task.plan_id), [92]);
 });
 
 test('site priority is visible only for a non-zero score or a real reason', () => {

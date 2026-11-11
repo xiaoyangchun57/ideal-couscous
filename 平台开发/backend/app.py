@@ -128,7 +128,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from inspection_rules import validate_submission_photos as _validate_submission_photos
 from photo_quality import (R30ContractError, record_photo_quality,
                            ensure_schema as ensure_photo_quality_schema,
-                           current_photo_quality)
+                           current_photo_quality, photo_quality_deductions)
 def validate_submission_photos(result, required_photos, photo_urls):
     return _validate_submission_photos(result, required_photos, photo_urls)
 from station_monitoring import (
@@ -8829,6 +8829,18 @@ def _inspection_arrival_resource_state(db, plan_id, user_id):
             or not _table_exists(db, 'vehicle_use_records')):
         return False, 'ARRIVAL_RESOURCE_STATE_UNAVAILABLE', '车辆履约状态暂不可用，请刷新后重试'
 
+    # A single physical trip can serve another approved plan for the same holder.
+    held_use = db.execute("""SELECT r.id FROM vehicle_use_records r
+        JOIN vehicle_applications va ON va.id=r.application_id
+        WHERE va.vehicle_id=? AND va.applicant_id=? AND r.returned_at IS NULL
+          AND COALESCE(r.status,'checked_out')!='returned' LIMIT 1""",
+        (vehicle_id, user_id)).fetchone()
+    if held_use:
+        vehicle = db.execute('SELECT status FROM vehicles WHERE id=?', (vehicle_id,)).fetchone()
+        if vehicle and vehicle['status'] not in VEHICLE_BLOCKING_STATUSES:
+            return True, None, None
+        return False, 'VEHICLE_UNAVAILABLE', '车辆当前处于不可使用状态'
+
     work_date = str(plan['generate_date'])[:10]
     application = db.execute("""SELECT * FROM vehicle_applications
         WHERE vehicle_id=? AND applicant_id=?
@@ -16837,10 +16849,10 @@ def evaluation_personnel():
         result.append(d)
 
     with get_db() as db:
+        deductions = photo_quality_deductions(db, (row['id'] for row in result), start, end,
+                                              allowed_site_ids=allowed_sites)
         for row in result:
-            photos = current_photo_quality(db, row['id'], start, end,
-                                           allowed_site_ids=allowed_sites)
-            row['photo_quality_deduction'] = sum(photo['deduction'] for photo in photos)
+            row['photo_quality_deduction'] = deductions.get(row['id'], 0)
     # 人均概览
     n = len(result) or 1
     overview = {
@@ -20603,7 +20615,14 @@ def _attachment_business_window(db, source_type, source_id, site_id, uploader_id
         start = _parse_dt(checkin['check_time']) if checkin else None
         upper = next((item[key] for key in ('check_out_time', 'completed_at', 'check_time')
                       if key in item.keys() and item[key]), None)
-        return {'start': start, 'end': _parse_dt(upper) or now,
+        upper_at = _parse_dt(upper)
+        if start and upper_at and start > upper_at:
+            completed_at = _parse_dt(item['completed_at']) if 'completed_at' in item.keys() else None
+            if item['result'] is None:
+                upper_at = None
+            elif completed_at and completed_at >= start:
+                upper_at = completed_at
+        return {'start': start, 'end': upper_at or now,
                 'business_type': 'inspection', 'business_id': str(source_id),
                 'checkin_plan_id': checkin.get('plan_id') if checkin else None,
                 'checkin_source': checkin.get('source') if checkin else ''}
@@ -21818,6 +21837,49 @@ def _formal_business_observation_rows(db, start, end, site_ids=None, metric=None
         params).fetchall()]
 
 
+def _formal_health_observation_rows(db, start, end, site_ids):
+    """Select the same preferred observations with only health-summary fields."""
+    if not site_ids or not (_table_exists(db, 'monitoring_business_observations')
+                            and _table_exists(db, 'observation_batches')):
+        return []
+    placeholders = ','.join('?' for _ in site_ids)
+    return [dict(row) for row in db.execute(f"""WITH formal AS (
+        SELECT business.id, business.business_site_id, business.endpoint_id,
+               business.business_metric, business.instrument_asset_code,
+               business.protocol_code, business.standard_value, business.standard_unit,
+               business.scheduled_at, business.observed_at, batch.function_code
+        FROM monitoring_business_observations business
+        JOIN observation_batches batch ON batch.id=business.observation_batch_id
+        JOIN observation_values value ON value.id=business.source_observation_value_id
+        WHERE business.is_current=1 AND batch.is_current=1
+          AND value.is_current=1 AND value.is_published=1 AND value.quality='valid'
+          AND batch.projection_state='completed'
+          AND business.scheduled_at>=? AND business.scheduled_at<?
+          AND business.business_site_id IN ({placeholders})
+          AND business.endpoint_id IS NOT NULL AND business.business_metric IS NOT NULL
+          AND business.observed_at IS NOT NULL
+    ), chosen AS (
+        SELECT CAST(substr(MIN(
+            CASE WHEN function_code=2061 THEN '0' ELSE '1' END ||
+            CASE WHEN protocol_code LIKE 'SL651:%' THEN '0'
+                 WHEN protocol_code LIKE 'HJ212:%' THEN '1' ELSE '2' END ||
+            printf('%020d',id)),3) AS INTEGER) AS id
+        FROM formal
+        GROUP BY business_site_id,endpoint_id,business_metric,
+                 COALESCE(instrument_asset_code,''),observed_at
+        HAVING CASE WHEN COUNT(CASE WHEN function_code=2061 THEN 1 END)>0
+            THEN COUNT(DISTINCT CASE WHEN function_code=2061
+                 THEN printf('%.17g',standard_value)||char(31)||standard_unit END)
+            ELSE COUNT(DISTINCT printf('%.17g',standard_value)||char(31)||standard_unit)
+            END=1
+    )
+    SELECT business.business_site_id,business.endpoint_id,business.business_metric,
+           business.instrument_asset_code,business.standard_value,
+           business.scheduled_at,business.observed_at
+    FROM chosen JOIN monitoring_business_observations business ON business.id=chosen.id
+    """, (start, end, *site_ids)).fetchall()]
+
+
 def _formal_arrival_summary(db, start, end, site_ids, *, evaluated_at=None):
     if site_ids is None:
         site_ids = [row['id'] for row in db.execute('SELECT id FROM sites ORDER BY id').fetchall()]
@@ -22215,8 +22277,9 @@ def data_health():
                         + int(configuration.get('result_delay_seconds') or 0)
                         + int(configuration.get('tolerance_seconds') or 0),
                     )
-            formal_rows = _formal_business_observation_rows(
-                db, start_utc, end_utc, scoped_site_ids, time_basis='scheduled')
+            formal_rows = (_formal_business_observation_rows(
+                db, start_utc, end_utc, scoped_site_ids, time_basis='scheduled') if detail_request
+                else _formal_health_observation_rows(db, start_utc, end_utc, scoped_site_ids))
             for row in formal_rows:
                 if not _site_reporting_required_at(
                         policy_events.get(row['business_site_id']),
@@ -22357,7 +22420,9 @@ def data_health():
                     timely_metrics += 1 if timely else 0
                 metric_detail.append({
                     'metric': metric,
-                    'label': th.get(metric, {}).get('label', metric),
+                    'label': (th.get(metric, {}).get('label')
+                              or _station_monitoring_api._STATION_MONITORING_FACTOR_LABELS.get(metric)
+                              or metric),
                     'expected': expected, 'actual': actual,
                     'missing': m_missing, 'over_limit': m_over, 'abnormal': m_abn,
                     'latest_at': latest_at, 'timely': timely,
@@ -22427,7 +22492,9 @@ def data_health():
     for m, a in sorted(metric_agg.items(), key=lambda x: x[0]):
         e = a['expected']; ab = a['abnormal']
         by_metric.append({
-            'metric': m, 'label': th.get(m, {}).get('label', m),
+            'metric': m, 'label': (th.get(m, {}).get('label')
+                                   or _station_monitoring_api._STATION_MONITORING_FACTOR_LABELS.get(m)
+                                   or m),
             'expected': e, 'abnormal': ab, 'normal': e - ab,
             'rate': round((e - ab) / e * 100, 1) if e > 0 else None,
         })
@@ -26308,29 +26375,24 @@ def mobile_my_today():
         carryover_condition = _mobile_open_execution_item_condition(db, 'pi')
         carryover_rows = db.execute(f"""SELECT DISTINCT ip.id AS plan_id, ip.plan_schedule_id,
                    date(ip.generate_date) AS work_date, ps.vehicle_days, ps.spare_parts, ps.work_order_ids
-            FROM insp_plans ip JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+            FROM insp_plans ip LEFT JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
             JOIN insp_plan_items pi ON pi.plan_id=ip.id
-            WHERE ip.assignee_id=? AND date(ip.generate_date)<? AND ps.status='approved'
+            WHERE ip.assignee_id=? AND date(ip.generate_date)<?
               AND ip.status IN ('active','completed')
               AND COALESCE(pi.execution_status,'active')='active' AND {carryover_condition}
             ORDER BY date(ip.generate_date), ip.id""", (user['id'], today)).fetchall()
         for carryover in carryover_rows:
             schedule_id = carryover['plan_schedule_id']
-            site_rows = db.execute("""SELECT DISTINCT pi.site_id FROM insp_plan_items pi
+            site_rows = db.execute(f"""SELECT DISTINCT pi.site_id FROM insp_plan_items pi
                 WHERE plan_id=? AND COALESCE(execution_status,'active')='active'
-                  AND check_out_time IS NULL
+                  AND {carryover_condition}
                   AND EXISTS (SELECT 1 FROM user_sites us
                               WHERE us.user_id=? AND us.site_id=pi.site_id)""",
-                (carryover['plan_id'], user['id'])).fetchall() if _mobile_checkout_supported(db) else db.execute(
-                """SELECT DISTINCT pi.site_id FROM insp_plan_items pi WHERE plan_id=?
-                   AND COALESCE(execution_status,'active')='active' AND result IS NULL
-                   AND EXISTS (SELECT 1 FROM user_sites us
-                               WHERE us.user_id=? AND us.site_id=pi.site_id)""",
                 (carryover['plan_id'], user['id'])).fetchall()
             if not site_rows:
                 continue
             carryover_package_count += 1
-            if schedule_id not in package_schedule_ids:
+            if schedule_id is not None and schedule_id not in package_schedule_ids:
                 package_schedule_ids.append(schedule_id)
             package_sites.update(int(row['site_id']) for row in site_rows)
             try:
@@ -26909,9 +26971,10 @@ def _effective_site_linked_workorders(db, site_id, limit=5, user=None):
 
 
 def _mobile_open_execution_item_condition(db, alias=''):
-    """Departure closes field work; missing results remain visible as missing facts."""
+    """An item remains open if either its field result or departure is missing."""
     prefix = f'{alias}.' if alias else ''
-    return f'({prefix}check_out_time IS NULL)' if _mobile_checkout_supported(db) else f'({prefix}result IS NULL)'
+    incomplete = f'NOT {_inspection_field_completion_sql(db, alias)}'
+    return f'({incomplete} OR {prefix}check_out_time IS NULL)' if _mobile_checkout_supported(db) else f'({incomplete})'
 
 
 def _mobile_rework_departure_resource(db, plan_id, user_id):
@@ -27051,11 +27114,11 @@ def mobile_today_execution():
                                                          'vehicle_exception_reason')
                                     else ", '' AS vehicle_exception_reason")
         rows = db.execute(f"""SELECT ip.id, ip.plan_name, ip.generate_date, ip.status, ip.completion_rate,
-                ip.plan_schedule_id, ps.schedule_type, ps.vehicle_days, ps.spare_parts, ps.work_order_ids,
+                ip.plan_schedule_id, ps.status AS schedule_status, ps.schedule_type, ps.vehicle_days, ps.spare_parts, ps.work_order_ids,
                 ps.version, ps.remarks {vehicle_exception_select} {rework_select}
             FROM insp_plans ip LEFT JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
             WHERE ip.assignee_id=? AND date(ip.generate_date)<=?
-              AND (ip.plan_schedule_id IS NULL OR ps.status='approved')
+              AND (ip.plan_schedule_id IS NULL OR ps.status='approved' OR date(ip.generate_date)<?)
               AND ip.status IN ('active','completed')
               AND (date(ip.generate_date)=? OR EXISTS (
                     SELECT 1 FROM insp_plan_items pending
@@ -27063,7 +27126,7 @@ def mobile_today_execution():
                       AND COALESCE(pending.execution_status,'active')='active'
                       AND {carryover_condition}
               ))
-            ORDER BY date(ip.generate_date), ip.id""", (user['id'], today, today)).fetchall()
+            ORDER BY date(ip.generate_date), ip.id""", (user['id'], today, today, today)).fetchall()
         packages = []
         for row in rows:
             p = dict(row)
@@ -27110,6 +27173,16 @@ def mobile_today_execution():
                     JOIN vehicles v ON v.id=va.vehicle_id
                     WHERE r.application_id=? ORDER BY r.id DESC LIMIT 1""",
                 (vehicle_application['id'],)).fetchone() if vehicle_application else None
+            held_use = db.execute("""SELECT r.*, va.applicant_id, va.end_at, va.reason,
+                        v.plate_no, v.status AS vehicle_status
+                    FROM vehicle_use_records r
+                    JOIN vehicle_applications va ON va.id=r.application_id
+                    JOIN vehicles v ON v.id=va.vehicle_id
+                    WHERE va.vehicle_id=? AND va.applicant_id=? AND r.returned_at IS NULL
+                      AND COALESCE(r.status,'checked_out')!='returned'
+                    ORDER BY r.id DESC LIMIT 1""", (vehicle_id, user['id'])).fetchone() if vehicle_id else None
+            if held_use:
+                vehicle_use = held_use
             vehicle_use_state = _vehicle_plan_use_state(db, vehicle_use) if vehicle_use else None
             rework_resource = None
             vehicle_exception_reason = str(p.get('vehicle_exception_reason') or '').strip()
@@ -27156,7 +27229,8 @@ def mobile_today_execution():
                 rework_pending = int(site_item.pop('_rework_pending', 0) or 0)
                 checked_out_items = int(site_item.pop('_checked_out_items', 0) or 0)
                 if (is_carryover and int(site_item['total'] or 0)
-                        and checked_out_items == int(site_item['total'] or 0)):
+                        and checked_out_items == int(site_item['total'] or 0)
+                        and int(site_item['completed'] or 0) == int(site_item['total'] or 0)):
                     continue
                 normal_checkin = _inspection_effective_checkin_time(
                     db, site_item['site_id'], user['id'])
@@ -27184,6 +27258,7 @@ def mobile_today_execution():
             plan_name = p['plan_name'] or f'巡检任务#{p["id"]}'
             packages.append({
                 'plan_id': p['id'], 'schedule_id': schedule_id, 'schedule_type': p['schedule_type'] or '',
+                'schedule_status': p['schedule_status'] if schedule_id is not None else 'approved',
                 'plan_name': plan_name,
                 'version': p['version'] or 1, 'status': p['status'], 'progress': p['completion_rate'],
                 'is_rework': is_rework, 'resource_state': p.get('resource_state') or 'ready',
@@ -27197,7 +27272,9 @@ def mobile_today_execution():
                 'vehicle_trip_start_date': vehicle_application['trip_start_date'] if vehicle_application else None,
                 'vehicle_trip_end_date': vehicle_application['trip_end_date'] if vehicle_application else None,
                 'vehicle_can_return': bool(vehicle_use_state and vehicle_use_state['can_return']),
-                'vehicle_needs_extension': bool(application_state and application_state['needs_extension']),
+                'vehicle_needs_extension': bool(not held_use and application_state and application_state['needs_extension']),
+                'vehicle_use_shared': bool(held_use and (not vehicle_application
+                                           or held_use['application_id'] != vehicle_application['id'])),
                 'vehicle_reserves_vehicle': bool(application_state and application_state['reserves_vehicle']),
                 'vehicle_exception_reason': vehicle_exception_reason,
                 'arrival_gate': arrival_gate,
@@ -27396,6 +27473,7 @@ def mobile_execution_site_check_out(plan_id, site_id):
     lat, lng = coords
     user = g.current_user
     with get_db() as db:
+        db.execute('BEGIN IMMEDIATE')
         # A replay can arrive after the first checkout committed. Treat an
         # already-closed site as idempotent instead of rejecting the queue item.
         closed_rows = db.execute("""SELECT check_out_time FROM insp_plan_items
@@ -27420,6 +27498,12 @@ def mobile_execution_site_check_out(plan_id, site_id):
                       AND COALESCE(pi.execution_status,'active')='active'
               )""", (plan_id, user['id'], today, user['id'], site_id, site_id)).fetchone()
         if owner and active_count and len(closed_rows) == active_count:
+            incomplete = db.execute(f"""SELECT 1 FROM insp_plan_items
+                WHERE plan_id=? AND site_id=? AND COALESCE(execution_status,'active')='active'
+                  AND NOT {_inspection_field_completion_sql(db)} LIMIT 1""", (plan_id, site_id)).fetchone()
+            if incomplete:
+                return jsonify({'error': '本站仍有未完成的检查项，请补充原任务结果',
+                                'code': 'INSPECTION_ITEMS_INCOMPLETE'}), 409
             closed_at = max((row['check_out_time'] for row in closed_rows if row['check_out_time']), default='')
             field_state = _ps_recalculate_field_execution(db, plan_id)
             db.commit()
@@ -27444,6 +27528,9 @@ def mobile_execution_site_check_out(plan_id, site_id):
             return jsonify({'error': '该站点没有可离站的检查项'}), 404
         if not any(_inspection_item_checkin_time(db, item, user['id']) for item in items):
             return jsonify({'error': '请先完成本站到站打卡'}), 400
+        if any(not _inspection_field_item_completed(item) for item in items):
+            return jsonify({'error': '本站仍有未完成的检查项，完成后才能离站',
+                            'code': 'INSPECTION_ITEMS_INCOMPLETE'}), 409
         previous = next((row['check_out_time'] for row in items if row['check_out_time']), None)
         now = previous or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not previous:
@@ -31030,11 +31117,7 @@ def _vehicle_plan_use_state(db, use_row):
     plan_completed = bool(is_plan_trip and plan_status == 'completed')
     active = not row.get('returned_at') and row.get('status') != 'returned'
     needs_extension = bool(active and is_plan_trip and expired and plan_status == 'active')
-    can_return = bool(active and (
-        not is_plan_trip or (
-            plan_status != 'unknown' and (
-                plan_completed or plan_deleted or plan_vehicle_replaced
-                or row.get('vehicle_status') == 'restricted'))))
+    can_return = bool(active)
     plan_issue_message = ''
     if plan_deleted:
         plan_issue_message = '关联计划已删除，请完成还车以释放车辆'
@@ -32350,22 +32433,6 @@ def api_vehicle_use_record_return(rec_id):
             return jsonify({'error': '仅申请人或管理者可以还车'}), 403
         if rec['returned_at']:
             return jsonify({'error': '该车辆已经归还'}), 409
-        # 巡检排程的同车多站/多日安排是一段行程，不能在中途被任意入口提前归档。
-        # 车辆已因故障受限时保留安全还车的例外，其他突发情况应先走计划变更。
-        use_state = _vehicle_plan_use_state(db, rec)
-        trip_end = str(rec['end_at'] or '')[:10]
-        is_plan_trip = '巡检计划#' in str(rec['reason'] or '')
-        if is_plan_trip and use_state['plan_status'] == 'unknown':
-            return jsonify({
-                'error': '关联巡检计划数据异常，无法确认还车条件，请联系管理员核对',
-                'code': 'PLAN_SCHEDULE_MISSING',
-                'plan_schedule_id': use_state['plan_schedule_id'],
-            }), 409
-        if (is_plan_trip and not use_state['plan_completed']
-                and not use_state['plan_deleted']
-                and not use_state['plan_vehicle_replaced']
-                and rec['vehicle_status'] != 'restricted'):
-            return jsonify({'error': '本巡检计划行程尚未结束；如需提前结束，请先发起计划变更'}), 409
         if end_mileage < float(rec['start_mileage'] or 0):
             return jsonify({'error': '还车里程不能小于出车里程'}), 400
         inspection_id = data.get('return_inspection_id')
@@ -34160,6 +34227,16 @@ def _ps_check_vehicle_conflicts(db, user_id, vehicle_days, exclude_schedule_id=N
             conflicts.append({'date': date_str, 'vehicle_id': vid, 'plate_no': plate,
                               'reason': f'{plate} {schedule_reason}，不可安排'})
             continue
+        held = db.execute("""SELECT va.applicant_id FROM vehicle_use_records r
+            JOIN vehicle_applications va ON va.id=r.application_id
+            WHERE va.vehicle_id=? AND r.returned_at IS NULL
+              AND COALESCE(r.status,'checked_out')!='returned'
+              AND (va.applicant_id IS NULL OR va.applicant_id!=?) LIMIT 1""",
+            (vid, user_id)).fetchone()
+        if held:
+            conflicts.append({'date': date_str, 'vehicle_id': vid, 'plate_no': plate,
+                              'reason': f'{plate}仍由他人持有，归还后才能安排'})
+            continue
         # 1. 他人用车申请占用当天
         occ = db.execute("""
             SELECT va.id, u.real_name FROM vehicle_applications va
@@ -34605,23 +34682,33 @@ def _ps_execution_site_rows(db, schedule_id, parent_status=None):
     """User-facing date x site summary over the internal daily execution packages."""
     completion_sql = _inspection_field_completion_sql(db, 'pi')
     rework_sql = _inspection_active_rework_sql(db, 'pi')
-    rows = db.execute(f"""SELECT MIN(ip.id) AS plan_id, date(ip.generate_date) AS execution_date, pi.site_id,
+    open_sql = _mobile_open_execution_item_condition(db, 'pi')
+    rows = db.execute(f"""SELECT ip.id AS plan_id, ip.status AS plan_status, date(ip.generate_date) AS execution_date, pi.site_id,
                s.name AS site_name, ip.assignee, COUNT(*) AS total_items,
+               (SELECT te.remark FROM timeline_events te WHERE te.source_type='inspection'
+                AND te.source_id=ip.id AND te.event_type='overdue_closed'
+                ORDER BY te.id DESC LIMIT 1) AS close_reason,
                SUM(CASE WHEN {completion_sql} THEN 1 ELSE 0 END) AS completed_items,
+               SUM(CASE WHEN {open_sql} THEN 1 ELSE 0 END) AS open_items,
                SUM(CASE WHEN {rework_sql} THEN 1 ELSE 0 END) AS rework_items,
                SUM(CASE WHEN pi.result='abnormal' THEN 1 ELSE 0 END) AS abnormal_items
         FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
         LEFT JOIN sites s ON s.id=pi.site_id
-        WHERE ip.plan_schedule_id=? AND ip.status!='cancelled'
-          AND COALESCE(pi.execution_status,'active')='active'
-        GROUP BY date(ip.generate_date), pi.site_id, s.name, ip.assignee
+        WHERE ip.plan_schedule_id=? AND (
+            (ip.status!='cancelled' AND COALESCE(pi.execution_status,'active')='active')
+            OR (ip.status='cancelled' AND EXISTS (SELECT 1 FROM timeline_events te
+                WHERE te.source_type='inspection' AND te.source_id=ip.id
+                  AND te.event_type='overdue_closed')))
+        GROUP BY ip.id, ip.status, date(ip.generate_date), pi.site_id, s.name, ip.assignee
         ORDER BY execution_date, s.name""", (schedule_id,)).fetchall()
     today = datetime.now().strftime('%Y-%m-%d')
     result = []
     for row in rows:
         total = int(row['total_items'] or 0)
         completed = int(row['completed_items'] or 0)
-        if parent_status in ('modifying', 'change_submitted'):
+        if row['plan_status'] == 'cancelled' and row['close_reason'] is not None:
+            state = 'closed'
+        elif parent_status in ('modifying', 'change_submitted'):
             state = 'change_pending'
         elif int(row['rework_items'] or 0):
             state = 'rework'
@@ -34640,9 +34727,17 @@ def _ps_execution_site_rows(db, schedule_id, parent_status=None):
             'status': state,
             'status_cn': {'pending': '待执行', 'partial': '部分完成',
                           'completed': '已完成', 'change_pending': '变更待审',
-                          'rework': '需整改'}[state],
-            'overdue': bool(row['execution_date'] and row['execution_date'] < today and state not in ('completed', 'change_pending')),
-            'attention': ('计划变更待审核，暂不继续执行' if state == 'change_pending'
+                          'rework': '需整改', 'closed': '登记结束'}[state],
+            'close_reason': row['close_reason'] if state == 'closed' else None,
+            'overdue': bool(row['execution_date'] and row['execution_date'] < today and state not in ('completed', 'change_pending', 'closed')),
+            'can_close_overdue': bool(row['execution_date'] and row['execution_date'] < today
+                                      and row['plan_status'] in ('active', 'completed')
+                                      and int(row['open_items'] or 0)),
+            'can_remind_overdue': bool(row['execution_date'] and row['execution_date'] < today
+                                       and row['plan_status'] in ('active', 'completed')
+                                       and parent_status == 'approved' and completed < total),
+            'attention': (row['close_reason'] if state == 'closed'
+                          else '计划变更待审核，暂不继续执行' if state == 'change_pending'
                           else ('已逾期且尚未完成' if row['execution_date'] and row['execution_date'] < today and state != 'completed'
                                 else ('存在异常检查项' if int(row['abnormal_items'] or 0) else ''))),
         })
@@ -34786,9 +34881,11 @@ def _ps_schedule_execution_status(parent_status, field_status, site_rows=None,
     """Derive the user-facing plan execution state without changing field state."""
     labels = {
         'pending': '待执行', 'partial': '部分完成', 'completed': '已完成',
-        'change_pending': '变更待审', 'rework': '需整改',
+        'change_pending': '变更待审', 'rework': '需整改', 'closed': '登记结束',
     }
-    if parent_status in ('modifying', 'change_submitted'):
+    if site_rows and all(row.get('status') == 'closed' for row in site_rows):
+        status = 'closed'
+    elif parent_status in ('modifying', 'change_submitted'):
         status = 'change_pending'
     elif field_status == 'rework' or (
             site_rows and any(row.get('status') == 'rework' for row in site_rows)):
@@ -34911,6 +35008,39 @@ def _ps_execution_item_summaries(db, schedule_ids):
     }
 
 
+def _ps_execution_rows_with_recorded_closures(db, schedule_ids):
+    """Batch the same execution-site facts used by detail for affected schedules."""
+    ids = sorted({int(sid) for sid in schedule_ids if sid is not None})
+    if not ids:
+        return {}
+    marks = ','.join('?' for _ in ids)
+    completion = _inspection_field_completion_sql(db, 'pi')
+    rows = db.execute(f"""WITH closed_plans AS (
+            SELECT DISTINCT ip.id, ip.plan_schedule_id FROM insp_plans ip
+            JOIN timeline_events te ON te.source_type='inspection'
+              AND te.source_id=ip.id AND te.event_type='overdue_closed'
+            WHERE ip.plan_schedule_id IN ({marks}) AND ip.status='cancelled'
+        ), affected AS (SELECT DISTINCT plan_schedule_id FROM closed_plans)
+        SELECT ip.plan_schedule_id AS schedule_id, ip.id AS plan_id,
+            ip.status AS plan_status, pi.site_id, COUNT(*) AS total_items,
+            SUM(CASE WHEN {completion} THEN 1 ELSE 0 END) AS completed_items
+        FROM insp_plans ip JOIN insp_plan_items pi ON pi.plan_id=ip.id
+        JOIN affected ON affected.plan_schedule_id=ip.plan_schedule_id
+        LEFT JOIN closed_plans ON closed_plans.id=ip.id
+        WHERE (ip.status!='cancelled' AND COALESCE(pi.execution_status,'active')='active')
+           OR closed_plans.id IS NOT NULL
+        GROUP BY ip.plan_schedule_id, ip.id, ip.status, pi.site_id""", ids).fetchall()
+    result = {}
+    for row in rows:
+        total, completed = int(row['total_items']), int(row['completed_items'])
+        state = ('closed' if row['plan_status'] == 'cancelled' else
+                 'completed' if completed == total else 'partial' if completed else 'pending')
+        result.setdefault(int(row['schedule_id']), []).append({
+            'status': state, 'total_items': total, 'completed_items': completed,
+        })
+    return result
+
+
 def _ps_auto_flow(db, schedule):
     """审批通过后的自动流转：生成任务 + 锁定车辆 + 记录备件需求 + 通知。
     在审批事务内调用（db 由外部传入并统一 commit）。"""
@@ -34942,15 +35072,26 @@ def _ps_auto_flow(db, schedule):
         """, (vid, schedule['user_id'], _ps_vehicle_reason_like(schedule["id"]))).fetchone()
         if exists:
             continue
-        # Approval holds a SQLite write transaction. This overlap check is the
-        # final guard immediately before creating the reservation, including
-        # plans owned by the same operator.
+        held_by_other = db.execute("""SELECT 1 FROM vehicle_use_records r
+            JOIN vehicle_applications va ON va.id=r.application_id
+            WHERE va.vehicle_id=? AND r.returned_at IS NULL
+              AND COALESCE(r.status,'checked_out')!='returned'
+              AND (va.applicant_id IS NULL OR va.applicant_id!=?) LIMIT 1""",
+            (vid, schedule['user_id'])).fetchone()
+        if held_by_other:
+            raise PlanScheduleResourceConflict('车辆仍由他人持有，归还后才能安排')
+        # Only the holder's actual active trip may overlap its next plan.
         reservation = db.execute("""
-            SELECT id FROM vehicle_applications
-            WHERE vehicle_id=? AND status='approved'
-              AND NOT (end_at < ? OR start_at > ?)
+            SELECT va.id FROM vehicle_applications va
+            WHERE va.vehicle_id=? AND va.status='approved'
+              AND NOT (va.end_at < ? OR va.start_at > ?)
+              AND NOT (va.applicant_id=? AND EXISTS (
+                  SELECT 1 FROM vehicle_use_records r
+                  JOIN vehicle_applications held ON held.id=r.application_id
+                  WHERE held.vehicle_id=va.vehicle_id AND held.applicant_id=va.applicant_id
+                    AND r.returned_at IS NULL AND COALESCE(r.status,'checked_out')!='returned'))
             LIMIT 1
-        """, (vid, f'{start_date} 08:00:00', f'{end_date} 18:00:00')).fetchone()
+        """, (vid, f'{start_date} 08:00:00', f'{end_date} 18:00:00', schedule['user_id'])).fetchone()
         if reservation:
             raise PlanScheduleResourceConflict('车辆时间已被已批准安排占用')
         db.execute("""
@@ -35421,12 +35562,24 @@ def api_plan_schedules_list():
             rows.append(item)
         item_summaries = (_ps_execution_item_summaries(db, [item['id'] for item in rows])
                           if rows else {})
+        closure_rows = (_ps_execution_rows_with_recorded_closures(db, [item['id'] for item in rows])
+                        if rows else {})
         for item in rows:
             item['execution_summary'] = (
                 item_summaries.get(item['id'], {}).get('execution_summary') or {})
+            if item['id'] in closure_rows:
+                site_rows = closure_rows[item['id']]
+                if not item['execution_summary']:
+                    item['execution_summary'] = {'available': True}
+                item['execution_summary']['total_tasks'] = len(site_rows)
+                item['execution_summary']['completed_tasks'] = sum(
+                    row['status'] == 'completed' for row in site_rows)
+                item['execution_summary']['closed_tasks'] = sum(
+                    row['status'] == 'closed' for row in site_rows)
             item.update(_ps_schedule_execution_status(
                 item.get('status'), item['field_status'],
-                item_summary=item_summaries.get(item['id'])))
+                site_rows=closure_rows.get(item['id']),
+                item_summary=None if item['id'] in closure_rows else item_summaries.get(item['id'])))
         db.commit()
     if attention == 'resource':
         # 资源冲突以提交时保存的校验快照为准，避免仅凭当前库存造成误判。
@@ -35849,16 +36002,25 @@ def api_overdue_execution_action(plan_id):
             WHERE ip.id=?""", (plan_id,)).fetchone()
         if not plan:
             return jsonify({'error': '执行任务不存在'}), 404
-        if plan['plan_schedule_id'] is not None and plan['parent_schedule_status'] != 'approved':
+        if action == 'close' and plan['status'] == 'cancelled' and db.execute(
+                "SELECT 1 FROM timeline_events WHERE source_type='inspection' AND source_id=? AND event_type='overdue_closed' LIMIT 1",
+                (plan_id,)).fetchone():
+            return jsonify({'success': True, 'already_closed': True, 'cancelled_items': 0})
+        if action == 'remind' and plan['plan_schedule_id'] is not None and plan['parent_schedule_status'] != 'approved':
             return jsonify({
                 'error': '父计划当前不是已批准状态，不能继续处置执行任务',
                 'code': 'PLAN_SCHEDULE_NOT_EXECUTABLE',
             }), 409
-        if plan['status'] != 'active' or (plan['generate_date'] or '') >= datetime.now().strftime('%Y-%m-%d'):
+        if plan['status'] not in ('active', 'completed') or (plan['generate_date'] or '') >= datetime.now().strftime('%Y-%m-%d'):
             return jsonify({'error': '只有已逾期且仍待执行的任务可以处置'}), 409
-        pending_count = db.execute("""SELECT COUNT(*) FROM insp_plan_items WHERE plan_id=?
-            AND result IS NULL AND COALESCE(execution_status,'active')='active'""", (plan_id,)).fetchone()[0]
-        if not pending_count:
+        incomplete = f"NOT {_inspection_field_completion_sql(db)}"
+        pending_count = db.execute(f"""SELECT COUNT(*) FROM insp_plan_items WHERE plan_id=?
+            AND {incomplete} AND COALESCE(execution_status,'active')='active'""", (plan_id,)).fetchone()[0]
+        if not db.execute(f"""SELECT 1 FROM insp_plan_items
+            WHERE plan_id=? AND COALESCE(execution_status,'active')='active'
+              AND {_mobile_open_execution_item_condition(db)} LIMIT 1""", (plan_id,)).fetchone():
+            return jsonify({'error': '该任务已正常结束，无需异常关闭'}), 409
+        if action == 'remind' and not pending_count:
             return jsonify({'error': '该任务已无待执行检查项'}), 409
         if action == 'remind':
             if plan['assignee_id']:
@@ -35872,8 +36034,8 @@ def api_overdue_execution_action(plan_id):
                 (plan_id, g.current_user.get('real_name') or '管理员', f'催办逾期任务，待完成{pending_count}项'))
             db.commit()
             return jsonify({'success': True, 'message': '已向执行人员发送催办通知'})
-        db.execute("""UPDATE insp_plan_items SET execution_status='cancelled'
-            WHERE plan_id=? AND result IS NULL AND COALESCE(execution_status,'active')='active'""", (plan_id,))
+        db.execute(f"""UPDATE insp_plan_items SET execution_status='cancelled'
+            WHERE plan_id=? AND {incomplete} AND COALESCE(execution_status,'active')='active'""", (plan_id,))
         db.execute("UPDATE insp_plans SET status='cancelled' WHERE id=?", (plan_id,))
         db.execute("""INSERT INTO timeline_events
             (source_type,source_id,event_type,operator,remark)
@@ -36351,14 +36513,18 @@ def api_plan_schedules_approve(sid):
                     if active_application else start_at
                 reservation_end = max(str(active_application['end_at']), end_at) \
                     if active_application else end_at
-                reservation = db.execute("""SELECT id FROM vehicle_applications
-                    WHERE vehicle_id=? AND status='approved'
-                      AND NOT (end_at < ? OR start_at > ?)
-                      AND (? IS NULL OR id!=?)
+                reservation = db.execute("""SELECT va.id FROM vehicle_applications va
+                    WHERE va.vehicle_id=? AND va.status='approved'
+                      AND NOT (va.end_at < ? OR va.start_at > ?)
+                      AND (? IS NULL OR va.id!=?)
+                      AND NOT (va.applicant_id=? AND EXISTS (
+                          SELECT 1 FROM vehicle_use_records r WHERE r.application_id=va.id
+                            AND r.returned_at IS NULL AND COALESCE(r.status,'checked_out')!='returned'))
                     LIMIT 1
                 """, (vid, reservation_start, reservation_end,
                       active_application['id'] if active_application else None,
-                      active_application['id'] if active_application else None)).fetchone()
+                      active_application['id'] if active_application else None,
+                      fresh['user_id'])).fetchone()
                 if reservation:
                     db.rollback()
                     return jsonify({
@@ -38667,7 +38833,12 @@ def api_manual_reports():
 def api_manual_reports_create():
     """移动端一键上报异常，自动生成工单（site_id 受当前用户站点范围约束）"""
     data = request.get_json() or {}
-    site_id = data.get('site_id')
+    try:
+        site_id = int(data.get('site_id'))
+        if site_id <= 0:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return jsonify({'error': '站点参数无效'}), 400
     allowed = _filter_site_ids()
     if allowed is not None and (not site_id or int(site_id) not in allowed):
         return jsonify({'error': '无权限上报非本人负责站点的异常'}), 403
@@ -38676,7 +38847,9 @@ def api_manual_reports_create():
     photo_urls = data.get('photo_urls', [])
     if not isinstance(photo_urls, list):
         return jsonify({'error': '现场照片格式无效'}), 400
-    photo_urls = list(dict.fromkeys(url for url in photo_urls if isinstance(url, str) and url.startswith('/uploads/')))
+    if any(not isinstance(url, str) or not url.startswith('/uploads/') for url in photo_urls):
+        return jsonify({'error': '现场照片地址无效'}), 400
+    photo_urls = list(dict.fromkeys(photo_urls))
     if not photo_urls:
         return jsonify({'error': '请至少提交一张现场照片'}), 400
     gps_lat = data.get('gps_lat')
@@ -38689,13 +38862,17 @@ def api_manual_reports_create():
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as db:
-        # 同一现场人员短时间内使用同一批照片重复提交，通常是弱网重试或重复点击。
-        # 在写入前持有写锁并返回已有上报，确保一次上报只派生一张工单。
+        # 同一批照片只能正式归属一次；无论弱网重试间隔多久都返回原上报。
         db.execute('BEGIN IMMEDIATE')
+        if not db.execute('SELECT 1 FROM sites WHERE id=?', (site_id,)).fetchone():
+            return jsonify({'error': '站点不存在'}), 404
+        if allowed is not None and not db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+                (reporter_id, site_id)).fetchone():
+            return jsonify({'error': '无权限上报非本人负责站点的异常'}), 403
         duplicate = db.execute(
             '''SELECT * FROM manual_reports
                WHERE site_id=? AND reporter_id=? AND report_type=? AND description=? AND photo_urls=?
-                 AND reported_at >= datetime('now','localtime','-2 minutes')
                ORDER BY id DESC LIMIT 1''',
             (site_id, reporter_id, report_type, description, photos_json),
         ).fetchone()
@@ -38704,6 +38881,29 @@ def api_manual_reports_create():
             result['deduplicated'] = True
             result['photo_media'] = _manual_report_photo_media(db, result)
             return jsonify(result), 200
+        marks = ','.join('?' * len(photo_urls))
+        attachments = db.execute(f"""SELECT * FROM operation_attachments
+            WHERE stored_path IN ({marks})""", photo_urls).fetchall()
+        if len(attachments) != len(photo_urls):
+            return jsonify({'error': '照片不存在或状态已变化，请刷新后重试'}), 409
+        attachment_extras = {}
+        for attachment in attachments:
+            try:
+                extra = _json.loads(attachment['extra_json'] or '{}')
+            except (TypeError, ValueError):
+                extra = {}
+            if (not isinstance(extra, dict) or extra.get('material_role') != 'pending_manual_report'
+                    or attachment['uploader_id'] != reporter_id
+                    or attachment['source_type'] != 'site_photo'
+                    or attachment['source_id'] != 0 or attachment['is_deleted']):
+                return jsonify({'error': '照片不是本人可提交的异常暂存材料'}), 409
+            if int(attachment['site_id'] or 0) != int(site_id):
+                extra['original_site_id'] = attachment['site_id']
+                extra['site_correction'] = {'from_site_id': attachment['site_id'],
+                                            'to_site_id': int(site_id),
+                                            'operator_id': reporter_id, 'at': now}
+            extra['material_role'] = 'formal'
+            attachment_extras[attachment['id']] = _json.dumps(extra, ensure_ascii=False)
         # 写上报记录
         cur = db.execute(
             'INSERT INTO manual_reports (site_id, report_type, description, photo_urls, gps_lat, gps_lng, reporter_id, reported_at) VALUES (?,?,?,?,?,?,?,?)',
@@ -38739,21 +38939,11 @@ def api_manual_reports_create():
         # 关联工单号回写
         db.execute('UPDATE manual_reports SET order_no=?, status="dispatched" WHERE id=?', (order_no, report_id))
         # 将上传暂存照片提升为异常上报证据；审核队列由此可直接追溯到本次上报。
-        marks = ','.join('?' * len(photo_urls))
-        material_promotion = """
-                   ,extra_json=CASE
-                     WHEN json_valid(extra_json)
-                      AND json_extract(extra_json,'$.material_role')='pending_manual_report'
-                     THEN json_set(extra_json,'$.material_role','formal')
-                     ELSE extra_json
-                   END""" if _table_has_column(db, 'operation_attachments', 'extra_json') else ''
-        db.execute(
-            f"""UPDATE operation_attachments
-               SET source_type='manual_report', source_id=?, description=?{material_promotion}
-                WHERE stored_path IN ({marks}) AND site_id=? AND uploader_id=?
-                  AND source_type='site_photo' AND source_id=0""",
-            [report_id, f'异常上报#{report_id}现场证据', *photo_urls, site_id, reporter_id],
-        )
+        for attachment_id, extra_json in attachment_extras.items():
+            db.execute("""UPDATE operation_attachments
+                SET source_type='manual_report', source_id=?, description=?, site_id=?, extra_json=?
+                WHERE id=?""", (report_id, f'异常上报#{report_id}现场证据', site_id,
+                                 extra_json, attachment_id))
         db.commit()
 
         row = db.execute('SELECT * FROM manual_reports WHERE id=?', (report_id,)).fetchone()
