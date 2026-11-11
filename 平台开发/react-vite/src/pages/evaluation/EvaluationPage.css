@@ -147,7 +147,7 @@ button.evaluation-link:hover { color: var(--evaluation-primary); }
   display: flex;
   flex-direction: column;
   color: var(--evaluation-text);
-  background: var(--evaluation-surface);
+  background: var(--evaluation-detail-surface);
   border: 1px solid var(--evaluation-border);
   border-radius: 16px;
   box-shadow: var(--evaluation-shadow);

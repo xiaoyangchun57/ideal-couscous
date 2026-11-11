@@ -367,6 +367,7 @@ export default function EvaluationPage() {
       '--evaluation-primary': tokens.colorPrimary,
       '--evaluation-error': tokens.colorError,
       '--evaluation-surface': tokens.panelBg,
+      '--evaluation-detail-surface': tokens.colorBgElevated,
       '--evaluation-shadow': tokens.shadowCard,
     }}>
     <div className="evaluation-main">
