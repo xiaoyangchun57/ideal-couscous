@@ -256,6 +256,69 @@ class PlanResourceArchiveFlowTest(unittest.TestCase):
                  vehicle_id, int(vehicle_id is None),
                  json.dumps({'ok': True, 'errors': []})))
 
+    def test_returned_trip_reapplication_keeps_same_task_and_old_trip(self):
+        self.add_submitted_schedule(91)
+        with self.db() as db:
+            db.execute('ALTER TABLE vehicle_applications ADD COLUMN execution_plan_id INTEGER')
+            db.execute("UPDATE plan_schedules SET status='approved' WHERE id=91")
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee_id,generate_date,status,plan_schedule_id)
+                VALUES (910,'original',2,?,'active',91)""", (self.day(),))
+            db.execute("""INSERT INTO insp_plan_items (id,plan_id,site_id,item_name,result,photo_urls)
+                VALUES (9101,910,1,'unfinished',NULL,'[\"kept.jpg\"]')""")
+            db.execute("""INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (910,1,2,?,?,?,'returned')""",
+                (self.day() + ' 00:00:00', self.day() + ' 23:59:00', '巡检计划#91用车'))
+            db.execute("""INSERT INTO vehicle_use_records
+                (id,application_id,start_mileage,end_mileage,returned_at,status)
+                VALUES (910,910,1000,1020,?,'returned')""", (self.business_timestamp(),))
+        payload = {'execution_plan_id': 910, 'vehicle_id': 1,
+                   'start_at': self.day() + ' 01:00:00', 'end_at': self.day() + ' 03:00:00',
+                   'reason': '继续巡检', '_idempotency_key': 'reapply-910'}
+        headers = self.headers('operator-token')
+        with self.db() as db:
+            db.execute("""INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (909,1,3,?,?,'其他人用车','approved')""",
+                (self.day() + ' 01:00:00', self.day() + ' 03:00:00'))
+            db.execute("""INSERT INTO vehicle_use_records (id,application_id,start_mileage,status)
+                VALUES (909,909,1020,'checked_out')""")
+        occupied = self.client.post('/api/vehicle/applications', headers=headers, json=payload)
+        self.assertEqual(occupied.status_code, 409, occupied.json)
+        with self.db() as db:
+            db.execute('DELETE FROM vehicle_use_records WHERE id=909')
+            db.execute('DELETE FROM vehicle_applications WHERE id=909')
+        created = self.client.post('/api/vehicle/applications', headers=headers, json=payload)
+        self.assertEqual(created.status_code, 201, created.json)
+        app_id = created.json['id']
+        duplicate = self.client.post('/api/vehicle/applications', headers=headers,
+                                     json={**payload, '_idempotency_key': 'reapply-910-second'})
+        self.assertEqual(duplicate.json['id'], app_id)
+        forbidden = self.client.post('/api/vehicle/applications', headers=self.headers('other-token'),
+                                     json={**payload, '_idempotency_key': 'other-reapply'})
+        self.assertNotEqual(forbidden.status_code, 201)
+        approved = self.client.post(f'/api/vehicle/applications/{app_id}/approve',
+                                    headers=self.headers('manager-token'), json={'action': 'approve'})
+        self.assertEqual(approved.status_code, 200, approved.json)
+        with self.db() as db:
+            db.execute("INSERT INTO vehicle_inspections VALUES (911,1,'dispatch','normal')")
+        checkout = self.client.post('/api/vehicle/use-records', headers=headers,
+                                    json={'application_id': app_id, 'start_mileage': 1020,
+                                          'out_inspection_id': 911})
+        self.assertEqual(checkout.status_code, 201, checkout.json)
+        with self.db() as db:
+            self.assertTrue(app_module._inspection_arrival_resource_state(db, 910, 2)[0])
+            db.execute("UPDATE vehicle_applications SET reason='巡检计划#91用车' WHERE id=?", (app_id,))
+            db.execute("""INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,reason,status)
+                VALUES (912,1,2,?,?,?,'approved')""",
+                (self.day() + ' 04:00:00', self.day() + ' 05:00:00', '巡检计划#91用车'))
+            self.assertEqual(app_module._merge_legacy_plan_vehicle_trips(db), 0)
+            self.assertEqual(db.execute('SELECT status FROM vehicle_applications WHERE id=910').fetchone()[0], 'returned')
+            self.assertEqual(db.execute('SELECT end_mileage FROM vehicle_use_records WHERE id=910').fetchone()[0], 1020)
+            self.assertEqual(db.execute('SELECT photo_urls FROM insp_plan_items WHERE id=9101').fetchone()[0], '["kept.jpg"]')
+
     def install_real_service_policy_schema_and_roles(self):
         migration_path = os.path.join(
             os.path.dirname(__file__), 'migrations',

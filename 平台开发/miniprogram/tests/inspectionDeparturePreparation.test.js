@@ -856,6 +856,20 @@ test('vehicle checkout failure keeps inspection input and releases only its own 
   assert.equal(toasts.at(-1).title, '车辆已被其他安排占用');
 });
 
+test('returned trip opens a new application for the same execution task', () => {
+  const originalNavigateTo = wx.navigateTo;
+  try {
+    let navigation;
+    wx.navigateTo = options => { navigation = options; };
+    const page = createPage();
+    seedDeparture(page, { vehicle: { id: 1, plate_no: '赣A00001' },
+      vehicle_reapplication_available: true, vehicle_application_id: null });
+    assert.equal(page.data.departureVm.vehicle.primaryAction, 'reapply');
+    page.onDepartureVehicleAction({ currentTarget: { dataset: { action: 'reapply' } } });
+    assert.equal(navigation.url, '/pages/vehicle/vehicle?execution_plan_id=10&vehicle_id=1');
+  } finally { wx.navigateTo = originalNavigateTo; }
+});
+
 test('overdue vehicle continuation writes one exact application target before navigation', () => {
   const originalNavigateTo = wx.navigateTo;
   try {

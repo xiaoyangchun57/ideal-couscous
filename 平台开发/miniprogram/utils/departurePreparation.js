@@ -134,6 +134,13 @@ function buildVehicle(pkg) {
     if (vehicleUse && useState === 'checked_out') {
       statusLabel = '车辆已出车';
       statusTone = 'success';
+    } else if (pkg.vehicle_application_status === 'pending') {
+      statusLabel = '本次用车待审批';
+      statusTone = 'warning';
+    } else if (pkg.vehicle_reapplication_available) {
+      statusLabel = '车辆已还车，任务未完成';
+      statusTone = 'warning';
+      primaryAction = 'reapply';
     } else if (vehicleUse && useState === 'returned') {
       statusLabel = '车辆已还车';
     } else {
@@ -287,6 +294,9 @@ function buildTodoItems(vehicle, partsSummary, partsAcknowledgement, gate) {
           statusText: '待延期',
           action: 'extend',
         });
+      } else if (vehicle.primaryAction === 'reapply') {
+        items.push({ type: 'vehicle', icon: '🚗', title: '车辆已还车',
+          sub: '任务未完成，可申请本次用车', status: 'pending', statusText: '待申请', action: 'reapply' });
       } else if (vehicle.primaryAction === 'request_resource') {
         items.push({
           type: 'vehicle',

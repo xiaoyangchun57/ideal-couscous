@@ -853,6 +853,10 @@ def migrate_vehicle_lifecycle_schema():
                 if name not in existing:
                     db.execute(f'ALTER TABLE vehicle_use_records ADD COLUMN {name} {column_type}')
 
+            existing = {r['name'] for r in db.execute('PRAGMA table_info(vehicle_applications)').fetchall()}
+            if 'execution_plan_id' not in existing:
+                db.execute('ALTER TABLE vehicle_applications ADD COLUMN execution_plan_id INTEGER')
+
             refuel_columns = {
                 'unit_price': 'REAL', 'operator_id': 'INTEGER', 'operator_name': 'TEXT',
                 'fuel_type': 'TEXT', 'energy_quantity': 'REAL', 'energy_unit': "TEXT DEFAULT 'L'",
@@ -935,10 +939,12 @@ def _merge_legacy_plan_vehicle_trips(db):
     Historical use records stay untouched for audit. The first application becomes the
     plan-level trip; redundant daily reservations no longer participate in dispatch.
     """
+    linked_filter = (' AND execution_plan_id IS NULL'
+                     if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else '')
     rows = db.execute("""SELECT id, vehicle_id, applicant_id, start_at, end_at, status, reason
                          FROM vehicle_applications
                          WHERE vehicle_id IS NOT NULL AND applicant_id IS NOT NULL
-                           AND reason LIKE '%#%'""").fetchall()
+                           AND reason LIKE '%#%'""" + linked_filter).fetchall()
     groups = {}
     for row in rows:
         item = dict(row)
@@ -8790,6 +8796,32 @@ def _rework_arrival_resource_state(db, plan_id, user_id):
     return False, 'REWORK_RESOURCE_PREPARATION_REQUIRED', '请重新安排车辆或登记无车例外'
 
 
+def _execution_vehicle_application(db, plan_id, user_id):
+    if not _table_has_column(db, 'vehicle_applications', 'execution_plan_id'):
+        return None
+    return db.execute("""SELECT va.*, v.plate_no,
+            date(va.start_at) AS trip_start_date, date(va.end_at) AS trip_end_date
+        FROM vehicle_applications va LEFT JOIN vehicles v ON v.id=va.vehicle_id
+        WHERE va.execution_plan_id=? AND va.applicant_id=?
+          AND va.status IN ('pending','approved') ORDER BY va.id DESC LIMIT 1""",
+        (plan_id, user_id)).fetchone()
+
+
+def _linked_execution_is_open(db, application):
+    row = dict(application or {})
+    plan_id = row.get('execution_plan_id')
+    if not plan_id:
+        return True
+    condition = _mobile_open_execution_item_condition(db, 'pi')
+    return bool(db.execute(f"""SELECT 1 FROM insp_plans ip
+        JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+        JOIN insp_plan_items pi ON pi.plan_id=ip.id
+        JOIN user_sites us ON us.site_id=pi.site_id AND us.user_id=ip.assignee_id
+        WHERE ip.id=? AND ip.assignee_id=? AND ip.status IN ('active','completed')
+          AND ps.status='approved' AND COALESCE(pi.execution_status,'active')='active'
+          AND {condition} LIMIT 1""", (plan_id, row.get('applicant_id'))).fetchone())
+
+
 def _inspection_arrival_resource_state(db, plan_id, user_id):
     """Resolve the authoritative vehicle gate for one inspection package."""
     rework_supported = _table_has_column(db, 'insp_plans', 'rework_of_plan_id')
@@ -8829,6 +8861,12 @@ def _inspection_arrival_resource_state(db, plan_id, user_id):
             or not _table_exists(db, 'vehicle_use_records')):
         return False, 'ARRIVAL_RESOURCE_STATE_UNAVAILABLE', '车辆履约状态暂不可用，请刷新后重试'
 
+    linked_application = _execution_vehicle_application(db, plan_id, user_id)
+    if linked_application:
+        vehicle_id = linked_application['vehicle_id']
+        if linked_application['status'] != 'approved':
+            return False, 'VEHICLE_APPLICATION_INVALID', '本次用车申请正在审批'
+
     # A single physical trip can serve another approved plan for the same holder.
     held_use = db.execute("""SELECT r.id FROM vehicle_use_records r
         JOIN vehicle_applications va ON va.id=r.application_id
@@ -8842,10 +8880,12 @@ def _inspection_arrival_resource_state(db, plan_id, user_id):
         return False, 'VEHICLE_UNAVAILABLE', '车辆当前处于不可使用状态'
 
     work_date = str(plan['generate_date'])[:10]
-    application = db.execute("""SELECT * FROM vehicle_applications
+    legacy_filter = (' AND execution_plan_id IS NULL'
+                     if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else '')
+    application = linked_application or db.execute("""SELECT * FROM vehicle_applications
         WHERE vehicle_id=? AND applicant_id=?
           AND date(start_at)<=? AND date(end_at)>=?
-          AND reason LIKE ?
+          AND reason LIKE ?""" + legacy_filter + """
         ORDER BY id DESC LIMIT 1""", (
             vehicle_id, user_id, work_date, work_date,
             _ps_vehicle_reason_like(plan['plan_schedule_id']),
@@ -27024,7 +27064,9 @@ def _mobile_rework_departure_resource(db, plan_id, user_id):
     application_data = dict(application)
     use = None
     if _table_exists(db, 'vehicle_use_records'):
-        use = db.execute("""SELECT r.*, va.applicant_id, va.end_at, va.reason,
+        execution_column = ('va.execution_plan_id' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id')
+                            else 'NULL AS execution_plan_id')
+        use = db.execute(f"""SELECT r.*, va.applicant_id, va.end_at, va.reason, {execution_column},
                     va.rework_plan_id, v.plate_no, v.status AS vehicle_status
                 FROM vehicle_use_records r
                 JOIN vehicle_applications va ON va.id=r.application_id
@@ -27155,25 +27197,45 @@ def mobile_today_execution():
                     vehicle_data['document_warning'] = '证照30天内到期，请关注'
             # 一个巡检计划中的同一车辆是一段连续行程，而不是每天重复出、还车。
             # 因此工作日只需落在申请的起止区间内即可取得同一用车单。
+            legacy_filter = (' AND va.execution_plan_id IS NULL'
+                             if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else '')
             vehicle_application = db.execute("""SELECT va.*, v.plate_no,
                     date(va.start_at) AS trip_start_date, date(va.end_at) AS trip_end_date
                 FROM vehicle_applications va
                 LEFT JOIN vehicles v ON v.id=va.vehicle_id
                 WHERE va.vehicle_id=? AND va.applicant_id=?
                   AND date(va.start_at)<=? AND date(va.end_at)>=?
-                  AND va.status='approved' AND va.reason LIKE ? ORDER BY va.id DESC LIMIT 1""",
+                  AND va.status='approved' AND va.reason LIKE ?""" + legacy_filter + " ORDER BY va.id DESC LIMIT 1",
                 (vehicle_id, user['id'], work_date, work_date,
                  _ps_vehicle_reason_like(p["plan_schedule_id"]))).fetchone() if vehicle_id else None
+            linked_application = _execution_vehicle_application(db, p['id'], user['id']) if vehicle_id else None
+            if linked_application:
+                vehicle_application = linked_application
+                vehicle_id = linked_application['vehicle_id']
+                selected = db.execute('SELECT id, plate_no, model, status, current_mileage FROM vehicles WHERE id=?', (vehicle_id,)).fetchone()
+                vehicle_data = dict(selected) if selected else None
+                if vehicle_data:
+                    vehicle_data['document_state'] = _vehicle_document_state(db, vehicle_id)
+            returned_trip = db.execute("""SELECT 1 FROM vehicle_applications va
+                JOIN vehicle_use_records r ON r.application_id=va.id
+                WHERE va.applicant_id=? AND r.returned_at IS NOT NULL AND
+                  ((va.vehicle_id=? AND va.reason LIKE ? AND date(va.start_at)<=? AND date(va.end_at)>=?)
+                   OR """ + ('va.execution_plan_id=?' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else '0') + ") LIMIT 1",
+                ((user['id'], vehicle_id, _ps_vehicle_reason_like(p['plan_schedule_id']), work_date, work_date, p['id'])
+                 if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else
+                 (user['id'], vehicle_id, _ps_vehicle_reason_like(p['plan_schedule_id']), work_date, work_date))).fetchone() if vehicle_id and not is_rework else None
             application_state = _vehicle_plan_application_state(db, vehicle_application) \
                 if vehicle_application else None
-            vehicle_use = db.execute("""SELECT r.*, va.applicant_id, va.end_at, va.reason,
+            execution_column = ('va.execution_plan_id' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id')
+                                else 'NULL AS execution_plan_id')
+            vehicle_use = db.execute(f"""SELECT r.*, va.applicant_id, va.end_at, va.reason, {execution_column},
                         v.plate_no, v.status AS vehicle_status
                     FROM vehicle_use_records r
                     JOIN vehicle_applications va ON va.id=r.application_id
                     JOIN vehicles v ON v.id=va.vehicle_id
                     WHERE r.application_id=? ORDER BY r.id DESC LIMIT 1""",
                 (vehicle_application['id'],)).fetchone() if vehicle_application else None
-            held_use = db.execute("""SELECT r.*, va.applicant_id, va.end_at, va.reason,
+            held_use = db.execute(f"""SELECT r.*, va.applicant_id, va.end_at, va.reason, {execution_column},
                         v.plate_no, v.status AS vehicle_status
                     FROM vehicle_use_records r
                     JOIN vehicle_applications va ON va.id=r.application_id
@@ -27268,6 +27330,7 @@ def mobile_today_execution():
                 'resource_parts': resource_parts,
                 'vehicle_application_id': vehicle_application['id'] if vehicle_application else None,
                 'vehicle_application_status': vehicle_application['status'] if vehicle_application else None,
+                'vehicle_reapplication_available': bool(returned_trip and not vehicle_application and not held_use),
                 'vehicle_use': vehicle_use_state,
                 'vehicle_trip_start_date': vehicle_application['trip_start_date'] if vehicle_application else None,
                 'vehicle_trip_end_date': vehicle_application['trip_end_date'] if vehicle_application else None,
@@ -30939,6 +31002,8 @@ def _vehicle_schedule_id(reason):
 def _vehicle_application_schedule_id(db, application_row):
     """Resolve a plan schedule for normal and remediation vehicle applications."""
     row = dict(application_row or {})
+    if row.get('execution_plan_id'):
+        return None
     schedule_id = _vehicle_schedule_id(row.get('reason'))
     if schedule_id:
         return schedule_id
@@ -31019,7 +31084,8 @@ def _vehicle_can_dispatch(db, vehicle, exclude_application_id=None, exclude_sche
     # has passed or a legacy record left the vehicle status as idle.
     try:
         rework_column = ', va.rework_plan_id' if _table_has_column(db, 'vehicle_applications', 'rework_plan_id') else ''
-        active = db.execute(f'''SELECT r.id, va.reason{rework_column}
+        execution_column = ', va.execution_plan_id' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id') else ''
+        active = db.execute(f'''SELECT r.id, va.reason{rework_column}{execution_column}
                                FROM vehicle_use_records r
                                JOIN vehicle_applications va ON va.id=r.application_id
                                WHERE va.vehicle_id=? AND r.returned_at IS NULL
@@ -31226,13 +31292,15 @@ def api_vehicles():
         else:
             rows = db.execute("SELECT * FROM vehicles WHERE status<>'retired' ORDER BY plate_no").fetchall()
         result = []
+        execution_column = ('va.execution_plan_id' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id')
+                            else 'NULL AS execution_plan_id')
         for row in rows:
             item = dict(row)
             item['document_state'] = _vehicle_document_state(db, row['id'])
             item['schedulable'], item['schedule_block_reason'] = _vehicle_can_schedule(db, row)
             item['dispatchable'], item['dispatch_block_reason'] = _vehicle_can_dispatch(db, row)
             try:
-                active = db.execute('''SELECT r.*, va.applicant_id, va.end_at, va.reason,
+                active = db.execute(f'''SELECT r.*, va.applicant_id, va.end_at, va.reason, {execution_column},
                                              v.plate_no, v.status AS vehicle_status
                                       FROM vehicle_use_records r
                                       JOIN vehicle_applications va ON va.id=r.application_id
@@ -31837,6 +31905,15 @@ def api_vehicle_applications_create():
     no_vehicle_required = data.get('no_vehicle_required') in (True, 1, '1', 'true')
     vehicle_exception_reason = (data.get('vehicle_exception_reason') or '').strip()
     idempotency_key = str(data.get('_idempotency_key') or '').strip()
+    execution_plan_raw = data.get('execution_plan_id')
+    execution_plan_id = None
+    if execution_plan_raw not in (None, ''):
+        try:
+            execution_plan_id = int(execution_plan_raw)
+            if execution_plan_id <= 0:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return jsonify({'error': '巡检任务参数无效'}), 400
     if len(idempotency_key) > 160:
         return jsonify({'error': '重复提交标识无效'}), 400
     if destination_mode and not idempotency_key:
@@ -31878,6 +31955,50 @@ def api_vehicle_applications_create():
         if cached is not None:
             db.rollback()
             return jsonify(cached)
+        if execution_plan_id:
+            if not _table_has_column(db, 'vehicle_applications', 'execution_plan_id'):
+                db.rollback()
+                return jsonify({'error': '任务用车功能尚未就绪'}), 503
+            plan = db.execute("""SELECT ip.*, ps.status AS schedule_status, ps.vehicle_days
+                FROM insp_plans ip JOIN plan_schedules ps ON ps.id=ip.plan_schedule_id
+                WHERE ip.id=? AND ip.assignee_id=?""", (execution_plan_id, applicant_id)).fetchone()
+            if not plan or plan['schedule_status'] != 'approved' or plan['status'] not in ('active', 'completed'):
+                db.rollback()
+                return jsonify({'error': '巡检任务不存在或无权申请'}), 403
+            if 'rework_of_plan_id' in plan.keys() and plan['rework_of_plan_id'] is not None:
+                db.rollback()
+                return jsonify({'error': '整改任务请使用原资源申请入口'}), 409
+            open_condition = _mobile_open_execution_item_condition(db, 'pi')
+            unfinished = db.execute(f"""SELECT 1 FROM insp_plan_items pi
+                JOIN user_sites us ON us.site_id=pi.site_id AND us.user_id=?
+                WHERE pi.plan_id=? AND COALESCE(pi.execution_status,'active')='active'
+                  AND {open_condition} LIMIT 1""", (applicant_id, execution_plan_id)).fetchone()
+            try:
+                planned_vehicle = int(json.loads(plan['vehicle_days'] or '{}').get(str(plan['generate_date'])[:10]) or 0)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                planned_vehicle = 0
+            if not unfinished or not planned_vehicle or not vehicle_id or work_order_no:
+                db.rollback()
+                return jsonify({'error': '任务已结束或没有需要重新安排的计划车辆'}), 409
+            existing = _execution_vehicle_application(db, execution_plan_id, applicant_id)
+            if existing:
+                response = _decorate_attachment(db, existing)
+                db.rollback()
+                return jsonify(response)
+            returned = db.execute("""SELECT 1 FROM vehicle_applications va
+                JOIN vehicle_use_records r ON r.application_id=va.id
+                WHERE va.applicant_id=? AND r.returned_at IS NOT NULL AND
+                  ((va.execution_plan_id=? ) OR (va.execution_plan_id IS NULL AND va.vehicle_id=?
+                    AND va.reason LIKE ? AND date(va.start_at)<=? AND date(va.end_at)>=?)) LIMIT 1""",
+                (applicant_id, execution_plan_id, planned_vehicle,
+                 _ps_vehicle_reason_like(plan['plan_schedule_id']), str(plan['generate_date'])[:10],
+                 str(plan['generate_date'])[:10])).fetchone()
+            held = db.execute("""SELECT 1 FROM vehicle_use_records r JOIN vehicle_applications va ON va.id=r.application_id
+                WHERE va.applicant_id=? AND r.returned_at IS NULL AND COALESCE(r.status,'checked_out')!='returned' LIMIT 1""",
+                (applicant_id,)).fetchone()
+            if not returned or held or not start_value or start_value[0].date() < datetime.now().date():
+                db.rollback()
+                return jsonify({'error': '请在还车后按本次实际用车时间申请；持车中请继续原行程'}), 409
         if site_id is not None:
             site = db.execute('SELECT id,name FROM sites WHERE id=?', (site_id,)).fetchone()
             if not site:
@@ -31916,10 +32037,13 @@ def api_vehicle_applications_create():
         cur = db.execute(
             '''INSERT INTO vehicle_applications
                (vehicle_id, applicant_id, start_at, end_at, destination, reason, site_id,
-                work_order_no, no_vehicle_required, vehicle_exception_reason)
-               VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                work_order_no, no_vehicle_required, vehicle_exception_reason, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,'pending')''',
             (vehicle_id, applicant_id, start_at, end_at, destination, reason, site_id,
              work_order_no, int(no_vehicle_required), vehicle_exception_reason))
+        if execution_plan_id:
+            db.execute('UPDATE vehicle_applications SET execution_plan_id=? WHERE id=?',
+                       (execution_plan_id, cur.lastrowid))
         row = db.execute('SELECT * FROM vehicle_applications WHERE id=?', (cur.lastrowid,)).fetchone()
         response = _decorate_attachment(db, row)
         try:
@@ -32052,6 +32176,9 @@ def api_vehicle_application_approve(app_id):
         if app_row['status'] != 'pending':
             db.rollback()
             return jsonify({'error': '该申请已处理', 'code': 'VEHICLE_APPROVAL_STALE'}), 409
+        if status == 'approved' and not _linked_execution_is_open(db, app_row):
+            db.rollback()
+            return jsonify({'error': '关联巡检任务已结束或不可执行，请刷新', 'code': 'EXECUTION_TARGET_UNAVAILABLE'}), 409
         if status == 'approved' and app_row['vehicle_id']:
             vehicle = db.execute('SELECT * FROM vehicles WHERE id=?', (app_row['vehicle_id'],)).fetchone()
             available, reason_text = _vehicle_can_dispatch(db, vehicle)
@@ -32285,7 +32412,9 @@ def api_vehicle_use_records():
             return pagination_error
         offset = max(request.args.get('offset', (page - 1) * limit, type=int) or 0, 0)
         with get_db() as db:
-            q = '''SELECT r.*, v.id AS vehicle_id, v.plate_no, v.model, v.fuel_type, v.status AS vehicle_status, va.applicant_id, va.start_at, va.end_at, va.destination, va.reason,
+            execution_column = ('va.execution_plan_id' if _table_has_column(db, 'vehicle_applications', 'execution_plan_id')
+                                else 'NULL AS execution_plan_id')
+            q = f'''SELECT r.*, v.id AS vehicle_id, v.plate_no, v.model, v.fuel_type, v.status AS vehicle_status, va.applicant_id, va.start_at, va.end_at, va.destination, va.reason, {execution_column},
                           u.real_name as applicant_name
                    FROM vehicle_use_records r
                    JOIN vehicle_applications va ON r.application_id = va.id
@@ -32323,8 +32452,6 @@ def api_vehicle_use_records():
             result = []
             for row in rows:
                 item = dict(row)
-                match = re.search(r'巡检计划#(\d+)', str(item.get('reason') or ''))
-                item['plan_schedule_id'] = int(match.group(1)) if match else None
                 item = _vehicle_plan_use_state(db, item)
                 _notify_vehicle_expiry(db, item)
                 result.append(item)
@@ -32360,6 +32487,8 @@ def api_vehicle_use_records():
             return jsonify({'error': '仅申请人或管理者可以出车'}), 403
         if application['status'] != 'approved' or not application['vehicle_id']:
             return jsonify({'error': '仅已批准且已指定车辆的申请可以出车'}), 409
+        if not _linked_execution_is_open(db, application):
+            return jsonify({'error': '关联巡检任务已结束或不可执行，请刷新', 'code': 'EXECUTION_TARGET_UNAVAILABLE'}), 409
         schedule_id = _vehicle_application_schedule_id(db, application)
         if schedule_id and _refresh_plan_vehicle_adjustment(db, schedule_id):
             return jsonify({

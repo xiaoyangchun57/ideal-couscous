@@ -1453,6 +1453,18 @@ Page({
       this.onDepartureRefresh();
       return;
     }
+    if (action === 'reapply') {
+      if (this._showDepartureActionBlocked('vehicleCheckout')) return;
+      const pkg = this.data.currentPackage;
+      if (!pkg || !pkg.vehicle_reapplication_available || !pkg.plan_id) {
+        wx.showToast({ title: '任务状态已变化，请刷新', icon: 'none' });
+        return;
+      }
+      wx.navigateTo({ url: '/pages/vehicle/vehicle?execution_plan_id=' + encodeURIComponent(pkg.plan_id)
+        + '&vehicle_id=' + encodeURIComponent((pkg.vehicle || {}).id || ''),
+        fail: () => wx.showToast({ title: '车辆页面打开失败，请重试', icon: 'none' }) });
+      return;
+    }
     const actionKey = {
       request_resource: 'reworkRequest',
       checkout: 'vehicleCheckout',
@@ -1475,7 +1487,7 @@ Page({
   onDepartureTodoTap(e) {
     const action = e && e.currentTarget && e.currentTarget.dataset.action;
     if (!action || action === 'none') return;
-    if (action === 'checkout' || action === 'extend') {
+    if (action === 'checkout' || action === 'extend' || action === 'reapply') {
       this.onDepartureVehicleAction({ currentTarget: { dataset: { action } } });
     } else if (action === 'request_resource') {
       this.onOpenReworkResource();
