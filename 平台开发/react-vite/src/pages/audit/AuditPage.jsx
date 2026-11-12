@@ -371,6 +371,10 @@ function BusinessAuditTab({ queueKey, sourceTypes, title, statValue, allItems, l
       render: (_, record) => {
         const related = [
           record.plan_name && `计划：${record.plan_name}`,
+          record.audit_execution_plan_id && `任务#${record.audit_execution_plan_id}`,
+          record.audit_execution_plan_id && record.plan_schedule_id && `排程#${record.plan_schedule_id}`,
+          record.execution_work_date && `工作日：${record.execution_work_date}`,
+          record.audit_execution_plan_id && record.site_name && `站点：${record.site_name}`,
           record.rework_plan_id && `整改计划#${record.rework_plan_id}`,
           record.work_order_no && `工单：${record.work_order_no}`,
         ].filter(Boolean);
@@ -1176,6 +1180,13 @@ export default function AuditPage() {
               {item.spare_parts?.length > 0 && <Descriptions.Item label="备件计划">
                 {item.spare_parts.map((part, index) => <div key={index}>{part.part_name || part.name || part.part_sku || '备件'} × {part.quantity || part.planned_quantity || 0}</div>)}
               </Descriptions.Item>}
+            </>
+          )}
+          {item.source_type === 'vehicle_application' && item.audit_execution_plan_id && (
+            <>
+              <Descriptions.Item label="关联任务">{item.plan_name || '巡检任务'} #{item.audit_execution_plan_id}{item.plan_schedule_id ? `（排程#${item.plan_schedule_id}）` : ''}</Descriptions.Item>
+              <Descriptions.Item label="原工作日">{item.execution_work_date || '未记录'}</Descriptions.Item>
+              <Descriptions.Item label="本次用车时间">{item.start_at || '-'} 至 {item.end_at || '-'}</Descriptions.Item>
             </>
           )}
           <Descriptions.Item label="站点">{item.site_name || '-'}</Descriptions.Item>

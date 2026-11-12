@@ -658,6 +658,39 @@ class InspectionAuditUnitTest(unittest.TestCase):
         self.assertIsNone(workorder['plan_schedule_id'])
         self.assertEqual(workorder['plan_name'], '')
 
+    def test_vehicle_pending_projects_execution_task_work_date_and_sites(self):
+        with app_module.get_db() as db:
+            db.execute('ALTER TABLE vehicle_applications ADD COLUMN execution_plan_id INTEGER')
+            db.execute("INSERT INTO plan_schedules VALUES (77,2,'approved',datetime('now'))")
+            db.execute("INSERT INTO sites VALUES (2,'Site B','S-2','water_quality',0,0)")
+            db.execute("""INSERT INTO insp_plans
+                (id,plan_name,assignee_id,completion_rate,status,plan_schedule_id,generate_date)
+                VALUES (11,'Original route',2,0,'active',77,'2026-11-11')""")
+            db.executemany('INSERT INTO insp_plan_items (id,plan_id,site_id,item_name) VALUES (?,?,?,?)',
+                           [(110,11,1,'First'), (111,11,1,'Second'), (112,11,2,'Third')])
+            db.execute("INSERT INTO vehicles VALUES (5,'TEST-5','Utility')")
+            db.executemany("""INSERT INTO vehicle_applications
+                (id,vehicle_id,applicant_id,start_at,end_at,destination,reason,created_at,status,execution_plan_id)
+                VALUES (?,5,2,'2026-11-12 08:00','2026-11-12 17:00','Destination',?,datetime('now'),'pending',?)""",
+                [(60,'巡检计划#999用车',11), (61,'巡检计划#999用车',999),
+                 (62,'普通申请',None), (63,'巡检计划#77用车',None)])
+
+        response = self.client.get('/api/audit/pending', headers={'Authorization': 'Bearer admin-token'})
+        self.assertEqual(response.status_code, 200, response.json)
+        vehicles = {item['id']: item for item in response.json if item['source_type'] == 'vehicle_application'}
+        task = vehicles['va_60']
+        self.assertEqual((task['audit_execution_plan_id'], task['plan_schedule_id'], task['plan_name']),
+                         (11, 77, 'Original route'))
+        self.assertEqual(task['execution_work_date'], '2026-11-11')
+        self.assertEqual(task['site_name'], 'Site A、Site B')
+        self.assertEqual((task['start_at'], task['end_at']), ('2026-11-12 08:00', '2026-11-12 17:00'))
+        self.assertEqual(vehicles['va_63']['plan_schedule_id'], 77)
+        self.assertFalse(vehicles['va_63'].get('audit_execution_plan_id'))
+        for application_id in ('va_61', 'va_62'):
+            self.assertFalse(vehicles[application_id].get('audit_execution_plan_id'))
+            self.assertIsNone(vehicles[application_id]['plan_schedule_id'])
+            self.assertEqual(vehicles[application_id]['site_name'], '')
+
     def test_one_selective_decision_updates_items_and_attachments_together(self):
         self.client.get('/api/audit/pending', headers=self.headers())
         response = self.client.post('/api/operation-attachments/review', headers=self.headers(), json={
