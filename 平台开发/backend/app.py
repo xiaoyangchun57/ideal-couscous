@@ -17539,6 +17539,30 @@ def _vehicle_application_audit_association(db, application):
         'plan_schedule_id': None,
         'plan_name': '',
     }
+    if row.get('execution_plan_id'):
+        try:
+            plan = db.execute('''SELECT p.id, p.plan_name, p.generate_date,
+                                        ps.id AS plan_schedule_id
+                                 FROM insp_plans p
+                                 LEFT JOIN plan_schedules ps ON ps.id=p.plan_schedule_id
+                                 WHERE p.id=?''', (row['execution_plan_id'],)).fetchone()
+        except sqlite3.OperationalError:
+            plan = None
+        if plan:
+            association.update({
+                'audit_execution_plan_id': plan['id'],
+                'plan_schedule_id': plan['plan_schedule_id'],
+                'plan_name': plan['plan_name'] or '',
+                'execution_work_date': plan['generate_date'] or '',
+            })
+            try:
+                sites = db.execute('''SELECT DISTINCT s.id, s.name FROM insp_plan_items i
+                                      JOIN sites s ON s.id=i.site_id
+                                      WHERE i.plan_id=? ORDER BY s.id''', (plan['id'],)).fetchall()
+            except sqlite3.OperationalError:
+                sites = []
+            association['site_name'] = '、'.join(s['name'] for s in sites if s['name'])
+        return association
     if association['rework_plan_id']:
         try:
             plan = db.execute(
