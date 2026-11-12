@@ -168,6 +168,9 @@ Page({
 
   onLoad(options) {
     this._alive = true;
+    this._executionPlanId = Number(options && options.execution_plan_id) || null;
+    this._executionVehicleId = Number(options && options.vehicle_id) || null;
+    this._openExecutionApply = !!this._executionPlanId;
     this._loadRequestId = 0;
     this._sitesRequestId = 0;
     const applicationId = Number(options && options.application_id);
@@ -273,6 +276,7 @@ Page({
           vehicles: (vehicles || []).filter(item => item.dispatchable)
         });
         this._consumeVehicleTarget(target, exactTargetApplication, exactTargetDecorated);
+        this._openExecutionApplyWhenReady();
         if (!target && this._invalidVehicleTargetMessage) {
           const message = this._invalidVehicleTargetMessage;
           this._invalidVehicleTargetMessage = '';
@@ -301,6 +305,7 @@ Page({
       .then(sites => {
         if (!this._alive || requestId !== this._sitesRequestId) return;
         this.setData({ sites: Array.isArray(sites) ? sites : [], sitesAuthorityFresh: true, sitesLoadError: '' });
+        this._openExecutionApplyWhenReady();
       })
       .catch(err => {
         if (!this._alive || requestId !== this._sitesRequestId) return;
@@ -621,6 +626,11 @@ Page({
       .catch(err => { this.setData({ 'returnSheet.submitting': false }); wx.showToast({ title: (err && err.error) || '还车登记失败', icon: 'none' }); });
   },
 
+  _openExecutionApplyWhenReady() {
+    if (!this._openExecutionApply || !this.data.authorityFresh || !this.data.sitesAuthorityFresh) return;
+    this._openExecutionApply = false;
+    this.onOpenApply();
+  },
   onOpenApply() {
     if (!this._ensureWritable()) return;
     if (!this.data.sitesAuthorityFresh) {
@@ -629,7 +639,13 @@ Page({
     }
     if (!(this.data.vehicles || []).length) { wx.showToast({ title: '当前没有可调度车辆，请联系管理员', icon: 'none' }); return; }
     const hasSites = (this.data.sites || []).length > 0;
-    this.setData({ applySheet: { open: true, vehicleIndex: 0, startDate: todayStr(), startTime: '08:00', endDate: todayStr(), endTime: '18:00', destinationMode: hasSites ? 'site' : 'other', destinationModeIndex: hasSites ? 0 : 1, siteIndex: 0, otherDestination: '', reason: '', requestKey: 'vehicle_application_' + Date.now(), submitting: false } });
+    const now = new Date();
+    const startTime = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    const end = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const endDate = end.getFullYear() + '-' + String(end.getMonth() + 1).padStart(2, '0') + '-' + String(end.getDate()).padStart(2, '0');
+    const endTime = String(end.getHours()).padStart(2, '0') + ':' + String(end.getMinutes()).padStart(2, '0');
+    const selected = (this.data.vehicles || []).findIndex(item => Number(item.id) === this._executionVehicleId);
+    this.setData({ applySheet: { open: true, vehicleIndex: Math.max(0, selected), startDate: todayStr(), startTime: this._executionPlanId ? startTime : '08:00', endDate: this._executionPlanId ? endDate : todayStr(), endTime: this._executionPlanId ? endTime : '18:00', destinationMode: hasSites ? 'site' : 'other', destinationModeIndex: hasSites ? 0 : 1, siteIndex: 0, otherDestination: '', reason: this._executionPlanId ? '继续未完成的巡检任务' : '', requestKey: 'vehicle_application_' + Date.now(), submitting: false } });
   },
   onCloseApply() {
     if (this.data.applySheet.submitting) { wx.showToast({ title: '正在处理中，请稍候', icon: 'none' }); return; }
@@ -657,8 +673,10 @@ Page({
     const endAt = sheet.endDate + ' ' + sheet.endTime + ':00';
     if (endAt <= startAt) { wx.showToast({ title: '结束时间应晚于开始时间', icon: 'none' }); return; }
     this.setData({ 'applySheet.submitting': true });
-    api.applyVehicle({ vehicle_id: vehicle.id, start_at: startAt, end_at: endAt, destination_mode: sheet.destinationMode, site_id: sheet.destinationMode === 'site' ? site.id : null, destination: sheet.destinationMode === 'other' ? otherDestination : '', reason: sheet.reason.trim(), _idempotency_key: sheet.requestKey })
-      .then(() => { this.setData({ 'applySheet.open': false }); wx.showToast({ title: '用车申请已提交', icon: 'success' }); this.load(); })
+    const payload = { vehicle_id: vehicle.id, start_at: startAt, end_at: endAt, destination_mode: sheet.destinationMode, site_id: sheet.destinationMode === 'site' ? site.id : null, destination: sheet.destinationMode === 'other' ? otherDestination : '', reason: sheet.reason.trim(), _idempotency_key: sheet.requestKey };
+    if (this._executionPlanId) payload.execution_plan_id = this._executionPlanId;
+    api.applyVehicle(payload)
+      .then(() => { this.setData({ 'applySheet.open': false }); wx.showToast({ title: '用车申请已提交', icon: 'success' }); if (this._executionPlanId) wx.navigateBack(); else this.load(); })
       .catch(err => { this.setData({ 'applySheet.submitting': false }); wx.showToast({ title: (err && err.error) || '提交申请失败', icon: 'none' }); });
   }
 });

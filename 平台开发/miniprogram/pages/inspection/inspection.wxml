@@ -309,6 +309,7 @@
             <text wx:if="{{departureVehicleTemplateLoading && departureVm.vehicle.primaryAction === 'checkout'}}">正在加载出车前检查…</text>
             <text wx:elif="{{departureVm.vehicle.primaryAction === 'checkout'}}">出车登记</text>
             <text wx:elif="{{departureVm.vehicle.primaryAction === 'extend'}}">延续用车</text>
+            <text wx:elif="{{departureVm.vehicle.primaryAction === 'reapply'}}">申请本次用车</text>
             <text wx:elif="{{departureVm.vehicle.primaryAction === 'request_resource'}}">安排资源</text>
             <text wx:elif="{{departureVm.vehicle.primaryAction === 'retry'}}">刷新状态</text>
             <text wx:else>处理</text>
