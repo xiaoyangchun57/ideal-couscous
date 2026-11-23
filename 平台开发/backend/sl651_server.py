@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 from pathlib import Path
 import sqlite3
 from typing import Literal, Protocol
@@ -70,6 +71,8 @@ DEFAULT_QUEUE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_ERROR_QUEUE_MAX = 256
 DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE = 64
 DEFAULT_NORMALIZATION_SCAN_SECONDS = 0.1
+DEFAULT_NORMALIZATION_SCAN_RETRY_SECONDS = 1.0
+DEFAULT_NORMALIZATION_RECEIPT_GRACE_SECONDS = 0.1
 DEFAULT_MAPPING_PATH = Path(__file__).with_name("sl651_mapping.json")
 AGGREGATE_ONLY_ERROR_TYPES = frozenset({
     "source_cooling",
@@ -769,6 +772,8 @@ class StationIngestServer:
         self._normalization_wakeup = asyncio.Event()
         self._scheduled_normalizations: set[int] = set()
         self._normalization_stopping = False
+        self._closing = False
+        self._connections: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
 
     @property
@@ -787,6 +792,8 @@ class StationIngestServer:
 
     async def start(self) -> None:
         self.storage.healthcheck()
+        self._closing = False
+        self._normalization_stopping = False
         self._event_loop = asyncio.get_running_loop()
         self._worker = asyncio.create_task(self._persistence_worker(), name="station-ingest-persistence")
         self._normalizer = asyncio.create_task(self._normalization_worker(), name="station-monitoring-normalization")
@@ -795,17 +802,32 @@ class StationIngestServer:
         self._server = await asyncio.start_server(self._handle_connection, self.host, self.port, limit=MAX_FRAME_BYTES)
 
     async def close(self) -> None:
+        self._closing = True
+        self._normalization_stopping = True
+        self._normalization_wakeup.set()
         if self._server:
             self._server.close()
+        # Closing the listener does not close its already accepted connections.
+        # Stop new work, let admitted persistence finish, then stop the workers.
+        connections = dict(self._connections)
+        for writer in connections.values():
+            writer.close()
+        if self._server:
             await self._server.wait_closed()
+            self._server = None
+        if connections:
+            await asyncio.gather(*connections, return_exceptions=True)
         if self._worker:
             await self._queue.join()
             await self._queue.put(_QueuedWork("stop"))
             await self._worker
+            self._worker = None
         if self._normalization_scanner:
-            self._normalization_stopping = True
-            self._normalization_wakeup.set()
-            await self._normalization_scanner
+            try:
+                await self._normalization_scanner
+            except Exception as exc:
+                LOGGER.warning("station monitoring scanner stopped with error: %s", type(exc).__name__)
+            self._normalization_scanner = None
         if self._normalizer:
             # Let in-flight SQLite work close its connection before cancelling the idle
             # task.  Cancelling asyncio.to_thread() alone leaves its worker thread alive.
@@ -815,6 +837,7 @@ class StationIngestServer:
                 await self._normalizer
             except asyncio.CancelledError:
                 pass
+            self._normalizer = None
 
     def _source_key(self, writer: asyncio.StreamWriter) -> str:
         peer = writer.get_extra_info("peername")
@@ -831,6 +854,8 @@ class StationIngestServer:
     async def _admit_connection(self, source: str) -> str | None:
         now = asyncio.get_running_loop().time()
         async with self._connection_lock:
+            if self._closing:
+                return "receiver_stopping"
             self._prune_sources(now)
             if self._active_connections >= self.max_connections:
                 return "global_connection_limit"
@@ -875,6 +900,8 @@ class StationIngestServer:
 
     def _enqueue_error(self, error_code: str, source: str | None = None, *, count_toward_budget: bool = True) -> None:
         """Schedule bounded error persistence without opening SQLite on the event loop."""
+        if self._closing:
+            return
         if source:
             self._note_source_error(source, count_toward_budget=count_toward_budget)
         if self._queued_errors >= self.error_queue_max:
@@ -899,9 +926,16 @@ class StationIngestServer:
                 await self._normalization_wakeup.wait()
                 self._normalization_wakeup.clear()
                 continue
-            raw_ids = await asyncio.to_thread(
-                self.storage.pending_normalization_page, cursor, min(available, DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE)
-            )
+            try:
+                raw_ids = await asyncio.to_thread(
+                    self.storage.pending_normalization_page, cursor, min(available, DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE)
+                )
+            except Exception as exc:
+                # Keep the cursor and durable pending state unchanged. Receipt wakeups
+                # must not turn an unavailable database into a tight retry loop.
+                LOGGER.warning("station monitoring scan deferred: %s", type(exc).__name__)
+                await asyncio.sleep(DEFAULT_NORMALIZATION_SCAN_RETRY_SECONDS)
+                continue
             if self._normalization_stopping:
                 return
             if not raw_ids:
@@ -925,9 +959,10 @@ class StationIngestServer:
         while True:
             raw_id = await self._normalization_queue.get()
             try:
-                # Normalization is retryable projection work. Never let its SQLite
-                # write transaction compete with an acknowledged raw-receipt backlog.
-                while self._queued_frames:
+                # Give raw persistence a short head start, not an unbounded veto:
+                # a continuously busy receiver must still produce measurements.
+                receipt_deadline = asyncio.get_running_loop().time() + DEFAULT_NORMALIZATION_RECEIPT_GRACE_SECONDS
+                while self._queued_frames and asyncio.get_running_loop().time() < receipt_deadline:
                     await asyncio.sleep(0.01)
                 await asyncio.to_thread(
                     normalize_raw_frame, self.storage.database, raw_id, retire_source=True)
@@ -1040,6 +1075,8 @@ class StationIngestServer:
             self._enqueue_error("frame_too_large", source)
             return ProcessingResult(None, False)
         async with self._queued_bytes_lock:
+            if self._closing:
+                return ProcessingResult(None, False)
             if self._queued_frames >= self._queue_max_frames or self._queued_bytes + len(raw) > self.queue_max_bytes:
                 self._enqueue_error("queue_full", source)
                 return ProcessingResult(None, False)
@@ -1070,6 +1107,8 @@ class StationIngestServer:
             await writer.wait_closed()
             return
         buffer = b""
+        task = asyncio.current_task()
+        self._connections[task] = writer
         try:
             while True:
                 try:
@@ -1095,6 +1134,8 @@ class StationIngestServer:
                     writer.close()
                     await writer.wait_closed()
                     return
+        except ConnectionError:
+            pass
         finally:
             writer.close()
             try:
@@ -1102,6 +1143,7 @@ class StationIngestServer:
             except ConnectionError:
                 pass
             await self._release_connection(source)
+            self._connections.pop(task, None)
 
 
 async def run_server(
@@ -1123,6 +1165,20 @@ async def run_server(
     )
     await server.start()
     return server
+
+
+async def _serve_until_stopped(server: StationIngestServer) -> None:
+    """Route the container's SIGTERM through the same durable-work shutdown."""
+    loop = asyncio.get_running_loop()
+    stopping = asyncio.Event()
+    previous = signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(stopping.set))
+    try:
+        await stopping.wait()
+    finally:
+        try:
+            await server.close()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 async def _listener_healthcheck(host: str, port: int) -> None:
@@ -1240,10 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
             storage_policy=storage_policy,
         )
         LOGGER.info("station ingestion receiver started on loopback-or-explicit host")
-        try:
-            await asyncio.Future()
-        finally:
-            await server.close()
+        await _serve_until_stopped(server)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     asyncio.run(serve())

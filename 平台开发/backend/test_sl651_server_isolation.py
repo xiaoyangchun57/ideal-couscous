@@ -3,6 +3,7 @@ import asyncio
 import inspect
 import json
 import sqlite3
+import signal
 from contextlib import closing
 from datetime import datetime, timedelta
 import tempfile
@@ -437,6 +438,212 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='queue_full'").fetchone()[0], 1)
+
+    def _recovery_endpoint(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            site_id = db.execute("INSERT INTO sites(code,name,type) VALUES ('RECOVERY','recovery','water')").lastrowid
+            endpoint = db.execute("""INSERT INTO trusted_endpoints(
+                station_code,credential_hmac,business_site_id,endpoint_state)
+                VALUES ('TESTHJ01',?,?,'bound')""",
+                (credential_hmac(b'long-ascii-password', self.pepper), site_id)).lastrowid
+            db.execute("""INSERT INTO monitoring_endpoint_profiles(endpoint_id,business_site_id,
+                timezone,expected_granularity,effective_from)
+                VALUES (?,?,'Asia/Shanghai','realtime','2020-01-01T00:00:00+00:00')""", (endpoint, site_id))
+            db.execute("""INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,
+                expected_interval_seconds,tolerance_seconds,effective_from)
+                VALUES (?,'HJ212:w01001',60,0,'2020-01-01T00:00:00+00:00')""", (endpoint,))
+            db.commit()
+        return site_id
+
+    def _recovery_frame(self, stamp, value):
+        return make_hj212(qn=stamp+'001', cp=f'DataTime={stamp};w01001-Rtd={value};w01001-Flag=N')
+
+    async def test_scan_failure_recovers_backlog_and_current_tcp_result(self):
+        from station_monitoring import latest_values, result_trend_page
+        site_id = self._recovery_endpoint()
+        for minute in (49, 50, 51):
+            frame = parse_hj212_frame(self._recovery_frame(f'2026111314{minute}00', 7+minute/1000))
+            self.storage.persist_parsed(frame, self.storage.authenticate(frame), '2026-11-13T07:00:00+00:00')
+        original = self.storage.pending_normalization_page
+        calls = []
+
+        def fail_once(cursor, limit):
+            calls.append(time.monotonic())
+            if len(calls) == 1:
+                raise sqlite3.OperationalError('isolated transient scan failure')
+            return original(cursor, min(limit, 2))
+
+        try:
+            with mock.patch.object(self.storage, 'pending_normalization_page', side_effect=fail_once):
+                self.server._normalization_wakeup.set()
+                reader, writer = await self.connect()
+                writer.write(self._recovery_frame('20261123083700', '7.01312'))
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                for _ in range(100):
+                    with closing(sqlite3.connect(self.database)) as db:
+                        hours = db.execute('SELECT observed_at,standard_value FROM monitoring_hourly_last_values ORDER BY observed_at').fetchall()
+                    if len(hours) == 2 and hours[-1][1] == 7.01312:
+                        break
+                    await asyncio.sleep(0.05)
+                self.assertEqual(hours, [('2026-11-13T06:51:00+00:00', 7.051), ('2026-11-23T00:37:00+00:00', 7.01312)])
+                self.assertFalse(self.server._normalization_scanner.done())
+                self.assertGreaterEqual(calls[1]-calls[0], 0.09)
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    latest = latest_values(db, site_id, at_time='2026-11-23T01:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T01:00:00+00:00')[0]
+                    self.assertEqual(latest[0]['standard_value'], 7.01312)
+                    self.assertEqual(trend[-1]['value'], 7.01312)
+                    self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        finally:
+            # Permit pre-fix reproduction to tear down even when the scanner crashed.
+            if self.server._normalization_scanner.done():
+                self.server._normalization_scanner.exception()
+                self.server._normalization_scanner = None
+
+    async def test_continuous_receipts_do_not_starve_normalization(self):
+        self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        frame = parse_hj212_frame(self._recovery_frame('20261123083700', '7.01312'))
+        original_persist = self.server._process_raw_result
+        original_normalize = ingest_server.normalize_raw_frame
+        remaining_at_result = []
+        target_id = None
+
+        def slow_persist(*args):
+            time.sleep(0.04)
+            return original_persist(*args)
+
+        def normalize(*args, **kwargs):
+            result = original_normalize(*args, **kwargs)
+            if args[1] == target_id:
+                remaining_at_result.append(self.server.queued_frames)
+            return result
+
+        with mock.patch.object(self.server, '_process_raw_result', side_effect=slow_persist), mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            senders = [asyncio.create_task(self.send_one(make_uplink(serial=800+i))) for i in range(20)]
+            for _ in range(200):
+                if self.server.queued_frames >= 10:
+                    break
+                await asyncio.sleep(0.005)
+            self.assertGreaterEqual(self.server.queued_frames, 10)
+            target_id, _ = self.storage.persist_parsed(frame, self.storage.authenticate(frame), '2026-11-23T00:37:21+00:00')
+            self.server._normalization_wakeup.set()
+            await asyncio.gather(*senders)
+            for _ in range(60):
+                if remaining_at_result:
+                    break
+                await asyncio.sleep(0.05)
+            await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+        self.assertTrue(any(count > 0 for count in remaining_at_result), remaining_at_result)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchone()[0], 7.01312)
+
+    async def test_close_during_scan_failure_preserves_pending_and_restart_recovers(self):
+        self._recovery_endpoint()
+        raw = self._recovery_frame('20261123083700', '7.01312')
+        with mock.patch.object(self.storage, 'pending_normalization_page', side_effect=sqlite3.OperationalError('isolated offline scanner')) as scan:
+            self.server._normalization_wakeup.set()
+            reader, writer = await self.connect()
+            writer.write(raw)
+            await writer.drain()
+            for _ in range(60):
+                with closing(sqlite3.connect(self.database)) as db:
+                    pending = db.execute("SELECT raw_frame,persistence_state FROM ingest_raw_frames").fetchall()
+                if pending and scan.call_count:
+                    break
+                await asyncio.sleep(0.02)
+            self.assertEqual(pending, [(raw, 'pending_parse')])
+            previous_handler = signal.getsignal(signal.SIGTERM)
+            stop_task = asyncio.create_task(ingest_server._serve_until_stopped(self.server))
+            await asyncio.sleep(0)
+            signal.raise_signal(signal.SIGTERM)
+            await asyncio.wait_for(stop_task, timeout=3)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), previous_handler)
+            self.assertEqual(await asyncio.wait_for(reader.read(), timeout=1), b'')
+            writer.close()
+            await writer.wait_closed()
+            self.assertLessEqual(scan.call_count, 2)
+        self.assertEqual(self.server.queued_frames, 0)
+        self.assertFalse(self.server._connections)
+        self.assertIsNone(self.server._normalizer)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT raw_frame,persistence_state FROM ingest_raw_frames').fetchall(), [(raw, 'pending_parse')])
+        await self.server.start()
+        for _ in range(60):
+            with closing(sqlite3.connect(self.database)) as db:
+                hourly = db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchall()
+            if hourly:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(hourly, [(7.01312,)])
+
+    async def test_close_with_failed_inflight_persistence_never_acknowledges(self):
+        self.add_endpoint('unbound')
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fail_persist(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            raise sqlite3.OperationalError('isolated persistence failure')
+
+        reader, writer = await self.connect()
+        with mock.patch.object(self.storage, 'persist_parsed', side_effect=fail_persist):
+            writer.write(make_uplink(serial=921))
+            await writer.drain()
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(entered.is_set())
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=0.05)
+                closing_task = asyncio.create_task(self.server.close())
+                await asyncio.sleep(0.02)
+            finally:
+                release.set()
+            await asyncio.wait_for(closing_task, timeout=3)
+            self.assertEqual(await asyncio.wait_for(reader.read(), timeout=1), b'')
+        writer.close()
+        await writer.wait_closed()
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+        self.assertEqual(self.server.queued_frames, 0)
+        await self.server.start()
+        await self.send_one(make_uplink(serial=921))
+
+    async def test_normalization_retry_remains_pending_across_close_and_restart(self):
+        self._recovery_endpoint()
+        raw = self._recovery_frame('20261123083700', '7.01312')
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=sqlite3.OperationalError('isolated normalization failure')):
+            reader, writer = await self.connect()
+            writer.write(raw)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            for _ in range(100):
+                with closing(sqlite3.connect(self.database)) as db:
+                    retry = db.execute('SELECT attempt_count,state FROM monitoring_normalization_retries').fetchall()
+                if retry:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.wait_for(self.server.close(), timeout=3)
+        self.assertEqual(retry, [(1, 'retrying')])
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT raw_frame,persistence_state FROM ingest_raw_frames').fetchall(), [(raw, 'pending_parse')])
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM monitoring_hourly_last_values').fetchone()[0], 0)
+        await self.server.start()
+        for _ in range(100):
+            with closing(sqlite3.connect(self.database)) as db:
+                hourly = db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchall()
+            if hourly:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(hourly, [(7.01312,)])
 
     async def test_small_normalization_queue_continuously_drains_durable_backlog_without_restart(self):
         await self.server.close()
