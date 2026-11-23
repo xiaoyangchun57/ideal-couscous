@@ -736,7 +736,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(pages[1]['source_type'], 'hourly_last_value')
         self.assertEqual(pages[1]['source_candidate_count'], 2)
 
-    def test_receiver_same_time_replacement_keeps_only_current_unconsumed_projection(self):
+    def test_receiver_different_values_preserve_formal_conflict_sources(self):
         measured_at = datetime(2020, 6, 12, 4, 0)
         for serial, value in ((51, 7.10), (52, 7.20), (53, 7.30), (54, 7.40)):
             raw_id = self._persist(
@@ -753,8 +753,53 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                     'observation_values', 'monitoring_business_observations'))
             values = connection.execute(
                 'SELECT standard_value FROM monitoring_business_observations').fetchall()
-        self.assertEqual(counts, (1, 0, 1, 1, 1))
-        self.assertEqual(values, [(7.4,)])
+            states = connection.execute('SELECT slot_state FROM monitoring_business_observations').fetchall()
+            hourly = connection.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchone()[0]
+        self.assertEqual(counts, (4, 0, 4, 4, 4))
+        self.assertEqual(values, [(7.1,), (7.2,), (7.3,), (7.4,)])
+        self.assertEqual(states, [('conflict',)] * 4)
+        self.assertEqual(hourly, 7.4)
+
+    def test_earlier_formal_source_preserves_consumed_later_evidence(self):
+        measured_at = datetime(2020, 6, 12, 4, 0)
+        ids = [self._persist(
+            bytes.fromhex('4612') + bcd_number(7.1, 4, 2), serial=serial,
+            sent_at=measured_at, observed_at=measured_at, received_at=received,
+        ) for serial, received in ((65, '2020-06-11T20:05:00+00:00'),
+                                   (66, '2020-06-12T02:05:00+00:00'))]
+        normalize_raw_frame(self.database, ids[1], retire_source=True)
+        with closing(sqlite3.connect(self.database)) as connection:
+            later = connection.execute('SELECT id,source_observation_value_id,observation_batch_id,received_at,timeliness FROM monitoring_business_observations').fetchone()
+            connection.execute('INSERT INTO monitoring_alert_observation_events(observation_id) VALUES (?)', (later[0],))
+            connection.commit()
+        normalize_raw_frame(self.database, ids[0], retire_source=True)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute('SELECT id,source_observation_value_id,observation_batch_id,received_at,timeliness FROM monitoring_business_observations WHERE id=?', (later[0],)).fetchone(), later)
+            self.assertEqual(connection.execute('SELECT is_current FROM monitoring_business_observations WHERE id=?', (later[0],)).fetchone()[0], 0)
+            self.assertEqual(connection.execute('SELECT observation_id FROM monitoring_alert_observation_events').fetchone()[0], later[0])
+            current = connection.execute('''SELECT batch.raw_frame_id,business.timeliness
+                FROM monitoring_business_observations business JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.is_current=1''').fetchall()
+            self.assertEqual(current, [(ids[0], 'on_time')])
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_raw_frames WHERE id IN (?,?)', ids).fetchone()[0], 2)
+            self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(), [])
+
+    def test_default_normalization_source_correction_does_not_enable_raw_retirement(self):
+        measured_at = datetime(2020, 6, 12, 4, 0)
+        ids = [self._persist(
+            bytes.fromhex('4612') + bcd_number(7.1, 4, 2), serial=serial,
+            sent_at=measured_at, observed_at=measured_at, received_at=received,
+        ) for serial, received in ((67, '2020-06-11T20:05:00+00:00'),
+                                   (68, '2020-06-12T02:05:00+00:00'))]
+        for raw_id in ids[::-1]:
+            normalize_raw_frame(self.database, raw_id)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_parse_attempts').fetchone()[0], 2)
+            self.assertEqual(connection.execute('''SELECT batch.raw_frame_id FROM monitoring_business_observations business
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.is_current=1''').fetchall(), [(ids[0],)])
 
     def test_receiver_replacement_preserves_projection_with_formal_consumer(self):
         measured_at = datetime(2020, 6, 12, 4, 0)

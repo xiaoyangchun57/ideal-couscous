@@ -19,6 +19,7 @@ import os
 import signal
 from pathlib import Path
 import sqlite3
+import time
 from typing import Literal, Protocol
 
 try:  # Support both package tests and direct container execution.
@@ -69,7 +70,13 @@ DEFAULT_SOURCE_STATE_CAPACITY = 1024
 DEFAULT_QUEUE_MAX_FRAMES = 10_000
 DEFAULT_QUEUE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_ERROR_QUEUE_MAX = 256
+CONNECTION_ERROR_BATCH_SIZE = 16
+CONNECTION_ERROR_BUSY_MS = 50
+CONNECTION_ERROR_RETRY_SECONDS = 0.1
+CONNECTION_ERROR_RETRY_BUDGET_SECONDS = 5.0
+FAILURE_LOG_INTERVAL_SECONDS = 5.0
 DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE = 64
+DEFAULT_NORMALIZATION_PREFETCH = 2
 DEFAULT_NORMALIZATION_SCAN_SECONDS = 0.1
 DEFAULT_NORMALIZATION_SCAN_RETRY_SECONDS = 1.0
 DEFAULT_NORMALIZATION_RECEIPT_GRACE_SECONDS = 0.1
@@ -137,6 +144,73 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _log_processing_failure(stage: str, exc: Exception) -> None:
+    """Log bounded diagnostic categories, never exception text, SQL or frame data."""
+    prefixes = {
+        "scan": "station monitoring scan deferred",
+        "normalization": "station monitoring normalization deferred",
+        "retry_evidence": "station monitoring retry evidence failed",
+        "error_evidence": "station ingest error evidence persistence failed",
+        "raw_persistence": "station ingest raw persistence failed",
+        "worker_item": "station ingest persistence worker item failed",
+    }
+    operations = {
+        "_connect", "_require_raw_storage_capacity", "authenticate", "persist_parsed",
+        "persist_unparseable", "record_connection_error", "record_connection_errors", "_write_error",
+        "pending_normalization_page", "recent_pending_normalization_page",
+        "normalize_raw_frame", "record_normalization_retry",
+    }
+    operation = "unknown"
+    trace = exc.__traceback__
+    for _ in range(32):
+        if trace is None:
+            break
+        if trace.tb_frame.f_code.co_name in operations:
+            operation = trace.tb_frame.f_code.co_name
+        trace = trace.tb_next
+    error = exc
+    for _ in range(8):
+        if isinstance(error, sqlite3.Error) or error.__cause__ is None:
+            break
+        error = error.__cause__
+    code, name, reason = "unknown", "unknown", "details_suppressed"
+    if isinstance(error, sqlite3.Error):
+        candidate_code = getattr(error, "sqlite_errorcode", None)
+        candidate_name = getattr(error, "sqlite_errorname", None)
+        if (type(candidate_code) is int and isinstance(candidate_name, str)
+                and candidate_name.startswith("SQLITE_")
+                and getattr(sqlite3, candidate_name, None) == candidate_code):
+            code, name = candidate_code, candidate_name
+        # Allow only fixed messages/categories. Schema identifiers, file paths and
+        # constraint values in SQLite's original message may contain private data.
+        reason = {
+            sqlite3.SQLITE_BUSY: "database_busy",
+            sqlite3.SQLITE_LOCKED: "database_locked",
+            sqlite3.SQLITE_READONLY: "database_readonly",
+            sqlite3.SQLITE_FULL: "storage_full",
+            sqlite3.SQLITE_IOERR: "storage_io_error",
+            sqlite3.SQLITE_CANTOPEN: "database_open_failed",
+            sqlite3.SQLITE_CORRUPT: "database_corrupt",
+            sqlite3.SQLITE_NOTADB: "not_a_database",
+            sqlite3.SQLITE_CONSTRAINT: "constraint_failed",
+            sqlite3.SQLITE_SCHEMA: "schema_changed",
+        }.get(code & 0xff if type(code) is int else None, "details_suppressed")
+        message = str(error)
+        if message.startswith("no such table: "):
+            reason = "missing_table"
+        elif message.startswith("no such column: "):
+            reason = "missing_column"
+        elif message == "database is locked":
+            reason = "database_busy"
+        elif message == "attempt to write a readonly database":
+            reason = "database_readonly"
+    error_type = type(error).__name__ if type(error).__module__ == "sqlite3" else "non_sqlite_error"
+    LOGGER.warning(
+        "%s: %s stage=%s operation=%s sqlite_code=%s sqlite_name=%s reason=%s",
+        prefixes[stage], error_type, stage, operation, code, name, reason,
+    )
+
+
 def _source_key(endpoint_id: int | None, station_code: str | None) -> str:
     if endpoint_id is not None:
         return f"endpoint:{endpoint_id}"
@@ -187,10 +261,10 @@ class IngestionStorage:
         except RetentionError as exc:
             raise StorageError("raw archive storage is unavailable") from exc
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.database), timeout=5, isolation_level=None)
+    def _connect(self, *, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
+        connection = sqlite3.connect(str(self.database), timeout=busy_timeout_ms / 1000, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         connection.execute("PRAGMA foreign_keys=ON")
         # WAL is established by the versioned migration. Do not change journal mode per
         # receiver connection: that operation itself competes with a concurrent Web writer.
@@ -243,11 +317,14 @@ class IngestionStorage:
             (raw_id, parser_version, status, error_code),
         )
 
-    def _write_error(self, connection: sqlite3.Connection, raw_id: int | None, error_type: str) -> None:
+    def _write_error(
+        self, connection: sqlite3.Connection, raw_id: int | None, error_type: str,
+        *, occurred_at: str | None = None, prune: bool = True,
+    ) -> None:
         if raw_id is None:
             endpoint_id = None
             station_code = None
-            occurred_at = _utc_now()
+            occurred_at = occurred_at or _utc_now()
         else:
             raw = connection.execute(
                 "SELECT endpoint_id,station_code,received_at FROM ingest_raw_frames WHERE id=?", (raw_id,)
@@ -256,10 +333,17 @@ class IngestionStorage:
             station_code = raw["station_code"] if raw else None
             occurred_at = str(raw["received_at"]) if raw else _utc_now()
         if error_type not in AGGREGATE_ONLY_ERROR_TYPES:
-            connection.execute(
-                "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
-                (raw_id, error_type),
-            )
+            if raw_id is None:
+                sample_at = datetime.fromisoformat(occurred_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                connection.execute(
+                    "INSERT INTO ingest_errors(raw_frame_id,error_type,error_detail,created_at) VALUES (NULL,?,'',?)",
+                    (error_type, sample_at),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO ingest_errors(raw_frame_id, error_type, error_detail) VALUES (?, ?, '')",
+                    (raw_id, error_type),
+                )
         source_key = _source_key(endpoint_id, station_code)
         bucket_hour = datetime.fromisoformat(occurred_at).astimezone(timezone.utc).replace(
             minute=0, second=0, microsecond=0).isoformat()
@@ -282,7 +366,8 @@ class IngestionStorage:
             connection, raw_id, endpoint_id, station_code, occurred_at, None,
             error_type=error_type, record_received=raw_id is not None,
         )
-        prune_ingest_error_samples(connection)
+        if prune:
+            prune_ingest_error_samples(connection)
 
     def _update_current_state(
         self, connection: sqlite3.Connection, raw_id: int | None, endpoint_id: int | None,
@@ -422,12 +507,28 @@ class IngestionStorage:
             return raw_id
 
     def record_connection_error(self, error_code: str) -> None:
-        # Framing errors are raw-receipt evidence too. They may not bypass the same
-        # capacity guard that protects complete parseable and unparseable frames.
+        # Preserve the direct single-event storage API; only the queued worker uses
+        # short lock attempts and the bounded batch/retry path below.
         self._require_raw_storage_capacity()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._write_error(connection, None, error_code)
+            connection.commit()
+
+    def record_connection_errors(self, events: list[tuple[str, str]]) -> None:
+        """Commit already waiting events together; never wait to accumulate a batch."""
+        if not events or len(events) > CONNECTION_ERROR_BATCH_SIZE:
+            raise ValueError("connection error batch outside bounded capacity")
+        # Framing errors are raw-receipt evidence too. They may not bypass the same
+        # capacity guard that protects complete parseable and unparseable frames.
+        self._require_raw_storage_capacity()
+        with closing(self._connect(busy_timeout_ms=CONNECTION_ERROR_BUSY_MS)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for error_code, occurred_at in events:
+                self._write_error(connection, None, error_code, occurred_at=occurred_at, prune=False)
+            # Keep the existing retention contract and a cleanup opportunity at every
+            # successful batch, rather than scanning all samples for every event.
+            prune_ingest_error_samples(connection)
             connection.commit()
 
     def persist_parsed(
@@ -672,6 +773,24 @@ class IngestionStorage:
                 )
             ]
 
+    def recent_pending_normalization_page(self, limit: int) -> list[int]:
+        """Prioritize actual recent receipts, including work saved before restart.
+
+        Receipt recency is only a scheduling hint, never a measurement timestamp
+        or a replacement for the normalizer's protocol/quality checks.
+        """
+        with closing(self._connect()) as connection:
+            return [int(row[0]) for row in connection.execute(
+                """SELECT raw.id FROM ingest_raw_frames raw
+                   LEFT JOIN monitoring_normalization_retries retry
+                     ON retry.raw_frame_id=raw.id AND retry.normalization_version=?
+                   WHERE raw.persistence_state IN ('pending_parse', 'pending_reparse')
+                     AND (retry.raw_frame_id IS NULL OR (retry.state!='exhausted'
+                          AND (retry.next_attempt_at IS NULL OR retry.next_attempt_at<=?)))
+                   ORDER BY raw.received_at DESC,raw.id DESC LIMIT ?""",
+                ("station-monitoring-normalizer-v1", _utc_now(), limit),
+            )]
+
     def record_normalization_retry(self, raw_id: int, error_type: str, *, max_attempts: int = 3) -> None:
         """Persist bounded retry state; exhausted work becomes a stable diagnostic."""
         version = "station-monitoring-normalizer-v1"
@@ -760,6 +879,7 @@ class StationIngestServer:
         self.queue_peak_bytes = 0
         self.dropped_error_events = 0
         self.failed_error_persistence = 0
+        self._failure_log_next: dict[str, float] = {}
         self._queued_bytes_lock = asyncio.Lock()
         self._active_connections = 0
         self._connection_lock = asyncio.Lock()
@@ -908,7 +1028,7 @@ class StationIngestServer:
             self.dropped_error_events += 1
             return
         try:
-            self._queue.put_nowait(_QueuedWork("error", error_code=error_code))
+            self._queue.put_nowait(_QueuedWork("error", error_code=error_code, received_at=_utc_now()))
             self._queued_errors += 1
         except asyncio.QueueFull:
             self.dropped_error_events += 1
@@ -918,42 +1038,56 @@ class StationIngestServer:
             self._event_loop.call_soon_threadsafe(self._normalization_wakeup.set)
 
     async def _normalization_scan_loop(self) -> None:
-        """Continuously page durable work into the bounded queue without restart reliance."""
+        """Alternate recent receipts and an advancing backlog within one small queue."""
         cursor = 0
+        prefer_recent = True
+        empty_turns = 0
         while not self._normalization_stopping:
-            available = self._normalization_queue.maxsize - self._normalization_queue.qsize()
+            # A full old-work queue must not put thousands of items ahead of a
+            # fresh result. In-flight work remains with the same sole normalizer.
+            available = min(self._normalization_queue.maxsize, DEFAULT_NORMALIZATION_PREFETCH) - self._normalization_queue.qsize()
             if available <= 0:
                 await self._normalization_wakeup.wait()
                 self._normalization_wakeup.clear()
                 continue
             try:
-                raw_ids = await asyncio.to_thread(
-                    self.storage.pending_normalization_page, cursor, min(available, DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE)
-                )
+                page_size = min(len(self._scheduled_normalizations) + 1, DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE)
+                if prefer_recent:
+                    raw_ids = await asyncio.to_thread(self.storage.recent_pending_normalization_page, page_size)
+                else:
+                    raw_ids = await asyncio.to_thread(self.storage.pending_normalization_page, cursor, page_size)
             except Exception as exc:
                 # Keep the cursor and durable pending state unchanged. Receipt wakeups
                 # must not turn an unavailable database into a tight retry loop.
-                LOGGER.warning("station monitoring scan deferred: %s", type(exc).__name__)
+                self._log_failure("scan", exc)
                 await asyncio.sleep(DEFAULT_NORMALIZATION_SCAN_RETRY_SECONDS)
                 continue
             if self._normalization_stopping:
                 return
-            if not raw_ids:
+            if not raw_ids and not prefer_recent:
                 cursor = 0
+            chosen = None
+            for raw_id in raw_ids:
+                if not prefer_recent:
+                    cursor = raw_id
+                if raw_id not in self._scheduled_normalizations:
+                    chosen = raw_id
+                    break
+            prefer_recent = not prefer_recent
+            if chosen is None:
+                empty_turns += 1
+                if empty_turns < 2:
+                    continue
                 try:
                     await asyncio.wait_for(self._normalization_wakeup.wait(), timeout=DEFAULT_NORMALIZATION_SCAN_SECONDS)
                 except asyncio.TimeoutError:
                     pass
                 self._normalization_wakeup.clear()
+                empty_turns = 0
                 continue
-            for raw_id in raw_ids:
-                if self._normalization_stopping:
-                    return
-                cursor = raw_id
-                if raw_id in self._scheduled_normalizations:
-                    continue
-                self._scheduled_normalizations.add(raw_id)
-                await self._normalization_queue.put(raw_id)
+            empty_turns = 0
+            self._scheduled_normalizations.add(chosen)
+            await self._normalization_queue.put(chosen)
 
     async def _normalization_worker(self) -> None:
         while True:
@@ -967,15 +1101,23 @@ class StationIngestServer:
                 await asyncio.to_thread(
                     normalize_raw_frame, self.storage.database, raw_id, retire_source=True)
             except Exception as exc:
-                LOGGER.warning("station monitoring normalization deferred: %s", type(exc).__name__)
+                self._log_failure("normalization", exc)
                 try:
                     await asyncio.to_thread(self.storage.record_normalization_retry, raw_id, type(exc).__name__)
                 except Exception as retry_exc:
-                    LOGGER.warning("station monitoring retry evidence failed: %s", type(retry_exc).__name__)
+                    self._log_failure("retry_evidence", retry_exc)
             finally:
                 self._scheduled_normalizations.discard(raw_id)
                 self._normalization_queue.task_done()
                 self._normalization_wakeup.set()
+
+    def _log_failure(self, stage: str, exc: Exception) -> None:
+        # Fixed stage keys bound memory and repeated output. Counters still count
+        # every failed event, including those whose repeated diagnostic is suppressed.
+        now = time.monotonic()
+        if now >= self._failure_log_next.get(stage, 0):
+            self._failure_log_next[stage] = now + FAILURE_LOG_INTERVAL_SECONDS
+            _log_processing_failure(stage, exc)
 
     async def _persistence_worker(self) -> None:
         """Keep the sole persistence worker alive across individual SQLite failures.
@@ -984,40 +1126,79 @@ class StationIngestServer:
         persistence is best-effort and bounded: it must not take the receiver down or
         prevent later raw frames from reaching the same worker.
         """
+        frames: deque[_QueuedWork] = deque()
+        errors: deque[_QueuedWork] = deque()
+        batch: list[_QueuedWork] = []
+        retry_at = retry_deadline = 0.0
+        prefer_errors = False
         while True:
-            item = await self._queue.get()
-            try:
-                if item.kind == "stop":
-                    return
-                if item.kind == "error":
-                    try:
-                        await asyncio.to_thread(
-                            self.storage.record_connection_error,
-                            item.error_code or "unknown_connection_error",
-                        )
-                    except Exception as exc:
-                        self.failed_error_persistence += 1
-                        LOGGER.warning("station ingest error evidence persistence failed: %s", type(exc).__name__)
+            # These deques only hold admitted work: counters and unfinished queue
+            # tasks remain charged until commit/failure, so capacity does not grow.
+            if self._queue.empty() and not frames and (not errors or time.monotonic() < retry_at):
+                try:
+                    delay = max(0, retry_at - time.monotonic()) if errors else None
+                    if errors:
+                        item = await asyncio.wait_for(self._queue.get(), timeout=delay)
+                    else:
+                        item = await self._queue.get()
+                except asyncio.TimeoutError:
                     continue
+                if item.kind == "stop":
+                    self._queue.task_done()
+                    return
+                (errors if item.kind == "error" else frames).append(item)
+            for _ in range(self._queue.qsize()):
+                item = self._queue.get_nowait()
+                if item.kind == "stop":
+                    self._queue.task_done()
+                    return  # close only sends stop after all admitted work finishes
+                (errors if item.kind == "error" else frames).append(item)
+            if errors and time.monotonic() >= retry_at and (prefer_errors or not frames):
+                if not batch:
+                    batch = list(errors)[:CONNECTION_ERROR_BATCH_SIZE]
+                    retry_deadline = time.monotonic() + CONNECTION_ERROR_RETRY_BUDGET_SECONDS
+                try:
+                    await asyncio.to_thread(self.storage.record_connection_errors, [
+                        (event.error_code or "unknown_connection_error", event.received_at) for event in batch
+                    ])
+                except Exception as exc:
+                    self._log_failure("error_evidence", exc)
+                    code = getattr(exc, "sqlite_errorcode", 0) or 0
+                    locked = isinstance(exc, sqlite3.Error) and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    if locked and time.monotonic() < retry_deadline:
+                        retry_at = time.monotonic() + CONNECTION_ERROR_RETRY_SECONDS
+                        prefer_errors = False
+                        continue
+                    self.failed_error_persistence += len(batch)
+                for _ in batch:
+                    errors.popleft()
+                    self._queued_errors -= 1
+                    self._queue.task_done()
+                batch = []
+                retry_at = 0.0
+                prefer_errors = False
+                continue
+            if not frames:
+                continue
+            item = frames.popleft()
+            try:
                 try:
                     outcome = await asyncio.to_thread(self._process_raw_result, item.raw, item.received_at)
                 except Exception as exc:  # raw persistence failure must never generate an acknowledgement
-                    LOGGER.warning("station ingest raw persistence failed: %s", type(exc).__name__)
+                    self._log_failure("raw_persistence", exc)
                     outcome = ProcessingResult(None, False)
                 if item.reply is not None and not item.reply.done():
                     item.reply.set_result(outcome)
             except Exception as exc:  # defensive last line: only an explicit stop may end this worker
-                LOGGER.warning("station ingest persistence worker item failed: %s", type(exc).__name__)
+                self._log_failure("worker_item", exc)
                 if item.reply is not None and not item.reply.done():
                     item.reply.set_result(ProcessingResult(None, False))
             finally:
-                if item.kind == "frame":
-                    async with self._queued_bytes_lock:
-                        self._queued_frames = max(0, self._queued_frames - 1)
-                        self._queued_bytes = max(0, self._queued_bytes - len(item.raw))
-                elif item.kind == "error":
-                    self._queued_errors = max(0, self._queued_errors - 1)
+                async with self._queued_bytes_lock:
+                    self._queued_frames = max(0, self._queued_frames - 1)
+                    self._queued_bytes = max(0, self._queued_bytes - len(item.raw))
                 self._queue.task_done()
+                prefer_errors = True
 
     def _process_raw_result(self, raw: bytes, received_at: str) -> ProcessingResult:
         try:

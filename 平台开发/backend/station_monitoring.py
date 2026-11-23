@@ -116,7 +116,9 @@ def _upsert_hourly_last_value(
                updated_at=excluded.updated_at
            WHERE excluded.observed_at>monitoring_hourly_last_values.observed_at
               OR (excluded.observed_at=monitoring_hourly_last_values.observed_at
-                  AND excluded.received_at>=monitoring_hourly_last_values.received_at)""",
+                  AND (excluded.received_at>monitoring_hourly_last_values.received_at
+                       OR (excluded.received_at=monitoring_hourly_last_values.received_at
+                           AND excluded.source_raw_frame_id>monitoring_hourly_last_values.source_raw_frame_id)))""",
         (
             endpoint_id, site_id, protocol_code, business_metric,
             instrument_asset_code or "", sample_hour, observed_at,
@@ -194,14 +196,10 @@ def _retire_value_if_unconsumed(connection: sqlite3.Connection, value_id: int) -
            WHERE source_observation_value_id=?""",
         (value_id,),
     ).fetchall()
-    if any(_business_observation_has_consumer(connection, int(row[0]))
-           for row in business_rows):
+    # Hourly replacement must not retire an independent formal source. Equivalent
+    # business sources are collapsed by projection, not by hourly cleanup.
+    if business_rows:
         return False
-    for row in business_rows:
-        connection.execute(
-            "DELETE FROM monitoring_business_observations WHERE id=?", (int(row[0]),))
-        _reconcile_business_slot(
-            connection, int(row[1]), str(row[2]), row[3], str(row[4]))
     connection.execute("DELETE FROM observation_values WHERE id=?", (value_id,))
     _retire_empty_batch(connection, int(source[0]), int(source[1]))
     return True
@@ -371,15 +369,23 @@ def _protocol_business_priority(protocol_code: str) -> tuple[int, str]:
     return (2, protocol_code)
 
 
+def _business_source_order(row):
+    return (*_protocol_business_priority(row["protocol_code"]),
+            datetime.fromisoformat(row["received_at"]),
+            row["raw_frame_id"] if "raw_frame_id" in row.keys() else 0)
+
+
 def _reconcile_business_slot(connection, endpoint_id: int, business_metric: str,
                              instrument_asset_code: str | None,
                              scheduled_at: str) -> None:
     rows = connection.execute(
-        """SELECT id,protocol_code,standard_value,standard_unit,quality
-           FROM monitoring_business_observations
-           WHERE endpoint_id=? AND business_metric=?
-             AND instrument_asset_code IS ? AND scheduled_at=? AND is_current=1
-           ORDER BY id""",
+        """SELECT business.id,business.protocol_code,business.standard_value,
+                  business.standard_unit,business.quality,business.received_at,batch.raw_frame_id
+           FROM monitoring_business_observations business
+           JOIN observation_batches batch ON batch.id=business.observation_batch_id
+           WHERE business.endpoint_id=? AND business.business_metric=?
+             AND business.instrument_asset_code IS ? AND business.scheduled_at=?
+             AND business.is_current=1 AND batch.is_current=1""",
         (endpoint_id, business_metric, instrument_asset_code, scheduled_at),
     ).fetchall()
     valid_rows = [row for row in rows if row["quality"] == "valid"]
@@ -394,7 +400,7 @@ def _reconcile_business_slot(connection, endpoint_id: int, business_metric: str,
             "UPDATE monitoring_business_observations SET slot_state='conflict' WHERE id IN (%s)" %
             ",".join("?" * len(candidates)), [row["id"] for row in candidates])
     elif candidates:
-        selected = min(candidates, key=lambda row: (*_protocol_business_priority(row["protocol_code"]), row["id"]))
+        selected = min(candidates, key=_business_source_order)
         connection.execute(
             "UPDATE monitoring_business_observations SET slot_state='selected' WHERE id=?", (selected["id"],))
 
@@ -408,7 +414,7 @@ def _slot_rows(connection, site_id: int, configuration: dict, scheduled_at: str)
                    business.endpoint_id,business.scheduled_at,business.observed_at,
                    business.received_at,business.timeliness,business.slot_state,
                    business.projection_version,
-                   batch.function_code
+                   batch.function_code,batch.raw_frame_id
             FROM monitoring_business_observations business
             JOIN observation_batches batch ON batch.id=business.observation_batch_id
             WHERE business.business_site_id=? AND business.endpoint_id=?
@@ -439,7 +445,8 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
                                   instrument_asset_code: str | None, observed_at: str,
                                   received_at: str, standard_value: float, standard_unit: str,
                                   quality: str, function_code: int | None = None,
-                                  source_value_kind: str | None = None) -> bool:
+                                  source_value_kind: str | None = None,
+                                  retire_source: bool = False) -> bool:
     if (str(protocol_code).startswith("HJ212:") and function_code == 2061
             and not is_formal_hj212_source(
                 protocol_code, function_code, source_value_kind)):
@@ -450,6 +457,26 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
     scheduled_at = _scheduled_at(schedule, observed_at, function_code)
     if scheduled_at is None:
         return False
+    equivalents = _same_slot_factor_sources(
+        connection, endpoint_id=endpoint_id, protocol_code=protocol_code,
+        business_metric=business_metric, instrument_asset_code=instrument_asset_code,
+        scheduled_at=scheduled_at, standard_value=standard_value,
+        standard_unit=standard_unit, quality=quality, function_code=function_code)
+    raw_id = connection.execute(
+        "SELECT raw_frame_id FROM observation_batches WHERE id=?", (batch_id,)
+    ).fetchone()[0]
+    source_key = (datetime.fromisoformat(received_at), raw_id)
+    if any((datetime.fromisoformat(row["received_at"]), row["raw_frame_id"]) <= source_key
+           for row in equivalents):
+        return False
+    # Keep consumed evidence immutable; only retire an unconsumed equivalent
+    # after the earlier source has been established in this same transaction.
+    for row in equivalents:
+        if _business_observation_has_consumer(connection, row["id"]):
+            connection.execute(
+                "UPDATE monitoring_business_observations SET is_current=0 WHERE id=?", (row["id"],))
+        else:
+            connection.execute("DELETE FROM monitoring_business_observations WHERE id=?", (row["id"],))
     received = datetime.fromisoformat(received_at)
     observed = datetime.fromisoformat(observed_at)
     result_delay = _schedule_integer(schedule, "result_delay_seconds")
@@ -472,21 +499,19 @@ def _project_business_observation(connection, *, value_id: int, batch_id: int, e
          quality, timeliness, "duplicate", BUSINESS_PROJECTION_VERSION),
     )
     _reconcile_business_slot(connection, endpoint_id, business_metric, instrument_asset_code, scheduled_at)
+    if retire_source:
+        for row in equivalents:
+            _retire_value_if_unconsumed(connection, row["source_observation_value_id"])
     return True
 
 
-def _same_slot_factor_already_recorded(
+def _same_slot_factor_sources(
         connection, *, endpoint_id: int, protocol_code: str, business_metric: str,
-        instrument_asset_code: str | None, observed_at: str, standard_value: float,
-        standard_unit: str, quality: str, function_code: int | None) -> bool:
-    schedule = _business_schedule_for(connection, endpoint_id, protocol_code, observed_at)
-    if not schedule:
-        return False
-    scheduled_at = _scheduled_at(schedule, observed_at, function_code)
-    if scheduled_at is None:
-        return False
+        instrument_asset_code: str | None, scheduled_at: str, standard_value: float,
+        standard_unit: str, quality: str, function_code: int | None):
     return connection.execute(
-        """SELECT 1
+        """SELECT business.id,business.source_observation_value_id,
+                  business.received_at,batch.raw_frame_id
            FROM monitoring_business_observations business
            JOIN observation_batches batch ON batch.id=business.observation_batch_id
            WHERE business.endpoint_id=? AND business.protocol_code=?
@@ -495,10 +520,10 @@ def _same_slot_factor_already_recorded(
              AND business.standard_unit=? AND business.quality=?
              AND batch.function_code=?
              AND business.is_current=1 AND batch.is_current=1
-           LIMIT 1""",
+           """,
         (endpoint_id, protocol_code, business_metric, instrument_asset_code,
          scheduled_at, standard_value, standard_unit, quality, function_code),
-    ).fetchone() is not None
+    ).fetchall()
 
 
 def _project_missing_business_observations(database: Path) -> tuple[int, int]:
@@ -741,16 +766,6 @@ def normalize_raw_frame(
                 )
             instrument_asset_code = (
                 mapping["instrument_asset_code"] or profile["instrument_asset_code"])
-            duplicate_business_value = (
-                published and factor.quality in {"valid", "suspect"}
-                and _same_slot_factor_already_recorded(
-                    connection, endpoint_id=raw["endpoint_id"],
-                    protocol_code=factor.protocol_code, business_metric=metric,
-                    instrument_asset_code=instrument_asset_code,
-                    observed_at=observed_at, standard_value=factor.raw_value,
-                    standard_unit=definition["standard_unit"], quality=factor.quality,
-                    function_code=function_code)
-            )
             value_cursor = connection.execute(
                 """INSERT INTO observation_values(
                        observation_batch_id, protocol_code, business_metric, raw_value,
@@ -780,9 +795,7 @@ def normalize_raw_frame(
                     normalization_version=normalization_version,
                 )
             projected = False
-            if (published and factor.quality in {"valid", "suspect"}
-                    and (not retire_source or factor.quality == "suspect" or hourly_applied)
-                    and not duplicate_business_value):
+            if published and factor.quality in {"valid", "suspect"}:
                 projected = _project_business_observation(
                     connection, value_id=int(value_cursor.lastrowid), batch_id=batch_id,
                     endpoint_id=raw["endpoint_id"], site_id=site_id, protocol_code=factor.protocol_code,
@@ -791,7 +804,7 @@ def normalize_raw_frame(
                     observed_at=observed_at, received_at=raw["received_at"],
                     standard_value=factor.raw_value, standard_unit=definition["standard_unit"],
                     quality=factor.quality, function_code=function_code,
-                    source_value_kind=source_value_kind,
+                    source_value_kind=source_value_kind, retire_source=retire_source,
                 )
             if published and factor.quality == "valid":
                 current_value_id = int(value_cursor.lastrowid)
@@ -807,12 +820,6 @@ def normalize_raw_frame(
                                )""",
                             (previous_hourly_value_id, previous_hourly_value_id),
                         )
-                        if (not projected and connection.execute(
-                                "SELECT 1 FROM observation_values WHERE id=?",
-                                (previous_hourly_value_id,),
-                        ).fetchone() is not None):
-                            connection.execute(
-                                "DELETE FROM observation_values WHERE id=?", (current_value_id,))
                 if retire_source and (not hourly_applied or not projected):
                     retire_value_ids.append(current_value_id)
                 elif not retire_source and not hourly_applied and not projected:
@@ -1313,7 +1320,7 @@ def _cycle_factor(connection, site_id: int, configuration: dict, scheduled_at: s
     distinct_formal_values = {
         (row["standard_value"], row["standard_unit"]) for row in formal_rows
     }
-    selected = formal_rows[0] if len(distinct_formal_values) == 1 else None
+    selected = min(formal_rows, key=_business_source_order) if len(distinct_formal_values) == 1 else None
     deadline_at = business_slot_deadline(configuration, scheduled_at)
     base = {
         "business_metric": configuration["business_metric"],
@@ -1371,7 +1378,7 @@ def _cycle_factor_from_rows(rows, configuration: dict, scheduled_at: str,
     distinct_formal_values = {
         (row["standard_value"], row["standard_unit"]) for row in formal_rows
     }
-    selected = formal_rows[0] if len(distinct_formal_values) == 1 else None
+    selected = min(formal_rows, key=_business_source_order) if len(distinct_formal_values) == 1 else None
     deadline_at = business_slot_deadline(configuration, scheduled_at)
     base = {
         "business_metric": configuration["business_metric"],
@@ -2196,7 +2203,7 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
                        business.quality,business.instrument_asset_code,business.endpoint_id,
                        business.scheduled_at,business.observed_at,business.received_at,
                        business.timeliness,business.slot_state,business.projection_version,
-                       batch.function_code,batch.normalized_at
+                       batch.function_code,batch.normalized_at,batch.raw_frame_id
                 FROM targets
                 JOIN monitoring_business_observations AS business
                      INDEXED BY idx_monitoring_business_current_site_scheduled
@@ -2732,7 +2739,9 @@ def trend_slots(connection, site_id: int, metric: str, start: str, end: str,
             if len(distinct_formal_values) > 1:
                 review_required = True
             if len(distinct_formal_values) == 1:
-                selected = selected or formal_rows[0]
+                candidate = min(formal_rows, key=_business_source_order)
+                if selected is None or _business_source_order(candidate) < _business_source_order(selected):
+                    selected = candidate
             deadline_at = max(deadline_at or slot['result_window_end_at'], slot['result_window_end_at'])
         if review_required:
             status, value = 'review_required', None
