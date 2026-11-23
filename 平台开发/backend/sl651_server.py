@@ -77,6 +77,7 @@ CONNECTION_ERROR_RETRY_BUDGET_SECONDS = 5.0
 FAILURE_LOG_INTERVAL_SECONDS = 5.0
 DEFAULT_NORMALIZATION_SCAN_PAGE_SIZE = 64
 DEFAULT_NORMALIZATION_PREFETCH = 2
+DEFAULT_NORMALIZATION_RECENT_CANDIDATES = 64
 DEFAULT_NORMALIZATION_SCAN_SECONDS = 0.1
 DEFAULT_NORMALIZATION_SCAN_RETRY_SECONDS = 1.0
 DEFAULT_NORMALIZATION_RECEIPT_GRACE_SECONDS = 0.1
@@ -776,19 +777,28 @@ class IngestionStorage:
     def recent_pending_normalization_page(self, limit: int) -> list[int]:
         """Prioritize actual recent receipts, including work saved before restart.
 
-        Receipt recency is only a scheduling hint, never a measurement timestamp
-        or a replacement for the normalizer's protocol/quality checks.
+        Materialize at most 64 index entries before filtering pending/retry state.
+        CROSS JOIN keeps that bounded window outside the primary-key lookups;
+        sparse/empty pending work cannot scan the complete receipt history.
+        Work outside this window remains reachable through the backlog cursor.
+        Receipt recency is only a scheduling hint, never a measurement timestamp.
         """
         with closing(self._connect()) as connection:
             return [int(row[0]) for row in connection.execute(
-                """SELECT raw.id FROM ingest_raw_frames raw
+                """WITH recent AS MATERIALIZED (
+                       SELECT id,received_at FROM ingest_raw_frames INDEXED BY idx_ingest_raw_received
+                       ORDER BY received_at DESC,id DESC LIMIT ?
+                   )
+                   SELECT recent.id FROM recent
+                   CROSS JOIN ingest_raw_frames raw ON raw.id=recent.id
                    LEFT JOIN monitoring_normalization_retries retry
                      ON retry.raw_frame_id=raw.id AND retry.normalization_version=?
                    WHERE raw.persistence_state IN ('pending_parse', 'pending_reparse')
                      AND (retry.raw_frame_id IS NULL OR (retry.state!='exhausted'
                           AND (retry.next_attempt_at IS NULL OR retry.next_attempt_at<=?)))
-                   ORDER BY raw.received_at DESC,raw.id DESC LIMIT ?""",
-                ("station-monitoring-normalizer-v1", _utc_now(), limit),
+                   ORDER BY recent.received_at DESC,recent.id DESC LIMIT ?""",
+                (DEFAULT_NORMALIZATION_RECENT_CANDIDATES,
+                 "station-monitoring-normalizer-v1", _utc_now(), limit),
             )]
 
     def record_normalization_retry(self, raw_id: int, error_type: str, *, max_attempts: int = 3) -> None:

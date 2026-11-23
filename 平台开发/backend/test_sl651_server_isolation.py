@@ -976,6 +976,134 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.storage.recent_pending_normalization_page(10), ids[2:])
         self.assertEqual(self.storage.pending_normalization_page(ids[3], 2), ids[4:])
 
+    async def test_recent_search_bounds_database_work_with_sparse_or_no_pending_history(self):
+        await self.server.close()
+        window = ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES
+        original_connect = self.storage._connect
+
+        def measure(method, *args):
+            statements = []
+            instructions = 0
+
+            def connect():
+                connection = original_connect()
+
+                def progress():
+                    nonlocal instructions
+                    instructions += 1
+                    return 0
+
+                connection.set_trace_callback(statements.append)
+                connection.set_progress_handler(progress, 1)
+                return connection
+
+            with mock.patch.object(self.storage, '_connect', side_effect=connect):
+                ids = method(*args)
+            self.assertEqual(len(statements), 1)
+            with closing(original_connect()) as db:
+                plan = [tuple(row) for row in db.execute('EXPLAIN QUERY PLAN '+statements[0])]
+            return {'ids': ids, 'vm_instructions': instructions, 'plan': plan,
+                    'exact_runtime_sql': statements[0]}
+
+        evidence = []
+        for history in (window*2, window*8):
+            with closing(original_connect()) as db:
+                previous = db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0]
+                db.executemany('''INSERT INTO ingest_raw_frames(received_at,frame_sha256,raw_frame,
+                    crc_status,authentication_status,disposition,persistence_state)
+                    VALUES (?,? ,X'00','not_checked','not_checked','quarantined','persisted')''',
+                    [((datetime(2026,11,13,tzinfo=timezone.utc)+timedelta(seconds=i)).isoformat(),
+                      f'isolated-bounded-history-{i}') for i in range(previous+1, history+1)])
+                db.commit()
+            for case in ('empty', 'oldest_only', 'recent_only', 'all_pending'):
+                with closing(original_connect()) as db:
+                    db.execute("UPDATE ingest_raw_frames SET persistence_state='persisted'")
+                    if case == 'oldest_only':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_parse' WHERE id=1")
+                    elif case == 'recent_only':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_reparse' WHERE id=?", (history,))
+                    elif case == 'all_pending':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_parse'")
+                    db.commit()
+                recent = measure(self.storage.recent_pending_normalization_page, 4)
+                old = measure(self.storage.pending_normalization_page, 0, 4)
+                expected = {'empty': [], 'oldest_only': [], 'recent_only': [history],
+                            'all_pending': list(range(history, history-4, -1))}[case]
+                self.assertEqual(recent['ids'], expected)
+                if case == 'oldest_only':
+                    self.assertEqual(old['ids'], [1])
+                plan = ' '.join(row[3] for row in recent['plan'])
+                self.assertIn('MATERIALIZE recent', plan)
+                self.assertIn('COVERING INDEX idx_ingest_raw_received', plan)
+                self.assertIn('SEARCH raw USING INTEGER PRIMARY KEY', plan)
+                self.assertNotIn('SCAN raw', plan)
+                evidence.append({'history_rows': history, 'case': case,
+                                 'candidate_limit': window, 'recent': recent, 'old': old})
+        for case in ('empty', 'oldest_only', 'recent_only', 'all_pending'):
+            counts = [row['recent']['vm_instructions'] for row in evidence if row['case']==case]
+            self.assertLessEqual(abs(counts[1]-counts[0]), 16, (case, counts))
+        print('BOUNDED_RECENT_SQL '+json.dumps(evidence))
+
+    async def test_recent_window_keeps_outside_backlog_and_due_retry_reachable(self):
+        await self.server.close()
+        self._recovery_endpoint()
+        old = [self._save_recovery_sample(f'2026111308{minute:02}00', 6+minute/100,
+               f'2026-11-13T00:{minute:02}:01+00:00') for minute in range(3)]
+        with closing(sqlite3.connect(self.database)) as db:
+            db.executemany('''INSERT INTO ingest_raw_frames(received_at,frame_sha256,raw_frame,
+                crc_status,authentication_status,disposition,persistence_state)
+                VALUES (?,? ,X'00','not_checked','not_checked','quarantined','persisted')''',
+                [((datetime(2026,11,22,tzinfo=timezone.utc)+timedelta(seconds=i)).isoformat(),
+                  f'isolated-window-history-{i}')
+                 for i in range(ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES)])
+            for raw_id, due in ((old[0], '2099-01-01T00:00:00+00:00'),
+                                (old[1], '2020-01-01T00:00:00+00:00')):
+                db.execute('''INSERT INTO monitoring_normalization_retries(raw_frame_id,normalization_version,
+                    attempt_count,next_attempt_at,last_error,state)
+                    VALUES (?,'station-monitoring-normalizer-v1',1,?,'isolated','retrying')''', (raw_id, due))
+            db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_reparse' WHERE id=?", (old[1],))
+            db.commit()
+        current = self._save_recovery_sample('20261123083700', 7.8, '2026-11-23T00:37:01+00:00')
+        self.assertEqual(self.storage.recent_pending_normalization_page(4), [current])
+        self.assertEqual(self.storage.pending_normalization_page(0, 2), old[1:])
+        original = ingest_server.normalize_raw_frame
+        processed = []
+
+        def normalize(*args, **kwargs):
+            result = original(*args, **kwargs)
+            processed.append(args[1])
+            return result
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            try:
+                await self.server.start()
+                for _ in range(150):
+                    if current in processed and all(raw_id in processed for raw_id in old[1:]):
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(set(processed), {current, *old[1:]})
+                self.assertEqual(processed[0], current)
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute('SELECT persistence_state FROM ingest_raw_frames WHERE id=?',
+                                               (old[0],)).fetchone()[0], 'pending_parse')
+                    db.execute("UPDATE monitoring_normalization_retries SET next_attempt_at='2020-01-01T00:00:00+00:00' WHERE raw_frame_id=?", (old[0],))
+                    db.commit()
+                # No explicit wakeup/new TCP frame: the old cursor must wrap and
+                # discover a retry that became due outside the recent window.
+                for _ in range(150):
+                    if old[0] in processed:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertIn(old[0], processed)
+            finally:
+                await self.server.close()
+        self.assertEqual(len(processed), len(set(processed)))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        print('OUTSIDE_RECENT_WINDOW '+json.dumps({'candidate_limit':ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES,
+              'old_ids':old, 'recent_id':current, 'processed_once':processed, 'due_retry_reached':True}))
+
     async def test_continuous_recent_pending_does_not_starve_old_backlog(self):
         await self.server.close()
         self._recovery_endpoint()
@@ -1079,7 +1207,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                 for _ in range(100):
                     with closing(sqlite3.connect(self.database)) as db:
                         hours = db.execute('SELECT observed_at,standard_value FROM monitoring_hourly_last_values ORDER BY observed_at').fetchall()
-                    if len(hours) == 2 and hours[-1][1] == 7.01312:
+                    if hours == [('2026-11-13T06:51:00+00:00', 7.051), ('2026-11-23T00:37:00+00:00', 7.01312)]:
                         break
                     await asyncio.sleep(0.05)
                 self.assertEqual(hours, [('2026-11-13T06:51:00+00:00', 7.051), ('2026-11-23T00:37:00+00:00', 7.01312)])
