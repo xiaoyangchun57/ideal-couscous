@@ -586,6 +586,106 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(trend.get_json()['standard_unit'], 'mg/L')
 
+    def test_mixed_retired_hourly_and_current_process_keep_latest_across_storage_stages(self):
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        current = now - timedelta(minutes=2)
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute('DELETE FROM monitoring_business_schedules WHERE endpoint_id=?',
+                       (self.endpoint_id,))
+            db.commit()
+
+        def receive(measured, value, serial, received, retire):
+            local = measured.astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+            raw_id = self._persist(bytes.fromhex('0311') + bcd_number(value, 3, 1),
+                serial=serial, sent_at=local, observed_at=local, received_at=received.isoformat())
+            self.assertEqual(normalize_raw_frame(self.database, raw_id, retire_source=retire), 'accepted')
+            return raw_id
+
+        receive(current-timedelta(days=9), 10.0, 501, current-timedelta(days=9), True)
+        receive(current, 22.5, 502, current+timedelta(seconds=1), False)
+        headers = self._headers('monitor-admin')
+        client = web_app.app.test_client()
+        evidence = []
+
+        def check(phase, received):
+            with closing(sqlite3.connect(self.database)) as db:
+                db.row_factory = sqlite3.Row
+                configurations = current_factor_configurations(db, self.site_id)
+                single = latest_values(db, self.site_id)
+                batch, _ = latest_values_and_cycles_batch(db, {
+                    self.site_id: configurations, self.other_site_id: []})
+                for items in (single, batch[self.site_id]):
+                    item = next(row for row in items if row['business_metric']=='water_temp')
+                    self.assertEqual((item['standard_value'], item['observed_at'], item['received_at']),
+                                     (22.5, current.isoformat(), received.isoformat()), phase)
+                self.assertEqual(batch[self.other_site_id], [])
+                process_count = db.execute('SELECT COUNT(*) FROM observation_values').fetchone()[0]
+                self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+            # Each phase is a fresh real read, not an earlier cached projection.
+            for cache, lock in (
+                (monitoring_api._station_monitoring_batch_cache, monitoring_api._station_monitoring_batch_cache_lock),
+                (monitoring_api._station_monitoring_list_cache, monitoring_api._station_monitoring_list_cache_lock),
+                (monitoring_api._station_monitoring_overview_cache, monitoring_api._station_monitoring_overview_cache_lock),
+                (monitoring_api._station_monitoring_overview_projection_cache, monitoring_api._station_monitoring_overview_projection_cache_lock),
+            ):
+                with lock:
+                    cache.clear()
+            latest = client.get(f'/api/station-monitoring/sites/{self.site_id}/latest', headers=headers)
+            overview = client.get(f'/api/station-monitoring/sites/{self.site_id}/overview', headers=headers)
+            listed = client.get('/api/station-monitoring/sites?scope=all', headers=headers)
+            trend = client.get(f'/api/station-monitoring/sites/{self.site_id}/trend?metric=water_temp&range=24h', headers=headers)
+            for response in (latest, overview, listed, trend):
+                self.assertEqual(response.status_code, 200, response.get_json())
+            for items in (latest.get_json()['items'], overview.get_json()['monitoring']['latest_values']):
+                item = next(row for row in items if row['business_metric']=='water_temp')
+                self.assertEqual((item['standard_value'], item['observed_at']), (22.5, current.isoformat()), phase)
+            listed_site = next(row for row in listed.get_json()['items'] if row['site_id']==self.site_id)
+            self.assertEqual(listed_site['last_valid_observation_at'], current.isoformat(), phase)
+            points = [point for point in trend.get_json()['points'] if point['observed_at']==current.isoformat()]
+            self.assertEqual([point['value'] for point in points], [22.5], phase)
+            evidence.append({'phase':phase, 'observed_at':current.isoformat(),
+                'received_at':received.isoformat(), 'value':22.5, 'process_rows':process_count,
+                'latest_source':item['source_type'], 'trend_source':points[0]['source_type'],
+                'http_statuses':[r.status_code for r in (latest, overview, listed, trend)]})
+
+        check('old_hourly_and_current_process', current+timedelta(seconds=1))
+        receive(current-timedelta(days=8), 11.0, 503, current-timedelta(days=8), True)
+        check('old_backlog_normalized_after_current', current+timedelta(seconds=1))
+        receive(current, 22.5, 504, current+timedelta(seconds=2), True)
+        check('current_process_retired_to_hourly', current+timedelta(seconds=2))
+        self.assertEqual(evidence[-1]['process_rows'], 0)
+        print('MIXED_SOURCE_API '+json.dumps(evidence))
+
+    def test_mixed_latest_compares_measurement_then_receipt_and_keeps_quality_and_mapping(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        measured = now-timedelta(minutes=5)
+        self._insert_legacy_trend_value(measured.isoformat(), (measured+timedelta(seconds=2)).isoformat(), 20.0, 601)
+        self._insert_hourly_trend_value(measured.isoformat(), (measured+timedelta(seconds=1)).isoformat(), 19.0, 900001)
+        with closing(sqlite3.connect(self.database)) as db:
+            db.row_factory = sqlite3.Row
+            def selected():
+                return next(item for item in latest_values(db, self.site_id) if item['business_metric']=='water_temp')
+            self.assertEqual(selected()['standard_value'], 20.0)
+            db.execute("UPDATE monitoring_hourly_last_values SET received_at=?,standard_value=21.0",
+                       ((measured+timedelta(seconds=3)).isoformat(),))
+            db.commit()
+            self.assertEqual(selected()['standard_value'], 21.0)
+            db.execute("UPDATE monitoring_hourly_last_values SET observed_at=?,normalized_at=?",
+                       ((measured-timedelta(days=1)).isoformat(), now.isoformat()))
+            db.commit()
+            self.assertEqual(selected()['standard_value'], 20.0)
+            for column, invalid in (('instrument_asset_code','OTHER'),
+                                    ('observed_at',(now+timedelta(days=1)).isoformat()),
+                                    ('observed_at','2019-01-01T00:00:00+00:00')):
+                db.execute("UPDATE monitoring_hourly_last_values SET observed_at=?,quality='valid',instrument_asset_code='INST-A'",
+                           (measured.isoformat(),))
+                db.execute(f'UPDATE monitoring_hourly_last_values SET {column}=?', (invalid,))
+                db.commit()
+                self.assertEqual(selected()['standard_value'], 20.0, (column, invalid))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE monitoring_hourly_last_values SET quality='suspect'")
+            db.rollback()
+
     def test_hourly_last_value_replaces_realtime_detail_and_survives_restart(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
@@ -736,7 +836,7 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
         self.assertEqual(pages[1]['source_type'], 'hourly_last_value')
         self.assertEqual(pages[1]['source_candidate_count'], 2)
 
-    def test_receiver_same_time_replacement_keeps_only_current_unconsumed_projection(self):
+    def test_receiver_different_values_preserve_formal_conflict_sources(self):
         measured_at = datetime(2020, 6, 12, 4, 0)
         for serial, value in ((51, 7.10), (52, 7.20), (53, 7.30), (54, 7.40)):
             raw_id = self._persist(
@@ -753,8 +853,53 @@ class StationMonitoringNormalizationTest(unittest.TestCase):
                     'observation_values', 'monitoring_business_observations'))
             values = connection.execute(
                 'SELECT standard_value FROM monitoring_business_observations').fetchall()
-        self.assertEqual(counts, (1, 0, 1, 1, 1))
-        self.assertEqual(values, [(7.4,)])
+            states = connection.execute('SELECT slot_state FROM monitoring_business_observations').fetchall()
+            hourly = connection.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchone()[0]
+        self.assertEqual(counts, (4, 0, 4, 4, 4))
+        self.assertEqual(values, [(7.1,), (7.2,), (7.3,), (7.4,)])
+        self.assertEqual(states, [('conflict',)] * 4)
+        self.assertEqual(hourly, 7.4)
+
+    def test_earlier_formal_source_preserves_consumed_later_evidence(self):
+        measured_at = datetime(2020, 6, 12, 4, 0)
+        ids = [self._persist(
+            bytes.fromhex('4612') + bcd_number(7.1, 4, 2), serial=serial,
+            sent_at=measured_at, observed_at=measured_at, received_at=received,
+        ) for serial, received in ((65, '2020-06-11T20:05:00+00:00'),
+                                   (66, '2020-06-12T02:05:00+00:00'))]
+        normalize_raw_frame(self.database, ids[1], retire_source=True)
+        with closing(sqlite3.connect(self.database)) as connection:
+            later = connection.execute('SELECT id,source_observation_value_id,observation_batch_id,received_at,timeliness FROM monitoring_business_observations').fetchone()
+            connection.execute('INSERT INTO monitoring_alert_observation_events(observation_id) VALUES (?)', (later[0],))
+            connection.commit()
+        normalize_raw_frame(self.database, ids[0], retire_source=True)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute('SELECT id,source_observation_value_id,observation_batch_id,received_at,timeliness FROM monitoring_business_observations WHERE id=?', (later[0],)).fetchone(), later)
+            self.assertEqual(connection.execute('SELECT is_current FROM monitoring_business_observations WHERE id=?', (later[0],)).fetchone()[0], 0)
+            self.assertEqual(connection.execute('SELECT observation_id FROM monitoring_alert_observation_events').fetchone()[0], later[0])
+            current = connection.execute('''SELECT batch.raw_frame_id,business.timeliness
+                FROM monitoring_business_observations business JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.is_current=1''').fetchall()
+            self.assertEqual(current, [(ids[0], 'on_time')])
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_raw_frames WHERE id IN (?,?)', ids).fetchone()[0], 2)
+            self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(), [])
+
+    def test_default_normalization_source_correction_does_not_enable_raw_retirement(self):
+        measured_at = datetime(2020, 6, 12, 4, 0)
+        ids = [self._persist(
+            bytes.fromhex('4612') + bcd_number(7.1, 4, 2), serial=serial,
+            sent_at=measured_at, observed_at=measured_at, received_at=received,
+        ) for serial, received in ((67, '2020-06-11T20:05:00+00:00'),
+                                   (68, '2020-06-12T02:05:00+00:00'))]
+        for raw_id in ids[::-1]:
+            normalize_raw_frame(self.database, raw_id)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM observation_batches').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM ingest_parse_attempts').fetchone()[0], 2)
+            self.assertEqual(connection.execute('''SELECT batch.raw_frame_id FROM monitoring_business_observations business
+                JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                WHERE business.is_current=1''').fetchall(), [(ids[0],)])
 
     def test_receiver_replacement_preserves_projection_with_formal_consumer(self):
         measured_at = datetime(2020, 6, 12, 4, 0)

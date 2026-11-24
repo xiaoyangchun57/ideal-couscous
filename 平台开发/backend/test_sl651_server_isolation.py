@@ -3,8 +3,9 @@ import asyncio
 import inspect
 import json
 import sqlite3
+import signal
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import tempfile
 import os
 import subprocess
@@ -405,7 +406,7 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         noisy_reader, noisy_writer = await self.connect()
         with mock.patch.object(
             self.storage,
-            "record_connection_error",
+            "record_connection_errors",
             side_effect=sqlite3.OperationalError("isolated error sink failure"),
         ):
             noisy_writer.write(b"noise-for-error-worker")
@@ -437,6 +438,1213 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_raw_frames").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='queue_full'").fetchone()[0], 1)
+
+    async def test_real_write_lock_diagnostics_preserve_no_ack_and_worker_recovery(self):
+        self.add_endpoint('unbound')
+        original_connect = self.storage._connect
+
+        def impatient_connect(**kwargs):
+            connection = original_connect(**kwargs)
+            connection.execute('PRAGMA busy_timeout=0')
+            return connection
+
+        with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                with mock.patch.object(self.storage, '_connect', side_effect=impatient_connect), mock.patch.object(ingest_server, 'CONNECTION_ERROR_RETRY_BUDGET_SECONDS', 0.1), self.assertLogs('station_ingest', level='WARNING') as logs:
+                    reader, writer = await self.connect()
+                    writer.write(make_uplink(serial=921))
+                    await writer.drain()
+                    self.assertEqual(await asyncio.wait_for(reader.read(), timeout=3), b'')
+                    writer.close()
+                    await writer.wait_closed()
+                    self.server._enqueue_error('diagnostic-test-only')
+                    await asyncio.wait_for(self.server._queue.join(), timeout=3)
+                output = '\n'.join(logs.output)
+                self.assertIn('stage=raw_persistence operation=persist_parsed', output)
+                self.assertIn('stage=error_evidence operation=record_connection_errors', output)
+                self.assertIn('sqlite_code=5 sqlite_name=SQLITE_BUSY reason=database_busy', output)
+                self.assertNotIn('diagnostic-test-only', output)
+                self.assertNotIn(str(self.database), output)
+                self.assertNotIn('BEGIN IMMEDIATE', output)
+                self.assertTrue(all(len(line) < 400 for line in logs.output))
+                self.assertFalse(self.server._worker.done())
+                self.assertEqual(blocker.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+            finally:
+                blocker.rollback()
+        await self.send_one(make_uplink(serial=921))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 1)
+
+    async def test_connection_error_batch_preserves_hours_samples_and_capacity(self):
+        boundary = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        events = [('noise' if i % 2 else 'source_cooling',
+                   (boundary + timedelta(seconds=i-16)).isoformat()) for i in range(32)]
+        statements = []
+        original_connect = self.storage._connect
+
+        def traced_connect(**kwargs):
+            db = original_connect(**kwargs)
+            db.set_trace_callback(statements.append)
+            return db
+
+        def snapshot():
+            with closing(sqlite3.connect(self.database)) as db:
+                return {
+                    'hourly': db.execute('''SELECT error_type,bucket_hour,occurrence_count,first_seen_at,last_seen_at
+                        FROM station_ingest_error_hourly ORDER BY error_type,bucket_hour''').fetchall(),
+                    'samples': db.execute('SELECT error_type,created_at FROM ingest_errors ORDER BY created_at,id').fetchall(),
+                    'current': db.execute('SELECT latest_error_at,latest_error_type FROM station_ingest_current_state').fetchall(),
+                }
+
+        with mock.patch.object(self.storage, '_connect', side_effect=traced_connect), mock.patch.object(
+            ingest_server, 'prune_ingest_error_samples', wraps=retention.prune_ingest_error_samples,
+        ) as prune:
+            for event in events:
+                await asyncio.to_thread(self.storage.record_connection_errors, [event])
+            baseline = snapshot()
+            self.assertEqual(prune.call_count, 32)
+            self.assertEqual(statements.count('BEGIN IMMEDIATE'), 32)
+            self.assertEqual(statements.count('COMMIT'), 32)
+            with closing(sqlite3.connect(self.database)) as db:
+                db.execute('DELETE FROM ingest_errors')
+                db.execute('DELETE FROM station_ingest_error_hourly')
+                db.execute('DELETE FROM station_ingest_current_state')
+                db.commit()
+            statements.clear()
+            prune.reset_mock()
+            with mock.patch.object(ingest_server, '_utc_now', side_effect=[stamp for _, stamp in events]):
+                for code, _ in events:
+                    self.server._enqueue_error(code)
+            self.server._enqueue_error('over-capacity')
+            self.assertEqual(self.server._queued_errors, 32)
+            self.assertEqual(self.server.dropped_error_events, 1)
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+            self.assertEqual(prune.call_count, 2)
+            self.assertEqual(statements.count('BEGIN IMMEDIATE'), 2)
+            self.assertEqual(statements.count('COMMIT'), 2)
+        self.assertEqual(snapshot(), baseline)
+        self.assertEqual(sum(row[2] for row in baseline['hourly']), 32)
+        self.assertEqual(len(baseline['hourly']), 4)
+        self.assertEqual(len(baseline['samples']), 16)
+        self.assertEqual(baseline['samples'][0][1], (boundary-timedelta(seconds=15)).strftime('%Y-%m-%d %H:%M:%S'))
+        self.assertEqual(self.server._queued_errors, 0)
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        # A successful batch still enforces the existing sample cap; no indefinite
+        # cleanup postponement is hidden behind the lower number of cleanup calls.
+        with mock.patch.object(retention, 'INGEST_ERROR_SAMPLE_MAX_ROWS', 3):
+            self.server._enqueue_error('noise')
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+            self.assertEqual(len(snapshot()['samples']), 3)
+        print('ERROR_BATCH_COUNTS events=32 hourly_buckets=4 samples=16 transactions=32->2 cleanup=32->2 capacity_drop=1')
+
+    async def test_connection_errors_and_frames_take_bounded_alternating_turns(self):
+        self.add_endpoint('unbound')
+        order = []
+        record = self.storage.record_connection_errors
+        process = self.server._process_raw_result
+
+        def errors(events):
+            order.append(('errors', len(events)))
+            return record(events)
+
+        def frame(*args):
+            order.append(('frame', 1))
+            return process(*args)
+
+        with mock.patch.object(self.storage, 'record_connection_errors', side_effect=errors), mock.patch.object(
+            self.server, '_process_raw_result', side_effect=frame,
+        ):
+            tasks = [asyncio.create_task(self.server._enqueue(make_uplink(serial=950+i), 'test')) for i in range(8)]
+            for _ in range(32):
+                self.server._enqueue_error('source_cooling')
+            outcomes = await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+        self.assertTrue(all(outcome.reply and parse_frame(outcome.reply).direction == 'down' for outcome in outcomes))
+        self.assertEqual([count for kind,count in order if kind=='errors'], [16,16])
+        error_positions = [i for i,(kind,_) in enumerate(order) if kind=='errors']
+        self.assertTrue(any(kind=='frame' for kind,_ in order[error_positions[0]+1:error_positions[1]]))
+        self.assertLess(error_positions[-1], len(order)-1, 'queued errors must run before continuous frames finish')
+        self.assertEqual((self.server._queued_errors,self.server.queued_frames,self.server.queued_bytes), (0,0,0))
+        print('ERROR_FRAME_TURNS '+json.dumps(order))
+
+    def _error_contention_storage_policy(self):
+        archive = self.root / 'error-contention-archive'
+        archive.mkdir(exist_ok=True)
+        gib = 1024 ** 3
+        return retention.storage_policy_for_governance(
+            archive, archive_minimum_total_bytes=8*gib, archive_minimum_free_bytes=gib,
+            hot_minimum_total_bytes=10*gib, hot_minimum_free_bytes=2*gib,
+        )
+
+    async def test_governance_error_capacity_contention_yields_to_tcp_and_results(self):
+        from station_monitoring import latest_values, result_trend_page
+        site_id = self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        self.storage.storage_policy = self._error_contention_storage_policy()
+        entered = threading.Event()
+        attempts, raw_starts, values = [], [], []
+        record = self.storage.record_connection_errors
+        process = self.server._process_raw_result
+        started = time.perf_counter()
+
+        def measured_errors(events):
+            began = time.perf_counter()
+            entered.set()
+            try:
+                return record(events)
+            finally:
+                attempts.append(time.perf_counter()-began)
+
+        def measured_raw(*args):
+            raw_starts.append(time.perf_counter()-started)
+            return process(*args)
+
+        async def hj_exchange(raw, qn):
+            inquiry = make_hj212(command='3020', qn=qn)
+            reader, writer = await self.connect()
+            try:
+                writer.write(raw + inquiry)
+                await writer.drain()
+                reply = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=3)
+                self.assertEqual(reply, build_hj212_9011_response(parse_hj212_frame(inquiry)))
+                return time.perf_counter()-started
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Only disk readings are synthetic. Directory probes, health writes, SQLite
+        # writer contention, queue dispatch, TCP and normalization execute for real.
+        usage = mock.Mock(total=16*1024**3, free=4*1024**3)
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=usage), mock.patch.object(
+            self.storage, 'record_connection_errors', side_effect=measured_errors,
+        ), mock.patch.object(self.server, '_process_raw_result', side_effect=measured_raw):
+            with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+                blocker.execute('BEGIN IMMEDIATE')
+                locked_at = time.perf_counter()
+                try:
+                    for _ in range(16):
+                        self.server._enqueue_error('capacity_contention')
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    inquiry_task = asyncio.create_task(hj_exchange(b'', '20261124083000001'))
+                    # 3020 needs authenticated reads, not a fictitious 2011 ACK.
+                    done, _ = await asyncio.wait({inquiry_task}, timeout=0.4)
+                    inquiry_before_unlock = bool(done)
+                    tcp_task = asyncio.create_task(self.send_one(make_uplink(serial=991)))
+                    await asyncio.sleep(max(0.06, locked_at + 0.5 - time.perf_counter()))
+                    self.assertFalse(tcp_task.done(), 'SL651 must not ACK an unsaved frame')
+                    with closing(sqlite3.connect(self.database)) as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+                finally:
+                    blocker.rollback()
+                inquiry_seconds, ack_seconds = await asyncio.gather(inquiry_task, tcp_task)
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+            for index, (stamp, value) in enumerate((('20261124083100', 7.1), ('20261124093100', 7.2))):
+                await hj_exchange(self._recovery_frame(stamp, value), f'20261124100{index}00001')
+                await asyncio.wait_for(self.server._queue.join(), timeout=3)
+                await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    latest = latest_values(db, site_id, at_time='2026-11-24T03:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-24T00:00:00+00:00', '2026-11-24T03:00:00+00:00')[0]
+                    self.assertEqual(latest[0]['standard_value'], value)
+                    self.assertEqual(trend[-1]['value'], value)
+                    values.append(value)
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='capacity_contention'").fetchone()[0], 16)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='0012345678' AND persistence_state='persisted'").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+                self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        evidence = {'policy_enabled': True, 'synthetic_disk_readings_only': True,
+            'inquiry_9011_before_unlock': inquiry_before_unlock, 'inquiry_seconds': inquiry_seconds,
+            'raw_dispatch_seconds': raw_starts, 'error_attempt_seconds': attempts,
+            'sl651_send_to_ack_seconds': ack_seconds, 'sl651_ack_observed_after_unlock': True,
+            'sl651_saved_before_ack': True,
+            'latest_and_trend_values': values, 'failed_error_events': self.server.failed_error_persistence}
+        print('GOVERNANCE_ERROR_CAPACITY_CONTENTION '+json.dumps(evidence))
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        self.assertTrue(inquiry_before_unlock, 'auxiliary capacity health write blocked authenticated TCP processing')
+        self.assertLess(attempts[0], 0.3, 'error capacity guard bypassed the short lock attempt')
+
+    async def test_governance_error_capacity_failures_reject_writes_and_recover(self):
+        self.add_endpoint('unbound')
+        policy = self._error_contention_storage_policy()
+        self.storage.storage_policy = policy
+        gib = 1024 ** 3
+        events = [('capacity_failure', '2026-11-24T01:00:00+00:00')]
+        rejected = []
+        for volume, dimension in (('archive', 'total'), ('archive', 'free'), ('hot', 'total'), ('hot', 'free')):
+            def usage(path):
+                is_target = (Path(path).resolve() == policy.root.resolve()) == (volume == 'archive')
+                total, free = 16*gib, 4*gib
+                if is_target:
+                    if dimension == 'total':
+                        total = (policy.minimum_total_bytes if volume == 'archive' else policy.hot_minimum_total_bytes) - 1
+                    else:
+                        free = (policy.minimum_free_bytes if volume == 'archive' else policy.hot_minimum_free_bytes) - 1
+                return mock.Mock(total=total, free=free)
+
+            with self.subTest(volume=volume, dimension=dimension), mock.patch.object(retention.shutil, 'disk_usage', side_effect=usage):
+                with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                    self.storage.record_connection_errors(events)
+                rejected.append(volume+'_'+dimension)
+                if volume == 'archive' and dimension == 'free':
+                    with self.assertLogs('station_ingest', level='WARNING') as logs:
+                        self.server._enqueue_error('capacity_failure')
+                        reader, writer = await self.connect()
+                        writer.write(make_uplink(serial=992))
+                        await writer.drain()
+                        self.assertEqual(await asyncio.wait_for(reader.read(), timeout=2), b'')
+                        writer.close()
+                        await writer.wait_closed()
+                        await asyncio.wait_for(self.server._queue.join(), timeout=2)
+                    self.assertTrue(any('stage=error_evidence ' in line for line in logs.output))
+                    self.assertTrue(any('stage=raw_persistence ' in line for line in logs.output))
+                    self.assertEqual(self.server.failed_error_persistence, 1)
+        policy.root.rmdir()
+        try:
+            with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                self.storage.record_connection_errors(events)
+            rejected.append('missing_archive')
+        finally:
+            policy.root.mkdir()
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=mock.Mock(total=16*gib, free=4*gib)):
+            with mock.patch.object(retention.tempfile, 'mkstemp', side_effect=PermissionError('isolated unwritable archive')):
+                with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                    self.storage.record_connection_errors(events)
+                rejected.append('unwritable_archive_probe')
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='capacity_failure'").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], 'degraded')
+            self.server._enqueue_error('capacity_recovered')
+            await self.send_one(make_uplink(serial=993))
+            await asyncio.wait_for(self.server._queue.join(), timeout=2)
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='capacity_recovered'").fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], 'healthy')
+        self.assertEqual(self.server._queued_errors, 0)
+        print('GOVERNANCE_CAPACITY_PROTECTION '+json.dumps({'rejected': rejected,
+            'failed_error_events': 1, 'no_raw_or_success_ack_during_failure': True,
+            'recovered_error_events': 1, 'recovered_sl651_saved_and_acknowledged': 1,
+            'health_degraded_then_healthy': True}))
+
+    async def test_governance_error_lock_exhaustion_remains_visible_and_tcp_recovers(self):
+        self.add_endpoint('unbound')
+        self.storage.storage_policy = self._error_contention_storage_policy()
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=mock.Mock(total=16*1024**3, free=4*1024**3)), mock.patch.object(
+            ingest_server, 'CONNECTION_ERROR_RETRY_BUDGET_SECONDS', 0.15,
+        ), self.assertLogs('station_ingest', level='WARNING') as logs:
+            with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+                blocker.execute('BEGIN IMMEDIATE')
+                try:
+                    for _ in range(16):
+                        self.server._enqueue_error('capacity_lock_budget')
+                    await asyncio.wait_for(self.server._queue.join(), timeout=1)
+                    self.assertEqual(self.server.failed_error_persistence, 16)
+                    self.assertEqual(self.server._queued_errors, 0)
+                    with closing(sqlite3.connect(self.database)) as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='capacity_lock_budget'").fetchone()[0], 0)
+                finally:
+                    blocker.rollback()
+            await self.send_one(make_uplink(serial=994))
+        self.assertTrue(any('stage=error_evidence_retry ' in line for line in logs.output))
+        self.assertTrue(any('stage=error_evidence ' in line for line in logs.output))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 1)
+        print('GOVERNANCE_ERROR_DEGRADED '+json.dumps({'test_retry_budget_seconds': 0.15,
+            'retry_attempts': self.server.error_persistence_retries, 'finally_failed_error_events': 16,
+            'terminal_failure_logged': True, 'later_sl651_saved_and_acknowledged': 1}))
+
+    async def test_connection_error_lock_retry_yields_to_real_tcp_and_web(self):
+        self.add_endpoint('unbound')
+        operator_id, token = self._create_l1_web_credentials()
+        attempts = []
+        attempted = threading.Event()
+        record = self.storage.record_connection_errors
+
+        def measured(events):
+            started = time.perf_counter()
+            try:
+                return record(events)
+            finally:
+                attempts.append(time.perf_counter()-started)
+                attempted.set()
+
+        def web_writes():
+            with web_app.app.test_client() as client:
+                return [client.post('/api/sites', headers={'Authorization':'Bearer '+token},
+                    json={'code':f'LOCK-{i}', 'name':f'lock probe {i}', 'manager_id':operator_id,
+                          'gps_lat':28.6, 'gps_lng':115.9}).status_code for i in range(4)]
+
+        with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                with mock.patch.object(self.storage, 'record_connection_errors', side_effect=measured), self.assertLogs('station_ingest', level='WARNING') as logs:
+                    for _ in range(32):
+                        self.server._enqueue_error('noise')
+                    self.assertTrue(await asyncio.to_thread(attempted.wait, 1))
+                    tcp_tasks = [asyncio.create_task(self.send_one(make_uplink(serial=970+i))) for i in range(8)]
+                    web_task = asyncio.create_task(asyncio.to_thread(web_writes))
+                    await asyncio.sleep(0.35)
+                    blocker.rollback()
+                    latencies = await asyncio.wait_for(asyncio.gather(*tcp_tasks), timeout=4)
+                    statuses = await asyncio.wait_for(web_task, timeout=4)
+                    await asyncio.wait_for(self.server._queue.join(), timeout=3)
+            finally:
+                blocker.rollback()
+        self.assertEqual(statuses, [201]*4)
+        self.assertLess(max(latencies), 2.5)
+        self.assertLess(max(attempts), 0.5)
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        self.assertEqual(self.server._queued_errors, 0)
+        self.assertEqual(sum('stage=error_evidence' in line for line in logs.output), 1)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 8)
+        print(f'ERROR_LOCK_REAL_IO events=32 tcp=8 web_201=4 lock_seconds=0.35 max_ack={max(latencies):.4f} max_error_attempt={max(attempts):.4f} error_attempts={len(attempts)} lost=0')
+
+    async def test_normalization_cleanup_lock_distinguishes_retries_from_final_loss(self):
+        import station_monitoring as monitoring
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        operator_id, token = self._create_l1_web_credentials()
+        raw_id = self._save_recovery_sample('20261123083700', 7.8, '2026-11-23T00:37:01+00:00')
+        entered = threading.Event()
+        release = threading.Event()
+        attempted = threading.Event()
+        cleanup = monitoring._retire_empty_batch
+        record = self.storage.record_connection_errors
+        prune = ingest_server.prune_ingest_error_samples
+        attempts, cleanups, prunes = [], [], []
+
+        def held_cleanup(db, batch_id, source_id):
+            if source_id != raw_id:
+                return cleanup(db, batch_id, source_id)
+            started = time.perf_counter()
+            self.assertTrue(db.in_transaction)
+            entered.set()
+            self.assertTrue(release.wait(5))
+            result = cleanup(db, batch_id, source_id)
+            cleanups.append({'held_seconds':time.perf_counter()-started, 'in_write_transaction':db.in_transaction})
+            return result
+
+        def measured_record(events):
+            started = time.perf_counter()
+            try:
+                return record(events)
+            finally:
+                attempts.append(time.perf_counter()-started)
+                attempted.set()
+
+        def measured_prune(db, **kwargs):
+            started = time.perf_counter()
+            result = prune(db, **kwargs)
+            prunes.append({'seconds':time.perf_counter()-started, 'in_write_transaction':db.in_transaction})
+            return result
+
+        def write_web():
+            with web_app.app.test_client() as client:
+                return client.post('/api/sites', headers={'Authorization':'Bearer '+token},
+                    json={'code':'NORMALIZER-LOCK', 'name':'isolated lock probe', 'manager_id':operator_id,
+                          'gps_lat':28.6, 'gps_lng':115.9}).status_code
+
+        with mock.patch.object(monitoring, '_retire_empty_batch', side_effect=held_cleanup), mock.patch.object(
+            self.storage, 'record_connection_errors', side_effect=measured_record,
+        ), mock.patch.object(ingest_server, 'prune_ingest_error_samples', side_effect=measured_prune), self.assertLogs('station_ingest', level='WARNING') as logs:
+            try:
+                await self.server.start()
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                for _ in range(32):
+                    self.server._enqueue_error('noise')
+                self.assertTrue(await asyncio.to_thread(attempted.wait, 1))
+                tcp = [asyncio.create_task(self.send_one(make_uplink(serial=980+i))) for i in range(2)]
+                web = asyncio.create_task(asyncio.to_thread(write_web))
+                await asyncio.sleep(0.25)
+                release.set()
+                latencies = await asyncio.wait_for(asyncio.gather(*tcp), timeout=4)
+                web_status = await asyncio.wait_for(web, timeout=4)
+                await asyncio.wait_for(self.server._queue.join(), timeout=3)
+                await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+            finally:
+                release.set()
+                await self.server.close()
+        self.assertEqual(web_status, 201)
+        self.assertGreater(self.server.error_persistence_retries, 0)
+        self.assertEqual((self.server.failed_error_persistence, self.server._queued_errors), (0,0))
+        self.assertTrue(any('stage=error_evidence_retry ' in line for line in logs.output))
+        self.assertFalse(any('stage=error_evidence ' in line for line in logs.output))
+        self.assertLess(max(latencies), 2.5)
+        self.assertTrue(cleanups and prunes)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT standard_value FROM monitoring_hourly_last_values WHERE business_site_id=?', (site_id,)).fetchone()[0], 7.8)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        print('NORMALIZER_WRITE_CONTENTION '+json.dumps({'synthetic_hold_not_production_root_cause':True,
+            'error_attempt_seconds':attempts, 'retry_attempts':self.server.error_persistence_retries,
+            'finally_failed_events':self.server.failed_error_persistence, 'persisted_errors':32,
+            'tcp_ack_seconds':latencies, 'tcp_raw_persisted':2, 'web_status':web_status,
+            'cleanup':cleanups, 'error_prune':prunes, 'pending_remaining':0}))
+
+    async def test_connection_error_batch_rolls_back_before_retry_without_double_count(self):
+        original = self.storage._write_error
+        writes = 0
+
+        def fail_inside_batch(*args, **kwargs):
+            nonlocal writes
+            original(*args, **kwargs)
+            writes += 1
+            if writes == 2:
+                failure = sqlite3.OperationalError('database is locked')
+                failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                failure.sqlite_errorname = 'SQLITE_BUSY'
+                raise failure
+
+        with mock.patch.object(self.storage, '_write_error', side_effect=fail_inside_batch):
+            for _ in range(32):
+                self.server._enqueue_error('noise')
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+        self.assertEqual(writes, 34)
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='noise'").fetchone()[0], 32)
+
+    async def test_connection_error_lock_budget_counts_each_failed_event_and_finishes(self):
+        self.add_endpoint('unbound')
+        record = self.storage.record_connection_errors
+        with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                with mock.patch.object(ingest_server, 'CONNECTION_ERROR_RETRY_BUDGET_SECONDS', 0.15), mock.patch.object(
+                    self.storage, 'record_connection_errors', wraps=record,
+                ) as attempts, self.assertLogs('station_ingest', level='WARNING') as logs:
+                    for _ in range(32):
+                        self.server._enqueue_error('noise')
+                    await asyncio.wait_for(self.server._queue.join(), timeout=2)
+                self.assertGreaterEqual(attempts.call_count, 4)
+                self.assertLessEqual(attempts.call_count, 8)
+                self.assertEqual(self.server.failed_error_persistence, 32)
+                self.assertEqual(self.server.dropped_error_events, 0)
+                self.assertEqual(self.server._queued_errors, 0)
+                self.assertEqual(len(logs.output), 2)
+                self.assertEqual(sum('stage=error_evidence_retry ' in line for line in logs.output), 1)
+                self.assertEqual(sum('stage=error_evidence ' in line for line in logs.output), 1)
+                self.assertGreater(self.server.error_persistence_retries, 0)
+                self.assertEqual(blocker.execute('SELECT COUNT(*) FROM ingest_errors').fetchone()[0], 0)
+            finally:
+                blocker.rollback()
+        await self.send_one(make_uplink(serial=989))
+        self.assertFalse(self.server._worker.done())
+
+    async def test_close_drains_connection_errors_during_retry_then_restarts(self):
+        self.add_endpoint('unbound')
+        with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                for _ in range(32):
+                    self.server._enqueue_error('noise')
+                await asyncio.sleep(0.12)
+                close_task = asyncio.create_task(self.server.close())
+                await asyncio.sleep(0.12)
+                self.assertFalse(close_task.done())
+                self.assertEqual(self.server._queued_errors, 32)
+                blocker.rollback()
+                await asyncio.wait_for(close_task, timeout=3)
+            finally:
+                blocker.rollback()
+        self.assertEqual(self.server._queued_errors, 0)
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='noise'").fetchone()[0], 32)
+        await self.server.start()
+        await self.send_one(make_uplink(serial=990))
+
+    def _recovery_endpoint(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            site_id = db.execute("INSERT INTO sites(code,name,type) VALUES ('RECOVERY','recovery','water')").lastrowid
+            endpoint = db.execute("""INSERT INTO trusted_endpoints(
+                station_code,credential_hmac,business_site_id,endpoint_state)
+                VALUES ('TESTHJ01',?,?,'bound')""",
+                (credential_hmac(b'long-ascii-password', self.pepper), site_id)).lastrowid
+            db.execute("""INSERT INTO monitoring_endpoint_profiles(endpoint_id,business_site_id,
+                timezone,expected_granularity,effective_from)
+                VALUES (?,?,'Asia/Shanghai','realtime','2020-01-01T00:00:00+00:00')""", (endpoint, site_id))
+            db.execute("""INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,
+                expected_interval_seconds,tolerance_seconds,effective_from)
+                VALUES (?,'HJ212:w01001',60,0,'2020-01-01T00:00:00+00:00')""", (endpoint,))
+            db.commit()
+        return site_id
+
+    def _recovery_frame(self, stamp, value):
+        return make_hj212(qn=stamp+'001', cp=f'DataTime={stamp};w01001-Rtd={value};w01001-Flag=N')
+
+    async def test_normalization_order_comparison_preserves_formal_sources(self):
+        from station_monitoring import latest_values, result_trend_page, trend_slots, business_slot_diagnostics
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        with closing(sqlite3.connect(self.database)) as db:
+            endpoint_id = db.execute("SELECT id FROM trusted_endpoints WHERE station_code='TESTHJ01'").fetchone()[0]
+            db.execute("""INSERT INTO monitoring_business_schedules(endpoint_id,protocol_code,
+                timezone,interval_seconds,anchor_local_time,tolerance_seconds,result_delay_seconds,effective_from)
+                VALUES (?,'HJ212:w01001','Asia/Shanghai',14400,'00:00:00',600,1800,'2020-01-01T00:00:00+00:00')""", (endpoint_id,))
+            db.commit()
+        cases = {
+            'cross_hour': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123093100', 8, '2026-11-23T01:32:00+00:00')],
+            'same_hour_different_value': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123084200', 8, '2026-11-23T00:43:00+00:00')],
+            'same_slot_same_value': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123084200', 7, '2026-11-23T00:43:00+00:00')],
+            'same_slot_same_value_distinct_payload': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123093100', 7, '2026-11-23T06:32:00+00:00')],
+            'formal_same_slot_same_value': [('20261123080000', 7, '2026-11-23T00:32:00+00:00'), ('20261123080000', 7, '2026-11-23T06:32:00+00:00')],
+            'formal_three_receipts': [('20261123080000', 7, f'2026-11-23T0{hour}:32:00+00:00') for hour in (0, 2, 6)],
+            'formal_receipt_tie': [('20261123080000', 7, '2026-11-23T00:32:00+00:00') for _ in range(3)],
+            'formal_receipt_not_id_order': [('20261123080000', 7, f'2026-11-23T0{hour}:32:00+00:00') for hour in (6, 0, 2)],
+            'formal_different_value': [('20261123080000', value, f'2026-11-23T0{index}:32:00+00:00') for index, value in enumerate((7, 8, 7))],
+            'same_measurement_later_receipt': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123083100', 8, '2026-11-23T02:32:00+00:00')],
+            'historical_retransmission': [('20261113083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123083100', 8, '2026-11-23T00:33:00+00:00')],
+            'continuous_new_values': [('2026112308'+str(31+i)+'00', 7+i/10, '2026-11-23T00:'+str(32+i)+':00+00:00') for i in range(4)],
+            'saved_pending_before_restart': [('20261123083100', 7, '2026-11-23T00:32:00+00:00'), ('20261123084200', 8, '2026-11-23T00:43:00+00:00')],
+        }
+        results = {}
+        for name, samples in cases.items():
+            seed = self.root / (name+'-seed.db')
+            with closing(sqlite3.connect(self.database)) as source, closing(sqlite3.connect(seed)) as target:
+                source.backup(target)
+            storage = IngestionStorage(seed, self.pepper)
+            raw_ids = []
+            for index, (stamp, value, received) in enumerate(samples):
+                formal_source = name.startswith('formal_')
+                kind = 'Avg' if formal_source else 'Rtd'
+                companion = f';w01009-{kind}={index+1};w01009-Flag=N' if formal_source or name == 'same_slot_same_value_distinct_payload' else ''
+                frame = parse_hj212_frame(make_hj212(command='2061' if formal_source else '2011', qn=stamp+f'{index:03}', cp=f'DataTime={stamp};w01001-{kind}={value};w01001-Flag=N'+companion))
+                raw_id, folded = storage.persist_parsed(frame, storage.authenticate(frame), received)
+                if not folded:
+                    raw_ids.append(raw_id)
+            snapshots = {}
+            for order, ids in [('ascending', raw_ids), ('descending', raw_ids[::-1]),
+                               ('interleaved', raw_ids[1::2]+raw_ids[::2])]:
+                database = self.root / (name+'-'+order+'.db')
+                with closing(sqlite3.connect(seed)) as source, closing(sqlite3.connect(database)) as target:
+                    source.backup(target)
+                for raw_id in ids:
+                    ingest_server.normalize_raw_frame(database, raw_id, retire_source=True)
+                with closing(sqlite3.connect(database)) as db:
+                    db.row_factory = sqlite3.Row
+                    self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+                    self.assertEqual(db.execute('''SELECT COUNT(*) FROM monitoring_business_observations business
+                        LEFT JOIN observation_values value ON value.id=business.source_observation_value_id
+                        LEFT JOIN observation_batches batch ON batch.id=value.observation_batch_id
+                        LEFT JOIN ingest_raw_frames raw ON raw.id=batch.raw_frame_id
+                        WHERE value.id IS NULL OR batch.id IS NULL OR raw.id IS NULL''').fetchone()[0], 0)
+                    hourly = [tuple(row) for row in db.execute("""SELECT sample_hour,observed_at,received_at,
+                        standard_value,quality,source_raw_frame_id FROM monitoring_hourly_last_values
+                        WHERE business_metric='ph' ORDER BY sample_hour""")]
+                    formal = [tuple(row) for row in db.execute("""SELECT business.scheduled_at,business.observed_at,
+                        business.received_at,business.standard_value,business.quality,business.timeliness,
+                        business.slot_state,batch.raw_frame_id FROM monitoring_business_observations business
+                        JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                        WHERE business.is_current=1 AND business.business_metric='ph'
+                        ORDER BY business.observed_at,business.received_at""")]
+                    latest = [{key:row.get(key) for key in ('standard_value','observed_at','received_at','quality')}
+                              for row in latest_values(db, site_id, at_time='2026-11-23T08:00:00+00:00') if row['business_metric']=='ph']
+                    trend = [{key:row.get(key) for key in ('value','observed_at','quality','status')}
+                             for row in result_trend_page(db, site_id, 'ph', '2026-11-13T00:00:00+00:00', '2026-11-23T03:00:00+00:00')[0]]
+                    slots = trend_slots(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T08:00:00+00:00', at_time='2026-11-23T08:00:00+00:00')
+                    diagnostics = business_slot_diagnostics(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T08:00:00+00:00')
+                    snapshots[order] = {'hourly':hourly, 'formal':formal, 'latest':latest, 'trend':trend,
+                                        'slots':slots, 'diagnostics':diagnostics}
+            results[name] = {'persisted_raw_count':len(raw_ids), 'equal':all(snapshot==snapshots['ascending'] for snapshot in snapshots.values()),
+                             'snapshots':snapshots}
+        for name, result in results.items():
+            self.assertTrue(result['equal'], name)
+        for name in ('formal_same_slot_same_value', 'formal_three_receipts',
+                     'formal_receipt_tie', 'formal_receipt_not_id_order'):
+            formal = results[name]['snapshots']['ascending']
+            self.assertEqual(len(formal['formal']), 1)
+            self.assertEqual(formal['formal'][0][2:7],
+                             ('2026-11-23T00:32:00+00:00', 7, 'valid', 'on_time', 'selected'))
+            self.assertEqual(formal['diagnostics']['late_points'], 0)
+        self.assertEqual([row[6] for row in results['formal_different_value']['snapshots']['ascending']['formal']],
+                         ['conflict', 'conflict'])
+        print('NORMALIZATION_ORDER_COMPARISON '+json.dumps(results, ensure_ascii=False, default=str))
+
+    async def test_formal_source_order_preserves_protocol_priority_and_factor_independence(self):
+        from station_monitoring import (trend_slots, current_factor_configurations,
+            _slot_rows, _cycle_factor, _cycle_factor_from_rows)
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        with closing(sqlite3.connect(self.database)) as db:
+            endpoint = db.execute("SELECT id FROM trusted_endpoints WHERE station_code='TESTHJ01'").fetchone()[0]
+            for code in ('HJ212:w01009', 'HJ212:005'):
+                db.execute('''INSERT INTO monitoring_factor_mappings(endpoint_id,protocol_code,
+                    expected_interval_seconds,tolerance_seconds,effective_from)
+                    VALUES (?,?,60,0,'2020-01-01T00:00:00+00:00')''', (endpoint, code))
+            db.execute('''INSERT INTO monitoring_business_schedules(endpoint_id,protocol_code,
+                timezone,interval_seconds,anchor_local_time,tolerance_seconds,result_delay_seconds,effective_from)
+                VALUES (?,NULL,'Asia/Shanghai',14400,'00:00:00',600,1800,'2020-01-01T00:00:00+00:00')''', (endpoint,))
+            db.commit()
+        raw_ids = []
+        for index, (ph, do_code, received) in enumerate((
+                (7, '005', '2026-11-23T00:31:00+00:00'),
+                (7, 'w01009', '2026-11-23T00:32:00+00:00'),
+                (8, 'w01009', '2026-11-23T06:32:00+00:00'))):
+            frame = parse_hj212_frame(make_hj212(command='2061', qn=f'20261123080000{index:03}',
+                cp=f'DataTime=20261123080000;w01001-Avg={ph};w01001-Flag=N;{do_code}-Avg=5;{do_code}-Flag=N'))
+            raw_id, folded = self.storage.persist_parsed(frame, self.storage.authenticate(frame), received)
+            self.assertFalse(folded)
+            raw_ids.append(raw_id)
+        snapshots = []
+        for index, order in enumerate((raw_ids, raw_ids[::-1], raw_ids[1:]+raw_ids[:1])):
+            database = self.root / f'factor-independent-{index}.db'
+            with closing(sqlite3.connect(self.database)) as source, closing(sqlite3.connect(database)) as target:
+                source.backup(target)
+            for raw_id in order:
+                ingest_server.normalize_raw_frame(database, raw_id, retire_source=True)
+            with closing(sqlite3.connect(database)) as db:
+                db.row_factory = sqlite3.Row
+                rows = db.execute('''SELECT business.business_metric,business.protocol_code,
+                    business.standard_value,business.timeliness,business.slot_state,batch.raw_frame_id
+                    FROM monitoring_business_observations business JOIN observation_batches batch ON batch.id=business.observation_batch_id
+                    WHERE business.is_current=1 ORDER BY business.business_metric,business.protocol_code,business.standard_value''').fetchall()
+                rows = [tuple(row) for row in rows]
+                ph = [row for row in rows if row[0]=='ph']
+                self.assertEqual([(row[2],row[4],row[5]) for row in ph], [(7, 'conflict',raw_ids[0]), (8,'conflict',raw_ids[2])])
+                selected = [row for row in rows if row[4]=='selected']
+                self.assertEqual([(row[1],row[5]) for row in selected], [('HJ212:w01009', raw_ids[1])])
+                slots = trend_slots(db, site_id, selected[0][0], '2026-11-23T00:00:00+00:00',
+                                    '2026-11-23T04:00:00+00:00', at_time='2026-11-23T01:00:00+00:00')
+                self.assertEqual(slots[0]['received_at'], '2026-11-23T00:32:00+00:00')
+                configuration = next(item for item in current_factor_configurations(
+                    db, site_id, at_time='2026-11-23T01:00:00+00:00') if item['business_metric']==selected[0][0])
+                source_rows = _slot_rows(db, site_id, configuration, '2026-11-23T00:00:00+00:00')
+                cycle = _cycle_factor(db, site_id, configuration, '2026-11-23T00:00:00+00:00',
+                                      datetime(2026,11,23,1,tzinfo=timezone.utc))
+                batched_cycle = _cycle_factor_from_rows(source_rows[::-1], configuration,
+                    '2026-11-23T00:00:00+00:00', datetime(2026,11,23,1,tzinfo=timezone.utc))
+                self.assertEqual(cycle, batched_cycle)
+                self.assertEqual((cycle['protocol_code'], cycle['received_at']),
+                                 ('HJ212:w01009', '2026-11-23T00:32:00+00:00'))
+                snapshots.append((rows, slots, cycle))
+                self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(snapshots[0], snapshots[2])
+
+    def _save_recovery_sample(self, stamp, value, received):
+        frame = parse_hj212_frame(self._recovery_frame(stamp, value))
+        raw_id, folded = self.storage.persist_parsed(frame, self.storage.authenticate(frame), received)
+        self.assertFalse(folded)
+        return raw_id
+
+    async def test_restart_recent_result_is_queryable_before_backlog_drains(self):
+        from station_monitoring import latest_values, result_trend_page
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        old = [self._save_recovery_sample(f'2026111308{minute:02}00', 6+minute/100,
+               f'2026-11-13T00:{minute:02}:01+00:00') for minute in range(32)]
+        current = self._save_recovery_sample('20261123083700', 7.8, '2026-11-23T00:37:01+00:00')
+        # Highest ID/most recent receipt is actually a historical retransmission.
+        self._save_recovery_sample('20261113090000', 6.8, '2026-11-23T00:38:00+00:00')
+        original = ingest_server.normalize_raw_frame
+        evidence = []
+
+        def normalize(*args, **kwargs):
+            time.sleep(0.01)
+            result = original(*args, **kwargs)
+            if args[1] == current:
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    remaining = db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE id<=? AND persistence_state='pending_parse'", (max(old),)).fetchone()[0]
+                    latest = latest_values(db, site_id, at_time='2026-11-23T01:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T01:00:00+00:00')[0]
+                    evidence.append((remaining, latest[0]['standard_value'], trend[-1]['value']))
+            return result
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            await self.server.start()
+            for _ in range(150):
+                if evidence:
+                    break
+                await asyncio.sleep(0.02)
+            await self.server.close()
+        self.assertTrue(evidence)
+        self.assertGreater(evidence[0][0], 0)
+        self.assertEqual(evidence[0][1:], (7.8, 7.8))
+        print('RECENT_BEFORE_BACKLOG '+json.dumps({'old_total':len(old), 'old_remaining_when_current_queryable':evidence[0][0], 'latest':evidence[0][1], 'trend':evidence[0][2]}))
+
+    async def test_live_tcp_result_overtakes_bounded_old_prefetch(self):
+        from station_monitoring import latest_values, result_trend_page
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        old = [self._save_recovery_sample(f'2026111308{minute:02}00', 6+minute/100,
+               f'2026-11-13T00:{minute:02}:01+00:00') for minute in range(32)]
+        entered = threading.Event()
+        release = threading.Event()
+        original = ingest_server.normalize_raw_frame
+        evidence = []
+        processed = []
+
+        def normalize(*args, **kwargs):
+            if not processed:
+                entered.set()
+                release.wait(5)
+            result = original(*args, **kwargs)
+            processed.append(args[1])
+            if args[1] not in old:
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    pending = db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE id<=? AND persistence_state='pending_parse'", (max(old),)).fetchone()[0]
+                    latest = latest_values(db, site_id, at_time='2026-11-23T01:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T01:00:00+00:00')[0]
+                    evidence.append((pending, latest[0]['standard_value'], trend[-1]['value']))
+            return result
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            await self.server.start()
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(entered.is_set())
+                reader, writer = await self.connect()
+                writer.write(self._recovery_frame('20261123083700', 7.9))
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                for _ in range(100):
+                    with closing(sqlite3.connect(self.database)) as db:
+                        saved = db.execute('SELECT COUNT(*) FROM ingest_raw_frames WHERE id>?', (max(old),)).fetchone()[0]
+                    if saved:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(saved, 1)
+                release.set()
+                for _ in range(150):
+                    if evidence:
+                        break
+                    await asyncio.sleep(0.02)
+            finally:
+                release.set()
+                await self.server.close()
+        self.assertTrue(evidence)
+        self.assertGreater(evidence[0][0], 0)
+        self.assertEqual(evidence[0][1:], (7.9, 7.9))
+        self.assertEqual(len(processed), len(set(processed)))
+        print('LIVE_TCP_BEFORE_BACKLOG '+json.dumps({'old_remaining_when_current_queryable':evidence[0][0], 'latest':evidence[0][1], 'trend':evidence[0][2]}))
+
+    async def test_recent_and_backlog_pages_share_due_retry_filter(self):
+        await self.server.close()
+        self._recovery_endpoint()
+        ids = [self._save_recovery_sample(f'2026112308{minute:02}00', 7+minute/100,
+               f'2026-11-23T00:{59-minute:02}:01+00:00') for minute in range(6)]
+        with closing(sqlite3.connect(self.database)) as db:
+            for raw_id, state, due in ((ids[0], 'retrying', '2099-01-01T00:00:00+00:00'),
+                                       (ids[1], 'exhausted', None),
+                                       (ids[2], 'retrying', '2020-01-01T00:00:00+00:00')):
+                db.execute('''INSERT INTO monitoring_normalization_retries(raw_frame_id,normalization_version,
+                    attempt_count,next_attempt_at,last_error,state) VALUES (?,'station-monitoring-normalizer-v1',1,?,'isolated',?)''', (raw_id,due,state))
+            db.commit()
+        self.assertEqual(self.storage.recent_pending_normalization_page(2), ids[2:4])
+        self.assertEqual(self.storage.pending_normalization_page(0, 2), ids[2:4])
+        self.assertEqual(self.storage.recent_pending_normalization_page(10), ids[2:])
+        self.assertEqual(self.storage.pending_normalization_page(ids[3], 2), ids[4:])
+
+    async def test_recent_search_bounds_database_work_with_sparse_or_no_pending_history(self):
+        await self.server.close()
+        window = ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES
+        original_connect = self.storage._connect
+
+        def measure(method, *args):
+            statements = []
+            instructions = 0
+
+            def connect():
+                connection = original_connect()
+
+                def progress():
+                    nonlocal instructions
+                    instructions += 1
+                    return 0
+
+                connection.set_trace_callback(statements.append)
+                connection.set_progress_handler(progress, 1)
+                return connection
+
+            with mock.patch.object(self.storage, '_connect', side_effect=connect):
+                ids = method(*args)
+            self.assertEqual(len(statements), 1)
+            with closing(original_connect()) as db:
+                plan = [tuple(row) for row in db.execute('EXPLAIN QUERY PLAN '+statements[0])]
+            return {'ids': ids, 'vm_instructions': instructions, 'plan': plan,
+                    'exact_runtime_sql': statements[0]}
+
+        evidence = []
+        for history in (window*2, window*8):
+            with closing(original_connect()) as db:
+                previous = db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0]
+                db.executemany('''INSERT INTO ingest_raw_frames(received_at,frame_sha256,raw_frame,
+                    crc_status,authentication_status,disposition,persistence_state)
+                    VALUES (?,? ,X'00','not_checked','not_checked','quarantined','persisted')''',
+                    [((datetime(2026,11,13,tzinfo=timezone.utc)+timedelta(seconds=i)).isoformat(),
+                      f'isolated-bounded-history-{i}') for i in range(previous+1, history+1)])
+                db.commit()
+            for case in ('empty', 'oldest_only', 'recent_only', 'all_pending'):
+                with closing(original_connect()) as db:
+                    db.execute("UPDATE ingest_raw_frames SET persistence_state='persisted'")
+                    if case == 'oldest_only':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_parse' WHERE id=1")
+                    elif case == 'recent_only':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_reparse' WHERE id=?", (history,))
+                    elif case == 'all_pending':
+                        db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_parse'")
+                    db.commit()
+                recent = measure(self.storage.recent_pending_normalization_page, 4)
+                old = measure(self.storage.pending_normalization_page, 0, 4)
+                expected = {'empty': [], 'oldest_only': [], 'recent_only': [history],
+                            'all_pending': list(range(history, history-4, -1))}[case]
+                self.assertEqual(recent['ids'], expected)
+                if case == 'oldest_only':
+                    self.assertEqual(old['ids'], [1])
+                plan = ' '.join(row[3] for row in recent['plan'])
+                self.assertIn('MATERIALIZE recent', plan)
+                self.assertIn('COVERING INDEX idx_ingest_raw_received', plan)
+                self.assertIn('SEARCH raw USING INTEGER PRIMARY KEY', plan)
+                self.assertNotIn('SCAN raw', plan)
+                evidence.append({'history_rows': history, 'case': case,
+                                 'candidate_limit': window, 'recent': recent, 'old': old})
+        for case in ('empty', 'oldest_only', 'recent_only', 'all_pending'):
+            counts = [row['recent']['vm_instructions'] for row in evidence if row['case']==case]
+            self.assertLessEqual(abs(counts[1]-counts[0]), 16, (case, counts))
+        print('BOUNDED_RECENT_SQL '+json.dumps(evidence))
+
+    async def test_recent_window_keeps_outside_backlog_and_due_retry_reachable(self):
+        await self.server.close()
+        self._recovery_endpoint()
+        old = [self._save_recovery_sample(f'2026111308{minute:02}00', 6+minute/100,
+               f'2026-11-13T00:{minute:02}:01+00:00') for minute in range(3)]
+        with closing(sqlite3.connect(self.database)) as db:
+            db.executemany('''INSERT INTO ingest_raw_frames(received_at,frame_sha256,raw_frame,
+                crc_status,authentication_status,disposition,persistence_state)
+                VALUES (?,? ,X'00','not_checked','not_checked','quarantined','persisted')''',
+                [((datetime(2026,11,22,tzinfo=timezone.utc)+timedelta(seconds=i)).isoformat(),
+                  f'isolated-window-history-{i}')
+                 for i in range(ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES)])
+            for raw_id, due in ((old[0], '2099-01-01T00:00:00+00:00'),
+                                (old[1], '2020-01-01T00:00:00+00:00')):
+                db.execute('''INSERT INTO monitoring_normalization_retries(raw_frame_id,normalization_version,
+                    attempt_count,next_attempt_at,last_error,state)
+                    VALUES (?,'station-monitoring-normalizer-v1',1,?,'isolated','retrying')''', (raw_id, due))
+            db.execute("UPDATE ingest_raw_frames SET persistence_state='pending_reparse' WHERE id=?", (old[1],))
+            db.commit()
+        current = self._save_recovery_sample('20261123083700', 7.8, '2026-11-23T00:37:01+00:00')
+        self.assertEqual(self.storage.recent_pending_normalization_page(4), [current])
+        self.assertEqual(self.storage.pending_normalization_page(0, 2), old[1:])
+        original = ingest_server.normalize_raw_frame
+        processed = []
+
+        def normalize(*args, **kwargs):
+            result = original(*args, **kwargs)
+            processed.append(args[1])
+            return result
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            try:
+                await self.server.start()
+                for _ in range(150):
+                    if current in processed and all(raw_id in processed for raw_id in old[1:]):
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(set(processed), {current, *old[1:]})
+                self.assertEqual(processed[0], current)
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute('SELECT persistence_state FROM ingest_raw_frames WHERE id=?',
+                                               (old[0],)).fetchone()[0], 'pending_parse')
+                    db.execute("UPDATE monitoring_normalization_retries SET next_attempt_at='2020-01-01T00:00:00+00:00' WHERE raw_frame_id=?", (old[0],))
+                    db.commit()
+                # No explicit wakeup/new TCP frame: the old cursor must wrap and
+                # discover a retry that became due outside the recent window.
+                for _ in range(150):
+                    if old[0] in processed:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertIn(old[0], processed)
+            finally:
+                await self.server.close()
+        self.assertEqual(len(processed), len(set(processed)))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        print('OUTSIDE_RECENT_WINDOW '+json.dumps({'candidate_limit':ingest_server.DEFAULT_NORMALIZATION_RECENT_CANDIDATES,
+              'old_ids':old, 'recent_id':current, 'processed_once':processed, 'due_retry_reached':True}))
+
+    async def test_continuous_recent_pending_does_not_starve_old_backlog(self):
+        await self.server.close()
+        self._recovery_endpoint()
+        old = {self._save_recovery_sample(f'2026111308{minute:02}00', 6+minute/100,
+               f'2026-11-13T00:{minute:02}:01+00:00') for minute in range(32)}
+        self._save_recovery_sample('20261123080000', 7, '2026-11-23T00:00:01+00:00')
+        original = ingest_server.normalize_raw_frame
+        processed = []
+        old_done = set()
+        minimum_pending = []
+        adding = True
+
+        def normalize(*args, **kwargs):
+            result = original(*args, **kwargs)
+            processed.append(args[1])
+            if args[1] in old:
+                old_done.add(args[1])
+            if adding:
+                # More fresh work arrives than one normalizer can consume.
+                for offset in (0, 1):
+                    seconds = len(processed)*2+offset
+                    stamp = (datetime(2026,11,23,8)+timedelta(seconds=seconds)).strftime('%Y%m%d%H%M%S')
+                    received = (datetime(2026,11,23,tzinfo=timezone.utc)+timedelta(seconds=seconds+1)).isoformat()
+                    self._save_recovery_sample(stamp, 7+seconds/1000, received)
+            with closing(sqlite3.connect(self.database)) as db:
+                minimum_pending.append(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state='pending_parse'").fetchone()[0])
+            return result
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            await self.server.start()
+            for _ in range(200):
+                if len(old_done)>=6 or len(processed)>28:
+                    break
+                await asyncio.sleep(0.02)
+            adding = False
+            await self.server.close()
+        self.assertGreaterEqual(len(old_done), 6)
+        self.assertLessEqual(len(processed), 28)
+        self.assertEqual(len(processed), len(set(processed)))
+        self.assertGreater(min(minimum_pending), 0)
+        self.assertLessEqual(self.server._normalization_queue.qsize(), 2)
+        print('FAIR_BACKLOG_PROGRESS '+json.dumps({'processed':len(processed),'old_completed':len(old_done),'minimum_pending':min(minimum_pending)}))
+
+    async def test_ack_does_not_wait_for_normalization_and_prefetch_stays_bounded(self):
+        await self.server.close()
+        self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        for minute in range(12):
+            self._save_recovery_sample(f'2026112308{minute:02}00', 7+minute/100,
+                                       f'2026-11-23T00:{minute:02}:01+00:00')
+        entered = threading.Event()
+        release = threading.Event()
+        original = ingest_server.normalize_raw_frame
+
+        def normalize(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            await self.server.start()
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(entered.is_set())
+                await asyncio.wait_for(self.send_one(make_uplink(serial=992)), timeout=2)
+                self.assertFalse(release.is_set())
+                self.assertLessEqual(self.server._normalization_queue.qsize(), 2)
+                self.assertLessEqual(len(self.server._scheduled_normalizations), 3)
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state='pending_parse'").fetchone()[0], 12)
+            finally:
+                release.set()
+                await self.server.close()
+
+    async def test_scan_failure_recovers_backlog_and_current_tcp_result(self):
+        from station_monitoring import latest_values, result_trend_page
+        site_id = self._recovery_endpoint()
+        for minute in (49, 50, 51):
+            frame = parse_hj212_frame(self._recovery_frame(f'2026111314{minute}00', 7+minute/1000))
+            self.storage.persist_parsed(frame, self.storage.authenticate(frame), '2026-11-13T07:00:00+00:00')
+        original = self.storage.pending_normalization_page
+        calls = []
+
+        def fail_once(cursor, limit):
+            calls.append(time.monotonic())
+            if len(calls) == 1:
+                raise sqlite3.OperationalError('isolated transient scan failure')
+            return original(cursor, min(limit, 2))
+
+        try:
+            with mock.patch.object(self.storage, 'pending_normalization_page', side_effect=fail_once):
+                self.server._normalization_wakeup.set()
+                reader, writer = await self.connect()
+                writer.write(self._recovery_frame('20261123083700', '7.01312'))
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                for _ in range(100):
+                    with closing(sqlite3.connect(self.database)) as db:
+                        hours = db.execute('SELECT observed_at,standard_value FROM monitoring_hourly_last_values ORDER BY observed_at').fetchall()
+                    if hours == [('2026-11-13T06:51:00+00:00', 7.051), ('2026-11-23T00:37:00+00:00', 7.01312)]:
+                        break
+                    await asyncio.sleep(0.05)
+                self.assertEqual(hours, [('2026-11-13T06:51:00+00:00', 7.051), ('2026-11-23T00:37:00+00:00', 7.01312)])
+                self.assertFalse(self.server._normalization_scanner.done())
+                self.assertGreaterEqual(calls[1]-calls[0], 0.09)
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    latest = latest_values(db, site_id, at_time='2026-11-23T01:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-23T00:00:00+00:00', '2026-11-23T01:00:00+00:00')[0]
+                    self.assertEqual(latest[0]['standard_value'], 7.01312)
+                    self.assertEqual(trend[-1]['value'], 7.01312)
+                    self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        finally:
+            # Permit pre-fix reproduction to tear down even when the scanner crashed.
+            if self.server._normalization_scanner.done():
+                self.server._normalization_scanner.exception()
+                self.server._normalization_scanner = None
+
+    async def test_continuous_receipts_do_not_starve_normalization(self):
+        self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        frame = parse_hj212_frame(self._recovery_frame('20261123083700', '7.01312'))
+        original_persist = self.server._process_raw_result
+        original_normalize = ingest_server.normalize_raw_frame
+        remaining_at_result = []
+        target_id = None
+
+        def slow_persist(*args):
+            time.sleep(0.04)
+            return original_persist(*args)
+
+        def normalize(*args, **kwargs):
+            result = original_normalize(*args, **kwargs)
+            if args[1] == target_id:
+                remaining_at_result.append(self.server.queued_frames)
+            return result
+
+        with mock.patch.object(self.server, '_process_raw_result', side_effect=slow_persist), mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=normalize):
+            senders = [asyncio.create_task(self.send_one(make_uplink(serial=800+i))) for i in range(20)]
+            for _ in range(200):
+                if self.server.queued_frames >= 10:
+                    break
+                await asyncio.sleep(0.005)
+            self.assertGreaterEqual(self.server.queued_frames, 10)
+            target_id, _ = self.storage.persist_parsed(frame, self.storage.authenticate(frame), '2026-11-23T00:37:21+00:00')
+            self.server._normalization_wakeup.set()
+            await asyncio.gather(*senders)
+            for _ in range(60):
+                if remaining_at_result:
+                    break
+                await asyncio.sleep(0.05)
+            await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+        self.assertTrue(any(count > 0 for count in remaining_at_result), remaining_at_result)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchone()[0], 7.01312)
+
+    async def test_close_during_scan_failure_preserves_pending_and_restart_recovers(self):
+        self._recovery_endpoint()
+        raw = self._recovery_frame('20261123083700', '7.01312')
+        with mock.patch.object(self.storage, 'pending_normalization_page', side_effect=sqlite3.OperationalError('isolated offline scanner')) as scan, mock.patch.object(self.storage, 'recent_pending_normalization_page', side_effect=sqlite3.OperationalError('isolated offline scanner')) as recent_scan:
+            self.server._normalization_wakeup.set()
+            reader, writer = await self.connect()
+            writer.write(raw)
+            await writer.drain()
+            for _ in range(60):
+                with closing(sqlite3.connect(self.database)) as db:
+                    pending = db.execute("SELECT raw_frame,persistence_state FROM ingest_raw_frames").fetchall()
+                if pending and (scan.call_count or recent_scan.call_count):
+                    break
+                await asyncio.sleep(0.02)
+            self.assertEqual(pending, [(raw, 'pending_parse')])
+            previous_handler = signal.getsignal(signal.SIGTERM)
+            stop_task = asyncio.create_task(ingest_server._serve_until_stopped(self.server))
+            await asyncio.sleep(0)
+            signal.raise_signal(signal.SIGTERM)
+            await asyncio.wait_for(stop_task, timeout=3)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), previous_handler)
+            self.assertEqual(await asyncio.wait_for(reader.read(), timeout=1), b'')
+            writer.close()
+            await writer.wait_closed()
+            self.assertLessEqual(scan.call_count + recent_scan.call_count, 2)
+        self.assertEqual(self.server.queued_frames, 0)
+        self.assertFalse(self.server._connections)
+        self.assertIsNone(self.server._normalizer)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT raw_frame,persistence_state FROM ingest_raw_frames').fetchall(), [(raw, 'pending_parse')])
+        await self.server.start()
+        for _ in range(60):
+            with closing(sqlite3.connect(self.database)) as db:
+                hourly = db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchall()
+            if hourly:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(hourly, [(7.01312,)])
+
+    async def test_close_with_failed_inflight_persistence_never_acknowledges(self):
+        self.add_endpoint('unbound')
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fail_persist(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            raise sqlite3.OperationalError('isolated persistence failure')
+
+        reader, writer = await self.connect()
+        with mock.patch.object(self.storage, 'persist_parsed', side_effect=fail_persist):
+            writer.write(make_uplink(serial=921))
+            await writer.drain()
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(entered.is_set())
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(reader.readexactly(ACK_BYTES), timeout=0.05)
+                closing_task = asyncio.create_task(self.server.close())
+                await asyncio.sleep(0.02)
+            finally:
+                release.set()
+            await asyncio.wait_for(closing_task, timeout=3)
+            self.assertEqual(await asyncio.wait_for(reader.read(), timeout=1), b'')
+        writer.close()
+        await writer.wait_closed()
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+        self.assertEqual(self.server.queued_frames, 0)
+        await self.server.start()
+        await self.send_one(make_uplink(serial=921))
+
+    async def test_normalization_retry_remains_pending_across_close_and_restart(self):
+        self._recovery_endpoint()
+        raw = self._recovery_frame('20261123083700', '7.01312')
+        with mock.patch.object(ingest_server, 'normalize_raw_frame', side_effect=sqlite3.OperationalError('isolated normalization failure')):
+            reader, writer = await self.connect()
+            writer.write(raw)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            for _ in range(100):
+                with closing(sqlite3.connect(self.database)) as db:
+                    retry = db.execute('SELECT attempt_count,state FROM monitoring_normalization_retries').fetchall()
+                if retry:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.wait_for(self.server.close(), timeout=3)
+        self.assertEqual(retry, [(1, 'retrying')])
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT raw_frame,persistence_state FROM ingest_raw_frames').fetchall(), [(raw, 'pending_parse')])
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM monitoring_hourly_last_values').fetchone()[0], 0)
+        await self.server.start()
+        for _ in range(100):
+            with closing(sqlite3.connect(self.database)) as db:
+                hourly = db.execute('SELECT standard_value FROM monitoring_hourly_last_values').fetchall()
+            if hourly:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(hourly, [(7.01312,)])
 
     async def test_small_normalization_queue_continuously_drains_durable_backlog_without_restart(self):
         await self.server.close()
@@ -1167,6 +2375,70 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             probe_source.index("helper.chmod(0o444)"),
             probe_source.index("setpriv', '--reuid=10001"),
         )
+
+
+class ProcessingFailureDiagnosticsTest(unittest.TestCase):
+    def test_repeated_failure_logs_are_rate_limited_per_fixed_stage(self):
+        server = StationIngestServer(mock.Mock())
+        failure = RuntimeError('PRIVATE_ERROR_CONTENT')
+        with self.assertLogs('station_ingest', level='WARNING') as logs:
+            with mock.patch.object(ingest_server.time, 'monotonic', return_value=100):
+                for _ in range(100):
+                    server._log_failure('error_evidence', failure)
+                server._log_failure('raw_persistence', failure)
+            with mock.patch.object(ingest_server.time, 'monotonic', return_value=105):
+                server._log_failure('error_evidence', failure)
+        self.assertEqual(len(logs.output), 3)
+        self.assertNotIn('PRIVATE_ERROR_CONTENT', '\n'.join(logs.output))
+        self.assertEqual(len(server._failure_log_next), 2)
+
+    def test_sqlite_diagnostics_redact_schema_paths_parameters_and_long_messages(self):
+        secret = 'PRIVATE_PASSWORD_AND_RAW_FRAME'
+        with closing(sqlite3.connect(':memory:')) as db:
+            db.execute('CREATE TABLE private_values (value TEXT UNIQUE)')
+            db.execute('INSERT INTO private_values VALUES (?)', (secret,))
+            for sql, parameters, expected in [
+                ('SELECT * FROM '+secret, (), ('SQLITE_ERROR', 'missing_table')),
+                ('SELECT '+secret+' FROM private_values', (), ('SQLITE_ERROR', 'missing_column')),
+                ('INSERT INTO private_values VALUES (?)', (secret,), ('SQLITE_CONSTRAINT_UNIQUE', 'constraint_failed')),
+            ]:
+                with self.subTest(expected=expected):
+                    try:
+                        db.execute(sql, parameters)
+                    except sqlite3.Error as exc:
+                        with self.assertLogs('station_ingest', level='WARNING') as logs:
+                            ingest_server._log_processing_failure('raw_persistence', exc)
+                    else:
+                        self.fail('SQLite fault was not raised')
+                    output = '\n'.join(logs.output)
+                    self.assertIn('sqlite_name='+expected[0], output)
+                    self.assertIn('reason='+expected[1], output)
+                    self.assertNotIn(secret, output)
+                    self.assertNotIn('private_values', output)
+                    self.assertNotIn(sql, output)
+                    self.assertLess(len(output), 400)
+        for exc in (sqlite3.OperationalError(secret*1000), RuntimeError(secret*1000)):
+            with self.assertLogs('station_ingest', level='WARNING') as logs:
+                ingest_server._log_processing_failure('raw_persistence', exc)
+            self.assertIn('sqlite_code=unknown sqlite_name=unknown reason=details_suppressed', logs.output[0])
+            self.assertNotIn(secret, logs.output[0])
+            self.assertLess(len(logs.output[0]), 400)
+
+    def test_readonly_error_and_wrapped_sqlite_cause_remain_diagnostic(self):
+        with closing(sqlite3.connect(':memory:')) as db:
+            db.execute('PRAGMA query_only=ON')
+            try:
+                db.execute('CREATE TABLE private_table (private_column TEXT)')
+            except sqlite3.Error as exc:
+                try:
+                    raise StorageError('private path and parameters') from exc
+                except StorageError as wrapped:
+                    with self.assertLogs('station_ingest', level='WARNING') as logs:
+                        ingest_server._log_processing_failure('error_evidence', wrapped)
+            else:
+                self.fail('Readonly SQLite fault was not raised')
+            self.assertIn('sqlite_code=8 sqlite_name=SQLITE_READONLY reason=database_readonly', logs.output[0])
+            self.assertNotIn('private', logs.output[0])
 
 
 if __name__ == "__main__":
