@@ -29,7 +29,7 @@ try:  # Support both package tests and direct container execution.
     from .hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from .ingestion_framing import extract_ingestion_frames
     from .station_ingest_retention import (
-        RetentionError, StoragePolicy, check_storage_policy,
+        RetentionError, StoragePolicy, _require_storage, check_storage_policy,
         prune_ingest_error_samples, storage_policy_for_governance, storage_policy_for_mode,
     )
     from .station_ingest_slots import hj212_realtime_summary_identity
@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - direct `python sl651_server.py` entry 
     from hj212_parser import HJ212_PARSER_VERSION, ParsedHJ212Frame, build_hj212_9011_response, parse_hj212_frame
     from ingestion_framing import extract_ingestion_frames
     from station_ingest_retention import (
-        RetentionError, StoragePolicy, check_storage_policy,
+        RetentionError, StoragePolicy, _require_storage, check_storage_policy,
         prune_ingest_error_samples, storage_policy_for_governance, storage_policy_for_mode,
     )
     from station_ingest_slots import hj212_realtime_summary_identity
@@ -255,11 +255,16 @@ class IngestionStorage:
         self.credential_pepper = credential_pepper
         self.storage_policy = storage_policy
 
-    def _require_raw_storage_capacity(self) -> None:
+    def _require_raw_storage_capacity(self, *, record_health: bool = True) -> None:
         if self.storage_policy is None:
             return
         try:
-            check_storage_policy(self.database, self.storage_policy)
+            if record_health:
+                check_storage_policy(self.database, self.storage_policy)
+            else:
+                # Reuse the full capacity/writability guard without its separate
+                # five-second health-write transaction on the sole receipt worker.
+                _require_storage(self.storage_policy, self.database)
         except RetentionError as exc:
             raise StorageError("raw archive storage is unavailable") from exc
 
@@ -523,7 +528,9 @@ class IngestionStorage:
             raise ValueError("connection error batch outside bounded capacity")
         # Framing errors are raw-receipt evidence too. They may not bypass the same
         # capacity guard that protects complete parseable and unparseable frames.
-        self._require_raw_storage_capacity()
+        # Raw persistence and health probes still record storage health; auxiliary
+        # batches must reach their short write attempt without another health write.
+        self._require_raw_storage_capacity(record_health=False)
         with closing(self._connect(busy_timeout_ms=CONNECTION_ERROR_BUSY_MS)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             for error_code, occurred_at in events:

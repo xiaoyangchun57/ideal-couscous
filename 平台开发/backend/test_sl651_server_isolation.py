@@ -568,6 +568,195 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.server._queued_errors,self.server.queued_frames,self.server.queued_bytes), (0,0,0))
         print('ERROR_FRAME_TURNS '+json.dumps(order))
 
+    def _error_contention_storage_policy(self):
+        archive = self.root / 'error-contention-archive'
+        archive.mkdir(exist_ok=True)
+        gib = 1024 ** 3
+        return retention.storage_policy_for_governance(
+            archive, archive_minimum_total_bytes=8*gib, archive_minimum_free_bytes=gib,
+            hot_minimum_total_bytes=10*gib, hot_minimum_free_bytes=2*gib,
+        )
+
+    async def test_governance_error_capacity_contention_yields_to_tcp_and_results(self):
+        from station_monitoring import latest_values, result_trend_page
+        site_id = self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        self.storage.storage_policy = self._error_contention_storage_policy()
+        entered = threading.Event()
+        attempts, raw_starts, values = [], [], []
+        record = self.storage.record_connection_errors
+        process = self.server._process_raw_result
+        started = time.perf_counter()
+
+        def measured_errors(events):
+            began = time.perf_counter()
+            entered.set()
+            try:
+                return record(events)
+            finally:
+                attempts.append(time.perf_counter()-began)
+
+        def measured_raw(*args):
+            raw_starts.append(time.perf_counter()-started)
+            return process(*args)
+
+        async def hj_exchange(raw, qn):
+            inquiry = make_hj212(command='3020', qn=qn)
+            reader, writer = await self.connect()
+            try:
+                writer.write(raw + inquiry)
+                await writer.drain()
+                reply = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=3)
+                self.assertEqual(reply, build_hj212_9011_response(parse_hj212_frame(inquiry)))
+                return time.perf_counter()-started
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        # Only disk readings are synthetic. Directory probes, health writes, SQLite
+        # writer contention, queue dispatch, TCP and normalization execute for real.
+        usage = mock.Mock(total=16*1024**3, free=4*1024**3)
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=usage), mock.patch.object(
+            self.storage, 'record_connection_errors', side_effect=measured_errors,
+        ), mock.patch.object(self.server, '_process_raw_result', side_effect=measured_raw):
+            with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+                blocker.execute('BEGIN IMMEDIATE')
+                locked_at = time.perf_counter()
+                try:
+                    for _ in range(16):
+                        self.server._enqueue_error('capacity_contention')
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    inquiry_task = asyncio.create_task(hj_exchange(b'', '20261124083000001'))
+                    # 3020 needs authenticated reads, not a fictitious 2011 ACK.
+                    done, _ = await asyncio.wait({inquiry_task}, timeout=0.4)
+                    inquiry_before_unlock = bool(done)
+                    tcp_task = asyncio.create_task(self.send_one(make_uplink(serial=991)))
+                    await asyncio.sleep(max(0.06, locked_at + 0.5 - time.perf_counter()))
+                    self.assertFalse(tcp_task.done(), 'SL651 must not ACK an unsaved frame')
+                    with closing(sqlite3.connect(self.database)) as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+                finally:
+                    blocker.rollback()
+                inquiry_seconds, ack_seconds = await asyncio.gather(inquiry_task, tcp_task)
+            await asyncio.wait_for(self.server._queue.join(), timeout=3)
+            for index, (stamp, value) in enumerate((('20261124083100', 7.1), ('20261124093100', 7.2))):
+                await hj_exchange(self._recovery_frame(stamp, value), f'20261124100{index}00001')
+                await asyncio.wait_for(self.server._queue.join(), timeout=3)
+                await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+                with closing(sqlite3.connect(self.database)) as db:
+                    db.row_factory = sqlite3.Row
+                    latest = latest_values(db, site_id, at_time='2026-11-24T03:00:00+00:00')
+                    trend = result_trend_page(db, site_id, 'ph', '2026-11-24T00:00:00+00:00', '2026-11-24T03:00:00+00:00')[0]
+                    self.assertEqual(latest[0]['standard_value'], value)
+                    self.assertEqual(trend[-1]['value'], value)
+                    values.append(value)
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='capacity_contention'").fetchone()[0], 16)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE station_code='0012345678' AND persistence_state='persisted'").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+                self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        evidence = {'policy_enabled': True, 'synthetic_disk_readings_only': True,
+            'inquiry_9011_before_unlock': inquiry_before_unlock, 'inquiry_seconds': inquiry_seconds,
+            'raw_dispatch_seconds': raw_starts, 'error_attempt_seconds': attempts,
+            'sl651_send_to_ack_seconds': ack_seconds, 'sl651_ack_observed_after_unlock': True,
+            'sl651_saved_before_ack': True,
+            'latest_and_trend_values': values, 'failed_error_events': self.server.failed_error_persistence}
+        print('GOVERNANCE_ERROR_CAPACITY_CONTENTION '+json.dumps(evidence))
+        self.assertEqual(self.server.failed_error_persistence, 0)
+        self.assertTrue(inquiry_before_unlock, 'auxiliary capacity health write blocked authenticated TCP processing')
+        self.assertLess(attempts[0], 0.3, 'error capacity guard bypassed the short lock attempt')
+
+    async def test_governance_error_capacity_failures_reject_writes_and_recover(self):
+        self.add_endpoint('unbound')
+        policy = self._error_contention_storage_policy()
+        self.storage.storage_policy = policy
+        gib = 1024 ** 3
+        events = [('capacity_failure', '2026-11-24T01:00:00+00:00')]
+        rejected = []
+        for volume, dimension in (('archive', 'total'), ('archive', 'free'), ('hot', 'total'), ('hot', 'free')):
+            def usage(path):
+                is_target = (Path(path).resolve() == policy.root.resolve()) == (volume == 'archive')
+                total, free = 16*gib, 4*gib
+                if is_target:
+                    if dimension == 'total':
+                        total = (policy.minimum_total_bytes if volume == 'archive' else policy.hot_minimum_total_bytes) - 1
+                    else:
+                        free = (policy.minimum_free_bytes if volume == 'archive' else policy.hot_minimum_free_bytes) - 1
+                return mock.Mock(total=total, free=free)
+
+            with self.subTest(volume=volume, dimension=dimension), mock.patch.object(retention.shutil, 'disk_usage', side_effect=usage):
+                with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                    self.storage.record_connection_errors(events)
+                rejected.append(volume+'_'+dimension)
+                if volume == 'archive' and dimension == 'free':
+                    with self.assertLogs('station_ingest', level='WARNING') as logs:
+                        self.server._enqueue_error('capacity_failure')
+                        reader, writer = await self.connect()
+                        writer.write(make_uplink(serial=992))
+                        await writer.drain()
+                        self.assertEqual(await asyncio.wait_for(reader.read(), timeout=2), b'')
+                        writer.close()
+                        await writer.wait_closed()
+                        await asyncio.wait_for(self.server._queue.join(), timeout=2)
+                    self.assertTrue(any('stage=error_evidence ' in line for line in logs.output))
+                    self.assertTrue(any('stage=raw_persistence ' in line for line in logs.output))
+                    self.assertEqual(self.server.failed_error_persistence, 1)
+        policy.root.rmdir()
+        try:
+            with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                self.storage.record_connection_errors(events)
+            rejected.append('missing_archive')
+        finally:
+            policy.root.mkdir()
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=mock.Mock(total=16*gib, free=4*gib)):
+            with mock.patch.object(retention.tempfile, 'mkstemp', side_effect=PermissionError('isolated unwritable archive')):
+                with self.assertRaisesRegex(StorageError, 'raw archive storage is unavailable'):
+                    self.storage.record_connection_errors(events)
+                rejected.append('unwritable_archive_probe')
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='capacity_failure'").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], 'degraded')
+            self.server._enqueue_error('capacity_recovered')
+            await self.send_one(make_uplink(serial=993))
+            await asyncio.wait_for(self.server._queue.join(), timeout=2)
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='capacity_recovered'").fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT status FROM monitoring_storage_health WHERE storage_key='raw_archive'").fetchone()[0], 'healthy')
+        self.assertEqual(self.server._queued_errors, 0)
+        print('GOVERNANCE_CAPACITY_PROTECTION '+json.dumps({'rejected': rejected,
+            'failed_error_events': 1, 'no_raw_or_success_ack_during_failure': True,
+            'recovered_error_events': 1, 'recovered_sl651_saved_and_acknowledged': 1,
+            'health_degraded_then_healthy': True}))
+
+    async def test_governance_error_lock_exhaustion_remains_visible_and_tcp_recovers(self):
+        self.add_endpoint('unbound')
+        self.storage.storage_policy = self._error_contention_storage_policy()
+        with mock.patch.object(retention.shutil, 'disk_usage', return_value=mock.Mock(total=16*1024**3, free=4*1024**3)), mock.patch.object(
+            ingest_server, 'CONNECTION_ERROR_RETRY_BUDGET_SECONDS', 0.15,
+        ), self.assertLogs('station_ingest', level='WARNING') as logs:
+            with closing(sqlite3.connect(self.database, isolation_level=None)) as blocker:
+                blocker.execute('BEGIN IMMEDIATE')
+                try:
+                    for _ in range(16):
+                        self.server._enqueue_error('capacity_lock_budget')
+                    await asyncio.wait_for(self.server._queue.join(), timeout=1)
+                    self.assertEqual(self.server.failed_error_persistence, 16)
+                    self.assertEqual(self.server._queued_errors, 0)
+                    with closing(sqlite3.connect(self.database)) as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='capacity_lock_budget'").fetchone()[0], 0)
+                finally:
+                    blocker.rollback()
+            await self.send_one(make_uplink(serial=994))
+        self.assertTrue(any('stage=error_evidence_retry ' in line for line in logs.output))
+        self.assertTrue(any('stage=error_evidence ' in line for line in logs.output))
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 1)
+        print('GOVERNANCE_ERROR_DEGRADED '+json.dumps({'test_retry_budget_seconds': 0.15,
+            'retry_attempts': self.server.error_persistence_retries, 'finally_failed_error_events': 16,
+            'terminal_failure_logged': True, 'later_sl651_saved_and_acknowledged': 1}))
+
     async def test_connection_error_lock_retry_yields_to_real_tcp_and_web(self):
         self.add_endpoint('unbound')
         operator_id, token = self._create_l1_web_credentials()
