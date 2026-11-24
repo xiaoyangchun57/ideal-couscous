@@ -1611,8 +1611,9 @@ def latest_values(connection, site_id: int, *, at_time: str | None = None):
 
 
 def _hourly_latest_values(
-    connection, site_id: int, configurations: list[dict], *, rows=None,
+    connection, site_id: int, configurations: list[dict], *, rows=None, at_time=None,
 ) -> list[dict]:
+    at_time = at_time or _utc_now()
     if rows is None:
         rows = connection.execute(
             """SELECT hourly.* FROM monitoring_hourly_last_values hourly
@@ -1625,6 +1626,8 @@ def _hourly_latest_values(
     results = []
     used = set()
     for row in rows:
+        if row['quality'] != 'valid' or row['observed_at'] > at_time:
+            continue
         instrument = row["instrument_asset_code"] or None
         configuration = next((item for item in configurations
             if item["endpoint_id"] == row["endpoint_id"]
@@ -2436,17 +2439,24 @@ def latest_values_and_cycles_batch(connection, configurations_by_site, *, at_tim
         values.extend(historical_by_site.get(site_id, []))
         hourly_values = _hourly_latest_values(
             connection, site_id, configurations_by_site.get(site_id, []),
-            rows=hourly_rows_by_site.get(site_id, []))
+            rows=hourly_rows_by_site.get(site_id, []), at_time=at_time)
         if hourly_values:
-            hourly_keys = {
+            by_factor = {
                 (item["endpoint_id"], item["business_metric"],
-                 item.get("instrument_asset_code"))
-                for item in hourly_values
+                 item.get("instrument_asset_code")): item for item in values
             }
-            values[:] = [item for item in values if (
-                item["endpoint_id"], item["business_metric"],
-                item.get("instrument_asset_code")) not in hourly_keys]
-            values.extend(hourly_values)
+            for item in hourly_values:
+                key = (item['endpoint_id'], item['business_metric'],
+                       item.get('instrument_asset_code'))
+                current = by_factor.get(key)
+                # Retired hourly rows and retained process values are candidates
+                # for the same factor. Backlog normalization time is not recency.
+                # On a true time tie retain the existing detailed selection and
+                # its conflict/source metadata; do not reselect formal sources.
+                if current is None or (item['observed_at'], item['received_at']) > (
+                        current['observed_at'], current['received_at']):
+                    by_factor[key] = item
+            values[:] = by_factor.values()
         values.sort(key=lambda item: (
             item["business_metric"], item.get("instrument_asset_code") or ""))
 

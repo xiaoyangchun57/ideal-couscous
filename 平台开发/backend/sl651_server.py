@@ -151,6 +151,7 @@ def _log_processing_failure(stage: str, exc: Exception) -> None:
         "scan": "station monitoring scan deferred",
         "normalization": "station monitoring normalization deferred",
         "retry_evidence": "station monitoring retry evidence failed",
+        "error_evidence_retry": "station ingest error evidence persistence retrying",
         "error_evidence": "station ingest error evidence persistence failed",
         "raw_persistence": "station ingest raw persistence failed",
         "worker_item": "station ingest persistence worker item failed",
@@ -889,6 +890,7 @@ class StationIngestServer:
         self.queue_peak_bytes = 0
         self.dropped_error_events = 0
         self.failed_error_persistence = 0
+        self.error_persistence_retries = 0
         self._failure_log_next: dict[str, float] = {}
         self._queued_bytes_lock = asyncio.Lock()
         self._active_connections = 0
@@ -1172,14 +1174,18 @@ class StationIngestServer:
                         (event.error_code or "unknown_connection_error", event.received_at) for event in batch
                     ])
                 except Exception as exc:
-                    self._log_failure("error_evidence", exc)
                     code = getattr(exc, "sqlite_errorcode", 0) or 0
                     locked = isinstance(exc, sqlite3.Error) and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
                     if locked and time.monotonic() < retry_deadline:
+                        self.error_persistence_retries += 1
+                        self._log_failure("error_evidence_retry", exc)
                         retry_at = time.monotonic() + CONNECTION_ERROR_RETRY_SECONDS
                         prefer_errors = False
                         continue
                     self.failed_error_persistence += len(batch)
+                    # A transient warning must not consume the final-failure log
+                    # allowance when this batch actually exhausts its budget.
+                    self._log_failure("error_evidence", exc)
                 for _ in batch:
                     errors.popleft()
                     self._queued_errors -= 1

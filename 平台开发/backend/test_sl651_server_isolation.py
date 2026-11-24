@@ -617,6 +617,92 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 8)
         print(f'ERROR_LOCK_REAL_IO events=32 tcp=8 web_201=4 lock_seconds=0.35 max_ack={max(latencies):.4f} max_error_attempt={max(attempts):.4f} error_attempts={len(attempts)} lost=0')
 
+    async def test_normalization_cleanup_lock_distinguishes_retries_from_final_loss(self):
+        import station_monitoring as monitoring
+        await self.server.close()
+        site_id = self._recovery_endpoint()
+        self.add_endpoint('unbound')
+        operator_id, token = self._create_l1_web_credentials()
+        raw_id = self._save_recovery_sample('20261123083700', 7.8, '2026-11-23T00:37:01+00:00')
+        entered = threading.Event()
+        release = threading.Event()
+        attempted = threading.Event()
+        cleanup = monitoring._retire_empty_batch
+        record = self.storage.record_connection_errors
+        prune = ingest_server.prune_ingest_error_samples
+        attempts, cleanups, prunes = [], [], []
+
+        def held_cleanup(db, batch_id, source_id):
+            if source_id != raw_id:
+                return cleanup(db, batch_id, source_id)
+            started = time.perf_counter()
+            self.assertTrue(db.in_transaction)
+            entered.set()
+            self.assertTrue(release.wait(5))
+            result = cleanup(db, batch_id, source_id)
+            cleanups.append({'held_seconds':time.perf_counter()-started, 'in_write_transaction':db.in_transaction})
+            return result
+
+        def measured_record(events):
+            started = time.perf_counter()
+            try:
+                return record(events)
+            finally:
+                attempts.append(time.perf_counter()-started)
+                attempted.set()
+
+        def measured_prune(db, **kwargs):
+            started = time.perf_counter()
+            result = prune(db, **kwargs)
+            prunes.append({'seconds':time.perf_counter()-started, 'in_write_transaction':db.in_transaction})
+            return result
+
+        def write_web():
+            with web_app.app.test_client() as client:
+                return client.post('/api/sites', headers={'Authorization':'Bearer '+token},
+                    json={'code':'NORMALIZER-LOCK', 'name':'isolated lock probe', 'manager_id':operator_id,
+                          'gps_lat':28.6, 'gps_lng':115.9}).status_code
+
+        with mock.patch.object(monitoring, '_retire_empty_batch', side_effect=held_cleanup), mock.patch.object(
+            self.storage, 'record_connection_errors', side_effect=measured_record,
+        ), mock.patch.object(ingest_server, 'prune_ingest_error_samples', side_effect=measured_prune), self.assertLogs('station_ingest', level='WARNING') as logs:
+            try:
+                await self.server.start()
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                for _ in range(32):
+                    self.server._enqueue_error('noise')
+                self.assertTrue(await asyncio.to_thread(attempted.wait, 1))
+                tcp = [asyncio.create_task(self.send_one(make_uplink(serial=980+i))) for i in range(2)]
+                web = asyncio.create_task(asyncio.to_thread(write_web))
+                await asyncio.sleep(0.25)
+                release.set()
+                latencies = await asyncio.wait_for(asyncio.gather(*tcp), timeout=4)
+                web_status = await asyncio.wait_for(web, timeout=4)
+                await asyncio.wait_for(self.server._queue.join(), timeout=3)
+                await asyncio.wait_for(self.server._normalization_queue.join(), timeout=3)
+            finally:
+                release.set()
+                await self.server.close()
+        self.assertEqual(web_status, 201)
+        self.assertGreater(self.server.error_persistence_retries, 0)
+        self.assertEqual((self.server.failed_error_persistence, self.server._queued_errors), (0,0))
+        self.assertTrue(any('stage=error_evidence_retry ' in line for line in logs.output))
+        self.assertFalse(any('stage=error_evidence ' in line for line in logs.output))
+        self.assertLess(max(latencies), 2.5)
+        self.assertTrue(cleanups and prunes)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT SUM(occurrence_count) FROM station_ingest_error_hourly WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_errors WHERE error_type='noise'").fetchone()[0], 32)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ingest_raw_frames').fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM ingest_raw_frames WHERE persistence_state IN ('pending_parse','pending_reparse')").fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT standard_value FROM monitoring_hourly_last_values WHERE business_site_id=?', (site_id,)).fetchone()[0], 7.8)
+            self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(), [])
+        print('NORMALIZER_WRITE_CONTENTION '+json.dumps({'synthetic_hold_not_production_root_cause':True,
+            'error_attempt_seconds':attempts, 'retry_attempts':self.server.error_persistence_retries,
+            'finally_failed_events':self.server.failed_error_persistence, 'persisted_errors':32,
+            'tcp_ack_seconds':latencies, 'tcp_raw_persisted':2, 'web_status':web_status,
+            'cleanup':cleanups, 'error_prune':prunes, 'pending_remaining':0}))
+
     async def test_connection_error_batch_rolls_back_before_retry_without_double_count(self):
         original = self.storage._write_error
         writes = 0
@@ -658,7 +744,10 @@ class StationIngestIsolationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.server.failed_error_persistence, 32)
                 self.assertEqual(self.server.dropped_error_events, 0)
                 self.assertEqual(self.server._queued_errors, 0)
-                self.assertEqual(len(logs.output), 1)
+                self.assertEqual(len(logs.output), 2)
+                self.assertEqual(sum('stage=error_evidence_retry ' in line for line in logs.output), 1)
+                self.assertEqual(sum('stage=error_evidence ' in line for line in logs.output), 1)
+                self.assertGreater(self.server.error_persistence_retries, 0)
                 self.assertEqual(blocker.execute('SELECT COUNT(*) FROM ingest_errors').fetchone()[0], 0)
             finally:
                 blocker.rollback()
