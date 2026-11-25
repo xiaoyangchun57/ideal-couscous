@@ -1,1 +1,5 @@
 *.sh text eol=lf
+
+backend/migrations/20261021_016_station_raw_value_text.sql text eol=lf
+backend/migrations/20261103_017_station_retention_partial_status.sql text eol=lf
+backend/migrations/20261103_018_station_hourly_last_values.sql text eol=lf
