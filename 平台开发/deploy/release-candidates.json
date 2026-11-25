@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release_line": "inspection-autonomy-preserve-production-ingest",
   "candidate_tags": [
-    "release-20261125-inspection-autonomy-r34"
+    "release-20261125-inspection-autonomy-bytefix1-r34"
   ],
   "historical_tags": [
     "release-20261022-retention-maintenance-r29",
@@ -43,6 +43,7 @@
     "release-20261029-governance-offline-r29",
     "release-20261101-web-ops-r31",
     "release-20261104-integrated-repair-r32",
-    "release-20261105-migration-byte-fix-r33"
+    "release-20261105-migration-byte-fix-r33",
+    "release-20261125-inspection-autonomy-r34"
   ]
 }
