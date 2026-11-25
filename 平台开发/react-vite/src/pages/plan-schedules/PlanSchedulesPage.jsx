@@ -57,11 +57,11 @@ const { Text } = Typography;
 // 计划状态映射（调度层状态机）
 const SCHEDULE_STATUS_MAP = {
   draft: { label: '草稿', color: 'default' },
-  submitted: { label: '待审批', color: 'processing' },
-  approved: { label: '已通过', color: 'success' },
+  submitted: { label: '待本人确认', color: 'processing' },
+  approved: { label: '已生效', color: 'success' },
   rejected: { label: '已退回', color: 'error' },
-  modifying: { label: '变更中', color: 'warning' },
-  change_submitted: { label: '变更待审', color: 'processing' },
+  modifying: { label: '修改待确认', color: 'warning' },
+  change_submitted: { label: '修改待确认', color: 'processing' },
   cancelled: { label: '已取消', color: 'default' },
   archived: { label: '已归档', color: 'default' },
 };
@@ -186,6 +186,7 @@ function PlanSchedulesMain() {
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const editorRequestRef = useRef(0);
+  const editConfirmationRef = useRef(null);
   const cleanupRequestRef = useRef(0);
   const cleanupActionRef = useRef(false);
   const cancelActionRef = useRef(false);
@@ -476,6 +477,7 @@ function PlanSchedulesMain() {
   const openEditor = useCallback(async (schedule = detail) => {
     if (!schedule) return;
     const requestId = ++editorRequestRef.current;
+    editConfirmationRef.current = null;
     const scheduleVehicleId = schedule.vehicle_id || (() => {
       const ids = [...new Set(Object.values(schedule.vehicle_days || {}).filter(Boolean).map(Number))];
       return ids.length === 1 ? ids[0] : null;
@@ -498,6 +500,7 @@ function PlanSchedulesMain() {
       plan_data: JSON.parse(JSON.stringify(schedule.plan_data || {})),
       vehicle_days: { ...(schedule.vehicle_days || {}) },
       vehicle_id: scheduleVehicleId,
+      no_vehicle_required: schedule.no_vehicle_required === true || schedule.no_vehicle_required === 1,
       spare_parts: (schedule.spare_parts || []).map(part => ({ ...part })),
       work_order_ids: [...(schedule.work_order_ids || [])],
       remarks: schedule.remarks || '',
@@ -686,39 +689,49 @@ function PlanSchedulesMain() {
     const normalizedVehicleDays = Object.fromEntries(Object.entries(editDraft.vehicle_days || {})
       .filter(([date, vehicleId]) => plannedDates.has(date) && vehicleId));
     const payload = { ...editDraft, plan_data: normalizedPlan, vehicle_days: normalizedVehicleDays };
+    const fingerprint = JSON.stringify({ ...payload, version: undefined });
+    const pending = editConfirmationRef.current;
+    const retryConfirmation = submitAfterSave && pending?.id === payload.id
+      && pending.version === payload.version && pending.fingerprint === fingerprint;
     setEditSaving(true);
     setEditError('');
     try {
-      const validationResult = await api.postStrict('/plan-schedules/validate', {
-        ...payload,
-        vehicle_id: payload.vehicle_id || null,
-        exclude_schedule_id: payload.id,
-      });
-      setEditValidation(validationResult);
-      if (submitAfterSave && validationResult?.errors?.length) {
-        setEditError(validationResult.errors.join('；'));
-        return;
+      let saved = { version: pending?.version };
+      if (!retryConfirmation) {
+        const validationResult = await api.postStrict('/plan-schedules/validate', {
+          ...payload,
+          vehicle_id: payload.vehicle_id || null,
+          exclude_schedule_id: payload.id,
+        });
+        setEditValidation(validationResult);
+        if (submitAfterSave && validationResult?.errors?.length) {
+          setEditError(validationResult.errors.join('；'));
+          return;
+        }
+        saved = await api.putStrict(`/plan-schedules/${payload.id}`, payload);
+        setEditDraft(current => current ? {
+          ...current,
+          version: saved.version,
+          plan_data: normalizedPlan,
+          vehicle_days: saved.vehicle_days || normalizedVehicleDays,
+        } : current);
+        editConfirmationRef.current = submitAfterSave
+          ? { id: payload.id, version: saved.version, fingerprint } : null;
       }
-      const saved = await api.putStrict(`/plan-schedules/${payload.id}`, payload);
-      setEditDraft(current => current ? {
-        ...current,
-        version: saved.version,
-        plan_data: normalizedPlan,
-        vehicle_days: saved.vehicle_days || normalizedVehicleDays,
-      } : current);
       if (submitAfterSave) {
         try {
-          await api.postStrict(`/plan-schedules/${payload.id}/submit`, { version: saved.version });
+          await api.postStrict(`/plan-schedules/${payload.id}/confirm`, { version: saved.version });
         } catch (error) {
-          setEditError(`草稿已保存，但提交失败：${error?.message || '请检查计划内容后重试'}`);
+          setEditError(`草稿已保存，生效结果未确认；请直接重试：${error?.message || '请检查计划内容后重试'}`);
           refreshAll();
           await openDetail(payload.id);
           return;
         }
       }
+      editConfirmationRef.current = null;
       const issueCount = Number(saved?.draft_issue_count || 0);
       message.success(submitAfterSave
-        ? '计划已保存并提交审批'
+        ? '计划已保存并由本人确认生效'
         : issueCount > 0 ? `草稿已保存，仍有 ${issueCount} 项待完善` : '计划草稿已保存');
       setEditOpen(false);
       refreshAll();
@@ -857,8 +870,8 @@ function PlanSchedulesMain() {
     setCancelError('');
     setCancelLoading(true);
     try {
-      await api.postStrict(`/plan-schedules/${detail.id}/cancel`, { reason: normalized.value, version });
-      message.success('计划已取消');
+      await api.postStrict(`/plan-schedules/${detail.id}/${detail.can_stop ? 'stop' : 'cancel'}`, { reason: normalized.value, version });
+      message.success(detail.can_stop ? '已停止剩余作业' : '计划已取消');
       setCancelOpen(false);
       setCancelReason('');
       refreshAll();
@@ -948,8 +961,41 @@ function PlanSchedulesMain() {
   const canCancelDetail = canCancelPlanSchedule(detail, user);
   const canEditDetail = detail && ['draft', 'rejected', 'modifying'].includes(detail.status)
     && (Number(detail.user_id) === Number(user?.id) || canApprove);
-  const canReviewDetail = detail && canApprove
-    && (detail.status === 'submitted' || detail.status === 'change_submitted');
+  const canReviewDetail = false;
+  const canConfirmDetail = detail?.can_confirm === true;
+  const canChangeDetail = detail?.status === 'approved' && !detail?.execution_completed
+    && Number(detail?.user_id) === Number(user?.id);
+  const confirmPlan = async () => {
+    if (!canConfirmDetail || acting) return;
+    setActing(true);
+    try {
+      await api.postStrict(`/plan-schedules/${detail.id}/confirm`, { version: detail.version });
+      message.success('计划已生效，任务可执行');
+      refreshAll();
+      await openDetail(detail.id);
+    } catch (error) { message.error(error.message || '确认失败，请重试'); }
+    finally { setActing(false); }
+  };
+  const requestPlanChange = () => {
+    if (!canChangeDetail) return;
+    let reason = '';
+    Modal.confirm({
+      title: '修改原计划',
+      content: <Space direction="vertical">
+        <Text>修改草稿期间原安排继续有效；本人确认后仅调整未执行部分，保留已做成果。</Text>
+        <Input.TextArea placeholder="请填写修改原因" onChange={event => { reason = event.target.value; }} maxLength={500} />
+      </Space>,
+      okText: '开始修改',
+      cancelText: '返回',
+      onOk: async () => {
+        if (!reason.trim()) { message.warning('请填写修改原因'); throw new Error('原因必填'); }
+        await api.postStrict(`/plan-schedules/${detail.id}/request-change`, { version: detail.version, change_reason: reason.trim() });
+        const updated = await api.getStrict(`/plan-schedules/${detail.id}`);
+        await openEditor(updated);
+        refreshAll();
+      },
+    });
+  };
   const canPurgeDetail = Boolean(detail && isAdmin);
   const cancellationPresentation = planCancellationPresentation(detail);
 
@@ -1097,7 +1143,7 @@ function PlanSchedulesMain() {
   return (
     <WorkspacePage
       title="巡检计划"
-      subtitle="按周期编排站点、车辆和现场资源；审批通过后生成可执行任务。"
+      subtitle="按周期编排站点、车辆和现场资源；本人确认后生成可执行任务，资源未落实不阻现场记录。"
       primaryAction={<Space>
         {isAdmin && <Button icon={<SettingOutlined />} onClick={openInspectionSettings}>检查项设置</Button>}
         {canUseFavorites && <Button type="primary" icon={<FolderOpenOutlined />} onClick={openFavorites}>从常用计划生成草稿</Button>}
@@ -1201,7 +1247,7 @@ function PlanSchedulesMain() {
           detailRequestRef.current += 1;
           setDrawerOpen(false);
         }} width={680} destroyOnHidden closable={!cancelLoading}
-        footer={detail && (canCancelDetail || canEditDetail || canReviewDetail || canPurgeDetail) ? (
+        footer={detail && (canCancelDetail || canEditDetail || canReviewDetail || canPurgeDetail || canConfirmDetail || canChangeDetail) ? (
           <div className="plan-detail-actions">
             {canPurgeDetail && (
               <Button danger icon={<HoverGifIcon name="trash-bin" size={14} />} onClick={openPlanPurge}
@@ -1209,11 +1255,13 @@ function PlanSchedulesMain() {
             )}
             {canCancelDetail && (
               <Button danger icon={<CloseOutlined />} onClick={openPlanCancellation}
-                loading={cancelLoading}>取消计划</Button>
+                loading={cancelLoading}>{detail.can_stop ? '停止剩余作业' : '取消计划'}</Button>
             )}
             {canEditDetail && (
               <Button type="primary" icon={<HoverGifIcon name="pencil" size={14} />} onClick={() => openEditor(detail)}>编辑计划</Button>
             )}
+            {canConfirmDetail && <Button type="primary" onClick={confirmPlan} loading={acting}>本人确认生效</Button>}
+            {canChangeDetail && <Button onClick={requestPlanChange}>修改计划</Button>}
             {canReviewDetail && (
               <>
                 <Button danger icon={<CloseOutlined />} onClick={() => setRejectOpen(true)} loading={acting}>退回</Button>
@@ -1251,6 +1299,9 @@ function PlanSchedulesMain() {
                   <Text type="secondary">{detail.submitted_at}</Text>
                 </Descriptions.Item>
               )}
+              {detail.confirmation && (
+                <Descriptions.Item label="本人确认" span={2}>{detail.user_name} · {detail.confirmation.confirmed_at} · v{detail.confirmation.version}</Descriptions.Item>
+              )}
               {detail.approver_name && (
                 <Descriptions.Item label="审批人" span={2}><Text type="secondary">{detail.approver_name}</Text></Descriptions.Item>
               )}
@@ -1259,9 +1310,9 @@ function PlanSchedulesMain() {
               )}
               {cancellationPresentation && (
                 <>
-                  <Descriptions.Item label="取消原因" span={2}>{cancellationPresentation.reason}</Descriptions.Item>
-                  <Descriptions.Item label="取消操作人">{cancellationPresentation.operatorName}</Descriptions.Item>
-                  <Descriptions.Item label="取消时间">{cancellationPresentation.occurredAt}</Descriptions.Item>
+                  <Descriptions.Item label={detail.field_status === "stopped" ? "停止原因" : "取消原因"} span={2}>{cancellationPresentation.reason}</Descriptions.Item>
+                  <Descriptions.Item label={detail.field_status === "stopped" ? "停止操作人" : "取消操作人"}>{cancellationPresentation.operatorName}</Descriptions.Item>
+                  <Descriptions.Item label={detail.field_status === "stopped" ? "停止时间" : "取消时间"}>{cancellationPresentation.occurredAt}</Descriptions.Item>
                 </>
               )}
               {detail.coverage_exception_reason && (
@@ -1324,11 +1375,12 @@ function PlanSchedulesMain() {
                     {row.tasks.length > 0 ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {row.tasks.map(task => (
-                          <div key={`${task.date}-${task.site_id}`} style={{
+                          <div key={`${task.date}-${task.plan_id}-${task.site_id}`} style={{
                             display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
                             padding: '4px 0', minWidth: 0,
                           }}>
                             <Text strong style={{ fontSize: 12 }}>{task.site_name}{scoreBadge(task.site_id)}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>任务 #{task.plan_id}</Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>{task.assignee || '未指定负责人'}</Text>
                             <Tag color={task.status === 'completed' ? 'green' : task.status === 'change_pending' ? 'gold' : task.status === 'partial' ? 'blue' : 'default'}>
                               {task.status_cn || task.status}
@@ -1339,8 +1391,9 @@ function PlanSchedulesMain() {
                         ))}
                         {(executionPackagesByDate[row.date] || []).filter(task => canApprove && task.can_handle_overdue).map(task => (
                           <div key={`package-${task.plan_id}`} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
-                            <Button size="small" type="link" aria-label={`催办${row.date}逾期执行`}
-                              onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>
+                            <Text type="secondary" style={{ fontSize: 11 }}>任务 #{task.plan_id}</Text>
+                            {task.can_remind_overdue && <Button size="small" type="link" aria-label={`催办${row.date}逾期执行`}
+                              onClick={() => handleOverdueAction(task, 'remind')}>催办</Button>}
                             <Button size="small" type="link" danger aria-label={`登记${row.date}未执行原因并关闭`}
                               onClick={() => closeOverdueExecution(task)}>登记并关闭</Button>
                           </div>
@@ -1407,8 +1460,8 @@ function PlanSchedulesMain() {
 
       <Modal
         open={cancelOpen}
-        title="取消计划"
-        okText="确认取消计划"
+        title={detail?.can_stop ? "停止剩余作业" : "取消计划"}
+        okText={detail?.can_stop ? "确认停止剩余" : "确认取消计划"}
         cancelText="返回"
         okButtonProps={{ danger: true }}
         confirmLoading={cancelLoading}
@@ -1419,7 +1472,7 @@ function PlanSchedulesMain() {
         destroyOnHidden
       >
         <Alert type="warning" showIcon
-          message="取消后保留审批和操作记录；已有现场或实际资源事实时服务端会拒绝。"
+          message="已做成果和真实进度保留；仅释放未履约预约和需求，不自动还车或回库。请填写原因。"
           style={{ marginBottom: 12 }} />
         {cancelError && <Alert type="error" showIcon message={cancelError} style={{ marginBottom: 12 }} />}
         <div className="plan-destructive-reason">
@@ -1475,7 +1528,7 @@ function PlanSchedulesMain() {
         footer={[
           <Button key="cancel" disabled={editSaving} onClick={() => setEditOpen(false)}>取消</Button>,
           <Button key="save" loading={editSaving} disabled={!editDraft || !editResourcesReady || !editItemsReady} onClick={() => saveEdit(false)}>保存草稿</Button>,
-          <Button key="submit" type="primary" loading={editSaving} disabled={!editDraft || !editResourcesReady || !editItemsReady} onClick={() => saveEdit(true)}>保存并提交</Button>,
+          <Button key="submit" type="primary" loading={editSaving} disabled={!editDraft || Number(editDraft.user_id) !== Number(user?.id) || !editResourcesReady || !editItemsReady} onClick={() => saveEdit(true)}>本人确认生效</Button>,
         ]}
       >
         {editError && <Alert type="error" showIcon message={editError} style={{ marginBottom: 12 }} />}
@@ -1500,7 +1553,7 @@ function PlanSchedulesMain() {
               <div>
                 <Text type="secondary">计划车辆（同一计划共用）</Text>
                 <Select allowClear showSearch optionFilterProp="label" style={{ width: '100%', marginTop: 6 }}
-                  value={editDraft.vehicle_id || undefined} placeholder="选择车辆；清空表示无需用车"
+                  value={editDraft.vehicle_id || undefined} placeholder="选择车辆；未选表示车辆尚未落实"
                   onChange={setPlanVehicle}
                   options={editVehicles.map(vehicle => ({
                     value: Number(vehicle.id),
@@ -1509,10 +1562,14 @@ function PlanSchedulesMain() {
                   }))} />
               </div>
               <div>
-                <Text type="secondary">无需用车说明</Text>
+                <Checkbox checked={editDraft.no_vehicle_required}
+                  onChange={event => setEditDraft(current => ({ ...current,
+                    no_vehicle_required: event.target.checked,
+                    ...(event.target.checked ? { vehicle_id: null, vehicle_days: {} } : {}),
+                  }))}>本计划无需用车</Checkbox>
                 <Input value={editDraft.vehicle_exception_reason} style={{ marginTop: 6 }}
                   disabled={Boolean(editDraft.vehicle_id)}
-                  placeholder={editDraft.vehicle_id ? '已选择计划车辆，无需填写' : '未安排车辆时必填'}
+                  placeholder={editDraft.vehicle_id ? '已选择计划车辆，无需填写' : '车辆情况选填，不影响现场记录'}
                   onChange={event => setEditDraft(current => ({ ...current, vehicle_exception_reason: event.target.value }))} />
               </div>
             </div>

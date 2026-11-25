@@ -4,8 +4,9 @@ const PLAN_EXECUTION_STATUS = {
   completed: { label: '已完成', color: 'success' },
   change_pending: { label: '变更待审', color: 'warning' },
   rework: { label: '需整改', color: 'warning' },
-  modifying: { label: '变更中，暂缓执行', color: 'warning' },
+  modifying: { label: '修改待确认，原安排可执行', color: 'warning' },
   cancelled: { label: '已取消', color: 'default' },
+  closed: { label: '登记结束', color: 'default' },
 };
 
 function userRoles(user = {}) {
@@ -18,6 +19,7 @@ function userRoles(user = {}) {
 export function canCancelPlanSchedule(plan = {}, user = {}) {
   const schedule = plan || {};
   const actor = user || {};
+  if (typeof schedule.can_cancel === 'boolean' || typeof schedule.can_stop === 'boolean') return schedule.can_cancel === true || schedule.can_stop === true;
   if (!['approved', 'modifying'].includes(schedule.status)) return false;
   return Number(schedule.user_id) === Number(actor.id) || userRoles(actor).includes('admin');
 }
@@ -37,9 +39,9 @@ export function normalizePlanPurgeReason(rawReason) {
 }
 
 export function planExecutionPresentation(plan = {}) {
-  if (plan.status === 'cancelled') return { key: 'cancelled', ...PLAN_EXECUTION_STATUS.cancelled };
-  if (plan.status === 'modifying') return { key: 'modifying', ...PLAN_EXECUTION_STATUS.modifying };
-  if (plan.status === 'change_submitted') return { key: 'change_pending', ...PLAN_EXECUTION_STATUS.change_pending };
+  if (plan.status === 'cancelled') return { key: 'cancelled', ...PLAN_EXECUTION_STATUS.cancelled, label: plan.field_status === 'stopped' ? '已停止剩余' : '已取消' };
+
+
   let key = PLAN_EXECUTION_STATUS[plan.execution_status] ? plan.execution_status : '';
   if (!key && plan.field_status === 'completed') key = 'completed';
   if (!key && plan.field_status === 'rework') key = 'rework';
@@ -67,7 +69,8 @@ export function groupExecutionPackagesByDate(tasks = []) {
       plan_id: planId,
       site_count: new Set(packageTasks.map(task => task.site_id)).size,
       can_handle_overdue: packageTasks.some(task =>
-        ['pending', 'partial'].includes(task.status) && task.overdue),
+        task.can_close_overdue === true),
+      can_remind_overdue: packageTasks.some(task => task.can_remind_overdue === true),
     })),
   ]));
 }
@@ -81,7 +84,8 @@ export function planDetailItineraryRows(planData = {}, generatedTasks = []) {
     const siteKey = task.site_id === undefined || task.site_id === null
       ? `name:${task.site_name || ''}`
       : `id:${task.site_id}`;
-    if (!tasksByDate.get(date).has(siteKey)) tasksByDate.get(date).set(siteKey, task);
+    const taskKey = `${task.plan_id ?? ''}:${siteKey}`;
+    if (!tasksByDate.get(date).has(taskKey)) tasksByDate.get(date).set(taskKey, task);
   });
 
   const dates = new Set([

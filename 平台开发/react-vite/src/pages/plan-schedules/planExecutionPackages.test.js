@@ -17,12 +17,21 @@ import {
 
 test('two sites in one internal day package expose one day-level action entry', () => {
   const grouped = groupExecutionPackagesByDate([
-    { date: '2026-08-17', plan_id: 91, site_id: 1, status: 'pending', overdue: true },
-    { date: '2026-08-17', plan_id: 91, site_id: 2, status: 'partial', overdue: true },
+    { date: '2026-08-17', plan_id: 91, site_id: 1, status: 'pending', overdue: true, can_close_overdue: true, can_remind_overdue: true },
+    { date: '2026-08-17', plan_id: 91, site_id: 2, status: 'partial', overdue: true, can_close_overdue: true, can_remind_overdue: true },
   ]);
   assert.equal(grouped['2026-08-17'].length, 1);
   assert.equal(grouped['2026-08-17'][0].site_count, 2);
   assert.equal(grouped['2026-08-17'][0].can_handle_overdue, true);
+});
+
+test('change-pending and completed-but-not-departed tasks can be closed without reminder', () => {
+  for (const status of ['change_pending', 'completed']) {
+    const grouped = groupExecutionPackagesByDate([{ date: '2026-08-17', plan_id: 92,
+      site_id: 1, status, overdue: false, can_close_overdue: true, can_remind_overdue: false }]);
+    assert.equal(grouped['2026-08-17'][0].can_handle_overdue, true);
+    assert.equal(grouped['2026-08-17'][0].can_remind_overdue, false);
+  }
 });
 
 test('overall execution presentation uses the server user state', () => {
@@ -40,9 +49,9 @@ test('overall execution presentation uses the server user state', () => {
 
 test('schedule modifying, submitted change, and cancellation override execution aggregates', () => {
   assert.deepEqual(planExecutionPresentation({ status: 'modifying', execution_status: 'completed' }),
-    { key: 'modifying', label: '变更中，暂缓执行', color: 'warning' });
+    { key: 'completed', label: '已完成', color: 'success' });
   assert.deepEqual(planExecutionPresentation({ status: 'change_submitted', execution_status: 'pending' }),
-    { key: 'change_pending', label: '变更待审', color: 'warning' });
+    { key: 'pending', label: '待执行', color: 'default' });
   assert.deepEqual(planExecutionPresentation({ status: 'cancelled', execution_status: 'partial' }),
     { key: 'cancelled', label: '已取消', color: 'default' });
 });
@@ -98,7 +107,7 @@ test('cancel and irreversible purge reason counters reserve local footer space r
 
 test('legacy and taskless plans never expose internal active as field work in progress', () => {
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'active' }).key, 'pending');
-  assert.equal(planExecutionPresentation({ status: 'change_submitted', field_status: 'active' }).key, 'change_pending');
+  assert.equal(planExecutionPresentation({ status: 'change_submitted', field_status: 'active' }).key, 'pending');
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'completed' }).key, 'completed');
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'rework' }).key, 'rework');
   assert.equal(planExecutionPresentation({}).key, 'pending');
@@ -126,6 +135,16 @@ test('generated site tasks replace planned chips for the same date and keep each
   assert.deepEqual(itineraryRowSiteIds(rows[0]), [1, 2]);
   assert.deepEqual(rows[1].planned_site_ids, [3]);
   assert.deepEqual(itineraryRowSiteIds(rows[1]), [3]);
+});
+
+test('same site and date retain distinct execution tasks and close actions', () => {
+  const tasks = [
+    { date: '2026-08-19', plan_id: 91, site_id: 1, status: 'completed', can_close_overdue: false },
+    { date: '2026-08-19', plan_id: 92, site_id: 1, status: 'pending', can_close_overdue: true },
+  ];
+  assert.deepEqual(planDetailItineraryRows({}, tasks)[0].tasks.map(task => task.plan_id), [91, 92]);
+  assert.deepEqual(groupExecutionPackagesByDate(tasks)['2026-08-19']
+    .filter(task => task.can_handle_overdue).map(task => task.plan_id), [92]);
 });
 
 test('site priority is visible only for a non-zero score or a real reason', () => {
@@ -175,7 +194,7 @@ test('detail cancellation keeps reason and context on failure and refreshes afte
   assert.match(handler, /canCancelPlanSchedule\(detail, user\)/);
   assert.match(handler, /canCancelPlanSchedule\(detail, user\) \|\| cancelActionRef\.current\) return/);
   assert.match(handler, /cancelActionRef\.current = true/);
-  assert.match(handler, /postStrict\(`\/plan-schedules\/\$\{detail\.id\}\/cancel`,\s*\{ reason: normalized\.value, version \}/);
+  assert.match(handler, /postStrict\(`\/plan-schedules\/\$\{detail\.id\}\/\$\{detail\.can_stop \? 'stop' : 'cancel'\}`,\s*\{ reason: normalized\.value, version \}/);
   assert.match(failureBranch, /setCancelError\(error\?\.message \|\| '取消计划失败/);
   assert.doesNotMatch(failureBranch, /setCancelReason\(''\)/);
   assert.match(handler, /finally \{[\s\S]*cancelActionRef\.current = false/);

@@ -453,6 +453,11 @@
   box-sizing: border-box;
 }
 
+.keyboard-open .report-compose-sheet {
+  bottom: var(--panel-keyboard-height);
+  max-height: calc(100vh - var(--panel-keyboard-height) - 24px);
+}
+
 /* --- 关闭按钮（绝对定位右上角） --- */
 .report-compose-close {
   position: absolute;

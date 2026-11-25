@@ -51,6 +51,8 @@ function emptyInspectionReportSheet(siteId, siteName) {
     open: false,
     siteId: Number.isInteger(normalizedSiteId) && normalizedSiteId > 0 ? normalizedSiteId : null,
     siteName: String(siteName || ''),
+    sites: [],
+    siteIndex: 0,
     typeIndex: 0,
     description: '',
     photos: [],
@@ -296,6 +298,7 @@ function decoratePackageResources(pkg) {
 
 Page({
   data: {
+    panelKeyboardHeight: 0,
     viewMode: 'execute',
     // ===== 6.5.1 执行包与站点选择阶段 =====
     viewPhase: 'entry',       // entry | departure | inspection
@@ -354,7 +357,7 @@ Page({
     reagentSheet: { open: false, mode: 'replacement', index: 0, newQty: '', duration: '', standardValue: '', measuredValue: '', passed: true, failAction: 'calibrate', submitting: false },
     sheet: { open: false, item: null, result: 'normal', remark: '', calibrator: '', calValues: '', photos: [], photoMedia: [], localPhotos: [], localPhotoMeta: [], rejectedMedia: [], supplementPhotos: [], supplementMedia: [], supplementLocalPhotos: [], supplementLocalMeta: [], supplementOnly: false, originalPhotoCount: 0, photoResultTitle: '', photoResultMessage: '' },
     submitting: false,
-    checkingOut: false,
+    checkingOut: false, correctingCheckOut: false,
     partsIssueSheet: { open: false, items: [], submitting: false },
     partsOptions: [],
     partsInventoryStatus: 'idle', partsInventoryError: '',
@@ -743,7 +746,7 @@ Page({
       'reagentSheet.submitting': false,
       'sheet.open': false,
       submitting: false,
-      checkingOut: false,
+      checkingOut: false, correctingCheckOut: false,
       'partsIssueSheet.open': false,
       'partsIssueSheet.submitting': false,
       'partsApply.open': false,
@@ -1061,6 +1064,10 @@ Page({
       this.setData({ entryTargetMessage: '目标已变化，请重新选择', entryCanEnter: false });
       return;
     }
+    if (packageTarget.scheduleId && packageTarget.scheduleStatus !== undefined && !['approved', 'modifying', 'change_submitted'].includes(packageTarget.scheduleStatus)) {
+      wx.showModal({ title: '计划暂不可执行', content: '请先由本人确认计划；已取消或失效的安排无法继续，已有记录会保留。', showCancel: false });
+      return;
+    }
     this.setData({ entryEntering: true });
     const requestId = (this._entryRequestId || 0) + 1;
     this._entryRequestId = requestId;
@@ -1152,7 +1159,8 @@ Page({
       const localCheckin = localStore.getSiteCheckIn(siteId);
       const localCheckinMatchesPlan = localCheckin
         && Number(localCheckin.data && localCheckin.data.plan_id) === Number(pkgId);
-      const alreadyOnSite = currentSite && currentSite.checked_in && !currentSite.checked_out
+      const alreadyOnSite = currentSite && currentSite.checked_in
+        && (!currentSite.checked_out || Number(currentSite.completed) < Number(currentSite.total))
         && !currentSite.rework_checkin_required;
       const selectedPlanReady = String(target.source || '').startsWith('plan_detail')
         && verifiedPkg.arrival_gate && verifiedPkg.arrival_gate.allowed === true;
@@ -1445,6 +1453,18 @@ Page({
       this.onDepartureRefresh();
       return;
     }
+    if (action === 'reapply') {
+      if (this._showDepartureActionBlocked('vehicleCheckout')) return;
+      const pkg = this.data.currentPackage;
+      if (!pkg || !pkg.vehicle_reapplication_available || !pkg.plan_id) {
+        wx.showToast({ title: '任务状态已变化，请刷新', icon: 'none' });
+        return;
+      }
+      wx.navigateTo({ url: '/pages/vehicle/vehicle?execution_plan_id=' + encodeURIComponent(pkg.plan_id)
+        + '&vehicle_id=' + encodeURIComponent((pkg.vehicle || {}).id || ''),
+        fail: () => wx.showToast({ title: '车辆页面打开失败，请重试', icon: 'none' }) });
+      return;
+    }
     const actionKey = {
       request_resource: 'reworkRequest',
       checkout: 'vehicleCheckout',
@@ -1467,7 +1487,7 @@ Page({
   onDepartureTodoTap(e) {
     const action = e && e.currentTarget && e.currentTarget.dataset.action;
     if (!action || action === 'none') return;
-    if (action === 'checkout' || action === 'extend') {
+    if (action === 'checkout' || action === 'extend' || action === 'reapply') {
       this.onDepartureVehicleAction({ currentTarget: { dataset: { action } } });
     } else if (action === 'request_resource') {
       this.onOpenReworkResource();
@@ -1817,12 +1837,16 @@ Page({
       return;
     }
     if (!pkg.vehicle_application_id) { wx.showToast({ title: '未找到本计划获批的用车安排', icon: 'none' }); return; }
+    if (pkg.vehicle_use && !pkg.vehicle_use.returned_at) {
+      wx.showToast({ title: '沿用当前持车行程，无需重复出车', icon: 'none' });
+      return;
+    }
     if (pkg.vehicle_needs_extension) {
       if (this._showDepartureActionBlocked('extend')) return;
       wx.showModal({
         title: '用车安排已超期',
-        content: '结转巡检尚未完成，请先到“我的用车”延续本次用车截止日期。',
-        confirmText: '立即延续',
+        content: '预计用车时间已到，可到“我的用车”更新预计时间。已有任务和持车记录会保留。',
+        confirmText: '查看用车',
         success: result => {
           if (!result.confirm) return;
           const snapshot = this._beginDepartureAction('extend');
@@ -2124,6 +2148,9 @@ Page({
           Number(this.data.selectedPlanId) === Number(planId) && Number(this.data.selSiteId) === Number(siteId))) { if (done) done(); return; }
         const packageSite = ((this.data.currentPackage && this.data.currentPackage.sites) || []).find(s => s.site_id === siteId) || {};
         const selectedSite = Object.assign({}, packageSite, res.site || {}, {
+          visit_version: res.visit_version,
+          visit_event_id: res.visit_event_id,
+          can_correct_checkout: res.can_correct_checkout === true,
           linked_workorders: (packageSite.linked_workorders || []).map(linkedWorkorderCn)
         });
         const photosMap = {};
@@ -2283,41 +2310,60 @@ Page({
   onSelectSite(e) {
     const id = Number(e.currentTarget.dataset.id);
     const reportSheet = this.data.reportSheet || emptyInspectionReportSheet();
-    if (normalizeReportPhotoItems(reportSheet).length && Number(reportSheet.siteId) !== id) {
-      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
-      return;
-    }
-    if (Number(reportSheet.siteId) !== id) {
+    const hasDraft = normalizeReportPhotoItems(reportSheet).length
+      || String(reportSheet.description || '').trim() || reportSheet.uploading || reportSheet.submitting;
+    if (!hasDraft && Number(reportSheet.siteId) !== id) {
       this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
       this._reportTrustedCameraRequest = null;
     }
-    this.setData({ selSiteId: id, stationStage: null, reagents: [], reagentAction: '加载中…',
+    this.setData({ checkingOut: false, correctingCheckOut: false, selSiteId: id, stationStage: null, reagents: [], reagentAction: '加载中…',
       categories: [], total: 0, completed: 0, completionPercent: 0, progressFillStyle: 'width:0%', abnormalCount: 0,
       photoProgress: { req: 0, taken: 0, missing: 0 },
-      reportSheet: Number(reportSheet.siteId) === id
+      reportSheet: hasDraft || Number(reportSheet.siteId) === id
         ? reportSheet : emptyInspectionReportSheet(id),
     });
     this.loadTasks(id);
   },
 
   onOpenReport() {
+    if (this.data.reportSheet && this.data.reportSheet.open) return;
     const siteId = Number(this.data.selSiteId);
     if (!siteId) return;
-    const site = this.data.selSite || this.data.site
-      || (this.data.sites || []).find(row => Number(row.id || row.site_id) === siteId) || {};
+    const site = (this.data.sites || []).find(row => Number(row.id || row.site_id) === siteId)
+      || (Number((this.data.selSite || {}).id) === siteId ? this.data.selSite : {}) || {};
     const current = this.data.reportSheet || emptyInspectionReportSheet();
     const sameSite = Number(current.siteId) === siteId;
-    if (!sameSite && normalizeReportPhotoItems(current).length) {
-      wx.showToast({ title: '请先提交或移除当前异常上报照片', icon: 'none' });
-      return;
-    }
-    const next = sameSite ? Object.assign({}, current) : emptyInspectionReportSheet(siteId);
+    const hasDraft = normalizeReportPhotoItems(current).length || String(current.description || '').trim();
+    const next = sameSite || hasDraft ? Object.assign({}, current) : emptyInspectionReportSheet(siteId);
+    next.restored = !!hasDraft;
     next.open = true;
-    next.siteId = siteId;
-    next.siteName = String(site.name || site.site_name || next.siteName || '');
+    if (!hasDraft || sameSite) {
+      next.siteId = siteId;
+      next.siteName = String(site.name || site.site_name || next.siteName || '');
+    }
+    if (!(next.sites || []).length && next.siteId && next.siteName) {
+      next.sites = [{ id: Number(next.siteId), name: next.siteName }];
+    }
     next.uploading = false;
     next.submitting = false;
     this.setData({ reportSheet: next });
+    const version = this._reportDraftVersion || 0;
+    api.sites().then(rows => {
+      const sheet = this.data.reportSheet || {};
+      if (this._reportPageUnloaded || !sheet.open || (this._reportDraftVersion || 0) !== version) return;
+      const sites = (Array.isArray(rows) ? rows : []).map(row => ({
+        id: Number(row.id), name: String(row.name || row.code || '').trim(),
+      })).filter(row => Number.isInteger(row.id) && row.id > 0 && row.name);
+      const index = sites.findIndex(row => row.id === Number(sheet.siteId));
+      this.setData({ 'reportSheet.sites': sites, 'reportSheet.siteIndex': index,
+        'reportSheet.siteId': index >= 0 ? sheet.siteId : null,
+        'reportSheet.siteName': index >= 0 ? sheet.siteName : '' });
+    }).catch(() => {
+      if (!this._reportPageUnloaded && this.data.reportSheet.open
+          && (this._reportDraftVersion || 0) === version) {
+        wx.showToast({ title: '授权站点加载失败，请关闭后重试', icon: 'none' });
+      }
+    });
   },
   onCloseReport() {
     const sheet = this.data.reportSheet || {};
@@ -2325,17 +2371,41 @@ Page({
       wx.showToast({ title: sheet.submitting ? '正在提交上报，请稍候' : '照片上传中，请稍候', icon: 'none' });
       return;
     }
-    this.setData({ 'reportSheet.open': false });
+    this.setData({ 'reportSheet.open': false, panelKeyboardHeight: 0 });
   },
-  onReportType(e) { this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
-  onReportDescription(e) { this.setData({ 'reportSheet.description': e.detail.value }); },
+  onPanelKeyboardHeightChange(e) {
+    this.setData({ panelKeyboardHeight: Math.max(0, Number(e.detail.height) || 0) });
+  },
+  onReportType(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.typeIndex': Number(e.detail.value) || 0 }); },
+  onReportDescription(e) { if (!this.data.reportSheet.submitting) this.setData({ 'reportSheet.description': e.detail.value }); },
+  onReportSite(e) {
+    const sheet = this.data.reportSheet || {};
+    const index = Number(e.detail.value);
+    const selected = (sheet.sites || [])[index];
+    if (!selected || sheet.submitting || selected.id === Number(sheet.siteId)) return;
+    const sourceSiteId = Number(sheet.siteId);
+    const draftVersion = this._reportDraftVersion || 0;
+    const apply = () => {
+      const current = this.data.reportSheet || {};
+      if (this._reportPageUnloaded || !current.open || current.submitting
+          || (this._reportDraftVersion || 0) !== draftVersion
+          || Number(current.siteId) !== sourceSiteId
+          || !(current.sites || []).some(site => site.id === selected.id)) return;
+      this.setData({ 'reportSheet.siteId': selected.id, 'reportSheet.siteName': selected.name,
+        'reportSheet.siteIndex': index });
+    };
+    if (!normalizeReportPhotoItems(sheet).length && !sheet.uploading
+        && !String(sheet.description || '').trim()) return apply();
+    wx.showModal({ title: '确认更正站点', content: `将上报站点更正为${selected.name}？已拍照片和填写内容会保留。`,
+      success: result => { if (result.confirm) apply(); } });
+  },
 
   reportPhotoContext(options) {
     const sheet = this.data.reportSheet || {};
     const siteId = Number(sheet.siteId);
     if (sheet.submitting || sheet.uploading) return null;
-    if (!siteId || siteId !== Number(this.data.selSiteId)) {
-      wx.showToast({ title: '当前上报站点已变化，请重新进入上报', icon: 'none' });
+    if (!siteId || !(sheet.sites || []).some(site => site.id === siteId)) {
+      wx.showToast({ title: '请选择授权站点', icon: 'none' });
       return null;
     }
     const photoItems = normalizeReportPhotoItems(sheet);
@@ -2356,8 +2426,6 @@ Page({
   reportPhotoContextIsCurrent(context) {
     const sheet = this.data.reportSheet || {};
     return !this._reportPageUnloaded && !!sheet.open
-      && Number(sheet.siteId) === context.siteId
-      && Number(this.data.selSiteId) === context.siteId
       && (this._reportDraftVersion || 0) === context.draftVersion;
   },
 
@@ -2369,7 +2437,7 @@ Page({
       wx.showLoading({ title: '上传中', mask: true });
       const pending = savedPaths.map((path, index) => {
         const idempotencyKey = photoIdempotencyKey(context.siteId, path, index);
-        return createPendingReportPhoto(path, idempotencyKey, metadata);
+        return Object.assign(createPendingReportPhoto(path, idempotencyKey, metadata), { uploadSiteId: context.siteId });
       });
       const replaced = context.replaceKey
         ? context.photoItems.find(item => item.key === context.replaceKey) : null;
@@ -2384,7 +2452,7 @@ Page({
   uploadReportPhotoItems(pending, context) {
     return Promise.allSettled(pending.map(item => fileToBase64(item.localPath)
       .then(image => api.uploadSitePhoto(
-        context.siteId, image, item.idempotencyKey, item.metadata
+        item.uploadSiteId || context.siteId, image, item.idempotencyKey, item.metadata
       )))).then(results => {
         const successful = results.filter(result => (
           result.status === 'fulfilled' && result.value && result.value.url
@@ -2403,7 +2471,7 @@ Page({
         }));
         const currentItems = normalizeReportPhotoItems(this.data.reportSheet);
         const merged = currentItems.map(item => outcomeByKey.get(item.key) || item);
-        this.setData(reportPhotoSheetPatch(merged, context.siteId));
+        this.setData(reportPhotoSheetPatch(merged, this.data.reportSheet.siteId));
         const failed = merged.filter(item => outcomeByKey.has(item.key) && item.status === 'failed');
         pending.forEach(item => {
           const outcome = outcomeByKey.get(item.key);
@@ -2710,9 +2778,8 @@ Page({
     }
     if (rs.uploading) return Promise.resolve({ busy: true });
     const siteId = Number(rs.siteId);
-    if (!siteId || siteId !== Number(this.data.selSiteId)
-        || Number(rs.photoSiteId) !== siteId) {
-      wx.showToast({ title: '照片与当前站点不一致，请重新上传', icon: 'none' });
+    if (!siteId || !(rs.sites || []).some(site => site.id === siteId)) {
+      wx.showToast({ title: '请选择授权站点', icon: 'none' });
       return Promise.resolve({ invalid: true });
     }
     const preparedPhotos = prepareReportPhotoStoragePaths(rs.photos);
@@ -2742,7 +2809,7 @@ Page({
           return { success: true, orderNo, stale: true };
         }
         this._reportDraftVersion = (this._reportDraftVersion || 0) + 1;
-        this.setData({ reportSheet: emptyInspectionReportSheet() });
+        this.setData({ reportSheet: emptyInspectionReportSheet(), panelKeyboardHeight: 0 });
         wx.showModal({ title: '异常已上报', content: `已生成工单：${orderNo}`, showCancel: false });
         this.loadTasks(siteId);
         return { success: true, orderNo };
@@ -2763,7 +2830,11 @@ Page({
   },
 
   hasSiteCheckIn(siteId) {
-    if (localStore.getSiteCheckIn(siteId)) return true;
+    const current = this.data.site && Number(this.data.site.id) === Number(siteId)
+      ? this.data.site : (this.data.sites || []).find(item => Number(item.id) === Number(siteId));
+    if (current && current.checked_out) return false;
+    const local = localStore.getSiteCheckIn(siteId);
+    if (local && Number(local.data && local.data.plan_id) === Number(this.data.selectedPlanId)) return true;
     if (this.data.site && this.data.site.id === siteId && this.data.site.checked_in) return true;
     return (this.data.sites || []).some(s => s.id === siteId && s.checked_in);
   },
@@ -2858,18 +2929,70 @@ Page({
     });
   },
 
+  _beginVisitAction(field, planId, siteId) {
+    const key = String(planId) + ':' + String(siteId);
+    const slot = '_visitAction_' + field;
+    if (this[slot] && this[slot].key === key) return null;
+    const operation = { key };
+    const selected = () => this._alive !== false
+      && Number(this.data.selectedPlanId) === Number(planId)
+      && Number(this.data.selSiteId) === Number(siteId);
+    if (!selected()) return null;
+    this[slot] = operation;
+    this.setData({ [field]: true });
+    return {
+      current: () => this[slot] === operation && selected(),
+      release: () => {
+        if (this[slot] !== operation) return;
+        this[slot] = null;
+        if (selected()) this.setData({ [field]: false });
+      },
+    };
+  },
+
   onCheckOut() {
     const site = this.data.site;
     const planId = this.data.selectedPlanId;
-    if (!site || !planId || this.data.checkingOut) return;
+    if (!site || !planId || site.checked_out) return;
+    if (this.data.viewMode !== 'execute' || !this.hasSiteCheckIn(site.id)) return;
+    this.refreshStationStage(site.id);
     if (this.data.stationSyncPending) {
       wx.showToast({ title: '本站仍有待同步记录，请先完成同步', icon: 'none' });
       return;
     }
-    this.setData({ checkingOut: true });
-    requestLocation().then(gps => api.checkOutExecutionSite(planId, site.id, {
-      lat: gps.lat, lng: gps.lng
-    })).then(res => {
+    if (!site.visit_version) { this.loadTasks(site.id); return; }
+    const completed = this.data.completed;
+    const total = this.data.total;
+    const action = this._beginVisitAction('checkingOut', planId, site.id);
+    if (!action) return;
+    wx.showModal({
+      title: '确认记录离站',
+      content: (site.name || '本站') + '：已完成 ' + completed + '/' + total + ' 项，剩余 '
+        + Math.max(0, total - completed) + ' 项。离站只记录离开事实，不结束剩余检查，也不会自动还车。',
+      confirmText: '记录离站',
+      success: result => {
+        if (!result.confirm) { action.release(); return; }
+        this._recordSiteDeparture(site, planId, action);
+      },
+      fail: action.release,
+    });
+  },
+
+  _recordSiteDeparture(site, planId, action) {
+    const current = action.current;
+    if (!current()) { action.release(); return Promise.resolve(); }
+    return requestLocation().then(gps => {
+      if (!current()) return null;
+      return api.checkOutExecutionSite(planId, site.id, {
+        lat: gps.lat, lng: gps.lng, version: site.visit_version, confirm_incomplete: true,
+      });
+    }).then(res => {
+      if (!res || !current()) return;
+      if (!res.checked_out) {
+        this.setData({ checkingOut: false });
+        this.loadTasks(site.id);
+        return;
+      }
       const sites = (this.data.sites || []).map(item => item.id === site.id
         ? Object.assign({}, item, { checked_out: true, check_out_time: res.check_out_time }) : item);
       const currentPackage = this.data.currentPackage ? Object.assign({}, this.data.currentPackage, { sites }) : this.data.currentPackage;
@@ -2879,7 +3002,8 @@ Page({
         ? orderedIds.map(id => sites.find(item => Number(item.id) === id || Number(item.site_id) === id)).filter(Boolean)
         : sites;
       const currentIdx = routeSites.findIndex(item => Number(item.id) === Number(site.id));
-      const nextSite = routeSites.find((item, index) => index > currentIdx && !item.checked_out && item.phase !== 'closed');
+      const nextSite = routeSites.find((item, index) => index > currentIdx
+        && (!item.checked_out || Number(item.completed) < Number(item.total)) && item.phase !== 'closed');
       const stationOutcome = nextSite ? {
         type: 'next_site',
         siteId: nextSite.id || nextSite.site_id,
@@ -2891,12 +3015,52 @@ Page({
       this.setData({ stationOutcome });
       // Refresh server facts without leaving the stable checkout result view.
       this.loadExecution();
+      this.loadTasks(site.id);
     }).catch(err => {
+      if (!current()) return;
       this.setData({ checkingOut: false });
-      wx.showModal({ title: '离站打卡失败', content: (err && (err.error || err.message)) || '请确认定位有效且仍在站点附近', showCancel: false });
-    });
+      wx.showModal({ title: '离站未记录', content: (err && (err.error || err.message)) || '请确认定位有效且仍在站点附近', showCancel: false });
+      if (err && err.code === 'INSPECTION_VISIT_VERSION_CONFLICT') this.loadTasks(site.id);
+    }).finally(action.release);
   },
 
+  onCorrectCheckOut() {
+    const site = this.data.site;
+    const planId = this.data.selectedPlanId;
+    if (!site || !site.can_correct_checkout) return;
+    const action = this._beginVisitAction('correctingCheckOut', planId, site.id);
+    if (!action) return;
+    const current = action.current;
+    wx.showModal({
+      title: '纠正误触离站',
+      content: '仅用于本人仍在站内但误触离站。原离站会保留；真实返站请使用重新到站。',
+      editable: true,
+      placeholderText: '请填写误触原因（最多500字）',
+      confirmText: '记录纠正',
+      success: result => {
+        if (!result.confirm || !current()) { action.release(); return; }
+        const reason = String(result.content || '').trim();
+        if (!reason || reason.length > 500) {
+          action.release();
+          wx.showToast({ title: '请填写1至500字原因', icon: 'none' });
+          return;
+        }
+        api.correctCheckOutExecutionSite(planId, site.id, {
+          version: site.visit_version, event_id: site.visit_event_id, reason,
+        }).then(() => {
+          if (!current()) return;
+          this.loadTasks(site.id);
+          this.loadExecution();
+          wx.showToast({ title: '已沿原任务纠正', icon: 'success' });
+        }).catch(err => {
+          if (!current()) return;
+          wx.showModal({ title: '无法纠正', content: (err && (err.error || err.message)) || '请刷新后重试', showCancel: false });
+          this.loadTasks(site.id);
+        }).finally(action.release);
+      },
+      fail: action.release,
+    });
+  },
   onGoToNextSite() {
     const outcome = this.data.stationOutcome;
     const nextSiteId = Number(outcome && outcome.siteId);
@@ -2905,7 +3069,8 @@ Page({
       return;
     }
     const nextSite = (this.data.sites || []).find(item => Number(item.id) === nextSiteId || Number(item.site_id) === nextSiteId);
-    if (!nextSite || nextSite.checked_out || nextSite.phase === 'closed') {
+    if (!nextSite || (nextSite.checked_out && !(Number(nextSite.completed) < Number(nextSite.total)))
+        || nextSite.phase === 'closed') {
       wx.showToast({ title: '下一站已变化，请刷新后重试', icon: 'none' });
       return;
     }
@@ -2916,7 +3081,7 @@ Page({
       siteId: nextSiteId,
       source: 'next_site',
     });
-    this.setData({ selSiteId: nextSiteId, selSite: nextSite, site: nextSite,
+    this.setData({ selSiteId: nextSiteId, selSite: nextSite, site: nextSite, checkingOut: false, correctingCheckOut: false,
       stationOutcome: null, stationStage: null, categories: [], total: 0, completed: 0,
       completionPercent: 0, progressFillStyle: 'width:0%', abnormalCount: 0,
       photoProgress: { req: 0, taken: 0, missing: 0 } });
@@ -2946,10 +3111,21 @@ Page({
   onCheckIn() {
     const site = this.data.site;
     const planId = this.data.selectedPlanId;
-    if (!site || !planId) return;
+    if (!site || !planId || Number(this.data.selSiteId) !== Number(site.id)) return;
+    const targetKey = String(planId) + ':' + String(site.id);
+    if (this._checkingInTarget && this._checkingInTarget.key === targetKey) return;
+    const checkinOperation = { key: targetKey };
+    this._checkingInTarget = checkinOperation;
+    const releaseCheckin = () => {
+      if (this._checkingInTarget === checkinOperation) this._checkingInTarget = null;
+    };
+    const stillCurrent = () => this._alive !== false && Number(this.data.selectedPlanId) === Number(planId)
+      && Number(this.data.selSiteId) === Number(site.id);
+
     wx.showLoading({ title: '定位中' });
     requestLocation().then(gps => {
       wx.hideLoading();
+      if (!stillCurrent()) { releaseCheckin(); return; }
       const payload = buildCheckinPayload(site, planId, gps, nowStr());
       // 本地先落库：断网/弱网也留存打卡态，联网后静默同步
       const opId = localStore.addOp('checkin', payload);
@@ -2962,17 +3138,21 @@ Page({
       api.checkIn(payload, true)
         .then(() => {
           localStore.markSynced(opId);
+          releaseCheckin();
+          if (!stillCurrent()) return;
           const sites = (this.data.sites || []).map(item => item.id === site.id
-            ? Object.assign({}, item, { checked_in: true }) : item);
-          const checkedSite = Object.assign({}, this.data.site, { checked_in: true });
+            ? Object.assign({}, item, { checked_in: true, checked_out: false }) : item);
+          const checkedSite = Object.assign({}, this.data.site, { checked_in: true, checked_out: false });
           this.setData({ sites, site: checkedSite, selSite: checkedSite, syncCount: pendingSyncCount() },
             () => this.refreshStationStage(site.id));
           this.loadTasks(site.id);
           wx.showToast({ title: '打卡成功', icon: 'success' });
         })
         .catch((error) => {
+          releaseCheckin();
+          if (!isTransientSyncError(error)) localStore.removeOp(opId);
+          if (!stillCurrent()) return;
           if (!isTransientSyncError(error)) {
-            localStore.removeOp(opId);
             if (site.rework_checkin_required) {
               this.setData({ site: Object.assign({}, site, { rework_checkin_required: true }),
                 selSite: Object.assign({}, this.data.selSite, { rework_checkin_required: true }) });
@@ -3001,7 +3181,9 @@ Page({
           wx.showToast({ title: '打卡已本地保存，联网同步', icon: 'none' });
         });
     }).catch(error => {
+      releaseCheckin();
       wx.hideLoading();
+      if (!stillCurrent()) return;
       const openSettings = shouldOpenLocationSettings(error);
       wx.showModal({
         title: '无法获取位置', content: locationErrorMessage(error), showCancel: false,
