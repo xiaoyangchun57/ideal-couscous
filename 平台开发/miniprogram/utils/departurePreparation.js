@@ -128,18 +128,28 @@ function buildVehicle(pkg) {
       primaryAction = 'retry';
     }
   } else if (!vehicle && !vehicleUse) {
-    statusLabel = exceptionReason ? '计划无需用车' : '未安排车辆';
+    requirement = pkg.no_vehicle_required === true ? 'no_vehicle' : 'planned_vehicle';
+    statusLabel = requirement === 'no_vehicle' ? '计划无需用车' : '需用车，尚未落实，请在原计划改选或协调';
+    statusTone = requirement === 'no_vehicle' ? 'neutral' : 'warning';
   } else {
     requirement = 'planned_vehicle';
     if (vehicleUse && useState === 'checked_out') {
       statusLabel = '车辆已出车';
       statusTone = 'success';
+    } else if (pkg.vehicle_application_status === 'pending') {
+      statusLabel = '旧申请尚未落实，请在原计划确认或重新安排';
+      statusTone = 'warning';
+    } else if (pkg.vehicle_reapplication_available) {
+      statusLabel = '车辆已还车，任务未完成';
+      statusTone = 'warning';
+      primaryAction = 'reapply';
     } else if (vehicleUse && useState === 'returned') {
       statusLabel = '车辆已还车';
     } else {
-      statusLabel = '车辆待出车';
+      const unresolved = pkg.arrival_gate && pkg.arrival_gate.resource_ready === false;
+      statusLabel = unresolved ? (pkg.arrival_gate.resource_message || '车辆需协调，现场可继续') : '车辆待出车';
       statusTone = 'warning';
-      primaryAction = 'checkout';
+      primaryAction = unresolved && !applicationId ? 'none' : 'checkout';
     }
     if (mode === 'carryover' && needsExtension) {
       statusLabel = '用车安排已超期';
@@ -287,6 +297,9 @@ function buildTodoItems(vehicle, partsSummary, partsAcknowledgement, gate) {
           statusText: '待延期',
           action: 'extend',
         });
+      } else if (vehicle.primaryAction === 'reapply') {
+        items.push({ type: 'vehicle', icon: '🚗', title: '车辆已还车',
+          sub: '任务未完成，可申请本次用车', status: 'pending', statusText: '待申请', action: 'reapply' });
       } else if (vehicle.primaryAction === 'request_resource') {
         items.push({
           type: 'vehicle',

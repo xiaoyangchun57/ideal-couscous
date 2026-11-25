@@ -176,11 +176,11 @@ export const orderLevelBadge = {
 // Plan schedule status (label + Tag preset color)
 export const scheduleStatusMap = {
   draft: { label: '草稿', color: 'default' },
-  submitted: { label: '待审批', color: 'processing' },
-  approved: { label: '已通过', color: 'success' },
+  submitted: { label: '待本人确认', color: 'processing' },
+  approved: { label: '已生效', color: 'success' },
   rejected: { label: '已退回', color: 'error' },
-  modifying: { label: '变更中', color: 'warning' },
-  change_submitted: { label: '变更待审', color: 'processing' },
+  modifying: { label: '修改待确认', color: 'warning' },
+  change_submitted: { label: '修改待确认', color: 'processing' },
   archived: { label: '已归档', color: 'default' },
 };
 

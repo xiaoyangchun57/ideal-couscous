@@ -2371,7 +2371,7 @@
   background: var(--color-card);
   border-top: 0.5rpx solid var(--color-divider);
   padding: 20rpx 32rpx calc(20rpx + env(safe-area-inset-bottom));
-  z-index: 200;
+  z-index: 20;
 }
 
 /* 按钮规范（lg 尺寸） */
@@ -3321,6 +3321,26 @@
   color: var(--color-text-primary);
   line-height: 1.6;
   box-sizing: border-box;
+}
+/* 键盘只占用当前页面面板空间，提交区保留在可视区域。 */
+.keyboard-open .sheet {
+  bottom: var(--panel-keyboard-height);
+  max-height: calc(100vh - var(--panel-keyboard-height) - 24px);
+}
+.keyboard-open .sheet .sheet-scroll {
+  max-height: calc(100vh - var(--panel-keyboard-height) - 240rpx - 24px - env(safe-area-inset-bottom));
+}
+.keyboard-open .parts-apply-sheet {
+  height: calc(100vh - var(--panel-keyboard-height) - 24px);
+}
+.keyboard-open .parts-apply-sheet .sheet-scroll {
+  max-height: none;
+}
+.ip-fullpanel {
+  bottom: var(--panel-keyboard-height, 0px);
+}
+.ip-fullpanel-body {
+  min-height: 0;
 }
 .ip-quality-item { display: flex; align-items: flex-start; gap: 20rpx; padding: 16rpx 0; }
 .ip-quality-image { width: 160rpx; height: 160rpx; flex: none; }

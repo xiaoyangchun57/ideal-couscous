@@ -31,10 +31,8 @@ const STATUS_CLS_TO_TONE = {
 
 function planHeaderPresentation(detail) {
   const source = detail || {};
-  if (source.status === 'modifying' || source.status === 'change_submitted') {
-    return SITE_TASK_STATUS.change_pending;
-  }
-  if (source.status === 'approved') {
+  if (source.field_status === 'stopped') return { label: '已停止剩余', cls: 'gray' };
+  if (['approved', 'modifying', 'change_submitted'].includes(source.status)) {
     const key = SITE_TASK_STATUS[source.execution_status]
       ? source.execution_status
       : (source.execution_completed ? 'completed' : 'pending');
@@ -68,7 +66,7 @@ function normalizeGeneratedTasks(detail) {
         const hasItemCounts = Number.isFinite(totalItems) && Number.isFinite(completedItems);
         const executionPlanId = Number(item.plan_id || item.id);
         const siteId = Number(item.site_id);
-        const canViewResult = item.status === 'completed'
+        const canViewResult = (item.status === 'completed' || (source.field_status === 'stopped' && completedItems > 0))
           && Number.isInteger(executionPlanId) && executionPlanId > 0
           && Number.isInteger(siteId) && siteId > 0;
         return Object.assign({}, item, {
@@ -161,6 +159,8 @@ Page({
     favorite: null,
     favoriteSheet: { open: false, periodStart: '', submitting: false },
     canCancel: false,
+    canConfirm: false,
+    canStop: false,
     cancelBlockReason: '',
     cancelSheet: { open: false, reason: '', submitting: false, error: '' },
     canAbandonChange: false,
@@ -250,7 +250,7 @@ Page({
           : (Array.isArray(res.spare_parts) ? res.spare_parts.map(p => ({
             part_name: p.part_name || p.name || '备件',
             quantity_text: (p.quantity || 1) + (p.unit || '个'),
-            status_cn: '待审批'
+            status_cn: '待现场领用'
           })) : []);
 
         const favorite = (favorites || []).find(item => Number(item.source_schedule_id) === Number(this.scheduleId)) || null;
@@ -293,8 +293,10 @@ Page({
           resourceDays,
           resourceParts: plannedParts,
           linkedWorkorders: res.linked_workorders || [],
-          canEdit: ['draft', 'rejected', 'modifying'].includes(res.status),
-          canChange: res.status === 'approved' && !executionCompleted,
+          canEdit: Number(res.user_id) === Number((getUser() || {}).id) && ['draft', 'rejected', 'modifying'].includes(res.status),
+          canConfirm: res.can_confirm === true,
+          canStop: res.can_stop === true,
+          canChange: Number(res.user_id) === Number((getUser() || {}).id) && res.status === 'approved' && !executionCompleted,
           canExecute: canContinueRework || canContinueExecution,
           canContinueRework,
           canContinueExecution,
@@ -517,7 +519,7 @@ Page({
   },
 
   onOpenCancel() {
-    if (!this.data.canCancel) {
+    if (!this.data.canCancel && !this.data.canStop) {
       wx.showToast({
         title: this.data.cancelBlockReason || '计划状态或权限已变化，请刷新后重试',
         icon: 'none'
@@ -550,7 +552,7 @@ Page({
   },
 
   onConfirmCancel() {
-    if (!this.data.canCancel) {
+    if (!this.data.canCancel && !this.data.canStop) {
       const error = this.data.cancelBlockReason || '计划状态或权限已变化，请刷新后重试';
       this.setData({ 'cancelSheet.error': error });
       wx.showToast({ title: error, icon: 'none' });
@@ -562,7 +564,8 @@ Page({
       return;
     }
     const detail = this.data.detail || {};
-    const action = startPlanCancellation(this, () => api.cancelPlanSchedule(
+    const cancelRequest = this.data.canStop ? api.stopPlanSchedule : api.cancelPlanSchedule;
+    const action = startPlanCancellation(this, () => cancelRequest(
       this.scheduleId, normalized.value, detail.version
     ));
     if (!action.started) {
@@ -581,7 +584,7 @@ Page({
           'cancelSheet.reason': '',
           'cancelSheet.error': ''
         });
-        wx.showToast({ title: '计划已取消', icon: 'success' });
+        wx.showToast({ title: this.data.canStop ? '已停止剩余作业' : '计划已取消', icon: 'success' });
         this.load();
       })
       .catch(err => {
@@ -631,11 +634,11 @@ Page({
       });
   },
 
-  // 先解释审批失效与重新提交后果；确认并填写原因后才进入既有变更流程。
+  // 修改草稿保留原安排，直到本人确认修改生效。
   onChangeRequest() {
     wx.showModal({
       title: '确认变更计划',
-      content: '进入变更后，原审批结果失效，修改完成后需要重新提交并审核。是否继续？',
+      content: '修改草稿期间原安排仍可执行，确认修改后才调整未执行部分，已做成果保留。是否继续？',
       confirmText: '继续变更',
       cancelText: '暂不变更',
       success: (r) => {
@@ -651,9 +654,9 @@ Page({
               wx.showToast({ title: '请填写变更原因', icon: 'none' });
               return;
             }
-            api.requestPlanScheduleChange(this.scheduleId, reason)
+            api.requestPlanScheduleChange(this.scheduleId, reason, this.data.detail.version)
               .then(() => {
-                wx.showToast({ title: '请修改后重新提交审批', icon: 'none' });
+                wx.showToast({ title: '请修改后确认生效', icon: 'none' });
                 wx.navigateTo({ url: '/pages/plan-edit/plan-edit?id=' + this.scheduleId });
               })
               .catch(err => {
@@ -708,12 +711,12 @@ Page({
   onSubmit() {
     wx.showModal({
       title: '确认提交',
-      content: '提交后将进入审批流程，确认提交？',
+      content: '由本人确认后立即生成可执行任务；车辆或备件未落实不影响现场记录。确认生效？',
       success: (r) => {
         if (!r.confirm) return;
         api.submitPlanSchedule(this.scheduleId, this.data.detail && this.data.detail.version)
           .then(() => {
-            wx.showToast({ title: '已提交审批', icon: 'success' });
+            wx.showToast({ title: '计划已生效', icon: 'success' });
             this.load();
           })
           .catch(err => {

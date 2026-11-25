@@ -328,7 +328,7 @@ const originals = {
     const reportPage = createPage();
     seedStation(reportPage);
     reportPage.data.reportSheet = {
-      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '',
+      open: true, siteId: 20, siteName: '青云站', sites: [{ id: 20, name: '青云站' }], typeIndex: 1, description: '',
       photos: [], photoSiteId: null, uploading: false, submitting: false
     };
     let reportWrites = 0;
@@ -383,7 +383,7 @@ const originals = {
     assert.equal(reportRefreshes, 1, 'only a confirmed work order refreshes the station data');
 
     reportPage.data.reportSheet = {
-      open: true, siteId: 20, siteName: '青云站', typeIndex: 1, description: '水泵异响',
+      open: true, siteId: 20, siteName: '青云站', sites: [{ id: 20, name: '青云站' }], typeIndex: 1, description: '水泵异响',
       photos: ['/uploads/site_photos/equipment.jpg'], photoSiteId: 20,
       uploading: false, submitting: false
     };
@@ -756,7 +756,7 @@ const originals = {
 
     resetStorage();
     const checkout = createPage();
-    const first = { id: 20, site_id: 20, name: '第一站', checked_in: true, checked_out: false };
+    const first = { id: 20, site_id: 20, name: '第一站', checked_in: true, checked_out: false, visit_version: 'v1' };
     const second = { id: 21, site_id: 21, name: '第二站', checked_in: false, checked_out: false };
     seedStation(checkout, first);
     checkout.data.sites = [first, second];
@@ -765,7 +765,7 @@ const originals = {
     checkout.data.total = 1;
     checkout.data.completed = 1;
     checkout.refreshStationStage(20);
-    api.checkOutExecutionSite = () => Promise.resolve({ check_out_time: '2026-08-31 10:00:00' });
+    api.checkOutExecutionSite = () => Promise.resolve({ checked_out: true, check_out_time: '2026-08-31 10:00:00' });
     api.todayExecution = () => Promise.resolve({ packages: [checkout.data.currentPackage] });
     api.executionSiteTasks = () => Promise.resolve({
       site: Object.assign({}, first, { checked_out: true }), categories: [{ items: [] }],

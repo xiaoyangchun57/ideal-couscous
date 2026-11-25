@@ -1,4 +1,4 @@
-<view class="page">
+<view class="page {{panelKeyboardHeight > 0 ? 'keyboard-open' : ''}}" style="--panel-keyboard-height:{{panelKeyboardHeight}}px;">
   <!-- 页头 -->
   <view class="page-hd">
     <view class="page-hd-text">
@@ -117,22 +117,23 @@
       <view class="report-compose-heading">
         <text class="sheet-title">现场上报</text>
       </view>
+      <text class="detail-block-text" wx:if="{{reportSheet.restored}}">已恢复未提交上报，请核对站点；说明和照片已保留。</text>
       <view class="detail-row">
         <text class="detail-key">站点</text>
-        <picker wx:if="{{reportSheet.sites.length > 1}}" range="{{reportSheet.sites}}" range-key="name" value="{{reportSheet.siteIndex}}" bindchange="onReportSite">
+        <picker wx:if="{{reportSheet.sites.length > 1}}" range="{{reportSheet.sites}}" range-key="name" value="{{reportSheet.siteIndex}}" bindchange="onReportSite" disabled="{{reportSheet.submitting}}">
           <text class="detail-value">{{reportSheet.siteName || '请选择站点'}}</text>
         </picker>
         <text wx:else class="detail-value">{{reportSheet.siteName || '站点不可用'}}</text>
       </view>
       <view class="detail-row">
         <text class="detail-key">异常类型</text>
-        <picker range="{{reportTypes}}" range-key="label" value="{{reportSheet.typeIndex}}" bindchange="onReportType">
+        <picker range="{{reportTypes}}" range-key="label" value="{{reportSheet.typeIndex}}" bindchange="onReportType" disabled="{{reportSheet.submitting}}">
           <text class="detail-value">{{reportTypes[reportSheet.typeIndex].label}}</text>
         </picker>
       </view>
       <view class="detail-block">
         <text class="detail-block-label">现场说明</text>
-        <textarea class="detail-block-text" value="{{reportSheet.description}}" placeholder="请说明现场异常" maxlength="500" auto-height="true" bindinput="onReportDescription" />
+        <textarea fixed="{{true}}" adjust-position="{{false}}" bindkeyboardheightchange="onPanelKeyboardHeightChange" class="detail-block-text" value="{{reportSheet.description}}" placeholder="请说明现场异常" maxlength="500" auto-height="true" bindinput="onReportDescription" disabled="{{reportSheet.submitting}}" />
       </view>
       <view class="detail-block">
         <text class="detail-block-label">现场照片（1 至 6 张）</text>

@@ -32,6 +32,6 @@ test('plan submit sends the current version to the server', async () => {
 
   assert.deepEqual(calls, [
     { path: '/api/plan-schedules/42', method: 'PUT', data: { version: 6 }, options: { queue: false } },
-    { path: '/api/plan-schedules/42/submit', method: 'POST', data: { version: 7 }, options: { queue: false } },
+    { path: '/api/plan-schedules/42/confirm', method: 'POST', data: { version: 7 }, options: { queue: false } },
   ]);
 });

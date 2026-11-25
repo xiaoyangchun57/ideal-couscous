@@ -4,6 +4,7 @@ export const applyPlanVehicleSelection = (current, vehicleId) => {
   return {
     ...current,
     vehicle_id: normalizedVehicleId,
+    no_vehicle_required: false,
     vehicle_days: normalizedVehicleId ? current.vehicle_days : {},
     vehicle_exception_reason: '',
   };
@@ -16,6 +17,7 @@ export const buildPlanValidationPayload = (schedule) => ({
   period_end: schedule?.period_end,
   plan_data: schedule?.plan_data || {},
   vehicle_id: schedule?.vehicle_id || null,
+  no_vehicle_required: schedule?.no_vehicle_required === true || schedule?.no_vehicle_required === 1,
   vehicle_days: schedule?.vehicle_days || {},
   vehicle_exception_reason: schedule?.vehicle_exception_reason || '',
   exclude_schedule_id: schedule?.id,
