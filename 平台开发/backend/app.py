@@ -20622,7 +20622,14 @@ def _attachment_business_window(db, source_type, source_id, site_id, uploader_id
         start = _parse_dt(checkin['check_time']) if checkin else None
         upper = next((item[key] for key in ('check_out_time', 'completed_at', 'check_time')
                       if key in item.keys() and item[key]), None)
-        return {'start': start, 'end': _parse_dt(upper) or now,
+        upper_at = _parse_dt(upper)
+        if start and upper_at and start > upper_at:
+            completed_at = _parse_dt(item['completed_at']) if 'completed_at' in item.keys() else None
+            if item['result'] is None:
+                upper_at = None
+            elif completed_at and completed_at >= start:
+                upper_at = completed_at
+        return {'start': start, 'end': upper_at or now,
                 'business_type': 'inspection', 'business_id': str(source_id),
                 'checkin_plan_id': checkin.get('plan_id') if checkin else None,
                 'checkin_source': checkin.get('source') if checkin else ''}
@@ -38688,7 +38695,12 @@ def api_manual_reports():
 def api_manual_reports_create():
     """移动端一键上报异常，自动生成工单（site_id 受当前用户站点范围约束）"""
     data = request.get_json() or {}
-    site_id = data.get('site_id')
+    try:
+        site_id = int(data.get('site_id'))
+        if site_id <= 0:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return jsonify({'error': '站点参数无效'}), 400
     allowed = _filter_site_ids()
     if allowed is not None and (not site_id or int(site_id) not in allowed):
         return jsonify({'error': '无权限上报非本人负责站点的异常'}), 403
@@ -38697,7 +38709,9 @@ def api_manual_reports_create():
     photo_urls = data.get('photo_urls', [])
     if not isinstance(photo_urls, list):
         return jsonify({'error': '现场照片格式无效'}), 400
-    photo_urls = list(dict.fromkeys(url for url in photo_urls if isinstance(url, str) and url.startswith('/uploads/')))
+    if any(not isinstance(url, str) or not url.startswith('/uploads/') for url in photo_urls):
+        return jsonify({'error': '现场照片地址无效'}), 400
+    photo_urls = list(dict.fromkeys(photo_urls))
     if not photo_urls:
         return jsonify({'error': '请至少提交一张现场照片'}), 400
     gps_lat = data.get('gps_lat')
@@ -38710,13 +38724,17 @@ def api_manual_reports_create():
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with get_db() as db:
-        # 同一现场人员短时间内使用同一批照片重复提交，通常是弱网重试或重复点击。
-        # 在写入前持有写锁并返回已有上报，确保一次上报只派生一张工单。
+        # 同一批照片只能正式归属一次；无论弱网重试间隔多久都返回原上报。
         db.execute('BEGIN IMMEDIATE')
+        if not db.execute('SELECT 1 FROM sites WHERE id=?', (site_id,)).fetchone():
+            return jsonify({'error': '站点不存在'}), 404
+        if allowed is not None and not db.execute(
+                'SELECT 1 FROM user_sites WHERE user_id=? AND site_id=?',
+                (reporter_id, site_id)).fetchone():
+            return jsonify({'error': '无权限上报非本人负责站点的异常'}), 403
         duplicate = db.execute(
             '''SELECT * FROM manual_reports
                WHERE site_id=? AND reporter_id=? AND report_type=? AND description=? AND photo_urls=?
-                 AND reported_at >= datetime('now','localtime','-2 minutes')
                ORDER BY id DESC LIMIT 1''',
             (site_id, reporter_id, report_type, description, photos_json),
         ).fetchone()
@@ -38725,6 +38743,29 @@ def api_manual_reports_create():
             result['deduplicated'] = True
             result['photo_media'] = _manual_report_photo_media(db, result)
             return jsonify(result), 200
+        marks = ','.join('?' * len(photo_urls))
+        attachments = db.execute(f"""SELECT * FROM operation_attachments
+            WHERE stored_path IN ({marks})""", photo_urls).fetchall()
+        if len(attachments) != len(photo_urls):
+            return jsonify({'error': '照片不存在或状态已变化，请刷新后重试'}), 409
+        attachment_extras = {}
+        for attachment in attachments:
+            try:
+                extra = _json.loads(attachment['extra_json'] or '{}')
+            except (TypeError, ValueError):
+                extra = {}
+            if (not isinstance(extra, dict) or extra.get('material_role') != 'pending_manual_report'
+                    or attachment['uploader_id'] != reporter_id
+                    or attachment['source_type'] != 'site_photo'
+                    or attachment['source_id'] != 0 or attachment['is_deleted']):
+                return jsonify({'error': '照片不是本人可提交的异常暂存材料'}), 409
+            if int(attachment['site_id'] or 0) != int(site_id):
+                extra['original_site_id'] = attachment['site_id']
+                extra['site_correction'] = {'from_site_id': attachment['site_id'],
+                                            'to_site_id': int(site_id),
+                                            'operator_id': reporter_id, 'at': now}
+            extra['material_role'] = 'formal'
+            attachment_extras[attachment['id']] = _json.dumps(extra, ensure_ascii=False)
         # 写上报记录
         cur = db.execute(
             'INSERT INTO manual_reports (site_id, report_type, description, photo_urls, gps_lat, gps_lng, reporter_id, reported_at) VALUES (?,?,?,?,?,?,?,?)',
@@ -38760,21 +38801,11 @@ def api_manual_reports_create():
         # 关联工单号回写
         db.execute('UPDATE manual_reports SET order_no=?, status="dispatched" WHERE id=?', (order_no, report_id))
         # 将上传暂存照片提升为异常上报证据；审核队列由此可直接追溯到本次上报。
-        marks = ','.join('?' * len(photo_urls))
-        material_promotion = """
-                   ,extra_json=CASE
-                     WHEN json_valid(extra_json)
-                      AND json_extract(extra_json,'$.material_role')='pending_manual_report'
-                     THEN json_set(extra_json,'$.material_role','formal')
-                     ELSE extra_json
-                   END""" if _table_has_column(db, 'operation_attachments', 'extra_json') else ''
-        db.execute(
-            f"""UPDATE operation_attachments
-               SET source_type='manual_report', source_id=?, description=?{material_promotion}
-                WHERE stored_path IN ({marks}) AND site_id=? AND uploader_id=?
-                  AND source_type='site_photo' AND source_id=0""",
-            [report_id, f'异常上报#{report_id}现场证据', *photo_urls, site_id, reporter_id],
-        )
+        for attachment_id, extra_json in attachment_extras.items():
+            db.execute("""UPDATE operation_attachments
+                SET source_type='manual_report', source_id=?, description=?, site_id=?, extra_json=?
+                WHERE id=?""", (report_id, f'异常上报#{report_id}现场证据', site_id,
+                                 extra_json, attachment_id))
         db.commit()
 
         row = db.execute('SELECT * FROM manual_reports WHERE id=?', (report_id,)).fetchone()

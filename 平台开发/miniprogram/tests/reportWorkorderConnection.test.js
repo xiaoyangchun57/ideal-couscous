@@ -288,7 +288,7 @@ async function run() {
   await staleOpen;
   assert.equal(stale.data.reportSheet.open, false);
 
-  // Upload is bound to the selected site and a photo-bearing draft cannot switch site.
+  // A confirmed correction preserves the uploaded photo and original capture site.
   const siteA = { id: 31, name: '甲站' };
   const siteB = { id: 32, name: '乙站' };
   const uploadCalls = [];
@@ -306,7 +306,9 @@ async function run() {
   assert.deepEqual(chosenSourceTypes.at(-1), ['album']);
   assert.equal(photos.data.reportSheet.photoSiteId, 31);
   photos.onReportSite({ detail: { value: '1' } });
-  assert.equal(photos.data.reportSheet.siteId, 31);
+  assert.equal(photos.data.reportSheet.siteId, 32);
+  assert.equal(photos.data.reportSheet.photos.length, 1);
+  assert.equal(photos.data.reportSheet.photoItems[0].uploadSiteId, 31);
 
   let attachmentReads = 0;
   api.attachmentDetail = attachmentId => {
@@ -341,7 +343,7 @@ async function run() {
   assert.equal(protectedDraft.data.reportSheet.photoItems[0].metadata.capture_session, 'stable-session',
     'selecting the current site preserves the full failed-photo draft');
   protectedDraft.onReportSite({ detail: { value: '1' } });
-  assert.equal(protectedDraft.data.reportSheet.siteId, 31);
+  assert.equal(protectedDraft.data.reportSheet.siteId, 32);
   assert.equal(protectedDraft.data.reportSheet.description, '保留失败照片');
   assert.equal(protectedDraft.data.reportSheet.photoItems[0].idempotencyKey, 'stable-failed-key');
   assert.equal(protectedDraft.data.reportSheet.photoItems[0].metadata.capture_session, 'stable-session');
@@ -499,6 +501,8 @@ async function run() {
   const staleCaptureTask = staleCapture.onTakeReportPhoto();
   await settle();
   const staleNavigation = navigations.at(-1);
+  // A replaced draft is stale; a confirmed site correction belongs to the same draft.
+  staleCapture._reportDraftVersion = (staleCapture._reportDraftVersion || 0) + 1;
   staleCapture.setData({ 'reportSheet.siteId': 32, 'reportSheet.siteName': '乙站' });
   staleNavigation.events.trustedCameraCaptured({
     requestId: new URLSearchParams(staleNavigation.url.split('?')[1]).get('request_id'),
