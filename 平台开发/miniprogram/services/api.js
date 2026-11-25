@@ -110,7 +110,10 @@ const api = {
       + (scope ? '?scope=' + scope : ''), 'GET');
   },
   checkOutExecutionSite: (planId, siteId, payload) =>
-    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}),
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/check-out', 'POST', payload || {}, { queue: false }),
+  correctCheckOutExecutionSite: (planId, siteId, payload) =>
+    request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/correct-check-out',
+      'POST', payload, { queue: false }),
   executionSiteReagents: (planId, siteId) =>
     request('/api/mobile/execution-plans/' + planId + '/sites/' + siteId + '/reagents', 'GET'),
   replaceExecutionReagent: (planId, siteId, payload) =>
@@ -338,7 +341,7 @@ const api = {
   // 排程详情（含 site_map、generated_plans）
   planScheduleDetail: (id) => request('/api/plan-schedules/' + id, 'GET'),
 
-  // 创建排程（submit=true 直接提交审批）
+  // 创建排程（submit=true 由本人确认并生效）
   createPlanSchedule: (payload) => request('/api/plan-schedules', 'POST', payload),
 
   // 编辑排程（仅 draft/rejected 可编辑）
@@ -354,15 +357,15 @@ const api = {
   createDraftFromPlanScheduleFavorite: (id, periodStart) =>
     request('/api/plan-schedule-favorites/' + id + '/draft', 'POST', { period_start: periodStart }),
 
-  // 提交排程审批
+  // 本人确认排程，与任务生成同事务
   submitPlanSchedule: (id, version) =>
-    request('/api/plan-schedules/' + id + '/submit', 'POST', { version }, { queue: false }),
+    request('/api/plan-schedules/' + id + '/confirm', 'POST', { version }, { queue: false }),
   approvePlanSchedule: (id) => request('/api/plan-schedules/' + id + '/approve', 'POST', {}),
   rejectPlanSchedule: (id, reason) => request('/api/plan-schedules/' + id + '/reject', 'POST', { reason: reason || '' }),
 
   // 发起变更（已通过的计划，approved → modifying）
-  requestPlanScheduleChange: (id, changeReason) =>
-    request('/api/plan-schedules/' + id + '/request-change', 'POST', { change_reason: changeReason }),
+  requestPlanScheduleChange: (id, changeReason, version) =>
+    request('/api/plan-schedules/' + id + '/request-change', 'POST', { change_reason: changeReason, version }, { queue: false }),
 
   abandonPlanScheduleChange: (id, version) =>
     request('/api/plan-schedules/' + id + '/abandon-change', 'POST', { version }, { queue: false }),
@@ -371,6 +374,9 @@ const api = {
     request('/api/plan-schedules/' + id + '/cancel', 'POST', {
       reason: String(reason || '').trim(), version
     }, { queue: false }),
+
+  stopPlanSchedule: (id, reason, version) =>
+    request('/api/plan-schedules/' + id + '/stop', 'POST', { reason, version }, { queue: false }),
 
   // 排程校验（车辆冲突等）
   validatePlanSchedule: (payload) => request('/api/plan-schedules/validate', 'POST', payload),

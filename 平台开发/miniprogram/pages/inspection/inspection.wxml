@@ -586,18 +586,18 @@
         </view>
 
         <!-- 底部主动作栏占位 -->
-        <view class="ip-bottom-spacer" wx:if="{{viewMode === 'execute' && stationStage && (stationStage.code !== 'checked_in' || (total > 0 && completed === total && !stationSyncPending && !site.checked_out)) && !sheet.open && !reportSheet.open && !reagentSheet.open && !partsIssueSheet.open && !partsApply.open && !vehicleSheet.open && !reworkResourceSheet.open && !refuelSheet.open && !vehicleFaultSheet.open}}"></view>
+        <view class="ip-bottom-spacer" wx:if="{{viewMode === 'execute' && stationStage && (stationStage.code !== 'checked_in' || (total > 0 && !stationSyncPending && !site.checked_out)) && !sheet.open && !reportSheet.open && !reagentSheet.open && !partsIssueSheet.open && !partsApply.open && !vehicleSheet.open && !reworkResourceSheet.open && !refuelSheet.open && !vehicleFaultSheet.open}}"></view>
 
         <!-- 底部固定主动作栏 -->
-        <view class="ip-bottom-bar" wx:if="{{viewMode === 'execute' && stationStage && (stationStage.code !== 'checked_in' || (total > 0 && completed === total && !stationSyncPending && !site.checked_out)) && !sheet.open && !reportSheet.open && !reagentSheet.open && !partsIssueSheet.open && !partsApply.open && !vehicleSheet.open && !reworkResourceSheet.open && !refuelSheet.open && !vehicleFaultSheet.open}}">
+        <view class="ip-bottom-bar" wx:if="{{viewMode === 'execute' && stationStage && (stationStage.code !== 'checked_in' || (total > 0 && !stationSyncPending && !site.checked_out)) && !sheet.open && !reportSheet.open && !reagentSheet.open && !partsIssueSheet.open && !partsApply.open && !vehicleSheet.open && !reworkResourceSheet.open && !refuelSheet.open && !vehicleFaultSheet.open}}">
           <!-- 待到站：到站打卡 -->
           <block wx:if="{{stationStage.code === 'unvisited'}}">
             <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onCheckIn">到站打卡，开始巡检</button>
           </block>
-          <!-- 已到站 + 全部正式完成：离站 -->
-          <block wx:elif="{{stationStage.code === 'checked_in' && total > 0 && completed === total && !stationSyncPending && !site.checked_out}}">
+          <!-- 离站独立记录；剩余检查不自动完成 -->
+          <block wx:elif="{{stationStage.code === 'checked_in' && total > 0 && !stationSyncPending && !site.checked_out}}">
             <button class="ip-btn ip-btn-primary ip-btn-lg" bindtap="onCheckOut" loading="{{checkingOut}}" disabled="{{checkingOut}}">
-              {{checkingOut ? '离站中…' : '结束本次作业，离站打卡'}}
+              {{checkingOut ? '离站中…' : '记录离站'}}
             </button>
           </block>
           <!-- 待同步：唯一主动作 -->
@@ -606,6 +606,8 @@
           </block>
           <!-- 已离站：按精确路线前往下一站或返回计划 -->
           <block wx:elif="{{stationStage.code === 'checked_out'}}">
+            <button class="ip-btn ip-btn-secondary" wx:if="{{site.can_correct_checkout}}" bindtap="onCorrectCheckOut" loading="{{correctingCheckOut}}" disabled="{{correctingCheckOut}}">误离站纠正</button>
+            <button class="ip-btn ip-btn-secondary" wx:if="{{completed < total}}" bindtap="onCheckIn">重新到站，继续原任务</button>
             <button class="ip-btn ip-btn-primary ip-btn-lg" wx:if="{{stationOutcome.type === 'next_site'}}" bindtap="onGoToNextSite">前往下一站：{{stationOutcome.siteName}}</button>
             <button class="ip-btn ip-btn-primary ip-btn-lg" wx:else bindtap="onBack" data-action="back">返回计划列表</button>
           </block>
@@ -618,7 +620,7 @@
     <!-- 空态 / 错误态 -->
     <view class="ip-empty-wrap" wx:if="{{loaded && !currentPackage}}">
       <view class="ip-empty">
-        <text class="ip-empty-text">{{executionError || '今日暂无已批准的巡检任务'}}</text>
+        <text class="ip-empty-text">{{executionError || '今日暂无已生效的巡检任务'}}</text>
         <text class="ip-empty-hint" wx:if="{{!executionError}}">今日无可执行任务；未来计划请到首页"即将执行"或"我的计划"查看</text>
       </view>
     </view>

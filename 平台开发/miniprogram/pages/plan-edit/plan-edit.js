@@ -877,10 +877,7 @@ Page({
     const coverageRequired = this.data.scheduleType === 'weekly' && missing.length > 0;
     const fieldErrors = {};
     if (!selected.size) fieldErrors.sites = '请至少安排一个巡检站点';
-    if (!this.data.noVehicleRequired && !this.data.planVehicleId) fieldErrors.planVehicleId = '请选择计划车辆';
-    if (coverageRequired && !String(this.data.coverageExceptionReason || '').trim()) {
-      fieldErrors.coverage_exception_reason = '请说明未覆盖站点的原因';
-    }
+    // Resource readiness and coverage are reminders; task validity is checked separately.
     const missingSiteList = coverageRequired ? missing.map(site => site.name) : [];
     this.setData({ coverageRequired, missingSiteNames: missingSiteList.join('、'), missingSiteList,
       missingCount: missingSiteList.length, coverageWarning: coverageRequired ? '本周存在未覆盖站点' : '', fieldErrors });
@@ -1020,12 +1017,12 @@ Page({
     submission
       .then(submitted => {
         if (!this.data.editId && !this.isCurrentCreation(payload)) return;
-        if (this.data.isChange && (!submitted || submitted.status !== 'change_submitted')) {
-          throw { error: '服务端未确认计划变更已提交审核，请直接重试' };
+        if (this.data.isChange && (!submitted || submitted.status !== 'approved')) {
+          throw { error: '服务端未确认修改已生效，请直接重试' };
         }
         this._pendingFormalSubmit = null;
         this.setData({ submitError: '' });
-        wx.showToast({ title: this.data.isChange ? '变更已提交审核' : (this.data.editId || (submitted && submitted.status === 'submitted') ? '已提交审批' : '计划已恢复，请查看当前状态'), icon: 'success' });
+        wx.showToast({ title: this.data.isChange ? '修改已生效' : '计划已生效', icon: 'success' });
         setTimeout(() => {
           if (this._pageAlive !== false && (this.data.editId || this.isCurrentCreation(payload))) wx.navigateBack();
         }, 1200);

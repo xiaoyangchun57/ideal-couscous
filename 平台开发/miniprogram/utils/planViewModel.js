@@ -35,13 +35,13 @@ function planStatusInfo(plan) {
 
   // Plan terminal states take precedence over any stale execution projection.
   if (status === 'archived') return { label: '已归档', tone: 'neutral', group: 'done' };
-  if (status === 'cancelled') return { label: '已取消', tone: 'neutral', group: 'done' };
+  if (status === 'cancelled') return { label: value.field_status === 'stopped' ? '已停止剩余' : '已取消', tone: 'neutral', group: 'done' };
   if (status === 'draft') return { label: '草稿', tone: 'neutral', group: 'draft' };
-  if (status === 'submitted') return { label: '待审批', tone: 'warning', group: 'active' };
+  if (status === 'submitted') return { label: '待本人确认', tone: 'warning', group: 'active' };
   if (status === 'rejected') return { label: '已退回', tone: 'warning', group: 'active' };
-  if (status === 'modifying') return { label: '变更中', tone: 'warning', group: 'active' };
+  if (status === 'modifying') return { label: '修改待确认', tone: 'warning', group: 'active' };
   if (status === 'change_submitted' || executionStatus === 'change_pending') {
-    return { label: '变更待审', tone: 'warning', group: 'active' };
+    return { label: '修改待确认', tone: 'warning', group: 'active' };
   }
   if (status === 'approved') {
     if (executionStatus === 'completed') return { label: '已完成', tone: 'success', group: 'done' };
@@ -99,20 +99,20 @@ const APPROVED_EXECUTION_STATUS_NOTES = {
     ? { text: `${context.supplementRequiredItems}项需补拍`, tone: 'warning' }
     : { text: '请按审核意见完成整改', tone: 'warning' }),
   completed: () => ({ text: '全部站点任务已完成', tone: 'success' }),
-  change_pending: () => ({ text: '等待变更审批', tone: 'info' })
+  change_pending: () => ({ text: '修改待本人确认，原安排继续有效', tone: 'info' })
 };
 
 const SCHEDULE_STATUS_NOTES = {
-  draft: () => ({ text: '尚未提交审批', tone: 'neutral' }),
-  submitted: () => ({ text: '等待管理员审批', tone: 'info' }),
+  draft: () => ({ text: '尚未由本人确认', tone: 'neutral' }),
+  submitted: () => ({ text: '旧待审记录可由本人明确确认生效', tone: 'info' }),
   rejected: context => {
     const reason = String(context.value.reject_reason || '').trim();
     return reason
       ? { text: `退回原因：${reason}`, tone: 'warning' }
       : { text: '退回原因待补充，请联系管理员', tone: 'warning' };
   },
-  modifying: () => ({ text: '计划变更编辑中', tone: 'info' }),
-  change_submitted: () => ({ text: '等待变更审批', tone: 'info' }),
+  modifying: () => ({ text: '修改尚未确认，原安排继续有效', tone: 'info' }),
+  change_submitted: () => ({ text: '修改待本人确认，原安排继续有效', tone: 'info' }),
   cancelled: context => {
     const reason = String(context.value.cancel_reason || context.value.cancellation_reason || '').trim();
     return reason

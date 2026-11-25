@@ -49,9 +49,9 @@ test('overall execution presentation uses the server user state', () => {
 
 test('schedule modifying, submitted change, and cancellation override execution aggregates', () => {
   assert.deepEqual(planExecutionPresentation({ status: 'modifying', execution_status: 'completed' }),
-    { key: 'modifying', label: '变更中，暂缓执行', color: 'warning' });
+    { key: 'completed', label: '已完成', color: 'success' });
   assert.deepEqual(planExecutionPresentation({ status: 'change_submitted', execution_status: 'pending' }),
-    { key: 'change_pending', label: '变更待审', color: 'warning' });
+    { key: 'pending', label: '待执行', color: 'default' });
   assert.deepEqual(planExecutionPresentation({ status: 'cancelled', execution_status: 'partial' }),
     { key: 'cancelled', label: '已取消', color: 'default' });
 });
@@ -107,7 +107,7 @@ test('cancel and irreversible purge reason counters reserve local footer space r
 
 test('legacy and taskless plans never expose internal active as field work in progress', () => {
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'active' }).key, 'pending');
-  assert.equal(planExecutionPresentation({ status: 'change_submitted', field_status: 'active' }).key, 'change_pending');
+  assert.equal(planExecutionPresentation({ status: 'change_submitted', field_status: 'active' }).key, 'pending');
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'completed' }).key, 'completed');
   assert.equal(planExecutionPresentation({ status: 'approved', field_status: 'rework' }).key, 'rework');
   assert.equal(planExecutionPresentation({}).key, 'pending');
@@ -194,7 +194,7 @@ test('detail cancellation keeps reason and context on failure and refreshes afte
   assert.match(handler, /canCancelPlanSchedule\(detail, user\)/);
   assert.match(handler, /canCancelPlanSchedule\(detail, user\) \|\| cancelActionRef\.current\) return/);
   assert.match(handler, /cancelActionRef\.current = true/);
-  assert.match(handler, /postStrict\(`\/plan-schedules\/\$\{detail\.id\}\/cancel`,\s*\{ reason: normalized\.value, version \}/);
+  assert.match(handler, /postStrict\(`\/plan-schedules\/\$\{detail\.id\}\/\$\{detail\.can_stop \? 'stop' : 'cancel'\}`,\s*\{ reason: normalized\.value, version \}/);
   assert.match(failureBranch, /setCancelError\(error\?\.message \|\| '取消计划失败/);
   assert.doesNotMatch(failureBranch, /setCancelReason\(''\)/);
   assert.match(handler, /finally \{[\s\S]*cancelActionRef\.current = false/);

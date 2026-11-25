@@ -80,8 +80,8 @@ function metricCn(key) {
 
 // 计划调度状态
 const PLAN_SCHEDULE_STATUS = {
-  draft: '草稿', submitted: '待审批', approved: '已通过',
-  rejected: '已退回', modifying: '变更中', change_submitted: '变更待审',
+  draft: '草稿', submitted: '待本人确认', approved: '已生效',
+  rejected: '已退回', modifying: '修改待确认', change_submitted: '修改待确认',
   cancelled: '已取消', archived: '已归档'
 };
 const PLAN_SCHEDULE_STATUS_CLS = {

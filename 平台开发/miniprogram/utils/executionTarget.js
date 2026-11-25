@@ -90,7 +90,7 @@ function buildPackageOption(pkg) {
     scheduleId: positiveId(source.schedule_id),
     scheduleStatus: source.schedule_status === undefined ? 'approved' : source.schedule_status,
     scheduleStatusLabel: source.schedule_id && source.schedule_status !== undefined && source.schedule_status !== 'approved'
-      ? ({ modifying: '父计划变更中', submitted: '父计划待审批', rejected: '父计划已退回',
+      ? ({ modifying: '修改待确认，原安排可执行', change_submitted: '修改待确认，原安排可执行', submitted: '待本人确认', rejected: '父计划已退回',
         draft: '父计划草稿', cancelled: '父计划已取消' }[source.schedule_status] || '父计划不可用') : '',
     workDate: String(source.work_date || ''),
     planType: source.schedule_type || 'inspection',

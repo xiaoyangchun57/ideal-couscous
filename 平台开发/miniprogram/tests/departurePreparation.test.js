@@ -30,9 +30,10 @@ test('mode prioritizes rework over carryover', () => {
 test('normal and carryover packages consume the authoritative vehicle arrival gate', () => {
   const normal = buildDeparturePreparation(pkg(), null);
   assert.equal(normal.canContinueToArrival, true);
-  assert.equal(normal.vehicle.statusLabel, '未安排车辆');
+  assert.match(normal.vehicle.statusLabel, /需用车，尚未落实/);
 
   const noVehicle = buildDeparturePreparation(pkg({
+    no_vehicle_required: true,
     vehicle_exception_reason: '步行即可完成全部站点',
   }), null);
   assert.equal(noVehicle.vehicle.statusLabel, '计划无需用车');
@@ -342,6 +343,7 @@ test('preparation completion requires an exact target and every authoritative re
   });
 
   const explicitNoVehicle = buildDeparturePreparation(pkg({
+    no_vehicle_required: true,
     vehicle_exception_reason: '站点步行可达', arrival_gate: { allowed: true },
   }), target);
   assert.equal(explicitNoVehicle.preparationCompleted, true);
