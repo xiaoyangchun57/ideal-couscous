@@ -2,9 +2,10 @@
   "schema_version": 1,
   "release_line": "inspection-autonomy-preserve-production-ingest",
   "candidate_tags": [
-    "release-20261125-inspection-autonomy-bytefix1-r34"
+    "release-20261125-legacy-checkout-hotfix1-r34"
   ],
   "historical_tags": [
+    "release-20261125-inspection-autonomy-bytefix1-r34",
     "release-20261022-retention-maintenance-r29",
     "release-20261022-station-result-chain-fix1-r29",
     "release-20261021-station-data-closure-r29",

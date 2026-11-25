@@ -27480,16 +27480,45 @@ def mobile_execution_site_check_out(plan_id, site_id):
         if not _inspection_visit_owner(db, plan_id, site_id, user):
             return jsonify({'error': '只能为本人仍有效的原任务记录离站'}), 403
         current = inspection_visit_facts.state(db, plan_id, site_id)
-        request_key = f'departure:{user["id"]}:{plan_id}:{site_id}:{data.get("version", "")}'
-        if inspection_visit_facts.replay(db, request_key):
-            return jsonify({'success': True, 'already_closed': True, **current})
-        if data.get('version') != current['visit_version']:
-            return jsonify({'error': '作业记录已变化，请刷新后重新确认离站',
-                'code': 'INSPECTION_VISIT_VERSION_CONFLICT', **current}), 409
+        legacy = 'version' not in data
+        legacy_visit = None
+        if not legacy:
+            request_key = f'departure:{user["id"]}:{plan_id}:{site_id}:{data.get("version", "")}'
+            if inspection_visit_facts.replay(db, request_key):
+                return jsonify({'success': True, 'already_closed': True, **current})
+            if data.get('version') != current['visit_version']:
+                return jsonify({'error': '作业记录已变化，请刷新后重新确认离站',
+                    'code': 'INSPECTION_VISIT_VERSION_CONFLICT', **current}), 409
         items = db.execute("""SELECT * FROM insp_plan_items WHERE plan_id=? AND site_id=?
             AND COALESCE(execution_status,'active')='active'""", (plan_id, site_id)).fetchall()
         completed = sum(_inspection_field_item_completed(item) for item in items)
-        if all(item['check_out_time'] for item in items):
+
+        def legacy_rejection(reason):
+            return jsonify({'error': reason + '。请保留手机内资料，联系维护核对原任务；正式新版可用后再更新',
+                'code': 'INSPECTION_LEGACY_DEPARTURE_UNSAFE',
+                'completed': completed, 'total': len(items)}), 409
+
+        if legacy:
+            if not items or completed != len(items):
+                return legacy_rejection(f'本站已完成{completed}/{len(items)}，旧版仅支持全部完成后的首次离站')
+            legacy_visit, reason = inspection_visit_facts.legacy_first_visit(
+                db, plan_id, site_id, user['id'],
+                lambda arrival: _legacy_inspection_checkin_matches_plan(
+                    db, items[0], user['id'], arrival['check_time']))
+            if reason:
+                return legacy_rejection(reason)
+            arrival_at = _parse_dt(legacy_visit['arrival']['check_time'])
+            if (not arrival_at or arrival_at.date() != datetime.now().date()
+                    or arrival_at > datetime.now()):
+                return legacy_rejection('首次到站时间无效或不在今日有效到站范围内')
+            request_key = legacy_visit['request_key']
+            departure = legacy_visit['departure']
+            if departure:
+                if not all(item['check_out_time'] == departure['occurred_at'] for item in items):
+                    return legacy_rejection('原离站后的任务状态已变化，不能回放旧版离站结果')
+            elif any(item['check_out_time'] for item in items):
+                return legacy_rejection('已有无法对应首次到站的离站状态')
+        if not legacy and all(item['check_out_time'] for item in items):
             return jsonify({'success': True, 'already_closed': True,
                 'check_out_time': max(item['check_out_time'] for item in items), **current})
         if completed < len(items) and data.get('confirm_incomplete') is not True:
@@ -27504,15 +27533,27 @@ def mobile_execution_site_check_out(plan_id, site_id):
         if distance is None or distance > SITE_GEOFENCE_M:
             return jsonify({'error': '请在站点300m范围内记录离站；站点须有有效坐标',
                 'code': 'SITE_GEOFENCE_EXCEEDED'}), 409
+        if legacy:
+            arrival = legacy_visit['arrival']
+            arrival_coords = _parse_gps_pair(arrival.get('lat'), arrival.get('lng'))
+            arrival_distance = _checkin_distance_to_site(site, *arrival_coords) if arrival_coords else None
+            if arrival_distance is None or arrival_distance > SITE_GEOFENCE_M:
+                return legacy_rejection('首次到站缺少有效的站内定位证据')
+            if legacy_visit['departure']:
+                return jsonify({'success': True, 'already_closed': True, **current})
         if not any(_inspection_item_checkin_time(db, item, user['id']) for item in items):
             return jsonify({'error': '请先记录本站到站'}), 409
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         db.execute("""UPDATE insp_plan_items SET check_out_time=? WHERE plan_id=? AND site_id=?
             AND COALESCE(execution_status,'active')='active'""", (now, plan_id, site_id))
         field = _ps_recalculate_field_execution(db, plan_id)
+        payload = {'completed': completed, 'total': len(items), 'lat': coords[0], 'lng': coords[1],
+                   'guard': inspection_visit_facts.facts_guard(db, plan_id, site_id)}
+        if legacy:
+            payload.update({'source': 'legacy_missing_version',
+                            'arrival_checkin_id': legacy_visit['arrival']['id']})
         inspection_visit_facts.record(db, plan_id, site_id, user['id'], 'departure', now,
-            {'completed': completed, 'total': len(items), 'lat': coords[0], 'lng': coords[1],
-             'guard': inspection_visit_facts.facts_guard(db, plan_id, site_id)}, request_key=request_key)
+            payload, request_key=request_key)
         response = {'success': True, 'check_out_time': now, 'completed': completed,
             'total': len(items), 'location_verified': True, 'distance_m': round(distance),
             'execution_status': field['status'], **inspection_visit_facts.state(db, plan_id, site_id)}
