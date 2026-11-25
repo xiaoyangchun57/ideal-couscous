@@ -317,7 +317,7 @@
       id="plan-coverage-reason"
       focus="{{focusedErrorField === 'coverage_exception_reason'}}"
       class="pe-textarea {{fieldErrors.coverage_exception_reason ? 'pe-textarea--error' : ''}}"
-      placeholder="{{coverageRequired ? '请说明漏站原因，如封路、站点停运或应急调度' : '如有漏站请说明原因（选填）'}}"
+      placeholder="{{coverageRequired ? '未覆盖原因选填，不影响确认' : '如有漏站请说明原因（选填）'}}"
       value="{{coverageExceptionReason}}"
       bindinput="onCoverageExceptionReason"
       maxlength="200"
@@ -414,7 +414,7 @@
   <!-- 底部固定操作栏 -->
   <view class="pe-bottom-bar">
     <button class="pe-btn pe-btn-ghost" bindtap="onSaveDraft" disabled="{{submitting}}">存草稿</button>
-    <button class="pe-btn pe-btn-primary" bindtap="onSubmit" loading="{{submitting}}" disabled="{{submitting}}">{{isChange ? '确认变更并生效' : '提交审批'}}</button>
+    <button class="pe-btn pe-btn-primary" bindtap="onSubmit" loading="{{submitting}}" disabled="{{submitting}}">{{isChange ? '确认变更并生效' : '本人确认生效'}}</button>
   </view>
 </view>
 

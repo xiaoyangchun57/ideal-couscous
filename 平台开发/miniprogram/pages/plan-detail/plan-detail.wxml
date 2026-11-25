@@ -10,7 +10,7 @@
       <view class="plan-type-period">{{typeCn}} · {{detail.period_start}} ~ {{detail.period_end}}</view>
       <view class="plan-name">{{detail.plan_name || '巡检计划'}}</view>
     </view>
-    <view class="progress-wrap" wx:if="{{detail.status === 'approved'}}">
+    <view class="progress-wrap" wx:if="{{totalItems > 0 && (detail.status === 'approved' || detail.status === 'modifying' || detail.status === 'change_submitted' || detail.field_status === 'stopped')}}">
       <view class="progress-summary">
         <text class="progress-stat"><text class="progress-num">{{completedSites || 0}}</text>/{{totalSites || 0}} 站</text>
         <text class="progress-stat"><text class="progress-num">{{completedItems || 0}}</text>/{{totalItems || 0}} 项</text>
@@ -59,8 +59,8 @@
 
   <!-- ===== 卡片1：作业路线 ===== -->
   <view class="info-card" wx:if="{{loaded && detail.cancellation}}">
-    <view class="card-header">取消记录</view>
-    <view class="info-row"><text class="info-label">取消原因</text><text class="info-value info-value-multiline">{{detail.cancellation.reason}}</text></view>
+    <view class="card-header">{{detail.cancellation.event_type === "stopped_remaining" ? "停止剩余作业记录" : "取消记录"}}</view>
+    <view class="info-row"><text class="info-label">{{detail.cancellation.event_type === "stopped_remaining" ? "停止原因" : "取消原因"}}</text><text class="info-value info-value-multiline">{{detail.cancellation.reason}}</text></view>
     <view class="info-row"><text class="info-label">操作人</text><text class="info-value">{{detail.cancellation.operator_name}}</text></view>
     <view class="info-row"><text class="info-label">操作时间</text><text class="info-value">{{detail.cancellation.occurred_at}}</text></view>
   </view>
@@ -107,7 +107,11 @@
 
   <!-- ===== 卡片2：审批信息 ===== -->
   <view class="info-card" wx:if="{{loaded && detail && (detail.user_name || detail.submitted_at || detail.approver_name || detail.approved_at || detail.remarks)}}">
-    <view class="card-header">审批信息</view>
+    <view class="card-header">生效与历史审批信息</view>
+    <view class="info-row" wx:if="{{detail.confirmation}}">
+      <text class="info-label">本人确认</text>
+      <text class="info-value">{{detail.user_name}} · {{detail.confirmation.confirmed_at}} · v{{detail.confirmation.version}}</text>
+    </view>
     <view class="info-row" wx:if="{{detail.user_name}}">
       <text class="info-label">负责人</text>
       <text class="info-value">{{detail.user_name}}</text>
@@ -156,7 +160,7 @@
   <view class="info-card" wx:if="{{canAbandonChange}}">
     <view class="card-header">计划变更中</view>
     <view class="info-row">
-      <text class="info-value info-value-secondary info-value-multiline">尚未提交审批。可以继续编辑，或放弃本次修改并恢复变更前已审批计划。</text>
+      <text class="info-value info-value-secondary info-value-multiline">修改尚未确认，原安排仍可执行。可以继续编辑，或放弃本次修改。</text>
     </view>
     <button class="btn-secondary-outline btn-destructive-outline" loading="{{abandoningChange}}" bindtap="onAbandonChange">放弃变更并恢复原计划</button>
   </view>
@@ -167,9 +171,10 @@
   <!-- ===== 底部固定操作栏 ===== -->
   <view class="bottom-bar" wx:if="{{loaded}}">
     <!-- 草稿状态 -->
-    <block wx:if="{{canEdit}}">
-      <button class="btn-primary-main" bindtap="onSubmit">提交审批</button>
-      <button class="btn-secondary-outline" bindtap="onEdit">编辑</button>
+    <block wx:if="{{canConfirm}}">
+      <button class="btn-primary-main" bindtap="onSubmit">本人确认生效</button>
+      <button class="btn-secondary-outline" bindtap="onEdit" wx:if="{{canEdit}}">编辑</button>
+      <button class="btn-secondary-outline" bindtap="onGoExecution" wx:if="{{canExecute}}">{{executionActionText}}</button>
     </block>
     <!-- 可执行：主=进入现场，次=发起变更 -->
     <block wx:elif="{{canExecute}}">
@@ -189,23 +194,23 @@
     <block wx:else>
       <button class="btn-primary-main" bindtap="onFavoriteAction" wx:if="{{canFavorite}}">{{favorite ? '复用计划' : '收藏为常用'}}</button>
     </block>
-    <button class="btn-secondary-outline btn-destructive-outline" bindtap="onOpenCancel" wx:if="{{canCancel}}">取消计划</button>
+    <button class="btn-secondary-outline btn-destructive-outline" bindtap="onOpenCancel" wx:if="{{canCancel || canStop}}">{{canStop ? "停止剩余作业" : "取消计划"}}</button>
   </view>
 
   <!-- 取消原因弹层 -->
   <view class="sheet-mask" wx:if="{{cancelSheet.open}}" bindtap="onCloseCancel"></view>
   <view class="sheet" wx:if="{{cancelSheet.open}}"><view class="sheet-handle"></view>
     <view class="sheet-head">
-      <text class="sheet-title">取消计划</text>
+      <text class="sheet-title">{{canStop ? "停止剩余作业" : "取消计划"}}</text>
       <view class="sheet-close" bindtap="onCloseCancel"></view>
     </view>
     <!-- 后果说明：破坏性操作必须明确告知影响 -->
     <view class="cancel-warning">
-      <text class="cancel-warning-title">取消后将产生以下影响</text>
+      <text class="cancel-warning-title">确认后将产生以下影响</text>
       <view class="cancel-warning-list">
-        <text class="cancel-warning-item">· 计划状态变更为"已取消"，不可恢复</text>
-        <text class="cancel-warning-item">· 已排期的巡检任务将同步作废</text>
-        <text class="cancel-warning-item">· 取消操作需填写原因并留痕</text>
+        <text class="cancel-warning-item">· 剩余未执行部分停止安排，已做成果与真实进度保留</text>
+        <text class="cancel-warning-item">· 释放未履约预约和需求，不自动还车或回库</text>
+        <text class="cancel-warning-item">· 原记录保留，填写原因并留痕</text>
       </view>
     </view>
     <text class="field-label">取消原因 <text class="required">*</text></text>
@@ -213,7 +218,7 @@
     <text class="form-error" wx:if="{{cancelSheet.error}}">{{cancelSheet.error}}</text>
     <view class="sheet-actions">
       <button class="btn-secondary-outline" bindtap="onCloseCancel">返回</button>
-      <button class="btn-primary-main btn-destructive-outline" loading="{{cancelSheet.submitting}}" bindtap="onConfirmCancel">确认取消</button>
+      <button class="btn-primary-main btn-destructive-outline" loading="{{cancelSheet.submitting}}" bindtap="onConfirmCancel">{{canStop ? "确认停止剩余" : "确认取消"}}</button>
     </view>
   </view>
 

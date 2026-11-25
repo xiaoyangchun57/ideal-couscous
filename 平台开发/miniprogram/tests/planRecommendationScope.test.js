@@ -102,13 +102,13 @@ test('PlanCard and FavoritePlan centralize safe business projections', () => {
 
 test('PlanCard status notes cover the complete safe status matrix', () => {
   const cases = [
-    [{ status: 'draft' }, { text: '尚未提交审批', tone: 'neutral' }],
-    [{ status: 'submitted' }, { text: '等待管理员审批', tone: 'info' }],
+    [{ status: 'draft' }, { text: '尚未由本人确认', tone: 'neutral' }],
+    [{ status: 'submitted' }, { text: '旧待审记录可由本人明确确认生效', tone: 'info' }],
     [{ status: 'rejected', reject_reason: '站点范围需调整' }, { text: '退回原因：站点范围需调整', tone: 'warning' }],
     [{ status: 'rejected' }, { text: '退回原因待补充，请联系管理员', tone: 'warning' }],
-    [{ status: 'modifying' }, { text: '计划变更编辑中', tone: 'info' }],
-    [{ status: 'change_submitted', execution_status: 'change_pending' }, { text: '等待变更审批', tone: 'info' }],
-    [{ status: 'approved', execution_status: 'change_pending' }, { text: '等待变更审批', tone: 'info' }],
+    [{ status: 'modifying' }, { text: '修改尚未确认，原安排继续有效', tone: 'info' }],
+    [{ status: 'change_submitted', execution_status: 'change_pending' }, { text: '修改待本人确认，原安排继续有效', tone: 'info' }],
+    [{ status: 'approved', execution_status: 'change_pending' }, { text: '修改待本人确认，原安排继续有效', tone: 'info' }],
     [{ status: 'approved', execution_status: 'pending' }, { text: '等待现场执行', tone: 'info' }],
     [{ status: 'approved', execution_status: 'partial', execution_summary: {
       available: true, total_tasks: 3, completed_tasks: 1

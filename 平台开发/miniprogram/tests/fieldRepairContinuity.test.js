@@ -183,22 +183,26 @@ test('多站新上报不默认旧站，恢复草稿明确提示；现场切站�
   assert.equal(field.data.reportSheet.description, '保留水泵异响说明');
 });
 
-test('6/12、待同步和已离站均不写普通离站；正式完成不另卡照片审核', async () => {
-  const site = { id: 31, site_id: 31, checked_in: true, checked_out: false };
+test('6/12经确认可离站，待同步不写入；正式完成不另卡照片审核', async () => {
+  const site = { id: 31, site_id: 31, checked_in: true, checked_out: false, visit_version: 'v1' };
   const instance = page(inspection, { viewMode: 'execute', site, selSite: site, selSiteId: 31,
     selectedPlanId: 10, sites: [site], total: 12, completed: 6,
     categories: [{ items: [{ item_id: 1, plan_id: 10, result: 'normal' }] }] });
   let writes = 0;
-  api.checkOutExecutionSite = () => { writes += 1; return Promise.resolve({ check_out_time: '2026-11-10 10:00:00' }); };
+  api.checkOutExecutionSite = () => { writes += 1; return Promise.resolve({ checked_out: true, check_out_time: '2026-11-10 10:00:00' }); };
+  instance.loadTasks = () => {};
+  instance.loadExecution = () => {};
   instance.onCheckOut();
   await settle();
-  assert.equal(writes, 0);
+  assert.equal(writes, 1, '部分完成明确确认后记录真实离站');
+  instance.data.site.checked_out = false;
+  instance.data.selSite.checked_out = false;
   instance.data.completed = 12;
   instance.data.categories[0].items[0].sync_pending = true;
   instance.data.stationSyncPending = false;
   instance.onCheckOut();
   await settle();
-  assert.equal(writes, 0, '点击前重读待同步事实');
+  assert.equal(writes, 1, '点击前重读待同步事实');
   instance.data.categories[0].items[0].sync_pending = false;
   instance.data.categories[0].items[0].review_status = 'rejected';
   instance.loadTasks = () => {};
@@ -206,14 +210,14 @@ test('6/12、待同步和已离站均不写普通离站；正式完成不另卡�
   api.todayExecution = () => Promise.resolve({ packages: [] });
   instance.onCheckOut();
   await settle();
-  assert.equal(writes, 1);
+  assert.equal(writes, 2);
   assert.equal(instance.data.site.checked_out, true);
   instance.onCheckOut();
   await settle();
-  assert.equal(writes, 1, '已离站补填不能再次离站');
+  assert.equal(writes, 2, '已离站补填不能再次离站');
 });
 
-test('昨天已离站缺结果仍可选原任务；父计划修改中保留展示并拦普通执行', async () => {
+test('昨天已离站缺结果仍可选原任务；父计划修改中仍沿原任务执行', async () => {
   const raw = { plan_id: 10, schedule_id: 100, schedule_status: 'approved',
     work_date: '2026-11-09', is_carryover: true, vehicle_needs_extension: false,
     vehicle_use_shared: true, vehicle: { id: 5, plate_no: '隔离测试车' },
@@ -240,11 +244,11 @@ test('昨天已离站缺结果仍可选原任务；父计划修改中保留展�
   assert.equal(instance.data.currentPackage.vehicle_use.id, 20);
   assert.equal(instance.data.currentPackage.sites[0].checked_out, true);
   const modifying = targets.buildPackageOption(Object.assign({}, raw, { schedule_status: 'modifying' }));
-  assert.match(modifying.scheduleStatusLabel, /变更中/);
+  assert.match(modifying.scheduleStatusLabel, /原安排可执行/);
   instance.data.entryPackages = [modifying];
   instance.onEnterSite();
   await settle();
-  assert.equal(reads, 1, '未批准父计划不能绕过审批执行');
+  assert.equal(reads, 2, '修改草稿不阻断原安排执行');
   let nextRead;
   instance.data.sites = [Object.assign({ id: 31 }, raw.sites[0])];
   instance.data.stationOutcome = { siteId: 31 };
@@ -252,6 +256,100 @@ test('昨天已离站缺结果仍可选原任务；父计划修改中保留展�
   instance.onGoToNextSite();
   assert.equal(nextRead, 31, '沿原路线可进入已离站待补填站点');
   assert.equal(instance.data.site.checked_out, true);
+});
+
+test('离站弹窗取消零写入、连点一次、失败可重试，切站迟到不覆盖', async () => {
+  const site = { id: 31, name: '甲站', checked_in: true, checked_out: false, visit_version: 'v1' };
+  const instance = page(inspection, { viewMode: 'execute', site, selSite: site, selSiteId: 31,
+    selectedPlanId: 10, sites: [site, sites[1]], total: 15, completed: 11, categories: [] });
+  instance.loadTasks = () => {};
+  instance.loadExecution = () => {};
+  let modal, modals = 0, writes = 0, payload, wait = deferred();
+  confirmation = options => { modal = options; modals += 1; };
+  api.checkOutExecutionSite = (plan, id, body) => {
+    writes += 1; payload = body;
+    assert.equal(plan, 10); assert.equal(id, 31);
+    return wait.promise;
+  };
+  try {
+    instance.onCheckOut(); instance.onCheckOut();
+    assert.equal(modals, 1);
+    assert.match(modal.content, /甲站.*11\/15.*剩余 4/);
+    modal.success({ confirm: false });
+    assert.equal(writes, 0);
+    assert.equal(instance.data.checkingOut, false);
+    instance.onCheckOut(); modal.success({ confirm: true });
+    instance.onCheckOut();
+    await settle();
+    assert.equal(writes, 1);
+    assert.equal(payload.version, 'v1');
+    assert.equal(payload.confirm_incomplete, true);
+    wait.reject({ error: '网络中断' });
+    await settle();
+    assert.equal(instance.data.checkingOut, false);
+    wait = deferred();
+    instance.onCheckOut(); modal.success({ confirm: true });
+    await settle();
+    assert.equal(writes, 2);
+    instance.onSelectSite({ currentTarget: { dataset: { id: 32 } } });
+    wait.resolve({ checked_out: true });
+    await settle();
+    assert.equal(instance.data.selSiteId, 32);
+    assert.notEqual(instance.data.site.checked_out, true);
+    assert.equal(instance.data.checkingOut, false);
+  } finally { confirmation = null; }
+});
+
+test('纠错带原事件和原因；切站后可纠错新站，真实返站迟到不串站', async () => {
+  const site = { id: 31, name: '甲站', checked_in: true, checked_out: true,
+    can_correct_checkout: true, visit_version: 'v2', visit_event_id: 9 };
+  const other = Object.assign({}, site, { id: 32, name: '乙站', visit_event_id: 10 });
+  const instance = page(inspection, { viewMode: 'execute', site, selSite: site, selSiteId: 31,
+    selectedPlanId: 10, sites: [site, other], total: 15, completed: 11, categories: [] });
+  instance.loadTasks = id => {
+    // Emulate the next site's loaded facts; no backend behavior is under test here.
+    const selected = instance.data.sites.find(row => row.id === id);
+    instance.setData({ site: selected, selSite: selected });
+  };
+  instance.loadExecution = () => {};
+  let modal, writes = 0;
+  const first = deferred(), second = deferred();
+  confirmation = options => { modal = options; };
+  api.correctCheckOutExecutionSite = (plan, id, body) => {
+    writes += 1;
+    assert.equal(plan, 10);
+    assert.deepEqual(body, { version: 'v2', event_id: id === 31 ? 9 : 10, reason: '本人仍在站内，误触' });
+    return id === 31 ? first.promise : second.promise;
+  };
+  try {
+    instance.onCorrectCheckOut();
+    modal.success({ confirm: true, content: '本人仍在站内，误触' });
+    instance.onSelectSite({ currentTarget: { dataset: { id: 32 } } });
+    assert.equal(instance.data.correctingCheckOut, false);
+    instance.onCorrectCheckOut();
+    modal.success({ confirm: true, content: '本人仍在站内，误触' });
+    assert.equal(writes, 2);
+    first.resolve({});
+    await settle();
+    assert.equal(instance.data.correctingCheckOut, true, '旧站回调不能解除新站锁');
+    second.resolve({});
+    await settle();
+    assert.equal(instance.data.correctingCheckOut, false);
+    instance.onSelectSite({ currentTarget: { dataset: { id: 31 } } });
+    let arrivals = 0;
+    const arrival = deferred();
+    api.trackEvent = () => Promise.resolve();
+    api.checkIn = () => { arrivals += 1; return arrival.promise; };
+    instance.onCheckIn(); instance.onCheckIn();
+    await settle();
+    assert.equal(arrivals, 1);
+    instance.onSelectSite({ currentTarget: { dataset: { id: 32 } } });
+    instance.data.site = Object.assign({}, other, { checked_in: false });
+    arrival.resolve({});
+    await settle();
+    assert.equal(instance.data.selSiteId, 32);
+    assert.equal(instance.data.site.checked_in, false);
+  } finally { confirmation = null; }
 });
 
 test('本人持车沿用服务端真实行程，过期可还车时优先打开还车', () => {

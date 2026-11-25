@@ -35,10 +35,9 @@ export default function ActionQueue() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [audit, submittedPlans, changedPlans, photoItems, alerts, wos] = await Promise.all([
+      const [audit, photoItems, alerts, wos] = await Promise.all([
         api.getStrict('/audit/pending'),
-        api.getStrict('/plan-schedules?status=submitted'),
-        api.getStrict('/plan-schedules?status=change_submitted'),
+
         api.getStrict('/inspection-v2/items/pending'),
         api.getStrict('/alerts?status=pending'),
         api.getStrict('/workorders?status=pending'),
@@ -54,9 +53,7 @@ export default function ActionQueue() {
       }));
       setItems({
         businessApprovals: auditList.length,
-        planApprovals:
-          (Array.isArray(submittedPlans) ? submittedPlans.length : 0)
-          + (Array.isArray(changedPlans) ? changedPlans.length : 0),
+        planApprovals: 0,
         photoReviews: Array.isArray(photoItems) ? photoItems.length : 0,
         incidents: incidentKeys.size,
         workorders: woList.length,

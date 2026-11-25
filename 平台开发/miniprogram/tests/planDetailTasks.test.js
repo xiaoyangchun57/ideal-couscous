@@ -128,10 +128,10 @@ test('detail header uses overall execution status while change review stays auth
   }), { label: '部分完成', cls: 'orange' });
   assert.deepEqual(planHeaderPresentation({
     status: 'change_submitted', execution_status: 'partial', execution_status_cn: '部分完成',
-  }), { label: '变更待审', cls: 'orange' });
+  }), { label: '部分完成', cls: 'orange' });
   assert.deepEqual(planHeaderPresentation({
     status: 'submitted', execution_status: 'pending', execution_status_cn: '待执行',
-  }), { label: '待审批', cls: 'blue' });
+  }), { label: '待本人确认', cls: 'blue' });
   assert.deepEqual(planHeaderPresentation({ status: 'cancelled' }),
     { label: '已取消', cls: 'gray' });
 });
@@ -302,17 +302,18 @@ test('change request explains reapproval before collecting reason and writing st
     { id: 7, role: 'operator' }
   );
   let writes = 0;
-  api.requestPlanScheduleChange = (id, reason) => {
+  api.requestPlanScheduleChange = (id, reason, version) => {
     writes += 1;
     assert.equal(id, '46');
     assert.equal(reason, '调整巡检日期');
+    assert.equal(version, page.data.detail.version);
     return Promise.resolve({ status: 'modifying' });
   };
 
   page.onChangeRequest();
   assert.equal(modals.length, 1);
-  assert.match(modals[0].content, /原审批结果失效/);
-  assert.match(modals[0].content, /重新提交并审核/);
+  assert.match(modals[0].content, /原安排仍可执行/);
+  assert.match(modals[0].content, /确认修改/);
   modals[0].success({ confirm: false });
   assert.equal(writes, 0);
   assert.equal(navigations.length, 0);
@@ -336,7 +337,7 @@ test('change request explains reapproval before collecting reason and writing st
   await flush();
   assert.equal(writes, 1);
   assert.equal(navigations.at(-1).url, '/pages/plan-edit/plan-edit?id=46');
-  assert.equal(toasts.at(-1).title, '请修改后重新提交审批');
+  assert.equal(toasts.at(-1).title, '请修改后确认生效');
 });
 
 test('an unsubmitted modifying plan can explicitly restore its approved snapshot', async () => {
@@ -431,7 +432,7 @@ test('owner and admin cancellation actions load the real page and open without w
   }
   assert.equal(writes, 0, 'opening the sheet never calls the cancellation API');
   const template = fs.readFileSync(templatePath, 'utf8');
-  assert.match(template, /bindtap="onOpenCancel"\s+wx:if="\{\{canCancel\}\}"/);
+  assert.match(template, /bindtap="onOpenCancel"\s+wx:if="\{\{canCancel \|\| canStop\}\}"/);
 });
 
 test('detail page consumes the server cancellation capability and blocking reason', async () => {
@@ -855,15 +856,15 @@ test('detail cancellation source preserves retry context and package labels keep
   const inspectionTemplate = fs.readFileSync(inspectionTemplatePath, 'utf8');
   assert.match(apiSource, /cancelPlanSchedule:\s*\(id, reason, version\)[\s\S]*\/cancel'[\s\S]*reason:\s*String\(reason[\s\S]*version[\s\S]*queue:\s*false/);
   assert.match(page, /canCancel:\s*res\.can_cancel === true/);
-  assert.match(page, /startPlanCancellation\(this,[\s\S]*api\.cancelPlanSchedule/);
+  assert.match(page, /const cancelRequest = this\.data\.canStop \? api\.stopPlanSchedule : api\.cancelPlanSchedule[\s\S]*startPlanCancellation\(this,/);
   assert.match(page, /'cancelSheet\.error':\s*\(err && \(err\.error \|\| err\.message\)\)/);
   assert.doesNotMatch(page, /catch[\s\S]{0,240}cancelSheet\.reason'\s*:\s*''/);
   assert.match(template, /maxlength="500"/);
   assert.match(template, /placeholder="请填写取消原因（必填，最多500字）"/);
   assert.match(template, /loading="\{\{cancelSheet\.submitting\}\}"/);
-  assert.match(template, /提交审批/);
-  assert.match(page, /原审批结果失效/);
-  assert.match(page, /重新提交并审核/);
+  assert.match(template, /确认生效/);
+  assert.match(page, /原安排仍可执行/);
+  assert.match(page, /确认修改/);
   assert.match(page, /vehicleAdjustmentRequired:\s*res\.vehicle_adjustment_required === true/);
   assert.match(template, /vehicleAdjustmentRequired[\s\S]*车辆需调整[\s\S]*bindtap="onChangeRequest"[\s\S]*调整车辆/);
   const editPage = fs.readFileSync(path.resolve(__dirname, '../pages/plan-edit/plan-edit.js'), 'utf8');

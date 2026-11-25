@@ -25,13 +25,10 @@ test('required guidance reacts to selections and submit scrolls to first error w
   assert.equal(page.data.submitting, false);
   page.data.days[0].sites = [1];
   page.data.noVehicleRequired = false;
-  page.data.focusedErrorField = 'coverage_exception_reason';
-  page.onSubmit();
-  assert.equal(scrolls.at(-1).selector, '#plan-vehicle-row');
-  assert.equal(page.data.focusedErrorField, '', 'previous textarea focus must be released');
+  assert.deepEqual(page.updateFieldGuidance(), {}, '需车未落实不再阻止确认');
+  assert.equal(page.buildPayload(true).no_vehicle_required, false);
   page.data.noVehicleRequired = true;
-  page.onSubmit();
-  assert.equal(scrolls.at(-1).selector, '#plan-coverage-reason');
+  assert.deepEqual(page.updateFieldGuidance(), {}, '覆盖不足只提醒');
   assert.equal(page.data.coverageRequired, true);
   assert.equal(page.data.missingSiteNames, 'B');
   page.data.days[0].sites = [1,2];
@@ -128,7 +125,7 @@ test('new plan draft and submit recover response loss with stable keys and disca
     assert.ok(requests[0]._idempotency_key);
     assert.deepEqual(requests[0], requests[1], 'manual retry carries the same key and payload');
     assert.equal(action === 'onSubmit' ? page.data.submitError : page.data.draftSaveError, '');
-    assert.equal(toasts.at(-1).title, '计划已恢复，请查看当前状态');
+    assert.equal(toasts.at(-1).title, action === 'onSubmit' ? '计划已生效' : '计划已恢复，请查看当前状态');
     const originalKey = requests[1]._idempotency_key;
     page.data.remarks = 'changed';
     await page.createNewPlan(page.buildPayload(action === 'onSubmit'));
@@ -253,8 +250,8 @@ test('vehicle and server field errors use inline anchors while system failures p
     detailState:'ready',inspectionItemsState:'ready',days:[{date:'2026-09-15',sites:[1]}],
     mySites:[{id:1,name:'A'}],periodStart:'2026-09-15',periodEnd:'2026-09-15',noVehicleRequired:false,remarks:'keep'
   })});page.setData=(patch,done)=>{Object.assign(page.data,patch);if(done)done();};
-  page.onSubmit();assert.equal(scrolls.at(-1).selector,'#plan-vehicle-row');
-  assert.equal(page.data.submitError,'');assert.match(page.data.fieldErrors.planVehicleId,/车辆/);
+  assert.deepEqual(page.updateFieldGuidance(), {});
+  assert.equal(page.buildPayload(true).no_vehicle_required, false, '未选车仍保留需车意图');
   page.applyValidation({error_details:[{field:'vehicle_id',date:'2026-09-15',text:'missing vehicle'}]});
   assert.equal(page.data.days[0].warning_text,'');
   page.locateSubmitError({error_details:[{field:'vehicle_id',date:'2026-09-15',text:'missing vehicle'}]});
@@ -728,7 +725,7 @@ test('change submit retries the same saved payload without another PUT after res
     submitCount += 1;
     return submitShouldFail
       ? Promise.reject({ error: '提交响应丢失，请重试' })
-      : Promise.resolve({ status: 'change_submitted', already_submitted: true });
+      : Promise.resolve({ status: 'approved', already_confirmed: true });
   };
   delete require.cache[pagePath];
   require(pagePath);
@@ -772,7 +769,7 @@ test('change submit retries the same saved payload without another PUT after res
   assert.equal(page.data.version, 8);
   assert.equal(submitCount, 2);
   assert.equal(navigations, 1);
-  assert.equal(toasts.some(item => item.title === '变更已提交审核'), true);
+  assert.equal(toasts.some(item => item.title === '修改已生效'), true);
 
   api.validatePlanSchedule = originals.validate;
   api.updatePlanSchedule = originals.update;
@@ -807,7 +804,7 @@ test('change submit runs PUT again when the user edits payload after a failed PO
     submitCount += 1;
     return submitCount === 1
       ? Promise.reject({ error: '提交响应丢失' })
-      : Promise.resolve({ status: 'change_submitted' });
+      : Promise.resolve({ status: 'approved' });
   };
   delete require.cache[pagePath];
   require(pagePath);
@@ -1063,7 +1060,7 @@ test('no-vehicle mode follows the persisted user choice instead of vehicle prese
   assert.equal(vehicleRequired.data.noVehicleRequired, false);
   assert.equal(vehicleRequired.data.vehicleExceptionReason, '历史说明仍保留');
   assert.equal(vehicleRequired.buildPayload(false).no_vehicle_required, false);
-  assert.match(vehicleRequired.updateFieldGuidance().planVehicleId, /车辆/);
+  assert.equal(vehicleRequired.updateFieldGuidance().planVehicleId, undefined, '需车未落实不阻止计划确认');
 });
 
 test('edit detail failure blocks all writes and retry restores the same edit target', async t => {
